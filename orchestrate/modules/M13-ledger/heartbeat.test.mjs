@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { memoryRecord } from '../../shared/record.mjs';
 import { makeFactWriter, TROUBLE_SOURCES } from '../M12-sensors/facts.mjs';
 import { makeAlerts, fakeIssues } from './alerts.mjs';
-import { heartbeatOnce, DISPATCHER_LATE_MIN, STATUS_FACT } from './heartbeat.mjs';
+import { heartbeatOnce, DISPATCHER_LATE_MIN, SENSORS_NONE_FACT, STATUS_FACT } from './heartbeat.mjs';
 
 // `wrap` lets a test change what the pass reads from the record (#98 r2 P6: a saved record with no time).
 function setup({ wrap = (w) => w, alertWrap = (w) => w } = {}) {
@@ -816,55 +816,169 @@ test('#451 r1 m1: posted says whether GitHub took the pinned body: opened, edite
   assert.equal((await shut.pass()).posted, false, 'an open GitHub refused posts nothing');
 });
 
+const alive = (ageMin, stale, o = {}) => ({ ageMin, limitMin: 15, stale, newestAt: o.newestAt ?? '2026-11-03T09:40:00.000Z', account: o.account ?? { ageMin, stale, at: o.newestAt ?? '2026-11-03T09:40:00.000Z' } });
+const sensorsAlert = (h) => alertIssues(h.gh).filter((i) => /heartbeat red: sensors/.test(i.title));
+
 test('L969: the Sensors job: green inside its limit, red with its own plain alert past it, cleared when it writes again', async () => {
   const h = setup();
-  let s = { ageMin: 2, limitMin: 15, stale: false };
+  let s = alive(2, false);
   h.probes.sensorsAlive = async () => s;
   await h.pass();
-  assert.match(h.gh.issues.get(1).body, /ok {4}Sensors job last wrote a reading: 2 min ago \(red after 15 min\)/);
+  assert.match(pinnedIssues(h.gh)[0].body, /ok {4}Sensors job last wrote a reading: 2 min ago \(red after 15 min\)/);
   assert.equal(alertIssues(h.gh).length, 0);
-  s = { ageMin: 16, limitMin: 15, stale: true };
+  s = alive(16, true);
   const r = await h.pass();
   assert.ok(r.red.includes('sensors'));
-  const al = alertIssues(h.gh).find((i) => /heartbeat red: sensors/.test(i.title));
+  const al = sensorsAlert(h)[0];
   assert.ok(al, 'its own alert');
   assert.match(al.body, /The Sensors job has written no reading for 16 minutes \(red after 15\)\. It may have stopped, or its writes are being refused\./);
   assert.match(al.body, /Check the Sensors background job on the Mini/);
-  assert.match(h.gh.issues.get(1).body, /RED: .*sensors/);
-  s = { ageMin: 16, limitMin: 15, stale: false };
+  assert.match(pinnedIssues(h.gh)[0].body, /RED: .*sensors/);
+  s = alive(16, false);
   assert.ok(!(await h.pass()).red.includes('sensors'), 'stale decides, not the rounded minutes: not stale is not red');
-  s = { ageMin: 15, limitMin: 15, stale: true };
+  s = alive(15, true, { newestAt: '2026-11-03T09:44:00.000Z' });
   assert.ok((await h.pass()).red.includes('sensors'), 'and stale at the rounded limit is red');
+  assert.match(pinnedIssues(h.gh)[0].body, /Sensors job last wrote a reading: over 15 min ago \(red after 15 min\)/, 'r1 c2: over the limit, not "15 min" against "red after 15"');
+  assert.ok(sensorsAlert(h).some((i) => /no reading for over 15 minutes/.test(i.body)));
   const before = notices(h.gh);
-  s = { ageMin: 17, limitMin: 15, stale: true };
+  s = alive(17, true, { newestAt: '2026-11-03T09:44:00.000Z' });
   await h.pass();
-  assert.equal(notices(h.gh), before, 'a changing age is edited silently');
+  assert.equal(notices(h.gh), before, 'a changing age of the same stop is edited silently');
+  s = alive(17, true, { newestAt: '2026-11-03T09:50:00.000Z' });
+  await h.pass();
+  assert.equal(notices(h.gh), before + 1, 'r1 m4: a stop after a newer reading is a new cause (its time is in the status), so it is told');
   const was = h.probes.sensorsAlive;
   h.probes.sensorsAlive = async () => { throw new Error('boom'); };
   await h.pass();
-  assert.equal(notices(h.gh), before + 1, 'review m3: stale to could-not-be-read is a new cause, so it is told');
+  assert.equal(notices(h.gh), before + 2, 'review m3: stale to could-not-be-read is a new cause, so it is told');
   h.probes.sensorsAlive = was;
-  s = { ageMin: 0, limitMin: 15, stale: false };
+  s = alive(0, false);
   await h.pass();
-  assert.equal(al.closed, true, 'cleared once it writes again');
+  assert.ok(sensorsAlert(h).every((i) => i.closed), 'cleared once it writes again');
 });
 
-test('L969: the Sensors job not known (no reading yet, or no limit) is not known, never red and never green; a throw or a bad answer is red', async () => {
+test('#464 r1 m5: a not-known pass leaves an open Sensors alert open; only a known reading clears it', async () => {
+  const h = setup();
+  let s = alive(20, true);
+  h.probes.sensorsAlive = async () => s;
+  await h.pass();
+  const al = sensorsAlert(h)[0];
+  assert.ok(al && !al.closed);
+  s = null;
+  await h.pass();
+  assert.ok(!al.closed, 'not known closes nothing');
+  assert.match(pinnedIssues(h.gh)[0].body, /Sensors job last wrote a reading: unknown/);
+  s = alive(1, false);
+  await h.pass();
+  assert.ok(al.closed, 'a known reading clears it');
+});
+
+test('#464 r1 m1: the account reading alone past the limit, or never written, is red, saying the account reading is not being written', async () => {
+  const h = setup();
+  h.probes.sensorsAlive = async () => alive(1, false, { account: { ageMin: 40, stale: true, at: '2026-11-03T09:20:00.000Z' } });
+  assert.ok((await h.pass()).red.includes('sensors'));
+  assert.match(sensorsAlert(h)[0].body, /The account reading is not being written: the Sensors job last wrote who is signed in 40 minutes ago \(red after 15\)/);
+  assert.match(pinnedIssues(h.gh)[0].body, /RED {3}Sensors job last wrote a reading: 1 min ago, but the account reading 40 min ago/);
+  const h2 = setup();
+  h2.probes.sensorsAlive = async () => alive(1, false, { account: { ageMin: null, stale: true, at: null } });
+  assert.ok((await h2.pass()).red.includes('sensors'));
+  assert.match(sensorsAlert(h2)[0].body, /last wrote who is signed in never/);
+  const h3 = setup();
+  h3.probes.sensorsAlive = async () => alive(1, false, { account: { ageMin: 3, stale: false, at: '2026-11-03T09:57:00.000Z' } });
+  assert.ok(!(await h3.pass()).red.includes('sensors'), 'the control');
+});
+
+test('#464 r1 m2, m4: each Sensors cause is its own notice; the same cause, its age moving, is edited silently', async () => {
+  const h = setup();
+  let s = alive(1, false, { account: { ageMin: 40, stale: true, at: '2026-11-03T09:20:00.000Z' } });
+  h.probes.sensorsAlive = async () => s;
+  await h.pass();
+  let n = notices(h.gh);
+  s = alive(1, false, { account: { ageMin: 41, stale: true, at: '2026-11-03T09:20:00.000Z' } });
+  await h.pass();
+  assert.equal(notices(h.gh), n, 'the same account reading, older now: silent');
+  s = alive(1, false, { account: { ageMin: 20, stale: true, at: '2026-11-03T09:40:00.000Z' } });
+  await h.pass();
+  assert.equal(notices(h.gh), ++n, 'a newer account reading that went stale again is a new stop, told');
+  s = { clock: true, aheadMin: 7, limitMin: 15 };
+  await h.pass();
+  assert.equal(notices(h.gh), ++n, 'the clock is its own cause');
+  h.probes.sensorsAlive = async () => { throw new Error('boom'); };
+  await h.pass();
+  assert.equal(notices(h.gh), ++n, 'could not be read is its own cause, not the clock');
+  h.probes.sensorsAlive = async () => ({ ...alive(3, false), account: undefined });
+  await h.pass();
+  assert.equal(notices(h.gh), n, 'an answer missing a field is the same could-not-be-read cause as a throw');
+});
+
+test('#464 r1 m2: a reading from the future is red, naming the clock', async () => {
+  const h = setup();
+  h.probes.sensorsAlive = async () => ({ clock: true, aheadMin: 7, limitMin: 15 });
+  assert.ok((await h.pass()).red.includes('sensors'));
+  assert.match(sensorsAlert(h)[0].body, /stamped 7 minutes ahead of this clock.*Check the Mini's clock\./);
+  h.probes.sensorsAlive = async () => ({ clock: true, aheadMin: 'x', limitMin: 15 });
+  await h.pass();
+  assert.ok(sensorsAlert(h).some((i) => /could not be read/.test(i.body)), 'a clock answer with no number is unreadable');
+});
+
+test('#464 r1 M1: no Sensors reading at all is not known at first, then red past the limit, counted from the first pass that found none', async () => {
+  const h = setup();
+  let s = { none: true, limitMin: 15, why: 'none' };
+  h.probes.sensorsAlive = async () => s;
+  let r = await h.pass();
+  assert.ok(!r.red.includes('sensors'));
+  assert.match(pinnedIssues(h.gh)[0].body, /\? {5}Sensors job last wrote a reading: none yet \(for 0 min; red after 15 min\)/);
+  assert.match(pinnedIssues(h.gh)[0].body, /not known: .*sensors/);
+  const since = h.writer.get(SENSORS_NONE_FACT('product 1'));
+  assert.equal(since?.kind, 'fact.heartbeat-sensors-none-since');
+  assert.equal(since.ts, '2026-11-03T12:00:00.000Z');
+  h.tick(15);
+  assert.ok(!(await h.pass()).red.includes('sensors'), 'at the limit is not past it');
+  assert.equal(h.writer.get(SENSORS_NONE_FACT('product 1')).ts, '2026-11-03T12:00:00.000Z', 'the start is kept, never moved on');
+  h.tick(1 / 60);
+  r = await h.pass();
+  assert.ok(r.red.includes('sensors'));
+  assert.match(sensorsAlert(h)[0].body, /The Sensors job has never written a reading \(none for 15 minutes; red after 15\)\..*Check the Sensors background job on the Mini\./);
+  assert.match(pinnedIssues(h.gh)[0].body, /RED {3}Sensors job last wrote a reading: never \(for over 15 min\)/);
+  s = { none: true, limitMin: 15, why: 'record' };
+  const before = notices(h.gh);
+  await h.pass();
+  assert.match(sensorsAlert(h).at(-1).body, /readings in the Record could not be read for 15 minutes/);
+  assert.equal(notices(h.gh), before, 'r2 m4: the Record flipping between unreadable and empty is one notice, its body edited');
+  s = alive(0, false);
+  await h.pass();
+  assert.equal(h.writer.get(SENSORS_NONE_FACT('product 1')).kind, 'fact.heartbeat-sensors-seen', 'dropped once a reading is there');
+  assert.ok(sensorsAlert(h).every((i) => i.closed));
+  s = { none: true, limitMin: 15, why: 'none' };
+  h.tick(60);
+  assert.ok(!(await h.pass()).red.includes('sensors'), 'readings deleted later start a new count, not red at once');
+  assert.equal(h.writer.get(SENSORS_NONE_FACT('product 1')).ts, h.now().toISOString());
+});
+
+test('#464 r1 M1: a refused write of when the readings stopped is shown red, never a silent not known for ever', async () => {
+  const h = setup({ wrap: (w) => ({ get: w.get, put: (id, doc, kind) => (id === SENSORS_NONE_FACT('product 1') ? { ok: false, reason: 'refused' } : w.put(id, doc, kind)) }) });
+  h.probes.sensorsAlive = async () => ({ none: true, limitMin: 15, why: 'none' });
+  const r = await h.pass();
+  assert.ok(r.red.includes('alert-not-saved'));
+  assert.match(pinnedIssues(h.gh)[0].body, /the Record refused to save when the Sensors readings stopped: refused/);
+});
+
+test('L969: the Sensors job not known (no limit, or the grace after a start) is not known, never red and never green; a throw or a bad answer is red', async () => {
   const h = setup();
   h.world.usage = { window: 'weekly', pct: 10 };
   h.probes.sensorsAlive = async () => null;
   const r = await h.pass();
   assert.ok(!r.red.includes('sensors'));
-  assert.match(h.gh.issues.get(1).body, /Sensors job last wrote a reading: unknown/);
-  assert.match(h.gh.issues.get(1).body, /not known: sensors/);
-  assert.doesNotMatch(h.gh.issues.get(1).body, /All green/);
+  assert.match(pinnedIssues(h.gh)[0].body, /Sensors job last wrote a reading: unknown/);
+  assert.match(pinnedIssues(h.gh)[0].body, /not known: sensors/);
+  assert.doesNotMatch(pinnedIssues(h.gh)[0].body, /All green/);
   h.probes.sensorsAlive = async () => { throw new Error('boom'); };
   assert.ok((await h.pass()).red.includes('sensors'), 'a probe that throws');
-  assert.match(h.gh.issues.get(1).body, /Sensors job last wrote a reading: could not be read/);
-  h.probes.sensorsAlive = async () => ({ ageMin: 'soon', limitMin: 15, stale: false });
-  assert.ok((await h.pass()).red.includes('sensors'), 'an answer that is not a number');
-  h.probes.sensorsAlive = async () => ({ ageMin: 3, limitMin: 15 });
-  assert.ok((await h.pass()).red.includes('sensors'), 'an answer with no stale');
+  assert.match(pinnedIssues(h.gh)[0].body, /Sensors job last wrote a reading: could not be read/);
+  for (const bad of [{ ageMin: 'soon', limitMin: 15, stale: false }, { ageMin: 3, limitMin: 15 }, { ...alive(3, false), newestAt: undefined }, { ...alive(3, false), account: undefined }, { ...alive(3, false), limitMin: undefined }, { none: true }]) {
+    h.probes.sensorsAlive = async () => bad;
+    assert.ok((await h.pass()).red.includes('sensors'), JSON.stringify(bad));
+  }
   assert.ok(alertIssues(h.gh).some((i) => /Whether the Sensors job is still writing could not be read/.test(i.body)), 'review m3: the unreadable alert says so');
   // A caller with no sensorsAlive probe gets no Sensors line at all (as before L969).
   delete h.probes.sensorsAlive;

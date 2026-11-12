@@ -17,11 +17,19 @@
 //                     new notice even after Joe closed the last one (L730 m3). One Joe closed while it lasts answers
 //                     'suppressed' in `told`: the caller treats that as not told and tells it its own way, once a day.
 //   rules             the M10 Rules file reads and parses.
-//   sensors           when the caller passes `sensorsAlive` (→ null, or { ageMin, limitMin, stale }): the Sensors job's
-//                     newest reading; red when `stale` says it is past its limit, so a stopped Sensors job is told by
-//                     name, not only as readings that went "not known" (L967). Null is not known, as for the probes
-//                     below, and like them it neither raises nor clears: an alert open when the line goes not known stays
-//                     open until a known reading clears it, never closed on no word.
+//   sensors           when the caller passes `sensorsAlive` (heartbeat-probes.mjs: null, or one of its answers): the
+//                     Sensors job's newest reading; red when it is past its limit, so a stopped Sensors job is told by
+//                     name, not only as readings that went "not known" (L967). Its status carries the newest reading's
+//                     time (red:sensors:<iso>), so a new stop is a new notice, as the Dispatcher's (#464 r1 m4); a stop
+//                     that lasts is reminded every 24 h by alerts.mjs while its issue is open. Also red: the account
+//                     reading alone past the limit (the one the Dispatcher holds on, red:sensors:account:<iso|never>);
+//                     a reading stamped ahead of this clock (red:sensors:clock); and no reading at all for longer than
+//                     the limit (red:sensors:none; the body says whether the Record could not be read, one status so
+//                     a Record that flips between the two is one notice, #464 r2 m4), counted
+//                     from the first pass that found none, kept in `heartbeat-sensors-none-since-<product>` and dropped
+//                     once a reading is there (r1 M1). Null is not known, as for the probes below, and like them it
+//                     neither raises nor clears: an alert open when the line goes not known stays open until a known
+//                     reading clears it, never closed on no word.
 //   front door        the Front Door answers through the phone link (Remote Control).
 //   account           the signed-in Claude account, as its label from private config ("account A"), never an
 //                     email address: the probe maps it. Signed out → a `signed-out` fact and one alert; nothing here
@@ -52,6 +60,12 @@ const NOT_SAVED = 'alert-not-saved';
 /** In `red` when an alert GitHub lost was not told this pass (the robot job then also queues its late alert). */
 export const NOT_TOLD = 'alert-not-told';
 const LOGIN_UNKNOWN = 'robot-login-unknown';
+// When the heartbeat first found no Sensors reading (#464 r1 M1). A kind with no shape keeps only its kind and `ts`
+// (M12 fact-shapes.mjs), so `ts` is the time it began, and the "seen" kind says a reading was there again.
+export const SENSORS_NONE_FACT = (product) => `heartbeat-sensors-none-since-${product.replace(/[^A-Za-z0-9_-]/g, '-')}`;
+const NONE_SINCE = 'fact.heartbeat-sensors-none-since';
+const NONE_SEEN = 'fact.heartbeat-sensors-seen';
+const CHECK_SENSORS = 'Check the Sensors background job on the Mini.';
 /** The pinned issue's marker: found again by it when the Record never kept its number. */
 export const heartbeatMarker = (product) => `<!-- orch:heartbeat ${product} -->`;
 const ISSUE_FACT = (product) => `heartbeat-issue-${product.replace(/[^A-Za-z0-9_-]/g, '-')}`;
@@ -104,15 +118,46 @@ export async function heartbeatOnce({ product, writer, gh, alerts, owner, probes
   const notKnownLine = (name, line) => { unknown.push(name); lines.push(`?     ${line}: unknown (no current reading)`); };
   if (typeof probes.sensorsAlive === 'function') {
     const s = await probe(probes.sensorsAlive);
-    if (notKnown(s)) notKnownLine('sensors', 'Sensors job last wrote a reading');
-    else {
-      const age = s.ok ? s.v?.ageMin : undefined; const limit = s.ok ? s.v?.limitMin : undefined;
-      const read = Number.isFinite(age) && Number.isFinite(limit) && typeof s.v?.stale === 'boolean';
-      const sRed = !read || s.v.stale;
-      await set('sensors', sRed, `Sensors job last wrote a reading: ${read ? `${age} min ago (red after ${limit} min)` : 'could not be read'}`,
-        read ? `The Sensors job has written no reading for ${age} minutes (red after ${limit}). It may have stopped, or its writes are being refused. The signed-in account, usage and Front Door readings are going stale, so the Dispatcher holds new starts. Check the Sensors background job on the Mini.`
-          : 'Whether the Sensors job is still writing could not be read. The Dispatcher may be holding new starts. Check the Sensors background job on the Mini.',
-        read ? 'red:sensors' : 'red:sensors:unreadable');
+    const v = s.ok ? s.v : undefined;
+    const limit = v?.limitMin;
+    const noneId = SENSORS_NONE_FACT(product);
+    const line = 'Sensors job last wrote a reading';
+    const over = (age, stale) => (stale && age <= limit ? `over ${limit}` : `${age}`);
+    const put = (doc) => { const w = writer.put(noneId, doc); if (!wasSaved(w)) notSaved(`the Record refused to save when the Sensors readings stopped: ${String(w?.reason ?? 'no reason given').slice(0, 200)}`); };
+    if (notKnown(s)) notKnownLine('sensors', line);
+    else if (!s.ok || !Number.isFinite(limit)) {
+      await set('sensors', true, `${line}: could not be read`, `Whether the Sensors job is still writing could not be read. The Dispatcher may be holding new starts. ${CHECK_SENSORS}`, 'red:sensors:unreadable');
+    } else if (v.none === true) {
+      // No reading at all: not known at first, red once that has lasted past the limit (the Dispatcher's "never" rule).
+      const was = writer.get(noneId);
+      let since = was?.kind === NONE_SINCE ? Date.parse(was.ts) : NaN;
+      if (!Number.isFinite(since) || since > t.getTime() + 60_000) { since = t.getTime(); put({ kind: NONE_SINCE, ts: t.toISOString() }); }
+      const forMin = Math.max(0, Math.floor((t - since) / 60_000));
+      const record = v.why === 'record';
+      if (t - since > limit * 60_000) {
+        await set('sensors', true, `${line}: ${record ? 'the Record\'s readings could not be read' : 'never'} (for over ${limit} min)`,
+          record ? `The Sensors job's readings in the Record could not be read for ${forMin} minutes (red after ${limit}). The Dispatcher holds new starts while it can't read them. ${CHECK_SENSORS}`
+            : `The Sensors job has never written a reading (none for ${forMin} minutes; red after ${limit}). It may never have started, or its readings were deleted. The Dispatcher holds new starts without them. ${CHECK_SENSORS}`,
+          'red:sensors:none');
+      } else { unknown.push('sensors'); lines.push(`?     ${line}: none yet (for ${forMin} min; red after ${limit} min)`); }
+    } else {
+      if (writer.get(noneId)?.kind === NONE_SINCE) put({ kind: NONE_SEEN, ts: t.toISOString() });
+      const acc = v.account;
+      const read = v.clock === true ? Number.isFinite(v.aheadMin)
+        : Number.isFinite(v.ageMin) && typeof v.stale === 'boolean' && typeof v.newestAt === 'string' && typeof acc?.stale === 'boolean';
+      if (!read) await set('sensors', true, `${line}: could not be read`, `Whether the Sensors job is still writing could not be read. The Dispatcher may be holding new starts. ${CHECK_SENSORS}`, 'red:sensors:unreadable');
+      else if (v.clock === true) {
+        await set('sensors', true, `${line}: stamped ${v.aheadMin} min in the future`, `A Sensors reading is stamped ${v.aheadMin} minutes ahead of this clock, so how old the readings are can't be told. Check the Mini's clock.`, 'red:sensors:clock');
+      } else if (v.stale) {
+        await set('sensors', true, `${line}: ${over(v.ageMin, true)} min ago (red after ${limit} min)`,
+          `The Sensors job has written no reading for ${over(v.ageMin, true)} minutes (red after ${limit}). It may have stopped, or its writes are being refused. The signed-in account, usage and Front Door readings are going stale, so the Dispatcher holds new starts. ${CHECK_SENSORS}`,
+          `red:sensors:${v.newestAt}`);
+      } else if (acc.stale) {
+        const ago = acc.ageMin === null ? 'never' : `${over(acc.ageMin, true)} min ago`;
+        await set('sensors', true, `${line}: ${v.ageMin} min ago, but the account reading ${ago} (red after ${limit} min)`,
+          `The account reading is not being written: the Sensors job last wrote who is signed in ${acc.ageMin === null ? 'never' : `${over(acc.ageMin, true)} minutes ago`} (red after ${limit}), though its other readings are current. The Dispatcher holds new starts on that reading. ${CHECK_SENSORS}`,
+          `red:sensors:account:${acc.at ?? 'never'}`);
+      } else await set('sensors', false, `${line}: ${v.ageMin} min ago (red after ${limit} min)`, '');
     }
   }
 
