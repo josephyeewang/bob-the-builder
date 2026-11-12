@@ -293,15 +293,20 @@ A copy installed before the entry existed has an updater that does not keep `dis
    `hostLockPath` pointing at the copy (the copy is the owner's file, so the owner check still holds). **The copier** (L1029 E,
    `host-lock-copy.mjs`): add `hostLockSource` (the synced host.lock) to the setup config, and set `hostLockPath` to the copy, in
    a folder of the owner's own outside the guarded ones that orchestrate can go into (for example `/Users/<owner>/.orchestrate/host.lock`;
-   make the folder the owner's, 0755). Then, without sudo: `node setup.mjs host-lock-copier > ~/Library/LaunchAgents/<label>.host-lock-copy.plist`
+   make the folder the owner's, 0755; orchestrate must be able to go into every folder above it too, and a home folder is
+   often 0750; check-dispatcher's host.lock row FAILs when orchestrate can't read the copy). The job runs `host-lock-copy.mjs` from the installed copy, so
+   install (or update) the copy first. Then, without sudo: `node setup.mjs host-lock-copier > ~/Library/LaunchAgents/<label>.host-lock-copy.plist`
    (it prints the job file; the steps it prints are on stderr), and `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<label>.host-lock-copy.plist`.
+   Then run `dispatcher-config` again, so the job's `dispatcher.json` names the copy too (with the Dispatcher's job in place,
+   that is step 6's sequence); check-dispatcher FAILs while `dispatcher.json` names another `hostLockPath`.
    The job runs as the owner, every 60 s, from the installed copy, with the setup config as its one argument. Each run copies
    the synced file (0644; no copy when the synced file is gone, which the Dispatcher reads as no host claimed) and writes
    a stamp beside the copy (`host.lock.copied`). A run that can't read the synced file writes nothing and says why in
    `host-lock-copy.err.log`, beside the copy. **check-dispatcher FAILs when the stamp is older than 5 minutes** (or missing,
-   or not the owner's), so a copier that stopped is told, never read as a current copy. If the log says EPERM, macOS is
-   guarding the synced folder from the job too: give the installed copy's `bin/node` Full Disk Access (System Settings →
-   Privacy & Security → Full Disk Access), then `launchctl kickstart -k gui/$(id -u)/<label>.host-lock-copy`. The
+   or not the owner's), so a copier that stopped is told, never read as a current copy; while it FAILs, `daemons place`
+   and `load` wait too. If the log says EPERM, macOS is guarding the synced folder from the owner's job too: **stop and
+   tell the lead. Never give the installed copy's `bin/node` Full Disk Access**: the Dispatcher, robot and watch jobs run
+   that same node as orchestrate, so the grant would open Dropbox, the Desktop and Documents to all of them. The
    Dispatcher itself does not judge the copy's age: host.lock only adds a diary line and a note ("Air is home" never stops
    orchestrated products), so an old copy changes no decision.
 6. To change a path the Dispatcher and the robot share while both jobs are in place: `dispatcher-config` refuses, since the

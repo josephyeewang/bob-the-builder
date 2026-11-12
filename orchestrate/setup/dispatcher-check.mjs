@@ -76,9 +76,13 @@ export function unreadableWhy(io, file, real, stderr = '', mode) {
 // session's outbox as <outboxRoot>/<product>/<role>/<id>, and cleanup looks for copies at <copiesRoot>/<product>/<card>.
 // A root set to a product's own folder would put every outbox and copy one level too deep, so each is named here.
 const ROOTS = Object.freeze([['outboxRoot', 'the top outbox root'], ['copiesRoot', 'the workers\' top copies root']]);
+// And the host.lock it reads (L1029 E review M2): the rows below judge the setup config's hostLockPath, so a dispatcher.json
+// still naming another one (dispatcher-config not run again after hostLockPath moved to the copier's copy) is a FAIL here,
+// not a PASS on a file the Dispatcher never reads. Its own row label: the host.lock row already ends "(the Dispatcher's hostLockPath)".
+const HOST_LOCK_ROW = Object.freeze(['hostLockPath', 'the owner\'s host.lock', 'the host.lock this check reads']);
 
 /**
- * check-dispatcher's rows for outboxRoot and copiesRoot: the dispatcher.json the job reads (the copy's once there is a copy,
+ * check-dispatcher's rows for outboxRoot, copiesRoot and hostLockPath: the dispatcher.json the job reads (the copy's once there is a copy,
  * else the base's) names each as exactly the root users-folders makes (dispatcherKeys). Read only.
  */
 export function rootRows(io, cfg, k) {
@@ -88,15 +92,15 @@ export function rootRows(io, cfg, k) {
   const file = cur.missing ? src : inCopy; let text = null;   // a broken copy is the copy's file too: the job's plist names it
   try { text = io.readText(file); } catch { /* told below */ }
   let c = null; try { c = text === null ? null : JSON.parse(text); } catch { c = null; }
-  return ROOTS.map(([key, name]) => {
-    const want = io.at(k[key]); const what = `${file} names ${name} ${want} as ${key} (the Dispatcher's ${key})`;
+  return [...ROOTS, HOST_LOCK_ROW].map(([key, name, label = `the Dispatcher's ${key}`]) => {
+    const want = io.at(k[key]); const what = `${file} names ${name} ${want} as ${key} (${label})`;
     if (text === null) return { ok: false, what, why: `${file} can't be read${file === inCopy ? ' (the job reads the copy\'s)' : ''}; run dispatcher-config${file === inCopy ? ', then install again if the copy does not keep it' : ''}` };
     if (!c || typeof c !== 'object' || Array.isArray(c)) return { ok: false, what, why: `${file} is not a JSON object; run dispatcher-config` };
     if (!Object.hasOwn(c, key)) return { ok: false, what, why: `it has no ${key}, so an existing dispatcher.json without it won't start the Dispatcher until dispatcher-config is run again (an older setup wrote it)` };
     const got = c[key];
     if (got === want) return { ok: true, what };
     // A folder right under the root with a product's name: this config's products, or one it dropped.
-    const prod = typeof got === 'string' && dirname(got) === want && PRODUCT.test(basename(got)) ? basename(got) : undefined;
+    const prod = key !== 'hostLockPath' && typeof got === 'string' && dirname(got) === want && PRODUCT.test(basename(got)) ? basename(got) : undefined;
     if (prod) return { ok: false, what, why: `it names ${got}, product ${prod}'s own folder, not the root above it: the Dispatcher finds each product's folder under the root, so every outbox or copy would be looked for one level too deep; run dispatcher-config` };
     return { ok: false, what, why: `it names ${JSON.stringify(got)?.slice(0, 160)}, not ${want}; run dispatcher-config` };
   });

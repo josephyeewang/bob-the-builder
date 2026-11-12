@@ -34,7 +34,7 @@ const MODE = 0o644;
 
 const { O_RDONLY, O_NOFOLLOW, O_NONBLOCK, O_WRONLY, O_CREAT, O_EXCL } = realFs.constants;
 
-/** The source's text, null when it is not there, or throws with the reason (nothing is written then). */
+/** The source's bytes, null when it is not there, or throws with the reason (nothing is written then). Bytes, not text, so the copy is the file byte for byte. */
 function readSource(fs, from, uid) {
   let fd;
   try { fd = fs.openSync(from, O_RDONLY | O_NOFOLLOW | O_NONBLOCK); } catch (e) {
@@ -45,7 +45,9 @@ function readSource(fs, from, uid) {
       return null;
     }
     if (e?.code === 'ELOOP') throw new Error(`the synced host.lock ${from} is a link; it must be the file itself`);
-    if (e?.code === 'EPERM' || e?.code === 'EACCES') throw new Error(`the synced host.lock ${from} can't be read (${e.code}): if it is macOS's privacy protection, give this job's node Full Disk Access (README, Part 6)`);
+    // Never "give node Full Disk Access" (L1029 E review M1): the Dispatcher, robot and watch jobs run the installed copy's
+    // same node as orchestrate, so that grant would open the guarded folders to all of them. A refused read stops here.
+    if (e?.code === 'EPERM' || e?.code === 'EACCES') throw new Error(`the synced host.lock ${from} can't be read (${e.code}). If macOS's privacy protection is refusing this job too, stop and tell the lead: do not give the installed copy's node Full Disk Access, since the Dispatcher's, robot's and watch jobs run that same node (README, Part 6 step 5)`);
     throw new Error(`the synced host.lock ${from} can't be read (${e?.code ?? e})`);
   }
   try {
@@ -56,16 +58,20 @@ function readSource(fs, from, uid) {
     const b = Buffer.alloc(HOST_LOCK_MAX + 1); let n = 0;
     for (;;) { const k = fs.readSync(fd, b, n, b.length - n, null); if (k === 0) break; n += k; if (n === b.length) break; }
     if (n > HOST_LOCK_MAX) throw new Error(`the synced host.lock ${from} is over ${HOST_LOCK_MAX} bytes`);
-    return b.subarray(0, n).toString('utf8');
+    return Buffer.from(b.subarray(0, n));
   } finally { fs.closeSync(fd); }
 }
 
-/** Writes `text` at `to`, 0644, beside its name first and renamed over it. A leftover `.new` from a cut-off run is replaced. */
-function putFile(fs, to, text) {
+/**
+ * Writes `data` at `to`, 0644, beside its name first and renamed over it. A leftover `.new` from a cut-off run is replaced.
+ * One temp name, not one per run: launchd never starts a job's next run while one is going, and a per-run name would leave
+ * a file behind for each cut-off run.
+ */
+function putFile(fs, to, data) {
   const tmp = join(dirname(to), `.${basename(to)}.new`);
   try { fs.unlinkSync(tmp); } catch (e) { if (e?.code !== 'ENOENT') throw e; }
   const fd = fs.openSync(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, MODE);
-  try { fs.writeSync(fd, text); fs.fchmodSync(fd, MODE); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  try { fs.writeSync(fd, data); fs.fchmodSync(fd, MODE); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
   fs.renameSync(tmp, to);
 }
 
@@ -87,16 +93,16 @@ export function copyHostLock({ from, to, now = Date.now(), fs = realFs, uid = pr
     if (typeof from !== 'string' || typeof to !== 'string' || !from.startsWith('/') || !to.startsWith('/') || from === to) throw new Error('the copier needs the synced host.lock and the copy, two different full paths');
     const bad = folderProblem(fs, dirname(to), uid);
     if (bad) throw new Error(bad);
-    const text = readSource(fs, from, uid);
+    const bytes = readSource(fs, from, uid);
     let did;
-    if (text === null) {
+    if (bytes === null) {
       try { fs.unlinkSync(to); did = 'removed'; } catch (e) { if (e?.code !== 'ENOENT') throw e; did = 'none'; }
     } else {
       let cur = null;
-      try { const st = fs.lstatSync(to); if (st.isFile() && st.uid === uid && st.nlink === 1 && (st.mode & 0o777) === MODE) cur = fs.readFileSync(to, 'utf8'); } catch (e) { if (e?.code !== 'ENOENT') throw e; }
-      if (cur === text) did = 'same'; else { putFile(fs, to, text); did = 'copied'; }
+      try { const st = fs.lstatSync(to); if (st.isFile() && st.uid === uid && st.nlink === 1 && (st.mode & 0o777) === MODE) cur = fs.readFileSync(to); } catch (e) { if (e?.code !== 'ENOENT') throw e; }
+      if (cur !== null && Buffer.compare(cur, bytes) === 0) did = 'same'; else { putFile(fs, to, bytes); did = 'copied'; }
     }
-    putFile(fs, stampPath(to), `${JSON.stringify({ at: new Date(now).toISOString(), source: text === null ? 'absent' : 'present' })}\n`);
+    putFile(fs, stampPath(to), `${JSON.stringify({ at: new Date(now).toISOString(), source: bytes === null ? 'absent' : 'present' })}\n`);
     return { ok: true, did };
   } catch (e) { return { ok: false, why: e?.message ?? String(e) }; }
 }
@@ -135,6 +141,9 @@ export function copierPlist({ label, installRoot, node, configPath, copy, home }
 // The job's entry: one run, one line, exit 1 on a refusal so launchd shows the last run failed.
 const isMain = (() => { try { return !!process.argv[1] && realFs.realpathSync(process.argv[1]) === realFs.realpathSync(fileURLToPath(import.meta.url)); } catch { return false; } })();
 if (isMain) {
+  // A read that hangs (a synced file macOS has not fetched yet) must not hold the job: launchd starts no next run while one
+  // is going, so a stuck run would stop the copier for good. 20 s, well inside the 60 s beat; the stamp then ages and is told.
+  setTimeout(() => { process.stderr.write(`${new Date().toISOString()} host.lock copier: gave up after 20 s (the synced host.lock did not answer)\n`); process.exit(1); }, 20_000).unref();
   const { parseConfig } = await import('./layout.mjs');
   let cfg;
   try { cfg = parseConfig(JSON.parse(realFs.readFileSync(process.argv[2], 'utf8'))); } catch (e) {

@@ -341,6 +341,7 @@ test('L1029 E: host-lock-copier prints the owner\'s job file on stdout and the s
   assert.match(r.text, /<string>com\.example\.orch-test\.host-lock-copy<\/string>/);
   assert.match(r.text, /<string>\/Library\/orch-test\/install\/orchestrate\/setup\/host-lock-copy\.mjs<\/string>/);
   assert.match(r.text, /^ERR Save the text above as \/Users\/sam\/Library\/LaunchAgents\/com\.example\.orch-test\.host-lock-copy\.plist .*launchctl bootstrap gui\/\$\(id -u\)/m);
+  assert.match(r.text, /^ERR .*Run dispatcher-config again so the Dispatcher's dispatcher\.json names the copy too/m, 'review M2: the job reads dispatcher.json');
   const w2 = world({ raw: { ...RAW, ...INSTALL } }); w2.mac.as = 65001;
   const r2 = w2.run(['host-lock-copier']); assert.equal(r2.code, 1); assert.match(r2.text, /names no hostLockSource/);
 });

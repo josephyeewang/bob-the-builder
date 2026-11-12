@@ -83,7 +83,8 @@ test('L1029 E: macOS refusing the read (privacy protection) is told with the way
   const denied = { ...fs, openSync: (p, ...a) => { if (p === w.from) throw Object.assign(new Error('nope'), { code: 'EPERM' }); return fs.openSync(p, ...a); } };
   const r = w.run({ fs: denied, now: T0 + 60_000 });
   assert.equal(r.ok, false);
-  assert.match(r.why, /can't be read \(EPERM\): if it is macOS's privacy protection, give this job's node Full Disk Access/);
+  assert.match(r.why, /can't be read \(EPERM\)\. If macOS's privacy protection is refusing this job too, stop and tell the lead: do not give the installed copy's node Full Disk Access/);
+  assert.doesNotMatch(r.why, /give this job's node Full Disk Access/);
   assert.equal(readFileSync(stampPath(w.to), 'utf8'), before);
   assert.equal(readFileSync(w.to, 'utf8'), 'host=mini\n');
 });
@@ -154,4 +155,26 @@ test('L1029 E: the config takes hostLockSource only with hostLockPath, as a diff
   assert.throws(() => parseConfig({ ...raw, hostLockPath: undefined, hostLockSource: '/Users/sam/Dropbox/host.lock' }), /hostLockSource needs hostLockPath/);
   assert.throws(() => parseConfig({ ...raw, hostLockSource: '/Users/sam/.orchestrate/HOST.lock' }), /two different files/);
   for (const bad of ['/Users/other/host.lock', '/Users/sam/../x/host.lock', '/Users/sam/d/', 'rel/host.lock', 7]) assert.throws(() => parseConfig({ ...raw, hostLockSource: bad }), /hostLockSource must be the full path/, String(bad));
+});
+
+test('L1029 E review: the copy is the synced file byte for byte, text or not', () => {
+  const w = world();
+  const raw = Buffer.from([0x68, 0x6f, 0x73, 0x74, 0x3d, 0xff, 0xfe, 0x0a, 0xc3]);   // not valid UTF-8
+  writeFileSync(w.from, raw);
+  assert.deepEqual(w.run(), { ok: true, did: 'copied' });
+  assert.equal(Buffer.compare(readFileSync(w.to), raw), 0, 'byte for byte');
+  assert.deepEqual(w.run(), { ok: true, did: 'same' }, 'the same bytes are not rewritten');
+  writeFileSync(w.from, Buffer.from([0x68, 0x6f, 0x73, 0x74, 0x3d, 0xff, 0xfd, 0x0a, 0xc3]));
+  assert.deepEqual(w.run(), { ok: true, did: 'copied' }, 'one byte changed is a change');
+});
+
+test('L1029 E review: the job\'s entry runs as a script, says why on a config it can\'t read, and exits 1', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const { fileURLToPath } = await import('node:url');
+  const d = tempDir('orch-hlcopy-main-');
+  // A full run needs hostLockSource in the owner's /Users home, which a temp folder is not; the run itself is copyHostLock above.
+  const r = spawnSync(process.execPath, [fileURLToPath(new URL('./host-lock-copy.mjs', import.meta.url)), join(d, 'no-such.json')], { encoding: 'utf8', timeout: 30_000 });
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, /host\.lock copier: the setup config can't be read/);
+  assert.equal(r.stdout, '');
 });
