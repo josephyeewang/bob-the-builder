@@ -39,6 +39,7 @@ import { cardBranch } from '../M4-workshop/git/branch.mjs';
 import { outboxProblemFor } from '../M4-workshop/git/session-outbox.mjs';
 import { FINAL_STATES, OWNER_WAIT_WHO, PAUSED_WAIT_WHAT } from '../../shared/record.mjs';
 import { REVIEW_OVER } from '../M9-record/writer.mjs';
+import { READING_FUTURE_MS } from '../M12-sensors/facts.mjs';
 
 export const STOP_FACT = (sid) => `stop-${sid}`;
 /** The mark that a stop's unsaved work was told (L130 M9). */
@@ -601,9 +602,11 @@ export async function dispatcherPass({ rec, rules, now, clock = () => now, accou
       //   - a hit after the run began with no reset time (the worker could not read it, or it was already past), or a
       //     reset more than LIMIT_RESET_MAX_MS after the hit;
       //   - a card that has waited on a limit longer than LIMIT_RESET_MAX_MS since wait.since, whatever the reading says
-      //     (audit #125 r2 m-2, m-3): a reset that moves forward with each new hit, or a hit dated in the future, would
-      //     otherwise hold it quietly with no end;
-      //   - no hit after the run began, timeouts.usage_unknown_max_min after the card began to wait.
+      //     (audit #125 r2 m-2, m-3): a reset that moves forward with each new hit would otherwise hold it quietly with
+      //     no end;
+      //   - no hit after the run began, timeouts.usage_unknown_max_min after the card began to wait. A hit stamped more
+      //     than READING_FUTURE_MS ahead of the pass is no hit (L1032, the rule every reader of a reading's time keeps,
+      //     L1021): it is the clock, so Joe is told after that day, not held up to a week on a reset that never comes.
       const acct = doc.wait?.account;
       if (typeof acct !== 'string' || !acct) {
         // Told until delivered (L130 M12): the card is waiting on Joe from here on, so this branch never sees it again.
@@ -620,7 +623,7 @@ export async function dispatcherPass({ rec, rules, now, clock = () => now, accou
       }
       const lf = sensorsFact(rec, LIMIT_FACT(acct))?.doc;
       const seen = Date.parse(lf?.observed_at ?? '');
-      if (!(seen > runStarted)) {
+      if (!(seen > runStarted) || seen > now + READING_FUTURE_MS) {
         if (now - waitedFrom(doc, runStarted, now) > unknownMaxMs) {
           askJoe(id, { what: LIMIT_NO_HIT, now, kind: 'limit_no_hit', alert,
             text: `card ${id}: it has waited on account ${acct}'s usage limit with no limit hit recorded for its run, so it can't resume by itself; it waits on you` });
