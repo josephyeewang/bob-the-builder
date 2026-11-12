@@ -444,3 +444,17 @@ test('#463 r2 self-review m2: each run\'s record has a name of its own, so a she
   assert.equal(seen.length, 2); assert.notEqual(seen[0], seen[1]);
   for (const f of seen) assert.match(f, /\.orch-job-install-S-1\.group\.[0-9a-f]{16}$/);
 });
+
+// #463 r2 plants (lane 2, 2026-11-12): at the time limit the stop itself ends the job's own group, not only claude's later
+// close (a claude that never closes still has the job killed), and a job group that can't be told about is said.
+test('#463 r2 M1: the time limit kills the job\'s own group at once, before claude closes; one that can\'t be told about is said', async () => {
+  for (const [gone, kills, said] of [[() => false, [4242, 5151], false], [() => { throw new Error('EPERM'); }, [4242], true], [() => true, [4242], false]]) {
+    const child = Object.assign(new EventEmitter(), { pid: 4242 });   // never closes
+    const killed = [];
+    const job = { everyMs: 5, read: () => ({ pgid: 5151, pid: 5151, pid_start: '2026-11-12T00:00:00Z' }), gone, found: () => {}, ack: () => {} };
+    const err = await runToEnd(() => child, '/x/claude', [], {}, 60, (g) => killed.push(g), () => true, undefined, job).then(() => null, (e) => e);
+    assert.match(err?.message ?? '', /it did not finish in time/);
+    assert.deepEqual(killed, kills, 'the stop kills claude\'s group, then the job\'s when it is still there');
+    assert.equal(/its job's own process group may still run/.test(err.message), said, err.message);
+  }
+});
