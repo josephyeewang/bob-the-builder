@@ -36,8 +36,9 @@
 //   10 machine-wide block   reviewChecks' 10 (checkMachineWide)
 //   11 smoke and baseline   reviewChecks' smoke first, with the owner's home as the place outside the copy it must not
 //                           write, so the lock-down is shown on before any of the branch's code runs (#369 M2); then a
-//                           worker's baseline (the product's test command, run once through lockedRunCommand, must exit
-//                           0). The baseline never runs in the session's copy (#369 r1 M1): the start port makes a
+//                           worker's baseline (the product's test command, run once through runner-locked.mjs guardedRun,
+//                           must exit 0: its own process group recorded and killed with claude's, the Bash tool's wait its
+//                           limit, BASELINE_MS 10 min, #463 r2 M3). The baseline never runs in the session's copy (#369 r1 M1): the start port makes a
 //                           throwaway copy of the same commit (`x.throwaway()`), with its own settings that allow writes
 //                           there only and deny the session's copy and outbox, and removes it after. So a process the
 //                           tests leave running, one that started its own session (setsid) too, can't reach the copy
@@ -69,11 +70,18 @@ import { baselineTest, installStep } from '../modules/M4-workshop/launcher/launc
 import { isProtectedName } from '../modules/M4-workshop/launcher/worker-copy.mjs';
 import { git } from '../modules/M4-workshop/git/safe-git.mjs';
 import { check12 } from '../modules/M11-dispatcher/gate.mjs';
-import { claudeEnd, exitCodeCommand, readNoLink, runLockedCommand } from './runner-locked.mjs';
+import { randomBytes } from 'node:crypto';
+import { LOCKED_MS, claudeEnd, exitCodeCommand, groupFile, guardedRun, jobGroupProblem, readNoLink } from './runner-locked.mjs';
 import { foldKey } from '../shared/plan-fingerprint.mjs';
 
 const refuse = (reason) => ({ ok: false, reason });
-export const BASELINE_MS = 15 * 60_000;
+// The ports of guardedRun a test may swap in (#463 r2 self-review c1): its reads and waits, never what it runs.
+const JOB_PORTS = Object.freeze(['read', 'info', 'pidStartOf', 'jobGone', 'pollMs', 'answer', 'rm']);
+const jobPortsOf = (p) => (p && typeof p === 'object' ? Object.fromEntries(JOB_PORTS.filter((k) => Object.hasOwn(p, k)).map((k) => [k, p[k]])) : {});
+// #463 r2 M3 (L1010): the baseline runs as one Bash-tool command, so its limit is that tool's longest wait (LOCKED_MS,
+// 10 min, a claim on claude 2.1.322: RECHECK ON EVERY UPGRADE of the pin), not the 15 min it had. A branch whose tests
+// need longer is refused at the start ("did not finish in time"); its test command must be split by its product.
+export const BASELINE_MS = LOCKED_MS;
 const has = (v) => v !== undefined && v !== null && v !== '';
 export const WALK_LIMIT = 200_000;
 export const WALK_DEPTH = 64;
@@ -156,7 +164,7 @@ export const baselineCommand = (test, file) => exitCodeCommand(test, file, 'test
  * copy, outbox, env, head, mainAt, claudeBin, settings: { file, settings }, ownUid, throwaway() → { ok, copy, settingsFile,
  * done() } (the baseline's own copy, #369 r1 M1) } plus the config's { mirror, pin, hooksDir,
  * rules, snapshot, writeSnapshot, machineWide, busy, alert, spawn, home, testCommand, budget, bobFolder, bobManifest,
- * probeMs?, baselineMs? }. gateOf is M11's check12 (a port for tests). → { [n]: async () => { ok, reason } }, with no entry for a check whose inputs are not there.
+ * probeMs?, baselineMs?, nonce?, jobPorts? (guardedRun's read, info, pidStartOf, jobGone, pollMs, answer, rm: for tests) }. gateOf is M11's check12 (a port for tests). → { [n]: async () => { ok, reason } }, with no entry for a check whose inputs are not there.
  */
 export function workerChecks(x, { gateOf = check12 } = {}) {
   const r = reviewChecks({ ...x, reviewHome: x.home });
@@ -182,11 +190,20 @@ export function workerChecks(x, { gateOf = check12 } = {}) {
         let cmd; try { cmd = baselineCommand(x.testCommand, f); } catch (e) { return refuse(e.message); }
         rmSync(f, { force: true });
         b = await baselineTest({ run: async () => {
-          const ran = await runLockedCommand({ spawn: x.spawn, claudeBin: x.claudeBin, settingsFile: t.settingsFile, command: cmd, profile: x.profile, cwd: t.copy, env: x.env,
-            ms: x.baselineMs ?? BASELINE_MS, killGroup: x.killGroup, groupThere: x.groupThere });
-          // The command's own exit code, as it wrote it; none written, and the baseline can't say (not 0).
+          // #463 r2 M3 (L1010): as runLocked's jobs (guardedRun), the tests run in a process group of their own that is
+          // recorded and kept before they start, killed with claude's at the limit and at claude's end, and the Bash
+          // tool waits the whole limit. The baseline is a start check, so no group is kept in the runner's memory.
+          const ran = await guardedRun({ spawn: x.spawn, claudeBin: x.claudeBin, settingsFile: t.settingsFile, inner: cmd, profile: x.profile, cwd: t.copy,
+            env: x.env, ms: x.baselineMs ?? BASELINE_MS, killGroup: x.killGroup, groupThere: x.groupThere, label: 'the baseline',
+            gfile: groupFile({ cwd: t.copy, job: 'baseline', sessionId: x.sessionId, run: (x.nonce ?? (() => randomBytes(8).toString('hex')))() }),
+            ...jobPortsOf(x.jobPorts) });
           // Claude's own end (#463 r1 c3, as runLocked): one ended by a signal is no baseline, whatever it wrote.
           if (ran?.exitCode === null) return { exitCode: claudeEnd(ran) };
+          // Its own group still there at claude's end, or never recorded (so the tests never ran as kept): no baseline.
+          // One killed at claude's normal end is not (#369 r1 M1): the tests ran to their end, and their copy is thrown away.
+          const left = jobGroupProblem(ran, 'the baseline', { killedOk: true });
+          if (left) throw new Error(left);
+          // The command's own exit code, as it wrote it; none written, and the baseline can't say (not 0).
           let text; try { text = readNoLink(f).toString('utf8').trim(); } catch { return { exitCode: `not written; ${claudeEnd(ran)}` }; }
           return { exitCode: /^\d{1,3}$/.test(text) ? Number(text) : text.slice(0, 20) };
         } });

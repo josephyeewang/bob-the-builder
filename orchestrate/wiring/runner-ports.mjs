@@ -55,7 +55,7 @@
 // each character but a letter or digit made "-">/<session id>.jsonl) is CHECKED AGAINST NOTHING YET, as transcript.mjs's
 // line shapes are; void at the next pin. TRANSCRIPT_PLACE_CHECKED_AGAINST names the version once the live proof runs.
 
-import { fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeSync, closeSync, constants } from 'node:fs';
+import { fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeSync, closeSync, constants } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { execFileSync, spawn as childSpawn } from 'node:child_process';
 import { dirname, join } from 'node:path';
@@ -201,17 +201,26 @@ export const saveSettingsName = (id) => `${id}.save.json`;
  * refuses. The save runs under the session's save-phase settings (L991 M1: the session's walls with the network off),
  * the file the start wrote and whose hash it kept in the row (`save_settings_sha`, #463 r1 m3), in the copy's `.git`,
  * so it writes there and in the outbox only. A row with no such hash (a session started before it was kept) is refused.
- * onGroup: told the job's process group (#463 r1 m2, worker-runner.mjs keeps it).
+ * onGroup: told the job's process groups (#463 r1 m2, r2 M1; worker-runner.mjs keeps them). The copy's `.git` must be a
+ * real folder (no link) owned by the runner's user before the job runs there, and the job runs in its real path
+ * (#463 r2 m3), so a .git a worker swapped for a link never moves the save's folder elsewhere.
  */
-export function saveWorkPort({ mirrorOf, runLocked, settingsDir, make = createSaveWork } = {}) {
+export function saveWorkPort({ mirrorOf, runLocked, settingsDir, make = createSaveWork, lstat = lstatSync, realpath = realpathSync, uid = process.getuid() } = {}) {
   return async (s, { onGroup } = {}) => {
     const mirror = mirrorOf?.(s.product);
     if (typeof mirror !== 'string' || !mirror) return refuse(`product ${s.product} has no mirror in the runner's config`);
     if (typeof runLocked === 'function' && (typeof s.save_settings_sha !== 'string' || !SHA256.test(s.save_settings_sha))) return refuse(`session ${s.id} has no save settings kept by its start, so its work can't be saved inside the lock-down`);
     const bound = typeof runLocked === 'function'
-      ? (j) => runLocked({ ...j, sessionId: s.id, role: RUNNER_ROLE_OF[s.kind], settingsFile: typeof settingsDir === 'string' ? join(settingsDir, saveSettingsName(s.id)) : undefined,
-        // cwd .git: see runner-locked.mjs's capability note (claude 2.1.322 denies <cwd>/.git/config and hooks).
-        settingsSha: s.save_settings_sha, cwd: join(s.copy, '.git'), ...(typeof onGroup === 'function' ? { onGroup } : {}) })
+      ? (j) => {
+        const git = join(s.copy, '.git');
+        let st; try { st = lstat(git); } catch (e) { throw new Error(`the copy's .git can't be read (${e?.code ?? e?.message})`); }
+        if (!st.isDirectory() || st.isSymbolicLink()) throw new Error('the copy\'s .git is not a real folder');
+        if (st.uid !== uid) throw new Error('the copy\'s .git is not the runner\'s own');
+        let cwd; try { cwd = realpath(git); } catch (e) { throw new Error(`the copy's .git can't be read (${e?.code ?? e?.message})`); }
+        return runLocked({ ...j, sessionId: s.id, role: RUNNER_ROLE_OF[s.kind], settingsFile: typeof settingsDir === 'string' ? join(settingsDir, saveSettingsName(s.id)) : undefined,
+          // cwd .git: see runner-locked.mjs's capability note (claude 2.1.322 denies <cwd>/.git/config and hooks).
+          settingsSha: s.save_settings_sha, cwd, ...(typeof onGroup === 'function' ? { onGroup } : {}) });
+      }
       : undefined;
     return make({ runLocked: bound })({ clone: s.copy, mirror, card: s.card, branch: cardBranch(s.card), outbox: s.outbox });
   };
@@ -311,10 +320,11 @@ export function productWallGap(settings, places) {
   return null;
 }
 
-/** A live session's settings file as the start port wrote it: never through a link, a plain file, JSON. */
-export const sessionSettingsOf = (settingsDir) => (id) => {
+/** A live session's settings file as the start port wrote it: never through a link, a plain file, JSON. `name`: its
+ *  session settings by default, or its save settings (saveSettingsName, #463 r2 m5). */
+export const sessionSettingsOf = (settingsDir, name = (id) => `${id}.json`) => (id) => {
   if (typeof id !== 'string' || !SESSION_ID.test(id)) throw new Error('not a session id');
-  const fd = openSync(join(settingsDir, `${id}.json`), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  const fd = openSync(join(settingsDir, name(id)), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try { if (!fstatSync(fd).isFile()) throw new Error('not a plain file'); return JSON.parse(readFileSync(fd, 'utf8')); } finally { closeSync(fd); }
 };
 
