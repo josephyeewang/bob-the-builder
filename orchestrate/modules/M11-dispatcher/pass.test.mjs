@@ -2467,6 +2467,28 @@ test('L962 m1: a queued tell is dropped on the first pass with no failing stop',
   assert.equal(isQueued(rec, REVIEW_STOP_TELL_FACT), false, 'dropped once none fails');
 });
 
+// L976: an undo's launch names the commit it reverses, found from the card's source (M6 undoneBy, via exactReverse),
+// never from a field on the card; no other launch names one.
+test('L976: the undo launch carries the reversed commit from its source; an editing launch carries none', async () => {
+  const SHA = 'a'.repeat(40);
+  const w = world([
+    ['card', 'T-1', { state: 'merged', module: 'M-test', product: 'p1', tier: 2, files: ['src/a.js'], merge_commit: SHA }],
+    ['merge', 'MG-1', { state: 'audited_ok', card: 'T-1', pr: 7, merge_commit: SHA, product: 'p1' }],
+    ['ask', 'A-1', { state: 'answered', kind: 'undo', product: 'p1', card: 'T-1' }],
+    // A look-alike field on the card is never read: the commit comes from the source.
+    card('U-1', { kind: 'exact_reverse', source: { ask: 'A-1' }, files: ['src/a.js'], merge_commit: 'b'.repeat(40) }),
+    card('C-1')]);
+  const asked = [];
+  w.refuseLaunch((x) => { asked.push(x); return { ok: true }; });
+  await w.pass(0, { filesOf: () => ['src/a.js'] });
+  const by = Object.fromEntries(asked.map((x) => [x.card.id, x]));
+  assert.ok(by['U-1'] && by['C-1'], `both started: ${Object.keys(by)}`);
+  assert.equal(by['U-1'].kind, 'undo');
+  assert.equal(by['U-1'].undoCommit, SHA, 'the source\'s merge commit');
+  assert.equal(by['C-1'].kind, 'editing');
+  assert.equal('undoCommit' in by['C-1'], false, 'an editing launch names no reversed commit');
+});
+
 // L1000: each card state pinned to the reason its reviewer's stop carries. Only a cancel and a state no move leads out of
 // may be quiet (the runner's STOP_QUIET_REASONS); every other state asks no stop at all.
 test('L1000: every card state is pinned to its review stop reason: cancelled is cancel, failed, closed_no_answer and reverted are card_final, and no other state is stopped', async () => {

@@ -4,7 +4,8 @@
 // Each ask writes one request file into the runner's requests folder (requestWriter: exclusive) and then reads the
 // runner's status (readOwnerStatus, every check of step 1) until the answer to that request is there:
 //   <requestsDir>/<key>.json, and the answer in the status at answers[<key>] (owner-status.mjs ANSWER_KEY):
-//   - launch-<sessionId>                     { launch: { card, kind, product, sessionId } }   one per claimed id
+//   - launch-<sessionId>                     { launch: { card, kind, product, sessionId, undo_commit? } }   one per
+//                                            claimed id; undo_commit (40 hex) for an undo launch only (L976)
 //   - stopGroup-<sessionId>-<nonce>          { stopGroup: { id, pgid, kind } }
 //   - saveWork-<sessionId>-<nonce>           { saveWork: { id, kind, card } }
 //   - pauseLead-<product>-<nonce>            { pauseLead: { product } }
@@ -33,7 +34,7 @@ import { REQUEST_ID } from '../modules/M4-workshop/launcher/review-runner.mjs';
 import { PRODUCT } from '../shared/product-paths.mjs';
 import { CARD_ID } from '../modules/M9-record/outbox.mjs';
 import { START_ISO } from '../modules/M9-record/lock.mjs';
-import { RUNNER_KINDS, RUNNER_ROLE_OF, live, readOwnerStatus, runnerCopy, runnerOutbox } from './owner-status.mjs';
+import { RUNNER_KINDS, RUNNER_ROLE_OF, UNDO_COMMIT, live, readOwnerStatus, runnerCopy, runnerOutbox } from './owner-status.mjs';
 
 /** The kinds whose sessions have no work copy, so a stop never reads as unsaved work (owner-ports.mjs saveWork). */
 export const NO_COPY_KINDS = Object.freeze(['review', 'audit', 'readonly', 'lead', 'front_door']);
@@ -123,13 +124,15 @@ export function ownerAsyncPorts({ statusFile, uid, outboxRoot, copiesRoot, write
   const notAsked = (e) => ({ ok: false, reason: `the request could not be written (${e?.message ?? e})` });
 
   return {
-    launch: async ({ card, kind, product, sessionId } = {}, { signal } = {}) => {
+    launch: async ({ card, kind, product, sessionId, undoCommit } = {}, { signal } = {}) => {
       // Before the request is written a throw reads as refused (owner-ports.mjs).
       if (!REQUEST_ID.test(sessionId ?? '')) throw new Error('the launch names no session id the runner takes');
       if (!RUNNER_KINDS.includes(kind)) throw new Error(`the worker runner does not start ${JSON.stringify(kind)} sessions`);
       // No leading dot (#328 r1 c1): '.' would name copiesRoot itself, as review-runner.mjs refuses too.
       if (!CARD_ID.test(card ?? '') || card.startsWith('.') || !productName(product)) throw new Error('the launch names no card or product');
-      return ask(`launch-${sessionId}`, { launch: { card, kind, product, sessionId } }, (a, s) => {
+      if (kind === 'undo' && !(typeof undoCommit === 'string' && UNDO_COMMIT.test(undoCommit))) throw new Error('the undo launch names no reversed commit (40 hex)');
+      if (kind !== 'undo' && undoCommit !== undefined) throw new Error('only an undo launch names a reversed commit');
+      return ask(`launch-${sessionId}`, { launch: { card, kind, product, sessionId, ...(kind === 'undo' ? { undo_commit: undoCommit } : {}) } }, (a, s) => {
         const state = Object.hasOwn(s.requests, sessionId) ? s.requests[sessionId].state : undefined;
         // A refusal is the runner's once the request is used up by it: refused, or cancelled (a stop reached it before the
         // launch did, #456 r1 m1). Both are USED_UP (owner-status.mjs), so neither can still start a session.
