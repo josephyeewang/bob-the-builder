@@ -73,6 +73,8 @@ export const RUNNER_ROLE_OF = Object.freeze({ editing: productRole('worker'), un
 export const RUNNER_KINDS = Object.freeze(Object.keys(RUNNER_ROLE_OF));
 // The runner's places for one product (L836) live in shared/product-paths.mjs (L848), re-exported here for the callers.
 export { PRODUCT, productRoleClash, runnerPlaces, runnerCopy, runnerOutbox } from '../shared/product-paths.mjs';
+/** An undo launch's reversed commit (L976): a full 40-hex commit id, as M6 undoneBy gives it. */
+export const UNDO_COMMIT = /^[0-9a-f]{40}$/;
 /** How long the runner keeps a used-up request entry: a day, more than any claim timeout plus the stale window. */
 export const RUNNER_KEEP_USED_UP_MS = 24 * 3_600_000;
 /** The runner rewrites its status at least this often (L769): a forged inode lasts no longer than one rewrite. */

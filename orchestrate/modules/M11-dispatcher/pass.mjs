@@ -378,12 +378,17 @@ const RUNNER_STOP = Object.freeze(['stopped', 'wanted', 'failed']);
 // states whose verdict M9 throws away, not FINAL_STATES: an auditor on a closed card (closed can still move to reverted)
 // does work M9 would keep, so it runs on.
 const reviewStopReason = (card) => (card.state === 'cancelled' ? 'cancel' : REVIEW_OVER.includes(card.state) ? 'card_ended' : null);
+// L992, L1000: the word the stop file carries to the review runner (M4 review-stop.mjs). Only 'cancel' and 'card_final'
+// end a session without telling Joe (review-runner.mjs STOP_QUIET_REASONS, #455). card_ended is REVIEW_OVER less
+// cancelled (failed, closed_no_answer, reverted), every one a state no move leads out of, so card_final. A state not
+// mapped here asks no stop (reviewStopReason is null for it), so no live card's stop is ever quiet.
+export const REVIEW_STOP_RUNNER_REASON = Object.freeze({ cancel: 'cancel', card_ended: 'card_final' });
 
 /**
  * L946: ask the review runner to end each reviewer or auditor (product null, kind review or audit) whose card is in this
  * Record AT THE HEAD IT REVIEWS, and is cancelled or ended. The head is what makes it this product's: two products may
  * each have a C-7, never one commit. A reviewer of an older head of the card is left alone (L947: its verdict is thrown
- * away). The ask is `stopReview({ card, role, head })`, a stop file by target (no request id, L947), again every
+ * away). The ask is `stopReview({ card, role, head, reason })` (reason: REVIEW_STOP_RUNNER_REASON[why], L1000), a stop file by target (no request id, L947), again every
  * REVIEW_STOP_AGAIN_MS while the session is listed. Every ask of a pass is made at once, each with its own time limit,
  * so the asks add one port deadline to the step however many there are. A failed ask is said in the notes and the
  * failure log on each pass; Joe is told once for all of them (REVIEW_STOP_TELL_FACT), again each day it lasts, and the
@@ -443,8 +448,8 @@ async function reviewStops({ rec, sessions, ownProduct, now, stopReview, alert, 
     if (askedAt !== null && now - askedAt < REVIEW_STOP_AGAIN_MS) { out.reviewStops.push([s.id, why, 'waiting']); continue; }
     due.push({ s, why, key, was });
   }
-  const answers = await Promise.all(due.map(({ s }) => (typeof stopReview === 'function'
-    ? guarded(() => stopReview({ card: s.card, role: s.role, head: s.head }), portDeadlineMs)
+  const answers = await Promise.all(due.map(({ s, why }) => (typeof stopReview === 'function'
+    ? guarded(() => stopReview({ card: s.card, role: s.role, head: s.head, reason: REVIEW_STOP_RUNNER_REASON[why] }), portDeadlineMs)
     : { ok: false, reason: 'no stopReview port is wired' })));
   const failing = [];
   due.forEach(({ s, why, key, was }, n) => {
@@ -519,11 +524,12 @@ export const HELD_BANDS = Object.freeze({ band: 'unknown', own_building: 'unknow
  *   sessions: the running sessions Mac-wide [{ id, product, kind, card, lead, role, head, pgid, bundle_files, runner_stop }] (head: a review session's, L946;
  *                                    runner_stop: a review session's only, 'stopped' | 'wanted' | 'failed', the stop its runner shows, L968)
  *   probe(s) -> { size, activity }   (transcript size incl. compactions, and the activity tracker)
- *   launch({ card, kind, product, sessionId }) -> { ok, pid, pidStart, pgid, head, base, outbox, reason, signin, configDir }
+ *   launch({ card, kind, product, sessionId, undoCommit? }) -> { ok, pid, pidStart, pgid, head, base, outbox, reason, signin, configDir }
  *                                    (M4 launch, through accountLaunch; it starts claude with the claimed sessionId;
  *                                    `outbox` is the full path of the session's own outbox folder, which it made)
  *   stopGroup(s, { signal }) -> { ok, how }  (stopProcessGroup on the session's group; `signal` aborts when the pass gives up on it)
- *   stopReview({ card, role, head }) -> { ok, reason }  (the review runner's stop file by target, L946; stopPass reviewStops)
+ *   stopReview({ card, role, head, reason }) -> { ok, reason }  (the review runner's stop file by target, L946; stopPass reviewStops;
+ *     reason: REVIEW_STOP_RUNNER_REASON's word, L1000)
  *   saveWork(s) -> { ok, reason }    (M4 save-work, inside the worker's lock-down)
  *   hostLock() -> string | null      (the host.lock text; its path is config)
  *   pauseLead({ product }) -> any    (lead-restart's WRAP flow for a paused product)
@@ -892,7 +898,8 @@ async function starts({ rec, rules, now, b, running, launch, stopGroup, outboxRo
     // A launch has its own time limit (audit 0b-6 r5 m1): one that never answers holds no other start.
     // It may still start a session after the limit, so the card stays claimed, never back to ready (a
     // second start would make two sessions for one card); Joe is told, once a day.
-    const l = await guarded(() => launch({ card, kind, product, sessionId }), portDeadlineMs);
+    // An undo's launch carries the reversed commit exactReverse found from the card's source (L976), never a card field.
+    const l = await guarded(() => launch({ card, kind, product, sessionId, ...(kind === 'undo' ? { undoCommit: exact.commit } : {}) }), portDeadlineMs);
     // Late is any answer marked timed out (guarded's own, or a port's), not only guarded's exact words (L744 1).
     if (!l?.ok && (l?.timedOut === true || l?.reason === `it did not answer within ${portDeadlineMs} ms`)) {
       out.refused.push([id, `launcher: ${l.reason}`]);
