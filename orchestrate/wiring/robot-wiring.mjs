@@ -96,12 +96,20 @@ export function markToldByBeat(rec, { cause, text, now }) {
 }
 
 export const LATE_CAUSE = (since) => `robot-dispatcher-late-${since ?? 'never'}`;
-/** The queue cause of the alert sweep's trouble (L977), told as robot-main tells a failed pass's. It is in robot-main's
- * `robot-<pass>` form, so no pass may be named 'sweep' (a test checks it). */
-export const SWEEP_CAUSE = 'robot-sweep';
+/** The queue causes of the alert sweep's trouble (L977; #465 r1 m2), one per kind of why, each told once a day as robot-main
+ * tells a failed pass's: GitHub's list of open issues (or a call in the sweep) failing, a close GitHub refused, the
+ * robot's login unknown, a mark the Record refused, the sweep cut short by its limit, and the Record refusing to keep where
+ * an alert is during the sweep. They are in robot-main's `robot-<pass>` form, so no pass's `robot-<pass>` may equal one (a
+ * test checks it). */
+export const SWEEP_CAUSES = Object.freeze({ list: 'robot-sweep-list', close: 'robot-sweep-close', login: 'robot-sweep-login',
+  mark: 'robot-sweep-mark', timeout: 'robot-sweep-timeout', cache: 'robot-sweep-cache' });
 /** How long the sweep may take inside the heartbeat pass (L977 review M1): well inside the pass's own limit, so a slow
- * sweep is the sweep's trouble, not a failed heartbeat. */
+ * sweep is the sweep's trouble, not a failed heartbeat. It is cut to what the pass has left, less SWEEP_MARGIN_MS
+ * (#465 r1 m1). */
 export const SWEEP_DEADLINE_MS = 30_000;
+export const SWEEP_MARGIN_MS = 5_000;
+// M13's sweep whys, by kind (alerts.mjs sweep): each that matches names a cause; a why matching none is GitHub's side (list).
+const SWEEP_WHY_KINDS = [['login', /login is not known/], ['mark', /the Record refused the (sweep's mark|sweep's list mark|mark of)/]];
 export const ROBOT_PASSES = Object.freeze(['gate', 'heartbeat', 'caught-up', 'watch', 'deliver']);
 // What each pass that is not wired yet is waiting for: the port named in its refusal.
 export const NOT_WIRED_PASSES = Object.freeze({ gate: 'robot.github (R-0b-02)', heartbeat: `robot.heartbeat: the config names no robot App (${APP_KEYS.join(', ')}; L600)`, watch: 'robot.vercel',
@@ -279,7 +287,10 @@ export async function ideaIssues(gh, { owner, repo }) {
 }
 
 export async function wire(config, { log = (s) => process.stderr.write(`${s}\n`), fetchFn = globalThis.fetch, now = () => Date.now(),
-  uid = process.getuid?.(), deliver = null, hold = holdAlert, mint = mintInstallationToken, sweepDeadlineMs = SWEEP_DEADLINE_MS } = {}) {
+  uid = process.getuid?.(), deliver = null, hold = holdAlert, mint = mintInstallationToken, sweepDeadlineMs = SWEEP_DEADLINE_MS, passDeadlineMs = null, alertsOf = makeAlerts } = {}) {
+  // The heartbeat pass's own limit is robot-main's, handed in by its main (one value; #465 r2 M1: never imported from
+  // robot-main here, whose top-level main would then wait on this wire for ever). Without one the sweep is not run.
+  const passLimitMs = Number.isFinite(passDeadlineMs) && passDeadlineMs > 0 ? passDeadlineMs : null;
   const c = checkConfig(config, { keys: CONFIG_KEYS, paths: PATHS });
   const appBad = appProblem(c);
   if (appBad) throw new Error(`config: ${appBad}`);
@@ -315,35 +326,72 @@ export async function wire(config, { log = (s) => process.stderr.write(`${s}\n`)
     // One alerts object for the round (L977): the heartbeat's clears leave their proof on it, and the sweep after them
     // reads that same proof, so an alert issue whose number the Record refused is closed once its cause clears (#449).
     // The robot job is one process per round, so this is one per round.
-    const alerts = makeAlerts({ rec, gh: issues, owner: c.alertOwner, now: when, log });
+    const alerts = alertsOf({ rec, gh: issues, owner: c.alertOwner, now: when, log });   // alertsOf: M13 makeAlerts, or a test's wrap of it
     beat = (late) => heartbeatOnce({ product: c.product, writer: ledger, gh: issues, alerts,
       owner: c.alertOwner, probes: { ...probes, dispatcherLate: async () => late }, now: when });
     // The sweep, after the round's last raise and clear on that object (the heartbeat is the only pass that uses it). What
-    // it did is logged; a why is round trouble, told through the queue as a failed pass is, once a day per cause, by
-    // deliver in this same round. A sweep that throws, or runs past its own limit, is the same trouble, and so is a
-    // Record that refused to keep where an alert is during the sweep (the beat's own report has already run by then).
-    // Never throws, and never changes the heartbeat's own answer.
+    // it did is logged; each why is round trouble, told through the queue under its own kind's cause (SWEEP_CAUSES), as a
+    // failed pass is, once a day per cause, by deliver in this same round. A sweep that throws, runs past its own limit,
+    // closes nothing GitHub refused to close, or meets a Record that refused to keep where an alert is during the sweep, is
+    // the same trouble (the beat's own report has already run by then). Its limit is what the heartbeat pass has left, so
+    // a slow beat never makes the sweep run the pass past its own limit; with none left it is not run, and says so
+    // (#465 r1 m1). A cause the queue refused is logged and said in `tell`, and joins a failed pass's tell. Never throws, and never changes the heartbeat's answer.
     const none = (why) => ({ swept: false, closed: [], failed: [], kept: [], why });
     const said = (e) => makeMasker().maskSecrets(String(e?.message ?? e)).text.slice(0, 200);
-    sweepRound = async () => {
-      let a; let timer;
-      const limit = new Promise((resolve) => { timer = setTimeout(() => resolve(none(`it did not finish within ${sweepDeadlineMs} ms`)), sweepDeadlineMs); timer.unref?.(); });
-      try { a = await Promise.race([alerts.sweep({ product: c.product }), limit]); } catch (e) { a = none(`it stopped: ${said(e)}`); } finally { clearTimeout(timer); }
+    const list = (v) => (Array.isArray(v) ? [...v] : []);
+    sweepRound = async (passStart) => {
+      const trouble = [];   // [cause, why]
+      const limitMs = passLimitMs === null ? NaN : Math.min(sweepDeadlineMs, passLimitMs - (now() - passStart) - SWEEP_MARGIN_MS);
+      // Trouble already on the object before the sweep is not the sweep's: the beat's own report takes it, or, when the beat
+      // threw before its report, the heartbeat pass fails and is told as that. Only trouble that changes during the sweep is
+      // the sweep's (#465 r1 c3, r2 m3).
+      let before = null;
+      try { before = alerts.cacheTrouble(); } catch { before = null; }
+      let a;
+      if (passLimitMs === null) {
+        a = none('it was not run: it was given no heartbeat pass limit (robot-main hands in passDeadlineMs)');
+        trouble.push([SWEEP_CAUSES.timeout, a.why]);
+      } else if (!(limitMs > 0)) {
+        a = none(`it was not run: the heartbeat pass had ${Math.max(0, passLimitMs - (now() - passStart))} ms of its ${passLimitMs} left`);
+        trouble.push([SWEEP_CAUSES.timeout, a.why]);
+      } else {
+        let timer; let cut = false;
+        const limit = new Promise((resolve) => { timer = setTimeout(() => { cut = true; resolve(null); }, limitMs); timer.unref?.(); });
+        try {
+          const got = await Promise.race([alerts.sweep({ product: c.product }), limit]);
+          // What it answered is read inside the try, so an odd answer is the sweep's trouble, not a throw (#465 r1 c2).
+          a = cut ? none(`it did not finish within ${limitMs} ms`)
+            : got === null || typeof got !== 'object' ? none('it answered no result')
+            : { swept: got.swept === true, closed: list(got.closed), failed: list(got.failed), kept: list(got.kept), why: got.why === null || got.why === undefined ? null : String(got.why) };
+          if (cut) trouble.push([SWEEP_CAUSES.timeout, a.why]);
+          else if (a.swept === false && a.why === 'it answered no result') trouble.push([SWEEP_CAUSES.list, a.why]);
+          else if (a.why !== null) {
+            // Every kind the why names, each under its own cause (#465 r2 m4): a login stop and a refused mark in one why are two troubles.
+            const kinds = SWEEP_WHY_KINDS.filter(([, re]) => re.test(a.why)).map(([k]) => k);
+            for (const k of kinds.length ? kinds : ['list']) trouble.push([SWEEP_CAUSES[k], a.why]);
+          }
+        } catch (e) { a = none(`it stopped: ${said(e)}`); trouble.push([SWEEP_CAUSES.list, a.why]); } finally { clearTimeout(timer); }
+      }
+      // A close GitHub refused is tried again a day on, but the owner hears of it now (#465 r1 m3).
+      if (a.failed.length > 0) trouble.push([SWEEP_CAUSES.close, `GitHub refused to close ${a.failed.length === 1 ? 'issue' : 'issues'} ${a.failed.map((n) => `#${n}`).join(', ')}; ${a.failed.length === 1 ? 'it is' : 'they are'} tried again a day on`]);
       let refused = null;
       try { refused = alerts.cacheTrouble(); } catch { refused = null; }
-      const why = [a.why, refused !== null ? `the Record refused to keep where an alert is, this round (${String(refused).slice(0, 200)})` : null].filter((x) => x !== null).join('; ') || null;
+      if (refused !== null && refused !== undefined && refused !== before) trouble.push([SWEEP_CAUSES.cache, `the Record refused to keep where an alert is, this round (${String(refused).slice(0, 200)})`]);
+      const why = trouble.map(([, w]) => w).join('; ') || null;
       if (a.closed.length || a.failed.length || a.kept.length || why !== null) {
         try { log(`robot: alert sweep: closed ${JSON.stringify(a.closed)}, failed ${JSON.stringify(a.failed)}, kept ${JSON.stringify(a.kept)}${why !== null ? `; ${why}` : ''}`); } catch { /* the queue below still tells it */ }
       }
-      if (why !== null) {
+      const notQueued = [];
+      for (const [cause, w] of trouble) {
         try {
-          if (hold({ rec, cause: SWEEP_CAUSE, text: `the robot job's alert sweep: ${why}`, alert: outbox(rec, now()), now: now() }) === false) log('robot: the alert sweep\'s trouble could not be queued');
-        } catch (e) { try { log(`robot: the alert sweep's trouble could not be queued: ${said(e)}`); } catch { /* nothing left to tell it with */ } }
+          if (hold({ rec, cause, text: `the robot job's alert sweep: ${w}`, alert: outbox(rec, now()), now: now() }) === false) { notQueued.push(`${cause} could not be queued`); log(`robot: the alert sweep's trouble (${cause}) could not be queued`); }
+        } catch (e) { notQueued.push(`${cause} could not be queued (${said(e)})`); try { log(`robot: the alert sweep's trouble (${cause}) could not be queued: ${said(e)}`); } catch { /* nothing left to tell it with */ } }
       }
-      return { swept: a.swept, closed: a.closed, failed: a.failed, kept: a.kept, why };
+      return { swept: a.swept, closed: a.closed, failed: a.failed, kept: a.kept, why, ...(notQueued.length ? { tell: `the alert sweep's trouble: ${notQueued.join('; ')}` } : {}) };
     };
   }
   passes.heartbeat = async () => {
+    const passStart = now();   // the sweep's limit is what this pass has left (#465 r1 m1)
     const late = dispatcherLate(rec, { nowMs: now(), holder: lockHolder(c.dispatcherLockFile) });
     if (late) log(`robot: alert: ${late.text}`);
     // The late alert is queued FIRST, before any GitHub call, so a heartbeat that hangs past the pass's time limit can't
@@ -378,14 +426,16 @@ export async function wire(config, { log = (s) => process.stderr.write(`${s}\n`)
     }
     // After the beat, so its clears are in, and after the late alert's mark and drop, so a slow sweep can't undo them
     // (L977). Never throws.
-    const sweep = sweepRound ? await sweepRound() : null;
-    if (failed) throw Object.assign(failed instanceof Error ? failed : new Error(String(failed)), tell ? { tell } : {});
+    const sweep = sweepRound ? await sweepRound(passStart) : null;
+    // A sweep cause the queue refused rides on a failed pass's tell too, so robot-main says it (#465 r2 m6).
+    const withSweep = (t) => [t, sweep?.tell].filter(Boolean).join('; ') || null;
+    if (failed) { const t = withSweep(tell); throw Object.assign(failed instanceof Error ? failed : new Error(String(failed)), t ? { tell: t } : {}); }
     if (!beat) throw Object.assign(new Error(notWiredText(NOT_WIRED_PASSES.heartbeat)), tell ? { tell } : {});
     // Neither queued nor told by the heartbeat (GitHub lost it, or Joe closed it while it lasts): the pass fails with the
     // tell, as above, so robot-main logs it as not told and the round's result says so (L738 review m1).
-    if (late && tell && !toldByBeat) throw Object.assign(new Error('the Dispatcher-late alert was neither queued nor told by the heartbeat'), { tell });
+    if (late && tell && !toldByBeat) throw Object.assign(new Error('the Dispatcher-late alert was neither queued nor told by the heartbeat'), { tell: withSweep(tell) });
     // A pinned issue GitHub took no edit or open of is a failed pass, as deliver's `refused` is (#451 r1 m1).
-    if (beaten.posted === false) throw Object.assign(new Error(`the pinned heartbeat issue was not posted: ${beaten.postedWhy}`), tell && !toldByBeat ? { tell } : {});
+    if (beaten.posted === false) { const t = withSweep(tell && !toldByBeat ? tell : null); throw Object.assign(new Error(`the pinned heartbeat issue was not posted: ${beaten.postedWhy}`), t ? { tell: t } : {}); }
     // An alert GitHub lost is a failed item, which robot-main logs as deliver's are (#451 r1 m2).
     const failedItems = Object.values(beaten.told ?? {}).filter((v) => v === false).length;
     if (beaten.red.includes(NOT_TOLD)) return { red: beaten.red, failed: Math.max(1, failedItems), sweep };

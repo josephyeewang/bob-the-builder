@@ -63,11 +63,16 @@ export async function runPasses({ rec, passes, now, passDeadlineMs = PASS_DEADLI
       // A pass may say why its own alert was not queued (robot-wiring.mjs heartbeat): kept with the failure.
       if (e?.tell) res[name].tell = String(e.tell);
       try {
-        if (hold({ rec, cause: CAUSE(name), text: `the robot job's ${name} pass failed: ${error}; the other passes still ran`, alert, now: now() }) === false) res[name].tell = NOT_QUEUED;
-      } catch (e2) { res[name].tell = String(e2?.message ?? e2); }
+        if (hold({ rec, cause: CAUSE(name), text: `the robot job's ${name} pass failed: ${error}; the other passes still ran`, alert, now: now() }) === false) res[name].tell = addTell(res[name].tell, NOT_QUEUED);
+      } catch (e2) { res[name].tell = addTell(res[name].tell, String(e2?.message ?? e2)); }
     } finally { clearTimeout(timer); }
   }
   return res;
+}
+
+// A failed pass's tell keeps what the pass itself said (the sweep's, the late alert's) and adds why its failure alert was not queued (#465 r2 review m2).
+function addTell(had, more) {
+  return [had, more].filter(Boolean).join('; ');
 }
 
 export const LOCK_REFUSED = 3;
@@ -118,7 +123,7 @@ export async function main(argv, { now = () => Date.now(), log = (s) => process.
     if (dog && config.runDeadlineMs !== undefined) { dog.terminate(); dog = startDog(limit + WATCHDOG_MARGIN_MS); }
     const mod = await import(pathToFileURL(config.wiring).href);
     if (typeof mod.wire !== 'function') throw new Error('the wiring module has no wire()');
-    wired = await mod.wire(config, { now, log, ...wireOpts });
+    wired = await mod.wire(config, { now, log, passDeadlineMs, ...wireOpts });
   } catch (e) {
     log(`robot: not started: ${e.message}`);
     // A store that won't open has no alert queue, so this is told here: one issue per fault, a comment once a day while it
