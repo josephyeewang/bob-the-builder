@@ -45,6 +45,7 @@
 import { tellRefused, watchWrites } from './refused-writes.mjs';
 import { KEYS, minutes, need, MissingKey, missingFor } from './keys.mjs';
 import { sensorsFact } from './sensor-facts.mjs';
+import { READING_FUTURE_MS } from '../M12-sensors/facts.mjs';
 import { outageStep, OUTAGE_FACT } from './outage.mjs';
 import { intakePass } from './outbox-intake.mjs';
 import { leadRestartStep, leadInFlight, handoffVet, tellLeadSkipped, HANDOFF_NAME } from './lead-restart.mjs';
@@ -161,7 +162,7 @@ export function signedInAccount({ rec, rules, now }) {
   let staleMs;
   try { staleMs = minutes(rules, KEYS.staleAfterMin); } catch { return { account: null, reason: `the rules have no value for ${KEYS.staleAfterMin}`, missing: KEYS.staleAfterMin }; }
   const seen = Date.parse(d.observed_at ?? '');
-  if (!Number.isFinite(seen) || seen > now + 60_000 || now - seen > staleMs) return { account: null, reason: 'the signed-in account reading is stale' };
+  if (!Number.isFinite(seen) || seen > now + READING_FUTURE_MS || now - seen > staleMs) return { account: null, reason: 'the signed-in account reading is stale' };
   return { account: d.account, reason: null };
 }
 

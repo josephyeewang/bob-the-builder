@@ -28,6 +28,7 @@ import { activeKind } from '../../shared/asks.mjs';
 // The one row-file pattern (c1-r2, L704): M2's, which the Merge Gate (M6 gather.mjs), the Dispatcher's gate and the
 // wiring's planRows read too, so the lane rule and the go agree on which file is a row. Case-folded like BLUEPRINT (audit round 7).
 import { ROW_FILE } from '../M2-approvals/go.mjs';
+import { READING_FUTURE_MS } from '../M12-sensors/facts.mjs';
 
 // Mac-wide keys and how they combine across products (MAT-10, R2-M5(b), L96): one definition, in shared/rules.mjs,
 // so fakeRules answers a read with no product exactly as this engine does (L110).
@@ -45,7 +46,6 @@ const NOT_PRODUCT = compileList(['docs/blueprint/**', 'docs/*.md', 'docs/domains
 // places GitHub reads are covered with one pattern; a CODEOWNERS file elsewhere is inert, and refusing it costs nothing.
 const GITHUB_DIR = compileList(['.github/', '**/CODEOWNERS']);
 const FILE_STATUSES = ['added', 'modified', 'removed', 'renamed', 'copied'];
-const USAGE_FUTURE_MS = 60_000;
 
 // What each product state allows, before the file's own product_state_rules (which can only tighten, MAT-8).
 const STATE_FLOOR = Object.freeze({
@@ -203,7 +203,7 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
       const now = clock();
       if (!Number.isFinite(now)) return deny('no usable clock');
       if (!Number.isFinite(staleMin) || !Number.isFinite(readAt)) return deny('Tier 1 start needs a usage reading');
-      if (now - readAt > staleMin * 60_000 || readAt - now > USAGE_FUTURE_MS) return deny('usage reading is stale');
+      if (now - readAt > staleMin * 60_000 || readAt - now > READING_FUTURE_MS) return deny('usage reading is stale');
     }
     return allow(`start ${role} on ${product}`);
   }
