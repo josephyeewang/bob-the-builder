@@ -1933,5 +1933,6 @@ test('L946: the stops step gets p.stopReview and asks by card, role and head', a
     stopReview: (x) => { asked.push(x); return { ok: true }; } } });
   const r = await w.pass();
   assert.equal(r.steps.stops.ok, true, r.steps.stops.error);
-  assert.deepEqual(asked, [{ card: 'C-7', role: 'reviewer', head: hd }]);
+  // L1000: with the stop's reason word for the runner (a cancelled card: 'cancel', ended quietly).
+  assert.deepEqual(asked, [{ card: 'C-7', role: 'reviewer', head: hd, reason: 'cancel' }]);
 });
