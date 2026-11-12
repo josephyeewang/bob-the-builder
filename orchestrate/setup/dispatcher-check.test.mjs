@@ -14,6 +14,7 @@ import { WORKER_CONFIG_KEYS } from '../wiring/dispatcher-wiring.mjs';
 import { HOST_LOCK_MAX } from '../wiring/worker-ports.mjs';
 import { fakeMac, macTest as test } from './fake-mac.test-helper.mjs';
 import { tempDir } from '../shared/test-tmp.mjs';
+import { COPY_MAX_AGE_MS, stampPath } from './host-lock-copy.mjs';
 
 const BASE = '/Library/orch-test';
 const LOCK = '/Users/sam/Sync Folder/host.lock';   // a synced folder's name may hold a space
@@ -109,6 +110,30 @@ test('L748: all is well → the launches line, the host.lock line and the job li
   const res = checkDispatcherKeys(w.mac, w.cfg);
   assert.equal(res.length, 3); assert.deepEqual(failing(res), []); assert.ok(!res.some((r) => r.skip));
   assert.match(res[2].what, /the Dispatcher's own background job can read host\.lock/);
+});
+
+test('L1029 E: with the owner\'s copier (hostLockSource), check-dispatcher FAILs unless its stamp beside the copy is fresh and the owner\'s', () => {
+  const SRC = '/Users/sam/Library/CloudStorage/Dropbox/host.lock';
+  const w = world({ raw: { ...RAW, hostLockSource: SRC } });
+  const T = Date.parse('2026-11-12T10:00:00Z');
+  const row = (res) => res.find((r) => r.what.includes('copier'));
+  const at = (o = {}) => checkDispatcherKeys(w.mac, w.cfg, { now: T, ...o });
+  // Never run: the copier line FAILs, the rest is as before.
+  let res = at();
+  assert.equal(res.length, 4); assert.equal(row(res).ok, false);
+  assert.match(row(res).what, /copier has copied \/Users\/sam\/Library\/CloudStorage\/Dropbox\/host\.lock to \/Users\/sam\/Sync Folder\/host\.lock in the last 5 minutes/);
+  assert.match(row(res).why, /has never finished a run/);
+  assert.deepEqual(failing(res).length, 1);
+  // A fresh stamp of the owner's: PASS.
+  const st = stampPath(LOCK);
+  writeFileSync(w.mac.at(st), JSON.stringify({ at: new Date(T - 60_000).toISOString(), source: 'present' })); w.mac.owners.set(st, { uid: 65001, gid: 20 });
+  res = at(); assert.deepEqual(failing(res), []);
+  // Old: FAIL, naming the copier's log.
+  res = at({ now: T + COPY_MAX_AGE_MS }); assert.equal(row(res).ok, false); assert.match(row(res).why, /over 5 minutes ago.*host-lock-copy\.err\.log/);
+  // Not the owner's (the Dispatcher's own, say): FAIL.
+  w.mac.owners.set(st, { uid: 0, gid: 0 }); res = at(); assert.equal(row(res).ok, false); assert.match(row(res).why, /is not the owner's/);
+  // Without hostLockSource there is no copier line.
+  assert.equal(row(checkDispatcherKeys(world().mac, parseConfig(RAW), { now: T })), undefined);
 });
 
 test('L748 r1 M2: host.lock in a folder macOS guards → the Terminal read PASSes, but the job line is NOT TRIED, never a PASS', () => {
@@ -304,6 +329,20 @@ test('L748 r1 M1: check-dispatcher prints the lines; check-install never does (d
   const w2 = world({ raw: { ...RAW, ...INSTALL, hostLockPath: undefined } });
   assert.doesNotMatch(w2.run(['check-install']).text, /host\.lock|check-dispatcher/);
   const r2 = w2.run(['check-dispatcher']); assert.equal(r2.code, 1); assert.match(r2.text, /hostLockPath is not set/);
+});
+
+test('L1029 E: host-lock-copier prints the owner\'s job file on stdout and the steps on stderr; refused under sudo and without hostLockSource', () => {
+  const INSTALL = { address: 'https://example.invalid/org/repo.git', label: 'com.example.orch-test', runnerConfig: '/nowhere/review.json' };
+  const SRC = '/Users/sam/Library/CloudStorage/Dropbox/host.lock';
+  const w = world({ raw: { ...RAW, ...INSTALL, hostLockSource: SRC } });
+  const root = w.run(['host-lock-copier']); assert.equal(root.code, 2); assert.match(root.text, /the host\.lock copier is the owner's own job; run this without sudo/);
+  w.mac.as = 65001;
+  const r = w.run(['host-lock-copier']); assert.equal(r.code, 0, r.text);
+  assert.match(r.text, /<string>com\.example\.orch-test\.host-lock-copy<\/string>/);
+  assert.match(r.text, /<string>\/Library\/orch-test\/install\/orchestrate\/setup\/host-lock-copy\.mjs<\/string>/);
+  assert.match(r.text, /^ERR Save the text above as \/Users\/sam\/Library\/LaunchAgents\/com\.example\.orch-test\.host-lock-copy\.plist .*launchctl bootstrap gui\/\$\(id -u\)/m);
+  const w2 = world({ raw: { ...RAW, ...INSTALL } }); w2.mac.as = 65001;
+  const r2 = w2.run(['host-lock-copier']); assert.equal(r2.code, 1); assert.match(r2.text, /names no hostLockSource/);
 });
 
 test('foldersAbove lists every folder above a file, top first', () => {

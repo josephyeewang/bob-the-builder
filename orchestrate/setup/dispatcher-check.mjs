@@ -22,6 +22,7 @@ import { DISPATCHER_CONFIG, dispatcherSourcePath } from './dispatcher-setup.mjs'
 import { HOST_LOCK_MAX } from '../wiring/worker-ports.mjs';
 import { currentCopy } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { PRODUCT } from '../shared/product-paths.mjs';
+import { COPY_MAX_AGE_MS, stampProblem } from './host-lock-copy.mjs';
 
 const SUDO = '/usr/bin/sudo';
 const DISPATCHER_USER = 'orchestrate';
@@ -106,7 +107,7 @@ export function rootRows(io, cfg, k) {
  * Not part of checkInstall (install.mjs): `daemons load` and the watch cutover wait on that, and a host.lock the
  * Dispatcher can't read must not stop the review or watch jobs. Its own command is `check-dispatcher`.
  */
-export function checkDispatcherKeys(io, cfg, { dispatcher = cfg.dispatcher !== undefined, refused } = {}) {
+export function checkDispatcherKeys(io, cfg, { dispatcher = cfg.dispatcher !== undefined, refused, now = Date.now() } = {}) {
   const out = [];
   const item = (ok, what, why) => out.push({ ok, what, ...(ok ? {} : { why }) });
   const skip = (what, why) => out.push({ ok: true, skip: true, what, why });
@@ -127,6 +128,13 @@ export function checkDispatcherKeys(io, cfg, { dispatcher = cfg.dispatcher !== u
   const what = `the owner's host.lock (${k.hostLockPath}) is ${cfg.owner}'s and ${DISPATCHER_USER} can read it (the Dispatcher's hostLockPath)`;
   const owner = readUser(io, cfg.owner); const me = readUser(io, DISPATCHER_USER);
   if (!me.exists) { item(false, what, `the ${DISPATCHER_USER} user doesn't exist yet; run users-folders first`); return out; }
+  // With the owner's copier (hostLockSource, L1029 E), hostLockPath is its copy: the copy is only as good as the copier's last
+  // run, so a stamp older than COPY_MAX_AGE_MS (or none) is a FAIL, whatever the copy says (host-lock-copy.mjs).
+  if (cfg.hostLockSource !== undefined) {
+    const copied = `the owner's host.lock copier has copied ${cfg.hostLockSource} to ${k.hostLockPath} in the last ${COPY_MAX_AGE_MS / 60_000} minutes`;
+    const bad = owner.exists ? stampProblem(io, k.hostLockPath, { now, ownerUid: owner.uid }) : `the owner ${cfg.owner} is not a user on this Mac`;
+    item(bad === null, copied, bad);
+  }
   const needsRoot = `reading it as ${DISPATCHER_USER} needs root; run check-dispatcher with sudo`;
   // The real place, with the disk's own case (r1 m1): the guarded-folder test reads it.
   const realOf = (p) => { const at = realpathSync.native(io.at(p)); return io.prefix ? at.slice(realpathSync.native(io.prefix).length) || sep : at; };

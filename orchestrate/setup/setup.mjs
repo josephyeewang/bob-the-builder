@@ -18,6 +18,8 @@
 //   check-dispatcher     the review runner's launches folder, the job's dispatcher.json's outboxRoot and copiesRoot, and whether orchestrate can read the owner's host.lock, and if not why  (read only; sudo to read as orchestrate)
 //   dispatcher-config    [--dry-run]    write the Dispatcher's config, <base>/dispatcher.json (and the copy's, when the copy keeps it)  (root)
 //                                       an existing dispatcher.json without outboxRoot and copiesRoot won't start the Dispatcher until this is run again
+//   host-lock-copier     prints the owner's host.lock copier job file (a LaunchAgent of the owner's, L1029 E) on stdout and how to load it on
+//                        stderr; needs hostLockSource (read only; refused under sudo)
 //   dispatcher-keys      prints the Dispatcher config's reviewRoot, mirror, sealRoot, outboxRoot, copiesRoot, hostLockPath and hostLockUid as JSON (read only)
 //   daemons place|load|unload  [--dry-run]   the three background jobs' files; load; unload                    (root)
 //                                       (place and load refuse on the same checks: a placed job starts at boot without load)
@@ -48,6 +50,7 @@
 // /Library/... (L90 minor b). Exit: 0 fine, 1 a check failed or a problem was found, 2 usage or not root.
 
 import { realpathSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { ROOT_CONFIG_PATH, parseConfig } from './layout.mjs';
 import { checkDispatcherKeys, dispatcherKeysOn } from './dispatcher-check.mjs';
@@ -56,7 +59,9 @@ import { realIo, rootProblem } from './mac.mjs';
 import { guarded } from './guard.mjs';
 import { apply, check, plan } from './users-folders.mjs';
 import { proofCommands, runProofs } from './proofs.mjs';
-import { checkInstall, parseInstallConfig, planAddToInstall, planInstall, rootMadeEntries, spawnUpdater } from './install.mjs';
+import { checkInstall, installPaths, parseInstallConfig, planAddToInstall, planInstall, rootMadeEntries, spawnUpdater } from './install.mjs';
+import { COPIER_JOB, copierPlist } from './host-lock-copy.mjs';
+import { NODE } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { checkDaemons, jobLive, list, onlyJobs, planLoad, planPlace, planReloadAccount, planUnload } from './daemons.mjs';
 import { checkRulesCopy, checkWatchAppConfig, checkWatchRules, planWatchApp, planWatchRules, proveWatchAppChecks, watchConfigLine } from './watch-setup.mjs';
 import { reviewConfigCommand } from './review-config.mjs';
@@ -71,9 +76,9 @@ const TOKEN_PAGE_NOTE = [
   '  - Repository access: only the one repository named in the config;',
   '  - Permissions: Metadata = Read-only (GitHub adds it by itself; fine if absent), Contents = Read-only (GitHub may call it "code"), Pull requests = Read-only, Commit statuses = Read-only (the watch job reads it to judge a merge), and nothing else. (Not Checks: the job reads check runs with the watcher App, which holds Checks: read.)',
 ];
-const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install|check-dispatcher|dispatcher-config|dispatcher-keys|review-config --pin <x.y.z> --input <file> --out <file> [--for-install]|add-to-install --pin <x.y.z> --sha256 <hex>|bob --from <Bob checkout> --commit <sha>|daemons place|load|unload|list|check [--only <job>]|daemons reload-account|prove-token|proposals|check-proposals|safe-directory|check-safe-directory|token|check-token|watch-rules|check-watch-rules|watch-app> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
+const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install|check-dispatcher|dispatcher-config|dispatcher-keys|host-lock-copier|review-config --pin <x.y.z> --input <file> --out <file> [--for-install]|add-to-install --pin <x.y.z> --sha256 <hex>|bob --from <Bob checkout> --commit <sha>|daemons place|load|unload|list|check [--only <job>]|daemons reload-account|prove-token|proposals|check-proposals|safe-directory|check-safe-directory|token|check-token|watch-rules|check-watch-rules|watch-app> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
 const DAEMON_SUBS = ['place', 'load', 'unload', 'list', 'check', 'reload-account'];
-const COMMANDS = ['users-folders', 'check', 'proofs', 'install', 'check-install', 'check-dispatcher', 'dispatcher-config', 'dispatcher-keys', 'review-config', 'add-to-install', 'bob', 'daemons', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app'];
+const COMMANDS = ['users-folders', 'check', 'proofs', 'install', 'check-install', 'check-dispatcher', 'dispatcher-config', 'dispatcher-keys', 'host-lock-copier', 'review-config', 'add-to-install', 'bob', 'daemons', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app'];
 const READ_ONLY = ['check', 'check-install', 'check-dispatcher', 'dispatcher-keys', 'check-proposals', 'check-safe-directory', 'check-token', 'prove-token', 'check-watch-rules'];
 const PLAIN_CONFIG = ['users-folders', 'check', 'check-dispatcher', 'dispatcher-keys', 'proofs', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app', 'review-config'];
 
@@ -197,6 +202,17 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, bobGitOf, out
     return code;
   }
   if (o.cmd === 'check-dispatcher') return report(checkDispatcherKeys(io, cfg, { dispatcher: o.dispatcherOn, refused: o.dispatcherWhy }), out);
+  if (o.cmd === 'host-lock-copier') {
+    // The owner's own job: never root's to place or load (it runs as the owner, from the installed copy).
+    if (asRoot) { err('refused: the host.lock copier is the owner\'s own job; run this without sudo'); return 2; }
+    if (cfg.hostLockSource === undefined) { err('PROBLEM  the setup config names no hostLockSource (the synced host.lock the copier copies to hostLockPath)'); return 1; }
+    const home = `/Users/${cfg.owner}`;
+    let text; try { text = copierPlist({ label: cfg.label, installRoot: installPaths(cfg).installRoot, node: NODE, configPath: o.config ?? ROOT_CONFIG_PATH, copy: cfg.hostLockPath, home }); } catch (e) { err(`PROBLEM  ${e.message}`); return 1; }
+    const file = `${home}/Library/LaunchAgents/${cfg.label}.${COPIER_JOB}.plist`;
+    out(text);
+    err(`Save the text above as ${file} (owner's own, 0644), make the copy's folder ${dirname(cfg.hostLockPath)} (the owner's, 0755), then: launchctl bootstrap gui/$(id -u) ${file}. A minute later, sudo node setup.mjs check-dispatcher (README, Part 6 step 5).`);
+    return 0;
+  }
   if (o.cmd === 'dispatcher-keys') { let k; try { k = dispatcherKeysOn(io, cfg); } catch (e) { err(`PROBLEM  ${e.message}`); return 1; } out(JSON.stringify(k, null, 2)); return 0; }
   if (o.cmd === 'check-proposals') return report(checkProposals(io, cfg), out);
   if (o.cmd === 'check-safe-directory') return report(checkSafeDirectory(io, cfg), out);
