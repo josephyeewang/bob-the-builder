@@ -6,9 +6,10 @@
 //   setup  from the setup config (layout.mjs, install.mjs) and the Mac's own user records: the folders, the copy's paths, the uids
 //   pin    from --pin: the pin itself, and the program's place in the copy (where add-to-install puts it)
 //   owner  from the owner's input file, and only these: which product's Record the runner reads, the machine-wide settings
-//          file, and the rules the review sessions' hooks read. None has a default: a field left out is refused by name
-//   later  not written yet, because nothing in the repository makes it (the budget module, the Bob file list); until it is,
-//          launch checks 12 and 13 have no port and the launcher refuses every review, as today
+//          file, and the rules the review sessions' hooks read (the product also names its Record and the Dispatcher's rules
+//          snapshot for it, check 12). None has a default: a field left out is refused by name
+//   later  not written yet, because nothing in the repository makes it (the Bob file list); until it is, launch check 13
+//          has no port and the launcher refuses every review, as today
 // The input file may hold only the owner's fields: a setup field in it is refused, so a typed value can never stand in for
 // one setup knows.
 //
@@ -39,7 +40,7 @@ import { CONFIG_FIELDS, readConfig } from '../modules/M4-workshop/launcher/revie
 import { RUNNER_ROLES } from '../shared/review-roles.mjs';
 import { TOOLS_CHECKED } from '../modules/M10-rules/roles.mjs';
 import { CLAUDE_FILE, MANAGED_SOURCES_CHECKED_ON } from '../modules/M4-workshop/launcher/env-check.mjs';
-import { COPY_HOOKS, REVIEW_SNAPSHOT_FILE, bobPath, homeOf, keysPath, mirrorPath, outboxRootPath, ownerTapsPath, privatePath, reviewCopiesPath, storePath, workerCopiesPath } from './layout.mjs';
+import { COPY_HOOKS, REVIEW_SNAPSHOT_FILE, WORKER_STATUS_FILE, bobPath, dispatcherRulesPath, homeOf, keysPath, mirrorPath, outboxRootPath, ownerTapsPath, privatePath, reviewCopiesPath, storePath, workerCopiesPath, workerRunnerPaths } from './layout.mjs';
 import { installPaths } from './install.mjs';
 
 // The one source of each field. The test holds the keys equal to CONFIG_FIELDS.
@@ -48,8 +49,9 @@ export const SOURCES = Object.freeze({
   mirror: 'setup', hooksDir: 'setup', accountCopy: 'setup', ownerHome: 'setup', ownerUid: 'setup', ownerTaps: 'setup',
   wiring: 'setup', snapshot: 'setup', bobFolder: 'setup', deny: 'setup', reviewCopies: 'setup', workerCopies: 'setup',
   pin: 'pin', claudeBin: 'pin',
-  recordRoot: 'owner', machineWide: 'owner', rules: 'owner',
-  budget: 'later', bobManifest: 'later',
+  budget: 'setup', workerStatusFile: 'setup', workerUid: 'setup',
+  recordRoot: 'owner', machineWide: 'owner', rules: 'owner', dispatcherRules: 'owner',
+  bobManifest: 'later',
 });
 // What the owner's input file holds: exactly these keys, each required. `product` picks the Record (recordRoot).
 export const OWNER_INPUT = Object.freeze(['product', 'machineWide', 'rules']);
@@ -57,6 +59,8 @@ export const OWNER_INPUT = Object.freeze(['product', 'machineWide', 'rules']);
 export const INSTALL_LATER = Object.freeze(['claudeBin', 'hooksDir']);
 // The wiring, beside the runner in the copy (review-runner-main.mjs: the copy's own .mjs file, never a copy item).
 const WIRING = posix.join(posix.dirname(SCRIPTS.runner), 'review-wiring.mjs');
+// M11's budget module (launch check 12), the copy's own code file the runner imports (RUNNER_MODULES).
+export const BUDGET_MODULE = 'modules/M11-dispatcher/budget.mjs';
 const RULE_LISTS = Object.freeze({ production: ['env_files', 'programs', 'hosts'], secrets: ['paths'] });
 const plainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const absPath = (p) => typeof p === 'string' && isAbsolute(p) && posix.normalize(p) === p && p !== '/' && !p.includes('\0') && !p.includes('\n');
@@ -85,6 +89,9 @@ export function setupFields(cfg, { pin, userOf }) {
     // readable by the staff group, which review is in). The workers' copies are denied whole by review-settings itself.
     deny: [keysPath(cfg), privatePath(cfg), owner.home],
     reviewCopies: reviewCopiesPath(cfg), workerCopies: workerCopiesPath(cfg),
+    // Launch check 12 (L1001): M11's budget module, in the copy, and the worker runner's status file and user (the owner's
+    // own, as the Dispatcher's workerUid), which its running count reads.
+    budget: join(P.installRoot, BUDGET_MODULE), workerStatusFile: join(workerRunnerPaths(cfg).state, WORKER_STATUS_FILE), workerUid: owner.uid,
   };
   return { fields, problems };
 }
@@ -129,7 +136,7 @@ export function ownerFields(cfg, input) {
   }
   if (problems.length) return { fields: null, problems };
   const rules = { production: Object.fromEntries(RULE_LISTS.production.map((k) => [k, [...input.rules.production[k]]])), secrets: { paths: [...input.rules.secrets.paths] } };
-  return { fields: { recordRoot: storePath(cfg, input.product), machineWide: input.machineWide, rules }, problems };
+  return { fields: { recordRoot: storePath(cfg, input.product), dispatcherRules: dispatcherRulesPath(cfg, input.product), machineWide: input.machineWide, rules }, problems };
 }
 
 /** The whole config: { config, problems }. Each field from its one source (SOURCES), in CONFIG_FIELDS' order. */

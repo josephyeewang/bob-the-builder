@@ -27,6 +27,8 @@ import { NOT_WIRED_PHONE, phonePorts } from './phone-ports.mjs';
 import { fakeGitHubFetch, blobOf } from './fake-github.test-helper.mjs';
 import { reviewConfig } from './review-ports.test-helper.mjs';
 import { tempDir } from '../shared/test-tmp.mjs';
+import { readRulesSnapshot } from '../modules/M11-dispatcher/budget.mjs';
+import { FETCH_GRACE_MS } from '../modules/M10-rules/reader.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const MAIN = join(here, '..', 'modules', 'M11-dispatcher', 'main.mjs');
@@ -410,6 +412,59 @@ test('R-0b-162 A: the wired rules know the role files, and refuse a start that n
   const ed = rules.may('start_session', { product: P, role: 'worker', tier: 2, editing: true });
   assert.equal(ed.decision, 'deny');
   assert.match(ed.reason, new RegExp(notWiredText('running').replace(/[()]/g, '\\$&')));
+});
+
+// Launch check 12's rules for the runners (L1001): each pass (one wire) with usable rules writes the snapshot again.
+function snapshotWorld() {
+  const w = world();
+  const dir = w.f('products-rules'); mkdirSync(dir, { mode: 0o700 }); chmodSync(dir, 0o700);
+  const file = join(dir, 'dispatcher-rules.json');
+  w.approve([blobOf(FIRST)]);
+  return { w, dir, file, config: { ...w.config, rulesSnapshotFile: file } };
+}
+
+test('L1001: two passes with no rules change both write check 12\'s snapshot; a pass with no usable rules leaves it to go stale', async () => {
+  const s = snapshotWorld();
+  let t = Date.now();
+  const logs = [];
+  const opts = (fetchFn = fakeGitHubFetch(s.w.fake)) => ({ log: (x) => logs.push(x), fetchFn, now: () => t });
+  await wire(s.config, opts());
+  const a = readRulesSnapshot(s.file, { uid: process.getuid(), now: t });
+  assert.equal(a.ok, true, `${a.reason}\n${logs.join('\n')}`);
+  assert.deepEqual(Object.keys(a.rules), [P]);
+  assert.equal(a.rules[P].text, FIRST);
+  assert.equal(a.rules[P].commit, COMMIT);
+  assert.equal(a.rules[P].blob, blobOf(FIRST));
+  const ino = lstatSync(s.file).ino;
+  t += 60_000;
+  await wire(s.config, opts());
+  const b = readRulesSnapshot(s.file, { uid: process.getuid(), now: t });
+  assert.equal(b.writtenAt, new Date(t).toISOString(), 'the second pass wrote it again');
+  // Nothing changed but the fetch, which this pass made again (the runners' grace counts from it, L1001 review M2).
+  const noFetch = (r) => Object.fromEntries(Object.entries(r).map(([p, { fetched_at: _f, ...x }]) => [p, x]));
+  assert.deepEqual(noFetch(b.rules), noFetch(a.rules), 'with nothing changed');
+  assert.equal(a.rules[P].fetched_at, new Date(t - 60_000).toISOString());
+  assert.equal(b.rules[P].fetched_at, new Date(t).toISOString(), 'the fetch time is the second pass\'s');
+  assert.notEqual(lstatSync(s.file).ino, ino);
+  // GitHub can't be reached this launch: the reader has no fetch in its grace, so its rules are deny_all, and no write.
+  const before = readFileSync(s.file, 'utf8');
+  t += 60_000;
+  await wire(s.config, opts(async () => { throw new Error('offline'); }));
+  assert.equal(readFileSync(s.file, 'utf8'), before, 'not written');
+  assert.equal(readRulesSnapshot(s.file, { uid: process.getuid(), now: t }).ok, true, 'still inside the grace');
+  assert.match(readRulesSnapshot(s.file, { uid: process.getuid(), now: t - 60_000 + FETCH_GRACE_MS + 1 }).reason, /is stale/);
+  assert.ok(!queued(readRecord(s.w)).some((x) => /check 12's rules/.test(x)), 'rules not usable are the reader\'s to tell, not a write failure');
+});
+
+test('L1002: a snapshot folder others can read stops the write, which is logged and queued; the pass still runs', async () => {
+  const s = snapshotWorld();
+  chmodSync(s.dir, 0o750);
+  const logs = [];
+  await wire(s.config, { log: (x) => logs.push(x), fetchFn: fakeGitHubFetch(s.w.fake) });
+  assert.ok(!existsSync(s.file));
+  assert.match(logs.join('\n'), /dispatcher: the rules snapshot's folder .* can be read or written by group or others/);
+  assert.ok(queued(readRecord(s.w)).some((x) => /^check 12's rules for the runners could not be kept: the rules snapshot's folder .* no worker or review session starts once the last snapshot goes stale$/.test(x)), queued(readRecord(s.w)).join('\n'));
+  assert.throws(() => checkConfig({ ...s.config, rulesSnapshotFile: 'rel.json' }), /rulesSnapshotFile must be an absolute path/);
 });
 
 test('L270: the approvals port answers this product with its state folder; its GitHub writes and copies refuse', async () => {

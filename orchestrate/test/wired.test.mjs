@@ -54,8 +54,9 @@ export const CONFIG_ENTRIES = Object.freeze([
   // No file yet: the Sensors job's wiring comes with its plist.
   { file: null, loader: 'modules/M12-sensors/loop.mjs', call: 'import(pathToFileURL(config.wiring).href)', why: 'R-0b-169: the Sensors job wiring not written yet' },
   { file: 'modules/M4-workshop/launcher/review-wiring.mjs', loader: 'modules/M4-workshop/launcher/review-runner-main.mjs', call: 'import(pathToFileURL(c.wiring).href)' },
-  // No file yet: check 12's budget module is written when its inputs exist.
-  { file: null, loader: 'modules/M4-workshop/launcher/review-runner-main.mjs', call: 'import(pathToFileURL(c.budget).href)', why: 'L83 M-3: check 12 budget module not written yet' },
+  // Check 12's budget module (L1001), loaded by both runners from the path their config names.
+  { file: 'modules/M11-dispatcher/budget.mjs', loader: 'modules/M4-workshop/launcher/review-runner-main.mjs', call: 'import(pathToFileURL(c.budget).href)' },
+  { file: 'modules/M11-dispatcher/budget.mjs', loader: 'wiring/runner-main.mjs', call: 'import(pathToFileURL(file).href)' },
 ]);
 
 // ── Set these for your project ──────────────────────────────────────────────

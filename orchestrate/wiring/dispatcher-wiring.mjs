@@ -81,6 +81,7 @@ import { ROLES_DIR } from '../modules/M10-rules/roles.mjs';
 import { makeRules } from '../shared/rules.mjs';
 import { readOnlyClient, tokenFile } from '../modules/M6-merge-gate/watch-only.mjs';
 import { queueAlert } from '../modules/M11-dispatcher/alerts.mjs';
+import { writeRulesSnapshot } from '../modules/M11-dispatcher/budget.mjs';
 import { notWiredText, refusing } from './not-wired.mjs';
 import { NOT_WIRED_WORKER, cleanupProblem, hostLockOwnerProblem, workerPorts, workerUidProblem } from './worker-ports.mjs';
 import { NOT_WIRED_REVIEW, reviewPorts } from './review-ports.mjs';
@@ -95,8 +96,9 @@ export const REVIEW_CONFIG_KEYS = Object.freeze(['reviewRequestsDir', 'reviewSta
 // outboxes are outboxRoot's, so there is no second outbox key.
 export const WORKER_CONFIG_KEYS = Object.freeze(['reviewRoot', 'mirror', 'sealRoot', 'outboxRoot', 'copiesRoot', 'hostLockPath', 'hostLockUid', 'workerRequestsDir', 'workerStatusFile', 'workerUid']);
 const UID_KEYS = Object.freeze(['reviewUid', 'hostLockUid', 'workerUid']);
+// rulesSnapshotFile: optional, the Dispatcher's alone (the robot job's list leaves it out).
 export const CONFIG_KEYS = Object.freeze(['installRoot', 'wiring', 'lockFile', 'runDeadlineMs', 'product', 'recordRoot', 'ownerUid', 'productsFile', 'rulesStateDir', 'tokenFile', 'approvalsStateDir',
-  ...REVIEW_CONFIG_KEYS, ...WORKER_CONFIG_KEYS]);
+  'rulesSnapshotFile', ...REVIEW_CONFIG_KEYS, ...WORKER_CONFIG_KEYS]);
 const PATHS = Object.freeze(['recordRoot', 'productsFile', 'rulesStateDir', 'tokenFile', 'approvalsStateDir', ...[...REVIEW_CONFIG_KEYS, ...WORKER_CONFIG_KEYS].filter((k) => !UID_KEYS.includes(k))]);
 
 // The ports PRs C and D wire (M11 README, "The tick's ports"), each named in the port file that will answer it. A port
@@ -127,6 +129,7 @@ export function checkConfig(c, { keys = CONFIG_KEYS, paths = PATHS, selfUid = pr
   // Setup's product rule (shared/product-paths.mjs PRODUCT, #378 r1 m3): the name its folders are made under.
   if (typeof c.product !== 'string' || !PRODUCT.test(c.product)) throw new Error('config: product must be a product name (lower case letters, digits and -, a letter or digit first)');
   for (const k of paths) if (typeof c[k] !== 'string' || !isAbsolute(c[k])) throw new Error(`config: ${k} must be an absolute path`);
+  if (c.rulesSnapshotFile !== undefined && (typeof c.rulesSnapshotFile !== 'string' || !isAbsolute(c.rulesSnapshotFile))) throw new Error('config: rulesSnapshotFile must be an absolute path');
   if (!Number.isSafeInteger(c.ownerUid) || c.ownerUid < 0) throw new Error('config: ownerUid must be a Mac user id');
   // host.lock's owner, with the rest of the config: before wire() makes any folder or opens the Record (L805 m1). The
   // Dispatcher's own user is this process's; workerPorts checks it again with the start's selfUid.
@@ -135,6 +138,8 @@ export function checkConfig(c, { keys = CONFIG_KEYS, paths = PATHS, selfUid = pr
   if (keys.includes('workerUid')) { const bad = workerUidProblem(c); if (bad) throw new Error(`config: ${bad}`); }
   return c;
 }
+
+const USABLE_RULES = Object.freeze(['ok', 'last_good']);
 
 // privateFolder lives in private-folder.mjs (L739: worker-ports.mjs uses it too, without importing this file).
 export { privateFolder };
@@ -161,7 +166,7 @@ export function logOnlyAlert(log) {
 /**
  * The Record and the rules, built the one way both jobs use (this file and robot-wiring.mjs). `c` is a checked config
  * with product, recordRoot, ownerUid, productsFile, rulesStateDir and tokenFile; `who` names the job in its log lines.
- * → { rec, rules, gh (read-only), entry (the product's products.json entry) }
+ * → { rec, rules, gh (read-only), entry (the product's products.json entry), reader (M10's, refreshed once), products }
  */
 export async function recordAndRules(c, { who, log, fetchFn, now }) {
   const products = readProducts(c.productsFile);
@@ -200,7 +205,7 @@ export async function recordAndRules(c, { who, log, fetchFn, now }) {
   const storeAlert = (e) => { log(`${who}: record alert not sent: ${JSON.stringify(e)}`); return false; };
   ({ record: rec } = openRecord({ root: c.recordRoot, product: c.product, ownerUid: c.ownerUid, rules, alert: storeAlert, now }));
   await reader.refresh();
-  return { rec, rules, gh, entry };
+  return { rec, rules, gh, entry, reader, products: products.map((p) => p.product) };
 }
 
 /**
@@ -216,7 +221,17 @@ export async function wire(config, { limitedSync, log = (s) => process.stderr.wr
   const c = checkConfig(config);
   // Before the Record opens: a state folder M2 can't use stops the start, so no product is turned on untold (L295 MAT-1).
   const stateDir = approvalsDir(c);
-  const { rec, rules, gh, entry } = await recordAndRules(c, { who: 'dispatcher', log, fetchFn, now });
+  const { rec, rules, gh, entry, reader, products } = await recordAndRules(c, { who: 'dispatcher', log, fetchFn, now });
+  // Launch check 12's rules for the two runners (L1001, M11 budget.mjs): one launch is one pass, and every pass whose own
+  // rules are usable (ok or last_good) writes the snapshot again, changed or not, so its written_at stays fresh. One whose
+  // rules are not leaves it to go stale, and the runners then refuse it. A write that fails is logged and queued.
+  if (c.rulesSnapshotFile) {
+    const w = writeRulesSnapshot(c.rulesSnapshotFile, { product: c.product, products, state: (p) => reader.state(p), now: now() });
+    if (!w.ok && USABLE_RULES.includes(reader.state(c.product)?.status)) {
+      log(`dispatcher: ${w.reason}`);
+      try { queueAlert(rec, `check 12's rules for the runners could not be kept: ${w.reason}; no worker or review session starts once the last snapshot goes stale`, { now: now() }); } catch (e) { log(`dispatcher: that could not be queued (${e?.message ?? e})`); }
+    } else if (!w.ok) log(`dispatcher: ${w.reason}`);
+  }
   const ports = { alert: logOnlyAlert(log) };
   for (const { notWired } of groups) for (const k of notWired) ports[k] = refusing(k);
   ports.approvals = () => [approvalsFor(c, entry, stateDir)];

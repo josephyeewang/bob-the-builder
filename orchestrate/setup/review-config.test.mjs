@@ -56,7 +56,7 @@ test('every field the runner reads has exactly one source, and the built file ho
     for (const [src, part] of [['setup', s], ['owner', o], ['pin', p]]) assert.deepEqual(Object.keys(part).sort(), Object.keys(SOURCES).filter((k) => SOURCES[k] === src).sort(), `${src} gives exactly its fields`);
     const { config } = buildReviewConfig(w.cfg, { pin: PIN, input: w.input(), userOf: w.userOf });
     assert.deepEqual(Object.keys(config).sort(), CONFIG_FIELDS.filter((k) => SOURCES[k] !== 'later').sort());
-    assert.deepEqual(OWNER_INPUT.filter((k) => k !== 'product').sort(), Object.keys(SOURCES).filter((k) => SOURCES[k] === 'owner' && k !== 'recordRoot').sort(), 'the input keys are the owner fields (product stands for recordRoot)');
+    assert.deepEqual(OWNER_INPUT.filter((k) => k !== 'product').sort(), Object.keys(SOURCES).filter((k) => SOURCES[k] === 'owner' && k !== 'recordRoot' && k !== 'dispatcherRules').sort(), 'the input keys are the owner fields (product stands for recordRoot and dispatcherRules)');
   } finally { w.done(); }
 });
 
@@ -66,7 +66,7 @@ test('the file written is the one the runner\'s own readConfig takes, with setup
     const r = w.run();
     assert.equal(r.code, 0, r.err.join('\n'));
     assert.match(r.out.join('\n'), /the review runner's own check takes it/);
-    assert.match(r.out.join('\n'), /Left out \(no source yet\): budget, bobManifest/);
+    assert.match(r.out.join('\n'), /Left out \(no source yet\): bobManifest\b/);
     const c = w.check(r.outFile);
     assert.deepEqual(JSON.parse(r.text), JSON.parse(JSON.stringify(c)));
     const B = w.base;
@@ -85,8 +85,13 @@ test('the file written is the one the runner\'s own readConfig takes, with setup
     assert.equal(c.pin, PIN);
     assert.deepEqual(Object.keys(c.uids).sort(), Object.keys(DESIGN_PROFILES).sort());
     for (const [role, uid] of Object.entries(c.uids)) assert.equal(uid, RUNNER_ROLES.includes(role) ? me : OWNER_UID, role);
-    assert.equal(c.budget, undefined); assert.equal(c.bobManifest, undefined);
-    assert.equal(r.text.includes('2.1.316') && !/"(budget|bobManifest)"/.test(r.text), true);
+    // Launch check 12 (L1001): M11's budget module in the copy, the product's rules snapshot, the worker runner's status file and user.
+    assert.equal(c.budget, join(B, 'install/orchestrate/modules/M11-dispatcher/budget.mjs'));
+    assert.equal(c.dispatcherRules, join(B, 'products/acme/rules/dispatcher-rules.json'));
+    assert.equal(c.workerStatusFile, join(B, 'worker-runner/runner/status.json'));
+    assert.equal(c.workerUid, OWNER_UID);
+    assert.equal(c.bobManifest, undefined);
+    assert.equal(r.text.includes('2.1.316') && !/"bobManifest"/.test(r.text), true);
   } finally { w.done(); }
 });
 
@@ -113,7 +118,7 @@ test('a missing owner field is refused by name, never defaulted, and nothing is 
 test('the input file may not set a field setup or the pin gives, nor any field the runner does not read', () => {
   const w = world();
   try {
-    for (const [k, v, why] of [['installRoot', '/x', /comes from setup/], ['deny', ['/x'], /comes from setup/], ['uids', {}, /comes from setup/], ['claudeBin', '/x', /comes from --pin/], ['pin', '9.9.9', /comes from --pin/], ['budget', '/x.mjs', /no source yet/], ['recordRoot', '/x', /may not set recordRoot: it comes from the product named \(set product instead\)/], ['colour', 'red', /no field of the runner's config/]]) {
+    for (const [k, v, why] of [['installRoot', '/x', /comes from setup/], ['deny', ['/x'], /comes from setup/], ['uids', {}, /comes from setup/], ['claudeBin', '/x', /comes from --pin/], ['pin', '9.9.9', /comes from --pin/], ['budget', '/x.mjs', /comes from setup/], ['bobManifest', '/x', /no source yet/], ['dispatcherRules', '/x', /may not set dispatcherRules: it comes from the product named/], ['recordRoot', '/x', /may not set recordRoot: it comes from the product named \(set product instead\)/], ['colour', 'red', /no field of the runner's config/]]) {
       const r = w.run({ give: { ...w.input(), [k]: v } });
       assert.equal(r.code, 1, k);
       assert.ok(r.err.some((l) => why.test(l)), `${k}: ${r.err.join(' | ')}`);

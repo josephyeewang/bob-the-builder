@@ -41,6 +41,9 @@
 //                                                   budget(config) → M11's own check12 inputs { rules, rec, bandsNow,
 //                                                   runningNow } (check 12). Missing, that check has no port and the
 //                                                   launcher refuses it
+//     "dispatcherRules": "/abs",                   with budget: the Dispatcher's rules snapshot for this product (M11
+//     "workerStatusFile": "/abs", "workerUid": <uid>,   budget.mjs), and the worker runner's status file and user, which
+//                                                   check 12's running count reads with this runner's own status file
 //     "rules": { "production": { "env_files": [], "programs": [], "hosts": [] }, "secrets": { "paths": [] } } }
 //                                                   the rules the review sessions' hooks read: each run writes them to
 //                                                   `snapshot`, well inside the hooks' 5-minute limit (item 7)
@@ -73,9 +76,10 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { runnerPass, CARD_ID, isClaudeCommand, sessionIdOf } from './review-runner.mjs';
+import { runnerPass, CARD_ID, FOLDERS, isClaudeCommand, sessionIdOf } from './review-runner.mjs';
 import { installProblem, readInstallStamp, aclProblem, currentCopy, copyPath, copyReady, RUNNER_MODULES } from './install-check.mjs';
 import { sessionVerdict, verdictFromFile } from '../../M9-record/outbox.mjs';
+import { readDocFile, readRecordFile, recordFolderProblem } from '../../M9-record/read-view.mjs';
 import { SESSION_ID } from '../../../shared/record.mjs';
 import { codeFileProblem, openJobJson, readByDescriptor, readChangedProblem } from '../../../shared/job-config.mjs';
 import { readAccountFile, ACCOUNT_FILE } from './accounts.mjs';
@@ -93,11 +97,13 @@ import { CLAUDE_FILE, MANAGED_SOURCES_CHECKED_ON } from './env-check.mjs';
 
 const ABS = ['installRoot', 'root', 'outboxRoot', 'reviewHome', 'recordRoot', 'mirror', 'claudeBin', 'hooksDir', 'ownerHome', 'wiring',
   'snapshot', 'bobFolder', 'reviewCopies', 'workerCopies', 'machineWide'];
-const OPTIONAL_ABS = ['accountCopy', 'ownerTaps', 'bobManifest', 'budget'];
+const OPTIONAL_ABS = ['accountCopy', 'ownerTaps', 'bobManifest', 'budget', 'dispatcherRules', 'workerStatusFile'];
+// What the budget module reads beside the Record (M11 budget.mjs): required once the config names `budget` (L1001).
+const BUDGET_NEEDS = ['dispatcherRules', 'workerStatusFile', 'workerUid'];
 const PIN = /^\d+\.\d+\.\d+$/;
 // Every field readConfig reads, and nothing else: setup's review-config (setup/review-config.mjs) builds each from
 // exactly one source, and its test holds that table equal to this list.
-export const CONFIG_FIELDS = Object.freeze([...ABS, ...OPTIONAL_ABS, 'deny', 'pin', 'rules', 'uids', 'recordUid', 'ownerUid']);
+export const CONFIG_FIELDS = Object.freeze([...ABS, ...OPTIONAL_ABS, 'deny', 'pin', 'rules', 'uids', 'recordUid', 'ownerUid', 'workerUid']);
 // The one export a wiring may have (R-0b-163, L78 n4).
 export const WIRING_EXPORTS = Object.freeze(['start']);
 const absList = (v) => Array.isArray(v) && v.every((p) => typeof p === 'string' && isAbsolute(p));
@@ -133,6 +139,8 @@ export function readConfig(file, { lstat = lstatSync, top = '/', acl = aclProble
   if (!prod || !['env_files', 'programs', 'hosts'].every((k) => Array.isArray(prod[k]) && prod[k].every((v) => typeof v === 'string'))) throw new Error('config: rules.production must list env_files, programs and hosts');
   if (!absList(prod.env_files) || (c.rules.secrets !== undefined && !absList(c.rules.secrets?.paths))) throw new Error('config: the rules\' env_files and secrets.paths must be absolute paths');
   for (const k of ['recordUid', 'ownerUid']) if (!Number.isInteger(c[k]) || c[k] < 0) throw new Error(`config: ${k} must be a uid`);
+  if (c.workerUid !== undefined && (!Number.isInteger(c.workerUid) || c.workerUid < 0)) throw new Error('config: workerUid must be a uid');
+  if (c.budget !== undefined) for (const k of BUDGET_NEEDS) if (c[k] === undefined) throw new Error(`config: ${k} must be set with budget (launch check 12 reads it)`);
   if (!c.uids || typeof c.uids !== 'object') throw new Error('config: uids must map each role to a uid');
   // The runner's folder and review's outbox are two walls (L68 (4)): review sessions write the outbox, and only the
   // runner writes its launch and ended records. One inside the other (or the same folder) would let a session's
@@ -245,27 +253,7 @@ export function programsProblem(c, { self, config, node = realpathSync.native(pr
   return copyReady(c.installRoot, { owner: opts.owner ?? 0, ...(opts.lstat ? { lstat: opts.lstat } : {}), ...(opts.readlink ? { readlink: opts.readlink } : {}) });
 }
 
-// A folder of the Record: a plain folder of the Record's owner that no one else writes. Null, or the problem.
-function recordFolderProblem(d, recordUid) {
-  let st; try { st = lstatSync(d); } catch { return `${d} is missing`; }
-  if (st.isSymbolicLink() || !st.isDirectory()) return `${d} is not a plain folder`;
-  if (st.uid !== recordUid || st.mode & 0o022) return `${d} is not the Record owner's alone`;
-  return null;
-}
-
-// One document of the Record, read only: a plain file of the Record's owner that no one else writes, never a link.
-function readRecordFile(p, recordUid, entity, id, missing) {
-  let fd;
-  try { fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) { return { ok: false, ...(e?.code === 'ENOENT' ? { missing: true } : {}), reason: e?.code === 'ENOENT' ? missing : `it can't be read (${e?.code ?? e})` }; }
-  try {
-    const st = fstatSync(fd);
-    if (!st.isFile() || st.nlink !== 1 || st.uid !== recordUid || st.mode & 0o022 || st.size > MAX_CARD_BYTES) return { ok: false, reason: 'its file is not the Record\'s own plain file' };
-    const d = JSON.parse(readFileSync(fd, 'utf8'));
-    // An id that isn't the one asked for is no such document: on a disk that ignores case, `c-1` opens the file of `C-1`.
-    if (d?.entity !== entity || d?.id !== id || !d.doc || typeof d.doc !== 'object') return { ok: false, ...(d?.entity === entity && typeof d.id === 'string' && d.id !== id ? { missing: true } : {}), reason: `its file is not a ${entity} document` };
-    return { ok: true, doc: d.doc, rev: Number.isInteger(d.rev) ? d.rev : null };
-  } catch { return { ok: false, reason: 'its file is not JSON' }; } finally { closeSync(fd); }
-}
+// The Record's folders and document files are read through M9 read-view.mjs (recordFolderProblem, readRecordFile, readDocFile): one copy of the checks (L998).
 
 // A plain file of `owner`'s that no one else writes, read whole without following a link. → its text, or throws.
 function readOwnFile(p, owner) {
@@ -293,17 +281,8 @@ export function holdersOf(dir, { runFn = run } = {}) {
 /** A card from the Record, read only: docs/card/<id>.json, with its revision (`rev`). */
 export function readCardFile({ recordRoot, recordUid, card }) {
   if (typeof card !== 'string' || !CARD_ID.test(card) || card.startsWith('.')) return { ok: false, missing: true, reason: 'not a card id' };
-  for (const d of [recordRoot, join(recordRoot, 'docs'), join(recordRoot, 'docs', 'card')]) {
-    const bad = recordFolderProblem(d, recordUid);
-    if (bad) return { ok: false, reason: bad };
-  }
-  // The exact name, before anything opens it: on a disk that ignores case, `c-1` would open `C-1.json`, and a ruined
-  // file then counts as a read failure for every spelling of it.
-  const dir = join(recordRoot, 'docs', 'card');
-  let names;
-  try { names = readdirSync(dir); } catch (e) { return { ok: false, reason: `the card folder could not be listed (${e?.code ?? e?.message})` }; }
-  if (!names.includes(`${card}.json`)) return { ok: false, missing: true, reason: 'no such card' };
-  return readRecordFile(join(dir, `${card}.json`), recordUid, 'card', card, 'no such card');
+  // The folders, the exact name before anything opens it (on a disk that ignores case, `c-1` would open `C-1.json`), and the file: M9 read-view.
+  return readDocFile({ recordRoot, recordUid, entity: 'card', id: card, missing: 'no such card' });
 }
 
 /**
@@ -313,16 +292,7 @@ export function readCardFile({ recordRoot, recordUid, card }) {
  */
 export function readFactFile({ recordRoot, recordUid, fact }) {
   if (typeof fact !== 'string' || !/^[A-Za-z0-9._-]{1,200}$/.test(fact) || fact.startsWith('.')) return { ok: false, missing: true, reason: 'not a fact id' };
-  for (const d of [recordRoot, join(recordRoot, 'docs'), join(recordRoot, 'docs', 'fact')]) {
-    const bad = recordFolderProblem(d, recordUid);
-    if (bad) return { ok: false, reason: bad };
-  }
-  // The exact name, before anything opens it, as for a card: on a disk that ignores case, one spelling opens another's.
-  const dir = join(recordRoot, 'docs', 'fact');
-  let names;
-  try { names = readdirSync(dir); } catch (e) { return { ok: false, reason: `the fact folder could not be listed (${e?.code ?? e?.message})` }; }
-  if (!names.includes(`${fact}.json`)) return { ok: false, missing: true, reason: 'no such fact' };
-  return readRecordFile(join(dir, `${fact}.json`), recordUid, 'fact', fact, 'no such fact');
+  return readDocFile({ recordRoot, recordUid, entity: 'fact', id: fact, missing: 'no such fact' });
 }
 
 /**
@@ -332,16 +302,7 @@ export function readFactFile({ recordRoot, recordUid, fact }) {
  */
 export function readSessionFile({ recordRoot, recordUid, session }) {
   if (typeof session !== 'string' || !SESSION_ID.test(session)) return { ok: false, missing: true, reason: 'not a session id' };
-  for (const d of [recordRoot, join(recordRoot, 'docs'), join(recordRoot, 'docs', 'session')]) {
-    const bad = recordFolderProblem(d, recordUid);
-    if (bad) return { ok: false, reason: bad };
-  }
-  // The exact name, before anything opens it, as for a card.
-  const dir = join(recordRoot, 'docs', 'session');
-  let names;
-  try { names = readdirSync(dir); } catch (e) { return { ok: false, reason: `the session folder could not be listed (${e?.code ?? e?.message})` }; }
-  if (!names.includes(`${session}.json`)) return { ok: false, missing: true, reason: 'no such session' };
-  return readRecordFile(join(dir, `${session}.json`), recordUid, 'session', session, 'no such session');
+  return readDocFile({ recordRoot, recordUid, entity: 'session', id: session, missing: 'no such session' });
 }
 
 /**
@@ -646,7 +607,8 @@ export async function main(argv, { log = (s) => process.stderr.write(`${s}\n`), 
   // or answers nothing leaves check 12 with no port, so the launcher refuses every start; the pass still runs.
   let budget = null;
   if (c.budget) {
-    try { budget = await (await import(pathToFileURL(c.budget).href)).budget(c); } catch (e) { log(`review runner: the budget module could not be loaded (${e.message}); no review starts`); }
+    // The running count reads this runner's own status file too (wiring/worker-ports.mjs sessionsNow, L994).
+    try { budget = await (await import(pathToFileURL(c.budget).href)).budget({ ...c, reviewStatusFile: typeof c.root === 'string' ? join(c.root, FOLDERS.status) : undefined, reviewUid: c.uids?.reviewer }); } catch (e) { log(`review runner: the budget module could not be loaded (${e.message}); no review starts`); }
     if (budget && !['rules', 'rec', 'bandsNow', 'runningNow'].every((k) => budget[k])) { log('review runner: the budget module gave no rules, rec, bandsNow and runningNow; no review starts'); budget = null; }
   }
   const r = await pass(realPorts(c, wiring, { budget, log }));

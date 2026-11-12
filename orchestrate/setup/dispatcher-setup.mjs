@@ -27,7 +27,7 @@ import { RUNNER_LOG } from '../modules/M4-workshop/launcher/review-daemons.mjs';
 import { FOLDERS } from '../modules/M4-workshop/launcher/review-runner.mjs';
 import { CONFIG_KEYS, checkConfig } from '../wiring/dispatcher-wiring.mjs';
 import { tokenPath } from './extras.mjs';
-import { homeOf, privatePath } from './layout.mjs';
+import { dispatcherRulesPath, homeOf, privatePath } from './layout.mjs';
 import { installPaths } from './install.mjs';
 import { readUser } from './users-folders.mjs';
 import { checkDispatcherKeys, dispatcherKeysOn } from './dispatcher-check.mjs';
@@ -113,6 +113,7 @@ export function dispatcherConfigFor(io, cfg, { keys = CONFIG_KEYS } = {}) {
     reviewRunnerLog: at(join(P.logDir, RUNNER_LOG)), reviewInstallRoot: root,
     reviewRoot: at(k.reviewRoot), mirror: at(k.mirror), sealRoot: at(k.sealRoot), outboxRoot: at(k.outboxRoot), copiesRoot: at(k.copiesRoot), hostLockPath: at(k.hostLockPath), hostLockUid: k.hostLockUid,
     workerRequestsDir: at(k.workerRequestsDir), workerStatusFile: at(k.workerStatusFile), workerUid: k.workerUid,
+    rulesSnapshotFile: at(dispatcherRulesPath(cfg, d.product)),
   };
   // The other way too (L871): a key setup writes that the wiring doesn't take would stop the Dispatcher's start (an
   // unknown key), so it is told here, never written or dropped.

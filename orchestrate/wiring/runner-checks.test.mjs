@@ -341,3 +341,17 @@ test('#369 r1 m3: check 2 compares with the main the copy was restored from, not
     assert.match(await setupFilesProblem({ ...f, mainAt: at }), /more than 64 folders deep/);
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
+
+test('L1001: the config\'s budget and Bob file list reach the checks, which then have ports 12 and 13; with none, neither has', () => {
+  const c = checkRunnerConfig({ installRoot: '/i', requestsDir: '/r', statusFile: '/o/status.json', orchestrateUid: 501, outboxRoot: '/ob', copiesRoot: '/c', home: '/home',
+    path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/rec', recordUid: 502, claimMs: 1, pin: '2.1.300', machineWide: '/Library/Application Support/ClaudeCode/managed-settings.json',
+    budget: '/i/modules/M11-dispatcher/budget.mjs', bobManifest: '/i/bob-manifest.json', dispatcherRules: '/d/rules.json', reviewStatusFile: '/rv/status.json', reviewUid: 503,
+    products: { p1: { repo: 'o/p', mirror: '/m', rules: RULES, render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] }, hooksDir: '/h', snapshot: '/snap/s.json', bobFolder: '/b' } } } } });
+  const budget = { rules: {}, rec: {}, bandsNow: () => ({}), runningNow: () => [] }; const bobManifest = { 'a.md': 'f'.repeat(64) };
+  const i = workerCheckInputs(c, { product: 'p1', sessionId: SID }, { budget, bobManifest });
+  assert.equal(i.budget, budget); assert.equal(i.bobManifest, bobManifest);
+  const wx = { role: 'worker', profile: DESIGN_PROFILES.worker, kind: 'editing', product: 'p1', sessionId: SID, copy: '/c/C-1', settings: { file: '/f', settings: {} } };
+  const ports = (o) => Object.keys(startDeps(c, o).checksFor(wx)).map(Number);
+  assert.deepEqual(ports({ budget, bobManifest }), [1, 2, 3, 5, 6, 7, 8, 9, 10, 12, 13]);
+  assert.deepEqual(ports({}), [1, 2, 3, 5, 6, 7, 8, 9, 10], 'none loaded: no port, so launch refuses');
+});
