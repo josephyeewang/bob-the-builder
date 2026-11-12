@@ -377,11 +377,14 @@ const RUNNER_STOP = Object.freeze(['stopped', 'wanted', 'failed']);
 // report no size), and a card waiting on Joe may be waiting on this very review. Ended is M9's REVIEW_OVER (L960), the
 // states whose verdict M9 throws away, not FINAL_STATES: an auditor on a closed card (closed can still move to reverted)
 // does work M9 would keep, so it runs on.
+// `card_ended` here is REVIEW_OVER less cancelled; the worker stop's card_ended (stopReason, above) also covers closed and
+// a card waiting on Joe. The two paths never cross (#469 c3).
 const reviewStopReason = (card) => (card.state === 'cancelled' ? 'cancel' : REVIEW_OVER.includes(card.state) ? 'card_ended' : null);
 // L992, L1000: the word the stop file carries to the review runner (M4 review-stop.mjs). Only 'cancel' and 'card_final'
 // end a session without telling Joe (review-runner.mjs STOP_QUIET_REASONS, #455). card_ended is REVIEW_OVER less
-// cancelled (failed, closed_no_answer, reverted), every one a state no move leads out of, so card_final. A state not
-// mapped here asks no stop (reviewStopReason is null for it), so no live card's stop is ever quiet.
+// cancelled (failed, closed_no_answer, reverted), every one a state no move leads out of, so card_final. A state
+// reviewStopReason gives null for asks no stop, so no live card's stop is ever quiet. The two words are spelled here, not
+// imported from M4 (#469 c2): the L1000 test in pass.test.mjs holds each to STOP_QUIET_REASONS.
 export const REVIEW_STOP_RUNNER_REASON = Object.freeze({ cancel: 'cancel', card_ended: 'card_final' });
 
 /**
