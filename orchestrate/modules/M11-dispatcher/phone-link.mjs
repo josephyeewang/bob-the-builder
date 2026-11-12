@@ -23,6 +23,7 @@
 import { KEYS, minutes } from './keys.mjs';
 import { note } from './moves.mjs';
 import { sensorsFact } from './sensor-facts.mjs';
+import { READING_FUTURE_MS } from '../M12-sensors/facts.mjs';
 import { tellThen, clearCause, writeFrom } from './alerts.mjs';
 import { pastTime } from '../../shared/still-waiting.mjs';
 import { refusalReport } from './pass.mjs';
@@ -57,7 +58,7 @@ const reading = (rec, id, now) => {
   const d = sensorsFact(rec, id)?.doc;
   const v = d?.value;
   const seen = Date.parse(d?.observed_at ?? '');
-  const current = Number.isFinite(seen) && now - seen <= READING_MAX_AGE_MS && seen <= now + 60_000;
+  const current = Number.isFinite(seen) && now - seen <= READING_MAX_AGE_MS && seen <= now + READING_FUTURE_MS;
   return { value: current && (v === true || v === false) ? v : 'unknown', at: d?.observed_at ?? null };
 };
 

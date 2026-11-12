@@ -9,6 +9,7 @@ import { makeRules, HOLD_REASONS } from '../../shared/rules.mjs';
 import { makeEngine } from './engine.mjs';
 import { parsePolicy, PRODUCT_STATES, START_RULES, TIER1_MERGE_RULES } from './policy.mjs';
 import { MAX_FILES } from './classify.mjs';
+import { READING_FUTURE_MS } from '../M12-sensors/facts.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const FIXTURE = readFileSync(join(here, 'fixtures/policy.yaml'), 'utf8');
@@ -283,6 +284,8 @@ test('start_session: Tier 1 needs a fresh usage reading (A8)', () => {
   assert.equal(start(w, { tier: 1, usage: fresh(w) }).decision, 'allow');
   assert.match(start(w, { tier: 1, usage: { read_at: new Date(w.now - 16 * 60_000).toISOString() } }).reason, /stale/);
   assert.match(start(w, { tier: 1, usage: { read_at: new Date(w.now + 5 * 60_000).toISOString() } }).reason, /stale/);
+  assert.equal(start(w, { tier: 1, usage: { read_at: new Date(w.now + READING_FUTURE_MS).toISOString() } }).decision, 'allow', '#464 r2 m-E: up to the one Sensors allowance ahead is current');
+  assert.match(start(w, { tier: 1, usage: { read_at: new Date(w.now + READING_FUTURE_MS + 1).toISOString() } }).reason, /stale/, 'one millisecond further is not');
   assert.equal(start(w, { tier: 2 }).decision, 'allow', 'Tier 2 needs no reading');
   w.now = NaN;
   assert.match(start(w, { tier: 1, usage: { read_at: '2000-01-01T00:00:00Z' } }).reason, /clock/, 'a broken clock never lets Tier 1 start (audit round 2)');
