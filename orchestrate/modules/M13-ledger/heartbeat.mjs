@@ -43,9 +43,11 @@
 //                     window → one alert per window, its body naming the highest threshold (a higher one comments
 //                     once; the next window clears it).
 // Push requests are facts `push-request-<key>` for the Front Door to deliver (join item with lane 2).
-// Returns { red, body, told, posted, postedWhy }: `told` maps each kind raised or cleared this pass to what alerts.mjs
+// Returns { red, body, told, raised, posted, postedWhy }: `told` maps each kind raised or cleared this pass to what alerts.mjs
 // answered (false = GitHub lost it), so a caller can tell which alert went out, never just whether every one did (L730
-// m4). `posted` is true only when GitHub took the pinned issue's new body (an edit or an open answered yes); false, with
+// m4). `raised` maps each kind raised this pass to the { status, text } it was raised with, so a caller that tells a
+// lasting stop its own way (a daily hold while Joe closed the alert, 'suppressed') keys it by the same stop (#464
+// deviation 3, L1024). `posted` is true only when GitHub took the pinned issue's new body (an edit or an open answered yes); false, with
 // `postedWhy`, when every read, find, edit or open was refused, so a caller fails the pass rather than calling it done
 // (#451 r1 m1).
 
@@ -78,7 +80,7 @@ const notKnown = (r) => r.ok && r.v === null;
 export async function heartbeatOnce({ product, writer, gh, alerts, owner, probes, plannedSwitch = null, now = () => new Date() }) {
   const t = now();
   const key = (kind) => `${product}|heartbeat|${kind}`;
-  const red = []; const lines = []; const toldOf = {};
+  const red = []; const lines = []; const toldOf = {}; const raisedOf = {};
   // A write the Record refused can't go in an alert (alerts are what it refused), so the pinned issue shows it red (L389).
   const notSaved = (why) => { if (!red.includes(NOT_SAVED)) { red.push(NOT_SAVED); lines.push(`RED   alerts: ${why}`); } };
   // An alert GitHub lost, so a notice left owed pass after pass shows here on each of them (L402).
@@ -88,7 +90,7 @@ export async function heartbeatOnce({ product, writer, gh, alerts, owner, probes
   };
   const set = async (kind, isRed, line, body, status = `red:${kind}`) => {
     lines.push(`${isRed ? 'RED  ' : 'ok   '} ${line}`);
-    if (isRed) { red.push(kind); toldOf[kind] = shown(await alerts.raise({ key: key(kind), title: `${product}: heartbeat red: ${kind}`, body, status })); }
+    if (isRed) { red.push(kind); raisedOf[kind] = { status, text: body }; toldOf[kind] = shown(await alerts.raise({ key: key(kind), title: `${product}: heartbeat red: ${kind}`, body, status })); }
     else toldOf[kind] = shown(await alerts.clear({ key: key(kind), note: `${kind} is green again.` }));
   };
 
@@ -286,5 +288,5 @@ export async function heartbeatOnce({ product, writer, gh, alerts, owner, probes
       }
     }
   }
-  return { red, body: render(), told: toldOf, posted, postedWhy: posted ? null : String(gh.lastAnswer ?? 'GitHub took no edit or open of the pinned issue').slice(0, 200) };
+  return { red, body: render(), told: toldOf, raised: raisedOf, posted, postedWhy: posted ? null : String(gh.lastAnswer ?? 'GitHub took no edit or open of the pinned issue').slice(0, 200) };
 }
