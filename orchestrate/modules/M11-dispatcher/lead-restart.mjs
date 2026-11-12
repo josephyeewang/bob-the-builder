@@ -6,10 +6,11 @@
 //      again at the next finished turn;
 //   2. the Lead writes handoff-<session>.md to its outbox and replies DONE;
 //   3. the outbox intake checks the handoff is under context.handoff_cap.role, estimated as
-//      ceil(utf-8 bytes / 4) (`handoffVet`), and applies it; an oversize one is not used;
+//      ceil(utf-8 bytes / 4), and that it reads as M3's one handoff shape (`handoffVet`, R-0b-143, L87 M-2 b), and
+//      applies it; an oversize one, or one a restarted Lead can't resume from, is not used;
 //   4. once applied: a `handoff` entry, the old session stopped (its transcript kept), the new Lead
 //      started on the same profile with the handoff first, and its launch record written (below).
-// A missing or oversize handoff gets one re-ask; after that the old Lead keeps running and Joe is
+// A missing, oversize or unreadable handoff gets one re-ask; after that the old Lead keeps running and Joe is
 // told. A Lead is never stopped without an applied handoff. A Lead read above
 // context.lead.hard + 50k means Claude Code's own compaction did not fire: alert once (m9).
 // The step's progress is the fact `lead-restart-<session>`.
@@ -20,6 +21,7 @@ import { plain, tellThen, writeFrom } from './alerts.mjs';
 import { holdAlert } from './pass.mjs';
 import { ENTITIES, leadLaunchHead } from '../../shared/record.mjs';
 import { pastTime, stillWaiting, STILL_WAITING_MS } from '../../shared/still-waiting.mjs';
+import { handoffProblem } from '../M3-lead/handoff.mjs';
 
 export const RESTART_FACT = (sid) => `lead-restart-${sid}`;
 export const HANDOFF_NAME = (sid) => `handoff-${sid}.md`;
@@ -47,14 +49,21 @@ export function recordLeadLaunch({ rec, now, alert, sessionId, head, product = n
 /** The handoff estimate (m8): ceil(utf-8 bytes / 4). */
 export const estimateTokens = (text) => Math.ceil(Buffer.byteLength(String(text), 'utf8') / 4);
 
-/** The intake's vet for handoff files: refuses one over the cap, so the session can write it again. */
+/** The intake's vet for handoff files: refuses one over the cap, or one that doesn't read as M3's handoff shape (R-0b-143,
+ *  L87 M-2 b), so the session can write it again. It runs before the handoff is applied, so a note that doesn't read is
+ *  asked for again and the old Lead is never stopped on it. */
 export const handoffVet = (rules) => ({ session, kind, text }) => {
   if (kind !== 'handoff-') return null;
   // Said here, so the owner hears the true cause: the rules are fine, and need() would say they have no value (L584 M1).
   if (!session?.product) throw new Error(`the session names no product, so ${KEYS.handoffCapRole} can't be read for it`);
   const cap = need(rules, KEYS.handoffCapRole, { product: session.product });
   const est = estimateTokens(text);
-  return est > cap ? `the handoff is about ${est} tokens, over the ${cap} cap` : null;
+  if (est > cap) return `the handoff is about ${est} tokens, over the ${cap} cap`;
+  // The shape is the Lead's (M3); a learning session also writes handoff- files, in its own form, so only the size holds there.
+  if (session.role === 'learning') return null;
+  // The reason can quote a line the Lead wrote: one line, cut, as every reason that reaches an alert.
+  const bad = handoffProblem(text);
+  return bad ? `the handoff does not read: ${plain(bad)}` : null;
 };
 
 /**
@@ -258,4 +267,4 @@ export function tellLeadSkipped({ rec, lead, error, alert, now }) {
 const startFailedText = (sid, reason) => `the Lead ${sid} was stopped after its handoff, but the new Lead did not start: ${reason ?? 'no answer'}; it is tried again every pass`;
 const reaskRefusedText = (sid, outcome, since) => `the Lead ${sid} did not hand in a usable handoff, and the second ask could not be sent since ${since} (${outcome ?? 'no answer'}); it is tried again at each finished turn`;
 const gaveUpText = (sid, why, asked = true) => `the Lead ${sid} did not hand in a usable handoff ${asked ? 'after a second ask' : 'within a day of the ask'} (${why ?? 'no reason recorded'}); it keeps running, and a restart now needs a person`;
-const wrapText = (sid, cap) => `WRAP: this session is large. Write your handoff to your outbox as ${HANDOFF_NAME(sid)}, under ${cap} tokens (about ${cap * 4} bytes), then reply DONE. Requests still queued in your outbox do not carry over: name any you still need in the handoff.`;
+const wrapText = (sid, cap) => `WRAP: this session is large. Write your handoff to your outbox as ${HANDOFF_NAME(sid)}, in the handoff shape your wording gives (every heading, once, in order), under ${cap} tokens (about ${cap * 4} bytes), then reply DONE. Requests still queued in your outbox do not carry over: name any you still need in the handoff.`;

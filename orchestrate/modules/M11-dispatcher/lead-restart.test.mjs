@@ -6,10 +6,11 @@ import { join } from 'node:path';
 import { leadRestartStep, leadInFlight, recordLeadLaunch, handoffVet, estimateTokens, RESTART_FACT, HANDOFF_NAME } from './lead-restart.mjs';
 import { intakePass } from './outbox-intake.mjs';
 import { KEYS as K } from './keys.mjs';
-import { rulesWith, recWith, change, T0, MIN, iso, withAlerts } from './fixtures.test-helper.mjs';
+import { rulesWith, recWith, change, T0, MIN, iso, withAlerts, handoffNote } from './fixtures.test-helper.mjs';
 import { rulesFromText } from '../M10-rules/from-text.mjs';
 import { leadLaunchHead } from '../../shared/record.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
+import { handoffText } from '../M3-lead/handoff.mjs';
 
 const R = rulesWith(); // soft 250k, hard 400k, handoff cap 8,000 tokens
 const SID = 'L-1';
@@ -27,7 +28,7 @@ function world() {
   let rec = recWith([], { outboxRoot: root });
   const step = (size, min, over = {}) => withAlerts(rec, T0 + min * MIN, over.alert ?? ((t) => calls.alerts.push(t)), (alert) => leadRestartStep({
     rec, rules: over.rules ?? R, now: T0 + min * MIN, lead: { sessionId: SID, product: 'p' }, size, alert: over.answer ?? alert,
-    inFlight: over.inFlight ?? null,
+    inFlight: over.inFlight ?? null, handoffRefused: over.handoffRefused,
     send: async (t) => { calls.sent.push(t); return { outcome }; },
     stopSession: async () => { calls.stops += 1; return over.stopFails ? { ok: false, reason: 'still running' } : { ok: true }; },
     startLead: async (x) => { calls.starts.push(x); return over.startFails ? { ok: false, reason: 'no' } : { ok: true, sessionId: 'L-2' }; },
@@ -36,7 +37,7 @@ function world() {
   // The pass's own intake, with the handoff vet, over the Lead's real outbox folder.
   const intake = (min = 3, { product = 'p', vet = handoffVet(R) } = {}) => intakePass({ rec, now: T0 + min * MIN, sessions: [{ sessionId: SID, role: 'lead', outbox, uid: UID, product: product ?? undefined }], wait: async () => {},
     alert: (t) => calls.alerts.push(t), note: () => {}, startReadonly: () => ({ ok: true }), replyToLead: () => {}, vet });
-  const handIn = (bytes) => writeFileSync(join(outbox, HANDOFF_NAME(SID)), 'x'.repeat(bytes));
+  const handIn = (bytes) => writeFileSync(join(outbox, HANDOFF_NAME(SID)), handoffNote(bytes));
   return { rec, calls, step, intake, handIn, outbox, refuse: (o) => { outcome = o; }, useRec: (r) => { rec = r; } };
 }
 const phase = (rec) => rec.read('fact', RESTART_FACT(SID))?.doc?.phase ?? 'none';
@@ -46,9 +47,9 @@ test('m8: the handoff estimate is ceil(bytes / 4); 31,000 bytes is accepted and 
   assert.equal(estimateTokens('é'), 1); // 2 utf-8 bytes
   const vet = handoffVet(R);
   const session = { product: 'p' };
-  assert.equal(vet({ session, kind: 'handoff-', text: 'x'.repeat(31_000) }), null);
-  assert.match(vet({ session, kind: 'handoff-', text: 'x'.repeat(33_000) }), /8250 tokens, over the 8000 cap/);
-  assert.equal(vet({ session, kind: 'handoff-', text: 'x'.repeat(32_000) }), null); // exactly the cap
+  assert.equal(vet({ session, kind: 'handoff-', text: handoffNote(31_000) }), null);
+  assert.match(vet({ session, kind: 'handoff-', text: handoffNote(33_000) }), /8250 tokens, over the 8000 cap/);
+  assert.equal(vet({ session, kind: 'handoff-', text: handoffNote(32_000) }), null); // exactly the cap
   assert.equal(vet({ session, kind: 'wish-', text: 'x'.repeat(99_000) }), null);
 });
 
@@ -74,8 +75,8 @@ test('L564: the Lead step reads each context line for its product, from real rul
 test('L564: the handoff check reads the cap for the session\'s product, and a session with no product is refused, its file kept', async () => {
   const vet = handoffVet(REAL);
   const session = { product: 'p' };
-  assert.equal(vet({ session, kind: 'handoff-', text: 'x'.repeat(16_000) }), null);
-  assert.match(vet({ session, kind: 'handoff-', text: 'x'.repeat(16_004) }), /4001 tokens, over the 4000 cap/);
+  assert.equal(vet({ session, kind: 'handoff-', text: handoffNote(16_000) }), null);
+  assert.match(vet({ session, kind: 'handoff-', text: handoffNote(16_004) }), /4001 tokens, over the 4000 cap/);
   assert.throws(() => vet({ session: {}, kind: 'handoff-', text: 'x' }), /names no product, so context\.handoff_cap\.role/);
   assert.throws(() => vet({ session: { product: 'nobody' }, kind: 'handoff-', text: 'x' }), /context\.handoff_cap\.role/);
   // Through intake, as production calls it: a session with no product gets "could not be checked", and the file waits.
@@ -98,7 +99,7 @@ test('M18: 260k at a finished turn with nothing in flight -> WRAP; the handoff a
   const w = world();
   assert.equal(await w.step(ended(240_000), 0), 'under the soft line');
   assert.equal(await w.step(ended(260_000), 1), 'WRAP sent');
-  assert.match(w.calls.sent[0], /^WRAP: .*handoff-L-1\.md, under 8000 tokens/);
+  assert.match(w.calls.sent[0], /^WRAP: .*handoff-L-1\.md, in the handoff shape your wording gives \(every heading, once, in order\), under 8000 tokens/);
   assert.equal(await w.step(midTurn(262_000), 2), 'mid-turn');
   w.handIn(31_000);
   await w.intake();
@@ -155,6 +156,69 @@ test('M18: an oversize handoff gets one re-ask; a second miss keeps the old Lead
   assert.equal(w.calls.stops, 0, 'never stopped without an applied handoff');
   assert.equal(w.calls.alerts.length, 1);
   assert.equal(await w.step(ended(264_000, 4), 4), 'gave_up');
+});
+
+// R-0b-143, L87 M-2 (b) and (c): the vet also reads the note as M3's one shape, before the old Lead is stopped.
+const GOOD_TYPED = '# Lead handoff\n\n## Claim\nLead of product p, session L-1\n\n## Open card\nC-3\n\n## Next step\nsend C-4\n\n## Decisions\n- export format: Markdown only (1 Nov)\n\n## Messages\n- queued: ask the owner about pricing\n';
+const handInText = (w, text) => writeFileSync(join(w.outbox, HANDOFF_NAME(SID)), text);
+
+test('R-0b-143: the handoff vet refuses a note that does not read as the one shape, whatever its size', () => {
+  const vet = handoffVet(R);
+  const session = { product: 'p' };
+  assert.equal(vet({ session, kind: 'handoff-', text: GOOD_TYPED }), null);
+  assert.equal(vet({ session, kind: 'handoff-', text: handoffText({ claim: 'c', next: 'n' }) }), null);
+  for (const [bad, why] of [
+    [GOOD_TYPED.replace('## Messages', '## Queued requests\n- pricing\n\n## Messages'), /does not read: the headings must be exactly/],
+    [GOOD_TYPED.replace(' (1 Nov)', ''), /does not read: a decision line is not/],
+    [GOOD_TYPED.replace('# Lead handoff', '# Handoff'), /does not read: not a Lead handoff/],
+    [GOOD_TYPED.replace('send C-4', 'none'), /does not read: the handoff has no Next step/],
+    ['', /does not read/],
+    ['x'.repeat(1_000), /does not read/],
+  ]) assert.match(vet({ session, kind: 'handoff-', text: bad }) ?? 'used', why, JSON.stringify(bad.slice(0, 60)));
+  // The cap is still checked first, and a Lead's own line in the reason is one line and cut.
+  assert.match(vet({ session, kind: 'handoff-', text: 'x'.repeat(33_000) }), /over the 8000 cap/);
+  const long = vet({ session, kind: 'handoff-', text: GOOD_TYPED.replace('- export format: Markdown only (1 Nov)', `- ${'y'.repeat(500)}`) });
+  assert.ok(long.length <= 'the handoff does not read: '.length + 200 && !long.includes('\n'), long);
+  // A learning session writes handoff- files in its own form: only the size holds there (review of #311, Minor 4).
+  const learning = { product: 'p', role: 'learning' };
+  assert.equal(vet({ session: learning, kind: 'handoff-', text: 'notes in the learning session\'s own form' }), null);
+  assert.match(vet({ session: learning, kind: 'handoff-', text: 'x'.repeat(33_000) }), /over the 8000 cap/);
+  assert.match(vet({ session: { product: 'p', role: 'lead' }, kind: 'handoff-', text: 'x' }), /does not read/);
+});
+
+test('R-0b-143 (c): a hand-typed note that does not read, through the composed vet: refused, re-asked, the old Lead not stopped', async () => {
+  const w = world();
+  assert.equal(await w.step(ended(260_000), 1), 'WRAP sent');
+  assert.match(w.calls.sent[0], /in the handoff shape your wording gives/);
+  handInText(w, GOOD_TYPED.replace('## Messages', '## Queued requests\n- pricing\n\n## Messages'));
+  const [r] = await w.intake();
+  assert.match(r.refused, /^the handoff does not read: /);
+  assert.equal(w.rec.read('fact', `intake-applied-${SID}-${HANDOFF_NAME(SID)}`), null, 'not marked used, so it can be written again');
+  assert.equal(w.rec.list('handoff').length, 0);
+  assert.equal(await w.step(ended(262_000, 2), 2, { handoffRefused: r.refused }), 're-asked');
+  assert.match(w.calls.sent[1], /not used \(the handoff does not read: the headings must be exactly .*\)\. Write handoff-L-1\.md again/);
+  assert.equal(w.calls.stops, 0, 'never stopped on a note that does not read');
+  assert.deepEqual(w.calls.starts, []);
+  // Written again in the shape: used, and the restart goes ahead.
+  handInText(w, GOOD_TYPED);
+  const [again] = await w.intake();
+  assert.equal(again.refused, undefined);
+  assert.equal(await w.step(ended(263_000, 3), 3), 'restarted');
+  assert.equal(w.calls.stops, 1);
+  assert.deepEqual(w.calls.starts, [{ handoff: 'handoff-L-1' }]);
+});
+
+test('R-0b-143 (c): a second note that does not read keeps the old Lead running, and the owner is told why', async () => {
+  const w = world();
+  await w.step(ended(260_000), 1);
+  handInText(w, '# Lead handoff\n\nclaim: p\nnext: carry on\n');
+  const [r] = await w.intake();
+  assert.equal(await w.step(ended(262_000, 2), 2, { handoffRefused: r.refused }), 're-asked');
+  handInText(w, GOOD_TYPED.replace(' (1 Nov)', ''));
+  const [r2] = await w.intake();
+  assert.equal(await w.step(ended(263_000, 3), 3, { handoffRefused: r2.refused }), 'gave up; the old Lead keeps running');
+  assert.equal(w.calls.stops, 0);
+  assert.match(w.calls.alerts.join(' | '), /did not hand in a usable handoff after a second ask \(the handoff does not read: a decision line/);
 });
 
 test('M18: an oversize handoff rewritten small after the re-ask is used (same name, not refused)', async () => {
