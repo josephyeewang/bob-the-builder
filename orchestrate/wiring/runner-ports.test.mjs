@@ -856,6 +856,18 @@ test('L985: undoCommitProblem, on a real mirror: an ancestor passes; a commit no
     const tag = (await gitOk(['rev-parse', 'refs/tags/v1'], { gitDir: mirror })).trim();
     assert.notEqual(tag, A);
     assert.equal(await undoCommitProblem({ mirror, commit: tag, head: B }), `the reversed commit ${tag.slice(0, 12)} is not a commit in the mirror`);
+    // #468 m3: its own inputs are checked first; a leading-dash or short value never reaches git.
+    const asked = [];
+    const run = async (args) => { asked.push(args); return { code: 0, stdout: 'commit\n' }; };
+    for (const commit of ['--output=/tmp/x', `-${A.slice(1)}`, A.slice(1), A.toUpperCase(), undefined, null, 7]) {
+      assert.equal(await undoCommitProblem({ mirror, commit, head: B }, { run }), 'the reversed commit is not 40 lower-case hex', String(commit));
+    }
+    for (const head of ['--all', `-${B.slice(1)}`, B.slice(1), undefined]) {
+      assert.equal(await undoCommitProblem({ mirror, commit: A, head }, { run }), 'the start commit is not 40 lower-case hex', String(head));
+    }
+    assert.deepEqual(asked, [], 'git is never asked');
+    assert.equal(await undoCommitProblem({ mirror, commit: A, head: B }, { run }), null, 'control: the fake git answers for good inputs');
+    assert.equal(asked.length, 2);
     // A lookup that can't be made is said as such, never as "not a commit" (self-review m2).
     assert.match(await undoCommitProblem({ mirror: join(d, 'none'), commit: A, head: B }), /can't be looked up in the mirror \(git -1\)/, 'no mirror');
     assert.equal(await undoCommitProblem({ mirror, commit: A, head: B }, { run: async () => ({ code: -1, stdout: '', stderr: 'refused' }) }), `the reversed commit ${A.slice(0, 12)} can't be looked up in the mirror (git -1)`);

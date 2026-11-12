@@ -409,7 +409,7 @@ test('L852: launch check 12 gives an undo the pass\'s answer: exact with filesOf
   const undo = { id: 'U-1', state: 'ready', kind: 'exact_reverse', source: { ask: 'A-1' }, product: 'p1', tier: 2, files: ['src/a.js'] };
   const filesOf = () => ['src/a.js'];
   const base = { rules, rec, bandsNow: () => GREEN, runningNow: () => [] };
-  const ask = (port, card = undo) => port({ card, kind: 'undo', product: 'p1' });
+  const ask = (port, card = undo) => port({ card, kind: 'undo', product: 'p1', undoCommit: SHA });
   const viaPass = startGate({ rules, rec, card: undo, kind: 'undo', product: 'p1', b: GREEN, running: [], exactReverse: true });
   assert.equal(viaPass.ok, true, 'control: the pass starts this undo on a paused product');
   assert.deepEqual(await ask(check12({ ...base, filesOf })), viaPass);
@@ -435,6 +435,10 @@ test('L852: launch check 12 gives an undo the pass\'s answer: exact with filesOf
     const r = await check12({ ...base, filesOf })({ card: undo, kind: 'undo', product: 'p1', undoCommit });
     assert.equal(r.ok, false, String(undoCommit)); assert.match(r.reason, /the reversed commit it was handed is not the one its source names/);
   }
+  // #468 m1: fails closed. An undo launch that leaves the key out is refused, not let past the comparison.
+  const keyless = await check12({ ...base, filesOf })({ card: undo, kind: 'undo', product: 'p1' });
+  assert.equal(keyless.ok, false, 'no undoCommit key');
+  assert.equal(keyless.reason, 'it is not an exact reverse: the launch names no reversed commit');
   // L863 m1: at launch the undo is already claimed. With its id it is told from another undo and starts; a card doc
   // with no id is refused for that, never counted as "an undo is already running" by its own claim.
   const claimed = recWith([...['T-1', 'MG-1', 'A-1'].map((id) => { const e = id === 'T-1' ? 'card' : id === 'MG-1' ? 'merge' : 'ask'; return [e, id, rec.read(e, id).doc]; }),
@@ -443,7 +447,7 @@ test('L852: launch check 12 gives an undo the pass\'s answer: exact with filesOf
     // L882 m3: one field off each: the product only, the kind only.
     ['card', 'P-2', { ...undo, id: undefined, state: 'claimed', product: 'p2' }], ['card', 'K-1', { ...undo, id: undefined, state: 'claimed', kind: 'editing' }]]);
   const atLaunch = check12({ ...base, rec: claimed, filesOf });
-  assert.equal((await atLaunch({ card: { ...undo, state: 'claimed' }, kind: 'undo', product: 'p1' })).ok, true, 'with its id: its own claim is not another undo');
+  assert.equal((await atLaunch({ card: { ...undo, state: 'claimed' }, kind: 'undo', product: 'p1', undoCommit: SHA })).ok, true, 'with its id: its own claim is not another undo');
   const { id: _, ...noId } = { ...undo, state: 'claimed' };
   const r = await atLaunch({ card: noId, kind: 'undo', product: 'p1' });
   assert.equal(r.ok, false);

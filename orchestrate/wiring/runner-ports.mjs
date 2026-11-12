@@ -250,8 +250,12 @@ export async function cardStartCommit({ mirror, cardDoc }, { main = mirrorMain }
 /**
  * An undo's reversed commit in the mirror (L976, L985): there as a commit, and an ancestor of the start commit, so the
  * copy holds what the undo reverses. → null, or the plain reason the start is refused. Asked before the copy is made.
+ * Both commits must be 40 lower-case hex, or it refuses without running git (#468 m3).
  */
 export async function undoCommitProblem({ mirror, commit, head }, { run = git } = {}) {
+  // #468 m3: its own inputs are checked before git sees them, so a value starting with '-' is never read as an option.
+  if (!(typeof commit === 'string' && UNDO_COMMIT.test(commit))) return 'the reversed commit is not 40 lower-case hex';
+  if (!(typeof head === 'string' && SHA.test(head))) return 'the start commit is not 40 lower-case hex';
   const at = { gitDir: mirror, purpose: 'runner-undo-commit', timeoutMs: 30_000 };
   const short = String(commit).slice(0, 12);
   // -t, never -e with ^{commit}: an annotated tag's id peels to a commit, and is still not the commit reversed.
