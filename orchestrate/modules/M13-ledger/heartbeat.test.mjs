@@ -4,6 +4,7 @@ import { memoryRecord } from '../../shared/record.mjs';
 import { makeFactWriter, TROUBLE_SOURCES } from '../M12-sensors/facts.mjs';
 import { makeAlerts, fakeIssues } from './alerts.mjs';
 import { heartbeatOnce, DISPATCHER_LATE_MIN, SENSORS_NONE_FACT, STATUS_FACT } from './heartbeat.mjs';
+import { READING_FUTURE_MS } from '../M12-sensors/facts.mjs';
 
 // `wrap` lets a test change what the pass reads from the record (#98 r2 P6: a saved record with no time).
 function setup({ wrap = (w) => w, alertWrap = (w) => w } = {}) {
@@ -984,4 +985,54 @@ test('L969: the Sensors job not known (no limit, or the grace after a start) is 
   delete h.probes.sensorsAlive;
   await h.pass();
   assert.doesNotMatch(h.gh.issues.get(1).body, /Sensors job/);
+});
+
+test('#464 r2 m-E: a kept start of no readings up to READING_FUTURE_MS ahead is kept; one a millisecond further is a clock step and starts again', async () => {
+  for (const [ahead, kept] of [[READING_FUTURE_MS, true], [READING_FUTURE_MS + 1, false]]) {
+    const h = setup();
+    h.probes.sensorsAlive = async () => ({ none: true, limitMin: 15, why: 'none' });
+    const ts = new Date(h.now().getTime() + ahead).toISOString();
+    assert.equal(h.writer.put(SENSORS_NONE_FACT('product 1'), { kind: 'fact.heartbeat-sensors-none-since', ts }).ok, true);
+    await h.pass();
+    assert.equal(h.writer.get(SENSORS_NONE_FACT('product 1')).ts, kept ? ts : h.now().toISOString(), `${ahead} ms ahead`);
+  }
+});
+
+test('#464 r2 m-B: a Record that throws on when the readings stopped gives the Sensors line its Record red, never a failed pass', async () => {
+  const boom = (w) => ({ get: (id) => { if (id === SENSORS_NONE_FACT('product 1')) throw new Error('store unreadable'); return w.get(id); }, put: w.put });
+  let h = setup({ wrap: boom });
+  h.probes.sensorsAlive = async () => ({ none: true, limitMin: 15, why: 'none' });
+  let r = await h.pass();
+  assert.ok(r.red.includes('sensors'), 'red at once: the time can\'t be counted');
+  assert.match(sensorsAlert(h)[0].body, /could not be read from the Record.*Check the Sensors background job on the Mini\./);
+  assert.match(pinnedIssues(h.gh)[0].body, /RED {3}Sensors job last wrote a reading: the Record could not be read$/m);
+  assert.match(pinnedIssues(h.gh)[0].body, /Front Door reachable from the phone: yes/, 'the rest of the pass still ran');
+  const throwsPut = (w) => ({ get: w.get, put: (id, doc, kind) => { if (id === SENSORS_NONE_FACT('product 1')) throw new Error('disk full'); return w.put(id, doc, kind); } });
+  h = setup({ wrap: throwsPut });
+  h.probes.sensorsAlive = async () => ({ none: true, limitMin: 15, why: 'none' });
+  r = await h.pass();
+  assert.ok(r.red.includes('sensors'), 'a put that throws is the same');
+  h = setup({ wrap: boom });
+  h.probes.sensorsAlive = async () => alive(1, false);
+  r = await h.pass();
+  assert.ok(!r.red.includes('sensors'), 'readings there: the Sensors line is its own');
+  assert.ok(r.red.includes('alert-not-saved'), 'the start could not be dropped, and that is said');
+  assert.match(pinnedIssues(h.gh)[0].body, /ok {4}Sensors job last wrote a reading: 1 min ago/);
+  assert.match(pinnedIssues(h.gh)[0].body, /the Record could not be read or written when the Sensors readings came back: store unreadable/);
+});
+
+test('#464 r2 m-A: a damaged account row is told as the Record\'s, one notice with "never"', async () => {
+  const h = setup();
+  const acc = { ageMin: null, stale: true, at: null, why: 'record' };
+  h.probes.sensorsAlive = async () => alive(1, false, { account: acc });
+  const r = await h.pass();
+  assert.ok(r.red.includes('sensors'));
+  assert.match(sensorsAlert(h)[0].body, /account reading in the Record could not be read, though its other readings are current/);
+  assert.doesNotMatch(sensorsAlert(h)[0].body, /never/);
+  assert.match(pinnedIssues(h.gh)[0].body, /the account reading could not be read from the Record$/m, 'red at once: no "red after"');
+  const before = notices(h.gh);
+  h.probes.sensorsAlive = async () => alive(1, false, { account: { ageMin: null, stale: true, at: null } });
+  await h.pass();
+  assert.match(sensorsAlert(h).at(-1).body, /last wrote who is signed in never/);
+  assert.equal(notices(h.gh), before, 'flipping between damaged and never written is one notice');
 });

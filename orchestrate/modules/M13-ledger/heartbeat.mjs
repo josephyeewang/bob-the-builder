@@ -51,7 +51,7 @@
 
 import { createHash } from 'node:crypto';
 import { lineIs, wasTold } from './alerts.mjs';
-import { TROUBLE_SOURCES, wasSaved } from '../M12-sensors/facts.mjs';
+import { TROUBLE_SOURCES, wasSaved, READING_FUTURE_MS } from '../M12-sensors/facts.mjs';
 
 export const DISPATCHER_LATE_MIN = 15;
 export const USAGE_STEPS = Object.freeze([50, 75, 90, 95]);
@@ -129,19 +129,32 @@ export async function heartbeatOnce({ product, writer, gh, alerts, owner, probes
       await set('sensors', true, `${line}: could not be read`, `Whether the Sensors job is still writing could not be read. The Dispatcher may be holding new starts. ${CHECK_SENSORS}`, 'red:sensors:unreadable');
     } else if (v.none === true) {
       // No reading at all: not known at first, red once that has lasted past the limit (the Dispatcher's "never" rule).
-      const was = writer.get(noneId);
-      let since = was?.kind === NONE_SINCE ? Date.parse(was.ts) : NaN;
-      if (!Number.isFinite(since) || since > t.getTime() + 60_000) { since = t.getTime(); put({ kind: NONE_SINCE, ts: t.toISOString() }); }
-      const forMin = Math.max(0, Math.floor((t - since) / 60_000));
-      const record = v.why === 'record';
-      if (t - since > limit * 60_000) {
+      // A Record that throws on the start's own get or put can't count the time, so it is the Record's red at once, never a
+      // failed pass (#464 r2 m-B).
+      let since = NaN;
+      let threw = false;
+      try {
+        const was = writer.get(noneId);
+        since = was?.kind === NONE_SINCE ? Date.parse(was.ts) : NaN;
+        if (!Number.isFinite(since) || since > t.getTime() + READING_FUTURE_MS) { since = t.getTime(); put({ kind: NONE_SINCE, ts: t.toISOString() }); }
+      } catch { threw = true; }
+      const forMin = threw ? 0 : Math.max(0, Math.floor((t - since) / 60_000));
+      const record = threw || v.why === 'record';
+      if (threw) {
+        // Red at once, even inside the grace after a start: a Record that throws is broken now, not "not yet" (review m2).
+        await set('sensors', true, `${line}: the Record could not be read`,
+          `The Sensors job's readings, or when they stopped, could not be read from the Record, so how long they have been missing can't be told. The Dispatcher holds new starts while it can't read them. ${CHECK_SENSORS}`,
+          'red:sensors:none');
+      } else if (t - since > limit * 60_000) {
         await set('sensors', true, `${line}: ${record ? 'the Record\'s readings could not be read' : 'never'} (for over ${limit} min)`,
           record ? `The Sensors job's readings in the Record could not be read for ${forMin} minutes (red after ${limit}). The Dispatcher holds new starts while it can't read them. ${CHECK_SENSORS}`
             : `The Sensors job has never written a reading (none for ${forMin} minutes; red after ${limit}). It may never have started, or its readings were deleted. The Dispatcher holds new starts without them. ${CHECK_SENSORS}`,
           'red:sensors:none');
       } else { unknown.push('sensors'); lines.push(`?     ${line}: none yet (for ${forMin} min; red after ${limit} min)`); }
     } else {
-      if (writer.get(noneId)?.kind === NONE_SINCE) put({ kind: NONE_SEEN, ts: t.toISOString() });
+      try { if (writer.get(noneId)?.kind === NONE_SINCE) put({ kind: NONE_SEEN, ts: t.toISOString() }); } catch (e) {
+        notSaved(`the Record could not be read or written when the Sensors readings came back: ${String(e?.message ?? e).slice(0, 200)}`);
+      }
       const acc = v.account;
       const read = v.clock === true ? Number.isFinite(v.aheadMin)
         : Number.isFinite(v.ageMin) && typeof v.stale === 'boolean' && typeof v.newestAt === 'string' && typeof acc?.stale === 'boolean';
@@ -153,9 +166,13 @@ export async function heartbeatOnce({ product, writer, gh, alerts, owner, probes
           `The Sensors job has written no reading for ${over(v.ageMin, true)} minutes (red after ${limit}). It may have stopped, or its writes are being refused. The signed-in account, usage and Front Door readings are going stale, so the Dispatcher holds new starts. ${CHECK_SENSORS}`,
           `red:sensors:${v.newestAt}`);
       } else if (acc.stale) {
-        const ago = acc.ageMin === null ? 'never' : `${over(acc.ageMin, true)} min ago`;
-        await set('sensors', true, `${line}: ${v.ageMin} min ago, but the account reading ${ago} (red after ${limit} min)`,
-          `The account reading is not being written: the Sensors job last wrote who is signed in ${acc.ageMin === null ? 'never' : `${over(acc.ageMin, true)} minutes ago`} (red after ${limit}), though its other readings are current. The Dispatcher holds new starts on that reading. ${CHECK_SENSORS}`,
+        // A damaged account row is the Record's problem, not "never written" (#464 r2 m-A); one status for both, so a row
+        // that flips between the two is one notice (as red:sensors:none, r2 m4).
+        const ago = acc.why === 'record' ? 'could not be read from the Record' : acc.ageMin === null ? 'never' : `${over(acc.ageMin, true)} min ago`;
+        await set('sensors', true, `${line}: ${v.ageMin} min ago, but the account reading ${ago}${acc.why === 'record' ? '' : ` (red after ${limit} min)`}`,
+          acc.why === 'record'
+            ? `The Sensors job's account reading in the Record could not be read, though its other readings are current. The Dispatcher holds new starts without it. ${CHECK_SENSORS}`
+            : `The account reading is not being written: the Sensors job last wrote who is signed in ${acc.ageMin === null ? 'never' : `${over(acc.ageMin, true)} minutes ago`} (red after ${limit}), though its other readings are current. The Dispatcher holds new starts on that reading. ${CHECK_SENSORS}`,
           `red:sensors:account:${acc.at ?? 'never'}`);
       } else await set('sensors', false, `${line}: ${v.ageMin} min ago (red after ${limit} min)`, '');
     }
