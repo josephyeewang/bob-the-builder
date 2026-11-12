@@ -39,7 +39,7 @@ import { readJobConfig } from '../../shared/job-config.mjs';
 import { makeLock } from '../../modules/M9-record/lock.mjs';
 import { checkRunnerConfig, lockedOf, lockedWiring } from '../../wiring/runner-main.mjs';
 import { JOBS_DIR, lockedRunner, LOCKED_SAVE_MS, quoted } from '../../wiring/runner-locked.mjs';
-import { startPort, removeAll, chmodTree } from '../../wiring/runner-ports.mjs';
+import { startPort, removeAll, chmodTree, saveSettingsName } from '../../wiring/runner-ports.mjs';
 import { loadMemory, processGroupPorts } from '../../wiring/runner-loop.mjs';
 import { runnerCopy, runnerOutbox, RUNNER_ROLE_OF } from '../../wiring/owner-status.mjs';
 import { CLONE_CONFIG_TEMPLATE } from '../../modules/M4-workshop/git/save-work.mjs';
@@ -50,7 +50,7 @@ export const STEPS = Object.freeze([
   [1, 'the install, check 4: passes, and the session settings keep none of the registry hosts'],
   [2, 'the install is walled: no network, no write to the home folder'],
   [3, 'save-work: the card\'s bundle is in the outbox and verifies from the mirror'],
-  [4, 'save-work of a trapped copy: the bundle is made and no planted hook or config ran'],
+  [4, 'save-work of a trapped copy: a new bundle is made, the planted hook and include are disarmed, none ran'],
   [5, 'the time limit: an install past lockedMs is stopped, its whole process group too'],
   [6, 'claude runs the job: save-work ran under dontAsk with the worker hooks set, nothing denied'],
   [7, 'save-work in time: the first save (called directly, no Dispatcher) answered inside save-work\'s limit'],
@@ -140,7 +140,11 @@ export const hooksSet = (text) => {
  * The proof's steps, with every port given (tests pass stand-ins). → results, one per step, in STEPS order.
  * io: { wiring(cfg, rec) → { start, saveWork }, stopGroup(s), groupListed(pid) → true/false/null, sleepers() → pids of
  * SLOW_INSTALL still running, verifyBundle(mirror, file) → null | why, exists(p), read(p), write(p, text, mode?), mkdir(p),
- * sleep(ms), now(), id(tag), cleanup({ copy, outbox, settingsFile, group?, sleepers? }) }.
+ * sleep(ms), now(), id(tag), reachable() → true/false (github.com from outside the sandbox, step 2's control),
+ * warn(text), cleanup({ copy, outbox, settingsFile, saveSettingsFile, sleepers? }) }.
+ * rec (one per launch, filled by io.wiring): answers (check n → its answer), settingsText (the session's settings after
+ * check 4), runs (each claude run: pid, out, job, settingsText it started with), groups (each group runLocked was told of:
+ * { job: 'install'|'save-work', pgid, pid, pid_start, job: { pgid, pid, pid_start }? } as `{ name, group }`).
  */
 export async function proveRunLocked({ c, product, io }) {
   const out = new Map();
@@ -150,7 +154,7 @@ export async function proveRunLocked({ c, product, io }) {
   // One launch of a throwaway card. Its copy and outbox are named before the start, so a start that answers "still
   // running" (no paths) is cleaned up too.
   const launchOne = async (cfg, tag) => {
-    const rec = { answers: {}, settingsText: null, runs: [] };
+    const rec = { answers: {}, settingsText: null, runs: [], groups: [] };
     const { start, saveWork } = io.wiring(cfg, rec);
     const card = io.id(`proof-rl-${tag}`); const sessionId = io.id(`proof-rl-${tag}`);
     const s = { card, sessionId, saveWork, rec, copy: runnerCopy({ copiesRoot: c.copiesRoot, product, card }), outbox: runnerOutbox({ outboxRoot: c.outboxRoot, product, role, sessionId }) };
@@ -186,7 +190,9 @@ export async function proveRunLocked({ c, product, io }) {
       const stopped = await stop(main.r);
       if (!stopped?.ok) for (const n of [3, 4, 6, 7]) out.set(n, notRun(n, `the test session could not be stopped (${stopped?.reason ?? 'no answer'})`));
       else {
-        const s = { id: main.sessionId, product, kind: 'editing', copy: main.r.copy, card: main.card, outbox: main.r.outbox };
+        // The row as the runner keeps it: with the hash of the save settings its start wrote (save-work refuses a row
+        // without one, #463 r1 m3; review M1).
+        const s = { id: main.sessionId, product, kind: 'editing', copy: main.r.copy, card: main.card, outbox: main.r.outbox, save_settings_sha: main.r.saveSettingsSha };
         const bundle = join(s.outbox, bundleName(s.card));
         const before = main.rec.runs.length;
         const t0 = io.now(); let a; try { a = await main.saveWork(s); } catch (e) { a = { ok: false, reason: e?.message ?? String(e) }; }
@@ -203,7 +209,7 @@ export async function proveRunLocked({ c, product, io }) {
           : !st ? fail(6, 'claude\'s run said nothing that can be read, so it can\'t be told it ran the job')
             : st.mode !== 'dontAsk' ? fail(6, `claude ran in mode ${st.mode}, not dontAsk`) : !job ? fail(6, `claude did not run ${script}`)
               : st.denied !== 0 ? fail(6, `claude denied ${st.denied ?? 'an unknown number of'} calls`) : st.errors ? fail(6, 'a call claude made returned an error')
-                : !hooksSet(main.rec.settingsText) ? fail(6, 'the session\'s settings set no worker hook for Bash')
+                : !hooksSet(run.settingsText) ? fail(6, 'the settings the save ran under set no worker hook for Bash')
                   : !st.hooks ? fail(6, 'claude\'s run shows no worker hook running on the call') : pass(6, { command: job }));
         // Step 4: the same copy, trapped, saved again. The traps can't fire in a save that never commits or reads the
         // index, so the proof is the disarm itself: the config back to the clone's template, the hooks folder gone.
@@ -215,13 +221,17 @@ export async function proveRunLocked({ c, product, io }) {
           const inc = join(git, 'trap.config');
           io.write(inc, `[core]\n\tfsmonitor = touch ${q(markers[1])}; true\n\thooksPath = ${join(git, 'hooks')}\n`);
           io.write(join(git, 'config'), `${io.read(join(git, 'config'))}[include]\n\tpath = ${inc}\n`);
+          // Step 3's bundle emptied, so only a bundle this save makes verifies (review m2).
+          io.write(bundle, '');
         } catch (e) { out.set(4, notRun(4, `the trap could not be planted in the copy (${e?.code ?? e?.message})`)); }
         if (!out.has(4)) {
           let b; try { b = await main.saveWork(s); } catch (e) { b = { ok: false, reason: e?.message ?? String(e) }; }
           const ran = markers.filter((m) => io.exists(m));
           let cfgNow = null; try { cfgNow = io.read(join(git, 'config')); } catch { cfgNow = null; }
+          let v4 = null;
           out.set(4, ran.length ? fail(4, `a planted trap ran: ${ran.join(', ')} exists`) : !b?.ok ? fail(4, `save-work refused the trapped copy: ${b?.reason ?? 'no answer'}`)
             : !io.exists(bundle) ? fail(4, 'save-work answered, but no bundle is in the outbox')
+              : (v4 = io.verifyBundle(p.mirror, bundle)) ? fail(4, `the trapped copy's bundle does not verify from the mirror: ${v4}`)
               : cfgNow !== CLONE_CONFIG_TEMPLATE ? fail(4, 'the copy\'s git config was not put back to the clone\'s template, so the planted include was not disarmed')
                 : io.exists(join(git, 'hooks')) ? fail(4, 'the copy\'s hooks folder is still there after the save') : pass(4, { bundle }));
         }
@@ -231,6 +241,8 @@ export async function proveRunLocked({ c, product, io }) {
     // Step 2: an install that reaches for the network and the home folder.
     const x = join(c.home, 'x');
     if (io.exists(x)) out.set(2, notRun(2, `${x} is there already. Remove it, then run this again`));
+    // The control (review m5): github.com reached from outside the sandbox, else a walled curl shows nothing.
+    else if (io.reachable() !== true) out.set(2, notRun(2, 'github.com could not be reached from outside the sandbox either, so a refused curl inside it shows nothing. Check the Mini\'s network, then run this again'));
     else {
       const s2 = await launchOne(variant(c, product, { install: walledInstall(c.home) }), 'walled');
       const b4 = four(s2);
@@ -241,18 +253,31 @@ export async function proveRunLocked({ c, product, io }) {
             : pass(2, { reason: b4.reason }));
     }
 
-    // Step 5: an install that runs past a short lockedMs.
-    const s5 = await launchOne(variant(c, product, { install: SLOW_INSTALL, lockedMs: SHORT_LOCKED_MS }), 'slow');
-    const c4 = four(s5); const run5 = s5.rec.runs.filter((r) => r.job === 'install').at(-1);
-    let listed = run5 ? io.groupListed(run5.pid) : null;
-    for (let w = 0; listed === true && w < 2_000; w += 200) { await io.sleep(200); listed = io.groupListed(run5.pid); }
-    const left = io.sleepers();
-    s5.sleepers = left;
-    out.set(5, !c4 ? noFour(5, s5) : c4.ok ? fail(5, `check 4 passed an install that sleeps 20 minutes (${SLOW_INSTALL})`)
-      : !/did not finish inside the lock-down \(it did not finish in time\)/.test(c4.reason ?? '') ? fail(5, `check 4 refused, but not for the time limit: ${c4.reason}`)
-        : listed === null ? fail(5, `whether claude's group (${run5?.pid}) is gone can't be told`) : listed ? fail(5, `ps -g ${run5.pid} still lists processes of claude's group`)
-          : left === null ? fail(5, `whether ${SLOW_INSTALL} still runs can't be told`) : left.length ? fail(5, `${SLOW_INSTALL} still runs (${left.join(', ')}): the install was not stopped with claude. Left running, not killed; each ends by itself within 20 minutes`)
-            : pass(5, { reason: c4.reason }));
+    // Step 5: an install that runs past a short lockedMs. A sleeper already there (an earlier run's) would be taken for
+    // this one's, so the step is not tried (review m4). The pass needs the job's own process group (the install's shell,
+    // as runLocked kept it from its record, #463 r2 M1) to have been seen, apart from claude's, and both groups gone: an
+    // install that never started its job can't pass (review M3).
+    const already = io.sleepers();
+    if (already === null || already.length) out.set(5, notRun(5, already === null ? `whether ${SLOW_INSTALL} already runs can't be told` : `${SLOW_INSTALL} already runs (${already.join(', ')}), left by an earlier run; it ends by itself within 20 minutes. Run this again then`));
+    else {
+      const s5 = await launchOne(variant(c, product, { install: SLOW_INSTALL, lockedMs: SHORT_LOCKED_MS }), 'slow');
+      const c4 = four(s5); const run5 = s5.rec.runs.filter((r) => r.job === 'install').at(-1);
+      const g5 = s5.rec.groups.filter((g) => g.name === 'install' && g.group?.job).at(-1)?.group;
+      const jobPg = g5?.job?.pgid;
+      const gone = async (pg) => { let l = Number.isInteger(pg) ? io.groupListed(pg) : null; for (let w = 0; l === true && w < 2_000; w += 200) { await io.sleep(200); l = io.groupListed(pg); } return l; };
+      const listed = run5 ? await gone(run5.pid) : null;
+      const jobListed = await gone(jobPg);
+      const left = io.sleepers();
+      s5.sleepers = left;
+      out.set(5, !c4 ? noFour(5, s5) : c4.ok ? fail(5, `check 4 passed an install that sleeps 20 minutes (${SLOW_INSTALL})`)
+        : !/did not finish inside the lock-down \(it did not finish in time\)/.test(c4.reason ?? '') ? fail(5, `check 4 refused, but not for the time limit: ${c4.reason}`)
+          : !Number.isInteger(jobPg) ? fail(5, 'the install\'s own process group was never recorded, so the job may never have started; a stop with nothing to stop proves nothing')
+            : jobPg === run5?.pid || jobPg === g5.pgid ? fail(5, `the job's process group (${jobPg}) is claude's own, not one of its own`)
+              : listed === null ? fail(5, `whether claude's group (${run5?.pid}) is gone can't be told`) : listed ? fail(5, `ps -g ${run5.pid} still lists processes of claude's group`)
+                : jobListed === null ? fail(5, `whether the job's group (${jobPg}) is gone can't be told`) : jobListed ? fail(5, `ps -g ${jobPg} still lists processes of the job's own group`)
+                  : left === null ? fail(5, `whether ${SLOW_INSTALL} still runs can't be told`) : left.length ? fail(5, `${SLOW_INSTALL} still runs (${left.join(', ')}): the install was not stopped with claude. Left running, not killed; each ends by itself within 20 minutes`)
+                    : pass(5, { reason: c4.reason, claudeGroup: run5.pid, jobGroup: jobPg }));
+    }
 
     // Step 8: an install's leftover, looked at once the session has started (a known limit, never a fail). NOT SEEN counts
     // only when the install's own session was made (`started`); otherwise the step was not tried.
@@ -268,9 +293,16 @@ export async function proveRunLocked({ c, product, io }) {
     }
   } finally {
     // Each throwaway's group, folders and settings file go, whatever happened (startPort removes those of a start it undid).
+    // A group that could not be stopped keeps its folders and settings, and is named (review m1): never removed from
+    // under a claude still running.
     for (const s of sessions) {
-      if (s.r?.ok === true || s.r?.running === true) { if (Number.isInteger(s.r.pgid)) await stop(s.r); }
-      io.cleanup({ copy: s.r?.copy ?? s.copy, outbox: s.r?.outbox ?? s.outbox, settingsFile: join(c.settingsDir, `${s.sessionId}.json`), sleepers: s.sleepers ?? [] });
+      const files = { copy: s.r?.copy ?? s.copy, outbox: s.r?.outbox ?? s.outbox, settingsFile: join(c.settingsDir, `${s.sessionId}.json`),
+        saveSettingsFile: join(c.settingsDir, saveSettingsName(s.sessionId)) };
+      if (s.r?.ok === true || s.r?.running === true) {
+        const st = Number.isInteger(s.r.pgid) ? await stop(s.r) : { ok: false, reason: 'its process group is not known' };
+        if (st?.ok !== true) { io.warn(`claude's group ${s.r.pgid ?? '(not known)'} for session ${s.sessionId} could not be stopped (${st?.reason ?? 'no answer'}); it may still run. Left in place: ${Object.values(files).join(', ')}. Stop it (ps -g ${s.r.pgid ?? '<pgid>'}), then remove them`); continue; }
+      }
+      io.cleanup({ ...files, sleepers: s.sleepers ?? [] });
     }
   }
   return STEPS.map(([n]) => out.get(n) ?? notRun(n, 'not reached'));
@@ -302,10 +334,17 @@ const recordingSpawn = (rec, dir) => (bin, args, opts) => {
   } finally { closeSync(fd); }
 };
 
+/** runLocked with every process group it keeps recorded in rec.groups as { name: the job, group }, the job's own too
+ * (step 5, review M3); a caller's own onGroup is still told. A runLocked that is not a function is handed back. */
+export const recordGroups = (base, rec) => (typeof base !== 'function' ? base : (o = {}) => base({ ...o, onGroup: (g) => {
+  rec.groups.push({ name: o.job, group: g });
+  if (typeof o.onGroup === 'function') o.onGroup(g);
+} }));
+
 /** The runner's own builders, as realRunnerPorts builds them, plus this proof's two inputs (see the top). */
 export function realWiring(dir, log) {
   return (cfg, rec) => {
-    const runLocked = lockedOf(cfg, { make: (o) => lockedRunner({ ...o, spawn: recordingSpawn(rec, dir) }) });
+    const runLocked = recordGroups(lockedOf(cfg, { make: (o) => lockedRunner({ ...o, spawn: recordingSpawn(rec, dir) }) }), rec);
     const locked = lockedWiring(cfg, { runLocked, log });
     const inner = locked.startDeps.checksFor;
     const checksFor = (x) => {
@@ -326,8 +365,10 @@ export function realWiring(dir, log) {
 function selfPath() { try { return realpathSync.native(fileURLToPath(import.meta.url)); } catch { return undefined; } }
 const arg = (argv, k) => { const i = argv.indexOf(k); return i >= 0 ? argv[i + 1] : undefined; };
 
-export async function main(argv, { print = (t) => process.stdout.write(t), uid = process.getuid(), now = () => Date.now() } = {}) {
+export async function main(argv, { print = (t) => process.stdout.write(t), uid = process.getuid?.(), now = () => Date.now(), platform = process.platform } = {}) {
   const fails = (why) => { print(report(STEPS.map(([n]) => notRun(n, why))).text); return 1; };
+  // macOS only (L1005): ps -g, pgrep and perl's setsid are read as the Mini's; anywhere else, a named skip, never a run.
+  if (platform !== 'darwin') return fails(`SKIP: this proof runs on macOS only (the Mini), not on ${platform}`);
   let c; try { c = checkRunnerConfig(readJobConfig(arg(argv, '--config'), { code: [], self: selfPath() })); } catch (e) { return fails(`the worker runner's config can't be read (${e?.message ?? e})`); }
   const product = arg(argv, '--product');
   let ownDirUid; try { const st = lstatSync(c.ownDir); ownDirUid = st.isDirectory() && !st.isSymbolicLink() ? st.uid : null; } catch { ownDirUid = null; }
@@ -361,13 +402,15 @@ export async function main(argv, { print = (t) => process.stdout.write(t), uid =
     write: (p, text, mode) => { writeFileSync(p, text); if (mode !== undefined) chmodSync(p, mode); }, mkdir: (p) => mkdirSync(p, { recursive: true }),
     sleep: (ms) => new Promise((r) => { setTimeout(r, ms); }), now,
     id: (prefix) => `${prefix}-${tag}-${(n += 1)}`,
-    cleanup: ({ copy, outbox, settingsFile, sleepers = [] }) => {
+    reachable: () => spawnSync('/usr/bin/curl', ['-sS', '--max-time', '20', '-o', '/dev/null', 'https://github.com'], { timeout: 30_000 }).status === 0,
+    warn: (t) => { print(`${t}\n`); log(t); },
+    cleanup: ({ copy, outbox, settingsFile, saveSettingsFile, sleepers = [] }) => {
       // Never killed: they are found by their command line, not by a pid this proof started (L1013). Step 5 has failed
       // and named them; each ends by itself within SLOW_INSTALL's 20 minutes.
       if (sleepers.length) log(`left running, not killed (found by command line, not started here): ${sleepers.join(', ')}`);
       const fs = { rm: rmSync, chmodTree };
       for (const d of [copy, outbox]) if (d) removeAll(fs, d, log);
-      try { rmSync(settingsFile, { force: true }); } catch (e) { log(`the proof's settings file ${settingsFile} can't be removed (${e?.code ?? e?.message})`); }
+      for (const f of [settingsFile, saveSettingsFile]) if (f) { try { rmSync(f, { force: true }); } catch (e) { log(`the proof's settings file ${f} can't be removed (${e?.code ?? e?.message})`); } }
     },
   };
   let results;

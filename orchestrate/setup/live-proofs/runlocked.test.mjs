@@ -3,7 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { CURL_UNREACHED, LEFTOVER_INSTALL, LEFTOVER_WAIT_MS, SLOW_INSTALL, STEPS, TEST_REPO, blockedBy, guardProblem, hooksSet, main, proveRunLocked, readStream, realWiring, report, variant, walledInstall } from './runlocked.mjs';
+import { CURL_UNREACHED, LEFTOVER_INSTALL, LEFTOVER_WAIT_MS, SLOW_INSTALL, STEPS, TEST_REPO, blockedBy, guardProblem, hooksSet, main, proveRunLocked, readStream, realWiring, recordGroups, report, variant, walledInstall } from './runlocked.mjs';
 import { JOBS_DIR, LOCKED_SAVE_MS, quoted } from '../../wiring/runner-locked.mjs';
 import { CLONE_CONFIG_TEMPLATE } from '../../modules/M4-workshop/git/save-work.mjs';
 
@@ -112,7 +112,8 @@ function world(over = {}) {
   const w = { files: new Map(), clock: 1_000, stopped: [], cleaned: [], slept: 0, launched: [], saves: 0,
     settingsText: SETTINGS, installSettings: INSTALL_SETTINGS, mainStart: { ok: true }, save: { ok: true }, saveMs: 3_000, stream: stream(), listed: false, sleepers: [], verify: null,
     xBefore: false, xWritten: false, walled: { ok: false, reason: 'the install exited 7' }, slow: { ok: false, reason: 'the install job did not finish inside the lock-down (it did not finish in time)' },
-    walledStart: null, leftoverStart: { ok: true }, leftover: true, started: true, trapRuns: false, disarm: true, stopOk: { ok: true }, ...over };
+    walledStart: null, leftoverStart: { ok: true }, leftover: true, started: true, trapRuns: false, disarm: true, stopOk: { ok: true }, stopFail: null,
+    mainSha: 'a'.repeat(64), saveSettings: SETTINGS, rewrite: true, jobGroup: 4250, jobListed: false, sleepersBefore: [], sleeperCalls: 0, reachable: true, warned: [], ...over };
   const c = cfg();
   const io = {
     wiring: (cv, rec) => {
@@ -122,7 +123,7 @@ function world(over = {}) {
         start: async (req) => {
           w.launched.push({ kind, req, lockedMs: cv.lockedMs });
           const copy = `/w/copies/trial/${req.card}`; const outbox = `/w/outboxes/trial/worker/${req.sessionId}`;
-          const started = { ok: true, pid: 900 + w.launched.length, pgid: 900 + w.launched.length, pidStart: '2026-11-03T10:00:00.000Z', copy, outbox };
+          const started = { ok: true, pid: 900 + w.launched.length, pgid: 900 + w.launched.length, pidStart: '2026-11-03T10:00:00.000Z', copy, outbox, ...(w.mainSha ? { saveSettingsSha: w.mainSha } : {}) };
           if (kind === 'main') {
             if (w.mainStart.four !== null) {
               rec.runs.push({ pid: 800, out: '/r/install', job: 'install', settingsText: w.installSettings });
@@ -136,7 +137,13 @@ function world(over = {}) {
             if (w.walledStart) return w.walledStart;
             if (w.walled !== null) rec.answers[4] = w.walled; if (w.xWritten) w.files.set('/Users/workers/x', ''); return { ok: false, reason: 'launch check 4 (dependencies): …' };
           }
-          if (kind === 'slow') { rec.runs.push({ pid: 4242, out: '/r/slow', job: 'install' }); rec.answers[4] = w.slow; return { ok: false, reason: 'launch check 4 (dependencies): …' }; }
+          if (kind === 'slow') {
+            rec.runs.push({ pid: 4242, out: '/r/slow', job: 'install' });
+            const g = { pgid: 4242, pid: 4242, pid_start: '2026-11-03T10:00:00.000Z' };
+            rec.groups.push({ name: 'install', group: g });
+            if (w.jobGroup !== null) rec.groups.push({ name: 'install', group: { ...g, job: { pgid: w.jobGroup, pid: w.jobGroup, pid_start: '2026-11-03T10:00:01.000Z' } } });
+            rec.answers[4] = w.slow; return { ok: false, reason: 'launch check 4 (dependencies): …' };
+          }
           rec.answers[4] = { ok: true };
           if (w.leftoverStart.ok === false) return { ok: false, reason: 'launch check 13 (Bob method folder): no check is wired' };
           if (w.leftoverStart.running) return { ok: false, running: true, pgid: 777, reason: 'still running' };
@@ -146,20 +153,23 @@ function world(over = {}) {
         },
         saveWork: async (s) => {
           w.saves += 1;
-          const out = `/r/save-${w.saves}`; rec.runs.push({ pid: 5000 + w.saves, out, job: 'save-work' }); w.files.set(out, w.stream);
+          // As saveWorkPort: a row with no save settings' hash is refused before claude runs.
+          if (!/^[0-9a-f]{64}$/.test(s.save_settings_sha ?? '')) return { ok: false, reason: `session ${s.id} has no save settings kept by its start` };
+          const out = `/r/save-${w.saves}`; rec.runs.push({ pid: 5000 + w.saves, out, job: 'save-work', settingsText: w.saveSettings }); w.files.set(out, w.stream);
           w.clock += w.saveMs;
           const a = typeof w.save === 'function' ? w.save(w.saves) : w.save;
-          if (a.ok) w.files.set(`${s.outbox}/bundle-${s.card}.bundle`, 'b');
+          if (a.ok && (w.saves === 1 || w.rewrite)) w.files.set(`${s.outbox}/bundle-${s.card}.bundle`, 'b');
           if (w.saves === 2 && w.trapRuns) w.files.set(`${s.copy}/marker-include`, '');
           if (w.saves === 2 && w.disarm) { w.files.set(`${s.copy}/.git/config`, CLONE_CONFIG_TEMPLATE); if (w.disarm !== 'config') for (const k of [...w.files.keys()]) if (k.startsWith(`${s.copy}/.git/hooks`)) w.files.delete(k); }
           return a;
         },
       };
     },
-    stopGroup: async (g) => { w.stopped.push(g); return w.stopOk; },
-    groupListed: () => (typeof w.listed === 'function' ? w.listed() : w.listed),
-    sleepers: () => w.sleepers,
-    verifyBundle: () => { if (w.verify === 'throw') throw new Error('boom'); return w.verify; },
+    stopGroup: async (g) => { w.stopped.push(g); return g.pgid === w.stopFail ? { ok: false, reason: 'EPERM' } : w.stopOk; },
+    groupListed: (pg) => (pg === w.jobGroup && pg !== 4242 ? w.jobListed : typeof w.listed === 'function' ? w.listed() : w.listed),
+    sleepers: () => { w.sleeperCalls += 1; return w.sleeperCalls === 1 ? w.sleepersBefore : w.sleepers; },
+    verifyBundle: (mirror, file) => { if (w.verify === 'throw') throw new Error('boom'); return w.files.get(file) === 'b' ? w.verify : 'not a bundle'; },
+    reachable: () => w.reachable, warn: (t) => { w.warned.push(t); },
     exists: (p) => w.files.has(p) || (p === '/Users/workers/x' && w.xBefore),
     read: (p) => { if (!w.files.has(p)) throw Object.assign(new Error('missing'), { code: 'ENOENT' }); return w.files.get(p); },
     write: (p, text) => { w.files.set(p, text); }, mkdir: (p) => { w.files.set(p, null); },
@@ -184,6 +194,9 @@ test('proveRunLocked: a runLocked that works passes 1 to 7, sees the leftover, a
   assert.deepEqual(w.stopped[0], { pid: 901, pgid: 901, pid_start: '2026-11-03T10:00:00.000Z' });
   assert.ok(w.stopped.some((g) => g.pgid === 904), 'and the leftover session at the end');
   assert.deepEqual(w.cleaned.map((x) => x.settingsFile), w.launched.map((l) => `/w/state/settings/${l.req.sessionId}.json`), 'every session, refused ones too');
+  assert.deepEqual(w.cleaned.map((x) => x.saveSettingsFile), w.launched.map((l) => `/w/state/settings/${l.req.sessionId}.save.json`), 'and its save settings (review M2)');
+  assert.equal(by[5].found.claudeGroup, 4242, 'step 5 names claude\'s group'); assert.equal(by[5].found.jobGroup, 4250, 'and the job\'s own');
+  assert.deepEqual(w.warned, []);
   assert.equal(w.cleaned[0].copy, `/w/copies/trial/${w.launched[0].req.card}`);
   assert.equal(w.cleaned[2].outbox, `/w/outboxes/trial/worker/${w.launched[2].req.sessionId}`, 'a refused start\'s own paths');
   assert.match(w.files.get(`/w/copies/trial/${w.launched[0].req.card}/trap.config`) ?? w.files.get(`/w/copies/trial/${w.launched[0].req.card}/.git/trap.config`), /fsmonitor/, 'the trap was planted');
@@ -226,7 +239,14 @@ test('proveRunLocked: each step fails on its own break', async () => {
     [{ stream: stream({ error: true }) }, 6, /returned an error/],
     [{ stream: stream({ hook: false }) }, 6, /no worker hook running/],
     [{ stream: 'garbage' }, 6, /can't be told/],
-    [{ settingsText: '{"sandbox":{}}' }, 6, /no worker hook for Bash/],
+    [{ saveSettings: '{"sandbox":{}}' }, 6, /settings the save ran under set no worker hook for Bash/],
+    [{ saveSettings: null }, 6, /settings the save ran under set no worker hook/],
+    [{ mainSha: null }, 3, /save-work refused: session .* has no save settings/],
+    [{ rewrite: false }, 4, /trapped copy's bundle does not verify from the mirror: not a bundle/],
+    [{ jobGroup: null }, 5, /own process group was never recorded/],
+    [{ jobGroup: 4242 }, 5, /is claude's own/],
+    [{ jobListed: true }, 5, /ps -g 4250 still lists processes of the job's own group/],
+    [{ jobListed: null }, 5, /whether the job's group \(4250\) is gone can't be told/],
     [{ save: { ok: false, reason: 'x' } }, 6, /did not answer ok/],
     [{ saveMs: LOCKED_SAVE_MS + 1 }, 7, /past save-work's limit/],
     [{ save: { ok: false, reason: 'x' } }, 7, /did not answer ok/],
@@ -257,6 +277,12 @@ test('proveRunLocked: a step that could not be tried is NOT RUN, with why, never
   assert.match(by[3].why, /^the session did not start \(launch check 11/, 'any other refusal is not called blocked');
   ({ by } = await run({ stopOk: { ok: false, reason: 'EPERM' } }));
   for (const n of [3, 4, 6, 7]) assert.match(by[n].why, /could not be stopped \(EPERM\)/);
+  ({ by } = await run({ reachable: false }));
+  assert.equal(by[2].result, 'NOT RUN', 'no network outside the sandbox: step 2 proves nothing'); assert.match(by[2].why, /could not be reached from outside the sandbox/);
+  ({ by } = await run({ sleepersBefore: [99] }));
+  assert.equal(by[5].result, 'NOT RUN', 'an earlier run\'s sleeper'); assert.match(by[5].why, /already runs \(99\)/);
+  ({ by } = await run({ sleepersBefore: null }));
+  assert.equal(by[5].result, 'NOT RUN'); assert.match(by[5].why, /already runs can't be told/);
   ({ by } = await run({ xBefore: true }));
   assert.equal(by[2].result, 'NOT RUN'); assert.match(by[2].why, /is there already/);
   ({ by } = await run({ leftoverStart: { ok: false } }));
@@ -272,6 +298,10 @@ test('proveRunLocked: a start still running, and a proof that throws part way, a
   const last = w.cleaned.at(-1);
   assert.equal(last.copy, `/w/copies/trial/${w.launched[3].req.card}`, 'its paths named by the proof');
   assert.ok(w.stopped.some((g) => g.pgid === 777), 'and its group stopped');
+  const z = await run({ leftoverStart: { running: true }, stopFail: 777 });
+  assert.equal(z.w.cleaned.length, 3, 'a group that could not be stopped keeps its folders (review m1)');
+  assert.ok(!z.w.cleaned.some((x) => x.copy === `/w/copies/trial/${z.w.launched[3].req.card}`));
+  assert.equal(z.w.warned.length, 1); assert.match(z.w.warned[0], /group 777 .* could not be stopped \(EPERM\); it may still run\. Left in place: \/w\/copies\/trial\//);
   const x = world({ verify: 'throw' });
   await assert.rejects(proveRunLocked({ c: x.c, product: 'trial', io: x.io }), /boom/);
   assert.equal(x.w.cleaned.length, 1, 'the session started before the throw');
@@ -282,7 +312,7 @@ test('proveRunLocked: a start still running, and a proof that throws part way, a
 
 test('main: a config that can\'t be read runs no step and exits 1', async () => {
   let text = '';
-  const code = await main(['--config', 'relative.json', '--product', 'trial'], { print: (t) => { text += t; } });
+  const code = await main(['--config', 'relative.json', '--product', 'trial'], { print: (t) => { text += t; }, platform: 'darwin' });
   assert.equal(code, 1);
   assert.equal(text.match(/^NOT RUN /gm)?.length, 8);
   assert.match(text, /config can't be read/);
@@ -298,4 +328,24 @@ test('realWiring: the runner\'s own start port, with the card read as claimed fo
   assert.doesNotMatch(r.reason, /claimed|another product|names no product/, 'the stand-in card passes the claim checks');
   assert.match(r.reason, /no sign-in/, 'and the real port goes on to the sign-in');
   assert.equal(typeof saveWork, 'function');
+});
+
+test('main: off macOS, a named skip that runs no step and is never a pass (L1005)', async () => {
+  let text = '';
+  const code = await main(['--config', '/x.json', '--product', 'trial'], { print: (t) => { text += t; }, platform: 'linux', uid: 501 });
+  assert.equal(code, 1);
+  assert.equal(text.match(/^NOT RUN  \d\. .* — SKIP: this proof runs on macOS only \(the Mini\), not on linux$/gm)?.length, 8);
+});
+
+test('recordGroups: every group runLocked is told of is kept with its job, and the caller\'s own onGroup still told', async () => {
+  const rec = { groups: [] }; const told = []; const seen = [];
+  const base = async (o) => { seen.push(o.job); o.onGroup({ pgid: 1 }); o.onGroup({ pgid: 1, job: { pgid: 2 } }); return { ok: true }; };
+  const r = recordGroups(base, rec);
+  assert.deepEqual(await r({ job: 'install', onGroup: (g) => told.push(g) }), { ok: true });
+  await r({ job: 'save-work' });
+  assert.deepEqual(rec.groups, [{ name: 'install', group: { pgid: 1 } }, { name: 'install', group: { pgid: 1, job: { pgid: 2 } } },
+    { name: 'save-work', group: { pgid: 1 } }, { name: 'save-work', group: { pgid: 1, job: { pgid: 2 } } }]);
+  assert.deepEqual(told, [{ pgid: 1 }, { pgid: 1, job: { pgid: 2 } }]);
+  assert.deepEqual(seen, ['install', 'save-work']);
+  assert.equal(recordGroups(null, rec), null, 'no runLocked: none');
 });
