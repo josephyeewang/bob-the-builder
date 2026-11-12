@@ -454,6 +454,20 @@ test('L1001: two passes with no rules change both write check 12\'s snapshot; a 
   assert.equal(readRulesSnapshot(s.file, { uid: process.getuid(), now: t }).ok, true, 'still inside the grace');
   assert.match(readRulesSnapshot(s.file, { uid: process.getuid(), now: t - 60_000 + FETCH_GRACE_MS + 1 }).reason, /is stale/);
   assert.ok(!queued(readRecord(s.w)).some((x) => /check 12's rules/.test(x)), 'rules not usable are the reader\'s to tell, not a write failure');
+  // PR-2 r2 M1: the rules file deleted (GitHub answers 404): the Dispatcher refuses now, so the snapshot is removed and the
+  // runners refuse at once, not after the grace.
+  t += 60_000;
+  await wire(s.config, opts());
+  assert.equal(readRulesSnapshot(s.file, { uid: process.getuid(), now: t }).ok, true, 'reachable again: written');
+  const gone = fakeGitHubFetch(s.w.fake);
+  await wire(s.config, opts(async (url, init) => (/\/contents\//.test(new URL(url).pathname) ? { status: 404, json: async () => ({}) } : gone(url, init))));
+  assert.equal(existsSync(s.file), false, logs.join('\n'));
+  assert.match(readRulesSnapshot(s.file, { uid: process.getuid(), now: t }).reason, /is missing/);
+  assert.ok(logs.some((l) => /so the rules snapshot is removed: the runners refuse at once/.test(l)), logs.join('\n'));
+  // One that can't be removed is logged and queued.
+  mkdirSync(s.file); writeFileSync(join(s.file, 'x'), 'y');
+  await wire(s.config, opts(async (url, init) => (/\/contents\//.test(new URL(url).pathname) ? { status: 404, json: async () => ({}) } : gone(url, init))));
+  assert.ok(queued(readRecord(s.w)).some((x) => /^check 12's rules for the runners could not be kept: .*could not be removed .*the runners may use it until it goes stale/.test(x)), queued(readRecord(s.w)).join('\n'));
 });
 
 test('L1002: a snapshot folder others can read stops the write, which is logged and queued; the pass still runs', async () => {

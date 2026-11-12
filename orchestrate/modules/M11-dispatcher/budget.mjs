@@ -16,11 +16,12 @@
 // product's usable rules text with its reviewed commit and blob and when it was last fetched, into its product's
 // snapshot (setup/layout.mjs dispatcherRulesPath: products/<p>/rules, orchestrate's, 0700, an access list giving read to
 // the review user and the owner only; L1002). It writes even when nothing changed, so `written_at` stays fresh; a reader
-// that goes deny_all stops the writes, and the snapshot then goes stale. budget builds M10's engine over that, as the
+// that could not reach GitHub stops the writes, and the snapshot then goes stale; any other deny_all (the rules file
+// deleted, say) removes it, so the runners refuse at once, as the Dispatcher does (PR-2 r2 M1). budget builds M10's engine over that, as the
 // Dispatcher's own is built (dispatcher-wiring.mjs recordAndRules): every product listed, one with no usable rules read
 // as deny_all (so, as there, every start on the Mac is refused and the Mac-wide keys combine over every product), the
-// real commit and blob, the products' states from the Record, and the running count refused ("count unknown", so no
-// editing start passes until it is wired). A snapshot that is missing, written or holding a fetch older than the
+// real commit and blob, the products' states from the Record, and the engine's own running count refused ("count unknown",
+// so its may() passes no editing start; check 12's start gate counts sessions itself, through runningNow). A snapshot that is missing, written or holding a fetch older than the
 // reader's own grace (M10 FETCH_GRACE_MS) or ahead of the clock, a link, not the Record owner's, or that others can read
 // or write (the file or its folder, by mode or access list) is refused, plainly: check 12 then refuses the start and
 // says why. It is read at most once a second, so one check 12 decides on one snapshot; its age is checked on every use.
@@ -57,8 +58,7 @@ const RULE_CALLS = Object.freeze(['may', 'get', 'num', 'dec', 'flag', 'classify'
 const NAME = /^[A-Za-z0-9._-]{1,200}$/;
 // How long one read of the snapshot is used for (L1001 review m3): one check 12 decides on one snapshot.
 export const SNAPSHOT_REUSE_MS = 1000;
-// The rights an access-list entry may give on the snapshot or its folder (setup/layout.mjs RULES_READ_ACL, and what macOS
-// shows on a file that inherits it): reading only.
+// The rights an access-list entry may give are wiring/worker-ports.mjs ACL_READS (reading only).
 
 const iso = (ms) => new Date(ms).toISOString();
 
@@ -81,12 +81,24 @@ export function rulesSnapshotFolderProblem(dir, uid, { lstat = lstatSync } = {})
  * review M2: the runners' grace counts from that fetch, as the reader's own does). Atomic: a new file beside it (0600, made
  * exclusive), synced, renamed over, and the folder synced. → { ok: true } or { ok: false, reason }; never throws.
  */
+// M10 reader.mjs refreshOne's words for a launch that could not reach GitHub (the only refusal left to go stale).
+const UNREACHED = /^GitHub unreachable: /;
 export function writeRulesSnapshot(file, { product, products, state, now = Date.now(), uid = process.getuid() }) {
   let tmp = null;
   try {
     if (typeof file !== 'string' || !isAbsolute(file)) return { ok: false, reason: 'the rules snapshot needs a full path' };
     const own = state(product);
-    if (!USABLE.includes(own?.status)) return { ok: false, reason: `${product}'s rules are ${own?.status ?? 'not known'}, so no snapshot is written (it goes stale)` };
+    if (!USABLE.includes(own?.status)) {
+      // GitHub not reached this launch: the last snapshot goes stale on the reader's own grace (L1001). Any other refusal
+      // (the rules file or main deleted, a reader error, no rules ever adopted) is the Dispatcher refusing now, so the
+      // snapshot is removed and the runners refuse at once, as it does (PR-2 r2 M1). A reason in other words is removed too.
+      if (UNREACHED.test(String(own?.reason ?? ''))) return { ok: false, reason: `${product}'s rules are ${own.status} (${String(own.reason).slice(0, 200)}), so no snapshot is written (it goes stale)` };
+      const why = `${product}'s rules are ${own?.status ?? 'not known'}${own?.reason ? ` (${String(own.reason).slice(0, 200)})` : ''}`;
+      try { rmSync(file, { force: true }); } catch (e) {
+        return { ok: false, removeFailed: true, reason: `${why}, but the last rules snapshot could not be removed (${e?.code ?? e?.message ?? e}): the runners may use it until it goes stale` };
+      }
+      return { ok: false, removed: true, reason: `${why}, so the rules snapshot is removed: the runners refuse at once` };
+    }
     if (!Array.isArray(products) || !products.includes(product) || !products.every((p) => typeof p === 'string' && NAME.test(p)) || new Set(products).size !== products.length) return { ok: false, reason: `the product list does not name ${product} once, by plain names` };
     const rules = {};
     for (const p of products) {
@@ -258,7 +270,8 @@ export function budget(config, { now = Date.now, io = {} } = {}) {
       }
       return r[k](...a);
     }])),
-    get rev() { return current().rev; },
+    // As makeRules's: null when there is no rules version to name, never a throw (PR-2 r2 m2).
+    get rev() { try { return current().rev; } catch { return null; } },
   });
   return Object.freeze({
     rules,

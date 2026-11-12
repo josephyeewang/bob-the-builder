@@ -3,7 +3,7 @@
 // Run: node --test orchestrate/modules/M11-dispatcher/budget.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { FETCH_GRACE_MS } from '../M10-rules/reader.mjs';
@@ -52,12 +52,29 @@ test('L1001: a write with no change still writes the file again, so its written_
 
 test('L1001: rules that are not usable are not written: the own product\'s stop the write; another\'s are left out of the rules but kept on the list', () => {
   const { file } = folder();
-  for (const status of ['deny_all', undefined]) {
-    const r = write(file, { state: () => (status ? { ...okState(), status } : null) });
-    assert.equal(r.ok, false);
-    assert.match(r.reason, /so no snapshot is written \(it goes stale\)/);
+  // GitHub not reached: nothing is written, and a snapshot already there is left to go stale (L1001).
+  assert.deepEqual(write(file), { ok: true });
+  const before = readFileSync(file, 'utf8');
+  const r = write(file, { now: T0 + 60_000, state: () => ({ status: 'deny_all', reason: 'GitHub unreachable: offline' }) });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /so no snapshot is written \(it goes stale\)/);
+  assert.equal(readFileSync(file, 'utf8'), before, 'left as it was');
+  // PR-2 r2 M1: any other refusal of the own rules (deleted, a reader error, none known) removes it: the runners refuse at once.
+  for (const own of [{ status: 'deny_all', reason: 'rules file not found' }, { status: 'deny_all', reason: 'reader_error: boom' }, { status: 'deny_all' }, null]) {
+    assert.deepEqual(write(file), { ok: true });
+    const g = write(file, { state: () => own });
+    assert.equal(g.ok, false); assert.equal(g.removed, true, JSON.stringify(own));
+    assert.match(g.reason, /so the rules snapshot is removed: the runners refuse at once/);
+    assert.equal(existsSync(file), false, JSON.stringify(own));
+    assert.match(read(file).reason, /missing|no such|ENOENT/i);
   }
-  assert.equal(read(file).ok, false, 'nothing was written');
+  assert.equal(write(file, { state: () => null }).removed, true, 'nothing there to remove: still answered as removed');
+  // A removal that fails is said, for the Dispatcher to queue.
+  const dir2 = folder(); mkdirSync(dir2.file);
+  writeFileSync(join(dir2.file, 'x'), 'y');
+  const f = writeRulesSnapshot(dir2.file, { product: PRODUCT, products: [PRODUCT], state: () => ({ status: 'deny_all', reason: 'rules file not found' }), now: T0 });
+  assert.equal(f.removeFailed, true, JSON.stringify(f));
+  assert.match(f.reason, /could not be removed .*the runners may use it until it goes stale/);
   // The own product's last_good is usable; another product's deny_all has no rules, but is still listed, so the runners'
   // engine reads it as deny_all as the Dispatcher's does (L1001 review M1; budget() below).
   const state = (p) => (p === PRODUCT ? okState(FIXTURE, C1, B1, 'last_good') : { status: 'deny_all' });
@@ -74,8 +91,10 @@ test('L1001: rules that are not usable are not written: the own product\'s stop 
 test('L1001: the snapshot goes stale once the writes stop, and is refused after the reader\'s grace', () => {
   const { file } = folder();
   write(file);
-  // The Dispatcher's rules went deny_all: its writes stop (above), so the last one ages.
-  assert.equal(write(file, { now: T0 + 60_000, state: () => ({ status: 'deny_all' }) }).ok, false);
+  // The Dispatcher can't reach GitHub: its writes stop and the file is left (above), so the last one ages.
+  const off = write(file, { now: T0 + 60_000, state: () => ({ status: 'deny_all', reason: 'GitHub unreachable: ETIMEDOUT' }) });
+  assert.equal(off.ok, false);
+  assert.equal(off.removed, undefined, 'unreachable leaves the file');
   assert.equal(read(file, T0 + FETCH_GRACE_MS).ok, true, 'still inside the grace');
   const stale = read(file, T0 + FETCH_GRACE_MS + 1);
   assert.equal(stale.ok, false);
@@ -87,6 +106,8 @@ test('L1001: the snapshot goes stale once the writes stop, and is refused after 
   assert.equal(write(file, { now: T0 + 200_000, state: () => okState(FIXTURE, C1, B1, 'last_good', T0) }).ok, true);
   assert.equal(read(file, T0 + FETCH_GRACE_MS).ok, true);
   assert.match(read(file, T0 + FETCH_GRACE_MS + 1).reason, /is stale: the rules for .* were last fetched at 2026-11-11T12:00:00\.000Z, over 300 s ago/);
+  // Written ahead of the clock while its rules were fetched before it: the write time alone is ahead, and that is refused.
+  assert.match(read(file, T0 + 100_000).reason, /was written at .*, ahead of this Mac's clock/);
 });
 
 test('L1002: an access list on the snapshot or its folder letting anyone but the two readers in, or letting them more than read, is refused', () => {
@@ -199,6 +220,7 @@ test('L995: budget() reads the snapshot on every use, builds the rules again whe
   const refused = b.rules.may('start_session', { product: PRODUCT, role: 'reviewer', tier: 2, editing: false });
   assert.equal(refused.decision, 'deny');
   assert.match(refused.reason, /rules error: .*is stale/);
+  assert.equal(b.rules.rev, null, 'a refused snapshot names no version, never a throw (PR-2 r2 m2)');
   assert.equal(b.rules.classify({ product: PRODUCT, files: [] }).tier, 1);
   // A start the rules would count is refused as the Dispatcher's engine refuses it: the count is not wired.
   snap(w, () => at(w));
@@ -239,9 +261,14 @@ test('L1001 review m3: one read of the snapshot serves the uses inside a second,
   w.clock.t += 1;
   assert.equal(shake(), true, 'read again after it');
   assert.equal(reads, 2);
-  // Its age is checked on every use, so a reused read never outlives the grace.
-  w.clock.t += FETCH_GRACE_MS;
+  // Its age is checked on every use, so a reused read never outlives the grace: read 500 ms inside the grace, then used
+  // again 600 ms later, inside the same second (no new read), it is past the grace and refused.
+  w.clock.t += FETCH_GRACE_MS - 500;
+  assert.equal(shake(), true, 'read again, still inside the grace');
+  assert.equal(reads, 3);
+  w.clock.t += 600;
   assert.throws(shake, /is stale/);
+  assert.equal(reads, 3, 'refused on the reused read, not a new one');
 });
 
 test('L995: budget() needs every path and uid it reads, and runningNow reads both runners\' status the one way (sessionsNow)', () => {

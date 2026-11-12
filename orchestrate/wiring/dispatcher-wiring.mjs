@@ -223,11 +223,12 @@ export async function wire(config, { limitedSync, log = (s) => process.stderr.wr
   const stateDir = approvalsDir(c);
   const { rec, rules, gh, entry, reader, products } = await recordAndRules(c, { who: 'dispatcher', log, fetchFn, now });
   // Launch check 12's rules for the two runners (L1001, M11 budget.mjs): one launch is one pass, and every pass whose own
-  // rules are usable (ok or last_good) writes the snapshot again, changed or not, so its written_at stays fresh. One whose
-  // rules are not leaves it to go stale, and the runners then refuse it. A write that fails is logged and queued.
+  // rules are usable (ok or last_good) writes the snapshot again, changed or not, so its written_at stays fresh. One that
+  // could not reach GitHub leaves it to go stale; any other refusal removes it, so the runners refuse at once (PR-2 r2 M1).
+  // A write, or a removal, that fails is logged and queued.
   if (c.rulesSnapshotFile) {
     const w = writeRulesSnapshot(c.rulesSnapshotFile, { product: c.product, products, state: (p) => reader.state(p), now: now() });
-    if (!w.ok && USABLE_RULES.includes(reader.state(c.product)?.status)) {
+    if (!w.ok && (w.removeFailed || USABLE_RULES.includes(reader.state(c.product)?.status))) {
       log(`dispatcher: ${w.reason}`);
       try { queueAlert(rec, `check 12's rules for the runners could not be kept: ${w.reason}; no worker or review session starts once the last snapshot goes stale`, { now: now() }); } catch (e) { log(`dispatcher: that could not be queued (${e?.message ?? e})`); }
     } else if (!w.ok) log(`dispatcher: ${w.reason}`);
