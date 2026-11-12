@@ -22,15 +22,17 @@ import { ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
 import { HOLD_FACT } from '../modules/M11-dispatcher/pass.mjs';
 import { LAST_PASS_FACT } from '../modules/M11-dispatcher/tick.mjs';
 import { USAGE_FACT } from '../modules/M11-dispatcher/usage.mjs';
-import { wire, checkUser, lastReturn, dispatcherLate, dropLateAlerts, lockHolder, LIVE_PASS_MAX_MS, NOT_WIRED_PASSES, ROBOT_PASSES, APP_KEYS, robotToken, robotChannel, markToldByBeat } from './robot-wiring.mjs';
+import { wire as wireOwn, checkUser, lastReturn, dispatcherLate, dropLateAlerts, lockHolder, LIVE_PASS_MAX_MS, NOT_WIRED_PASSES, ROBOT_PASSES, APP_KEYS, robotToken, robotChannel, markToldByBeat, SWEEP_CAUSES, SWEEP_MARGIN_MS, LATE_CAUSE } from './robot-wiring.mjs';
 import { generateKeyPairSync } from 'node:crypto';
 import { pidDead, takePassLock } from '../modules/M11-dispatcher/pass-lock.mjs';
 import { tick } from '../modules/M11-dispatcher/tick.mjs';
 import { rulesWith } from '../modules/M11-dispatcher/fixtures.test-helper.mjs';
 import { fakeAlert } from '../test/fake-alert.test-helper.mjs';
 import { DISPATCHER_LATE_MIN } from '../modules/M13-ledger/heartbeat.mjs';
-import { runPasses, CAUSE, main, NOT_QUEUED, LOCK_REFUSED, pidState, takeRoundLock } from './robot-main.mjs';
-import { fakeIssues } from '../modules/M13-ledger/alerts.mjs';
+import { runPasses, CAUSE, main, NOT_QUEUED, LOCK_REFUSED, pidState, takeRoundLock, PASS_DEADLINE_MS } from './robot-main.mjs';
+// wire as robot-main's main calls it: with the pass limit handed in (#465 r2 M1). A test that leaves it out says so.
+const wire = (config, opts = {}) => wireOwn(config, { passDeadlineMs: PASS_DEADLINE_MS, ...opts });
+import { fakeIssues, makeAlerts } from '../modules/M13-ledger/alerts.mjs';
 import { notWiredText } from './dispatcher-wiring.mjs';
 import { UNSENT, readUnsent } from '../modules/M9-record/unsent.mjs';
 import { holdAlert } from '../modules/M11-dispatcher/pass.mjs';
@@ -393,9 +395,21 @@ test('L265 M1, P16: an alert the queue refuses, or a queue that throws, is logge
   // M1: holdAlert answers false (the queue refused it).
   r = await runPasses({ rec, passes, now: () => Date.now(), hold: () => false });
   assert.equal(r.gate.tell, NOT_QUEUED);
+  // #465 r2 review m2: what the pass itself said (the sweep's tell) is kept, and the refusal added after it.
+  const told = Object.fromEntries(ROBOT_PASSES.map((p) => [p, () => { if (p === 'gate') throw Object.assign(new Error('boom'), { tell: 'the sweep was not run' }); return {}; }]));
+  r = await runPasses({ rec, passes: told, now: () => Date.now(), hold: () => false });
+  assert.equal(r.gate.tell, `the sweep was not run; ${NOT_QUEUED}`);
+  r = await runPasses({ rec, passes: told, now: () => Date.now(), hold: () => { throw new Error('the queue is damaged'); } });
+  assert.equal(r.gate.tell, 'the sweep was not run; the queue is damaged');
+  assert.equal(r.gate.untold, true, 'a queue that threw: the failure itself was not told (#465 r2 audit c2)');
   // Already told today (null) is not a refusal.
   r = await runPasses({ rec, passes, now: () => Date.now(), hold: () => null });
   assert.equal(r.gate.tell, undefined);
+  // #465 r2 audit c2: a pass's own tell beside a failure alert that was queued is not "could not be told".
+  r = await runPasses({ rec, passes: told, now: () => Date.now(), hold: () => true });
+  assert.deepEqual([r.gate.tell, r.gate.untold], ['the sweep was not run', undefined]);
+  r = await runPasses({ rec, passes: told, now: () => Date.now(), hold: () => false });
+  assert.equal(r.gate.untold, true);
   // In main: the failed pass's line says it could not be told, and a stopped round whose alert is refused says so.
   writeFileSync(lockOf(w), JSON.stringify({ pid: deadPid(), taken_at: 'T0' }));
   const logs = [];
@@ -1302,6 +1316,362 @@ test('#451 L967: an alert lost outside the per-kind list (usage) still makes the
   const logs = [];
   await main([w.configFile], { self: w.main, log: (l) => logs.push(l), wireOpts: { fetchFn } });
   assert.match(logs.join('\n'), /robot: heartbeat ran, and 1 of its items failed/);
+});
+
+// L977: one alerts object a round, and the sweep on it after the heartbeat, so an alert issue whose number the Record
+// lost is closed once its cause clears (#449).
+test('L977: an alert issue whose number the Record lost is closed by the next round\'s sweep once its cause clears', async () => {
+  const w = withKey(world({ extra: APP }));
+  const gh = appGitHub(w);
+  let t = Date.parse('2026-11-03T10:00:00Z');
+  const round = () => wire(w.config, { fetchFn: gh.fetchFn, now: () => t, log: () => {} });
+  const first = await round();
+  const { rec } = first;
+  const sense = (id, doc) => { const r = rec.write({ actor: 'sensors', entity: 'fact', id, expectRev: rec.read('fact', id)?.rev ?? 0, doc }); assert.ok(r.ok, `${id}: ${r.reason}`); };
+  const dispatcherPass = () => assert.ok(rec.write({ actor: 'dispatcher', entity: 'fact', id: LAST_PASS_FACT, expectRev: rec.read('fact', LAST_PASS_FACT)?.rev ?? 0,
+    doc: { at: isoAt(t), started_at: isoAt(t), steps: {} }, kind: 'full_pass' }).ok);
+  dispatcherPass();
+  sense('signed-in-account', { account: null, signed_in: false, reason: 'nobody is signed in', observed_at: isoAt(t) });
+  await first.passes.heartbeat();
+  const out = [...gh.issues.values()].find((i) => /heartbeat red: signed-out/.test(i.title));
+  assert.ok(out, 'the signed-out alert is raised');
+  // The Record loses where that issue is (as when its write was refused): its clear will find nothing to close.
+  const f = rec.list('fact').find((x) => x.doc?.kind === 'fact.alert' && x.doc?.issue === out.number);
+  assert.ok(f, 'the alert\'s own fact');
+  assert.ok(rec.write({ actor: 'ledger', entity: 'fact', id: f.id, expectRev: f.rev, doc: { ...f.doc, issue: null } }).ok);
+  // The next round (its own process, its own alerts object): signed in again, so the clear answers 'none' and the sweep
+  // after the beat closes the issue.
+  t += 5 * MIN; dispatcherPass();
+  sense('signed-in-account', { account: 'b', observed_at: isoAt(t) });
+  const second = await round();
+  const r = await second.passes.heartbeat();
+  assert.deepEqual(r.sweep.closed, [out.number], JSON.stringify(r.sweep));
+  assert.equal(r.sweep.why, null);
+  assert.equal(gh.issues.get(out.number).state, 'closed');
+  assert.ok(!queued(rec).some((q) => /alert sweep/.test(q)), 'no trouble to tell');
+});
+
+test('L977: a sweep that says why is round trouble, one queued entry under its own cause, not one per pass; what it did is logged; the heartbeat\'s answer is unchanged', async () => {
+  const w = withKey(world({ extra: APP }));
+  const gh = appGitHub(w);
+  // GitHub won't say who the robot is: any bot counts as the robot, so the sweep closes nothing and says why.
+  const fetchFn = async (url, init = {}) => (new URL(url).pathname === '/app' ? { status: 500, json: async () => ({}) } : gh.fetchFn(url, init));
+  const logs = [];
+  const { rec, passes } = await wire(w.config, { fetchFn, log: (l) => logs.push(l) });
+  const r = await passes.heartbeat();
+  assert.match(String(r.sweep?.why), /login is not known/);
+  assert.deepEqual(r.red, ['dispatcher', 'robot-login-unknown'], 'the beat\'s own answer: the Dispatcher never ran and the login is unknown, nothing from the sweep');
+  assert.equal(r.failed, undefined, 'a sweep with a why is not a failed heartbeat');
+  assert.match(logs.join('\n'), /robot: alert sweep: closed \[\], failed \[\], kept \[\]; the robot's own login is not known/);
+  assert.ok(queued(rec).some((q) => /^the robot job's alert sweep: the robot's own login is not known/.test(q)), queued(rec).join(' | '));
+  // Under its own kind's cause, which marks it (#465 r1 m2, m5 P5).
+  const entries = rec.read('fact', ALERT_QUEUE_FACT)?.doc?.entries ?? [];
+  assert.equal(entries.find((e) => /alert sweep/.test(e.text))?.mark?.fact, HOLD_FACT(SWEEP_CAUSES.login), JSON.stringify(entries));
+  assert.equal(r.sweep.tell, undefined, 'queued: nothing to say it was not');
+  await passes.heartbeat();
+  assert.equal(queued(rec).filter((q) => /alert sweep/.test(q)).length, 1, 'once, not every pass');
+});
+
+test('L977 review: a sweep that throws, or runs past its limit, is told masked and never fails the heartbeat; no pass is named sweep', async () => {
+  const causes = Object.values(SWEEP_CAUSES);
+  assert.equal(new Set(causes).size, causes.length, 'one cause per kind');
+  assert.ok(!ROBOT_PASSES.some((p) => causes.includes(CAUSE(p))), 'no sweep cause is a pass\'s');
+  const TOK = 'ghs_'.padEnd(40, 'z');
+  for (const [name, broken, want, cause] of [
+    ['throws', async () => { throw new Error(`list broke with ${TOK}`); }, /^it stopped: /, SWEEP_CAUSES.list],
+    ['hangs', () => new Promise(() => {}), /^it did not finish within 50 ms/, SWEEP_CAUSES.timeout],
+  ]) {
+    const w = withKey(world({ extra: APP }));
+    const gh = appGitHub(w);
+    // The pinned issue is the beat's last write: only GitHub's open-issue list after it, the sweep's, breaks.
+    let pinned = false;
+    const fetchFn = async (url, init = {}) => {
+      const u = new URL(url); const method = init.method ?? 'GET';
+      if (pinned && u.pathname === `/repos/${ALERT_REPO}/issues` && method === 'GET') return broken();
+      const res = await gh.fetchFn(url, init);
+      if (method !== 'GET' && /mini_alive_at:/.test(String(init.body ?? ''))) pinned = true;
+      return res;
+    };
+    const logs = [];
+    const { rec, passes } = await wire(w.config, { fetchFn, log: (l) => logs.push(l), sweepDeadlineMs: 50 });
+    const r = await passes.heartbeat();
+    assert.ok(pinned, `${name}: the beat posted its pinned issue`);
+    assert.equal(r.failed, undefined, name);
+    assert.match(r.sweep.why, want, name);
+    assert.ok(!logs.join('\n').includes(TOK) && !queued(rec).join('\n').includes(TOK), `${name}: the token is masked`);
+    assert.ok(queued(rec).some((q) => /^the robot job's alert sweep: it (stopped|did not finish)/.test(q)), `${name}: ${queued(rec).join(' | ')}`);
+    const entries = rec.read('fact', ALERT_QUEUE_FACT)?.doc?.entries ?? [];
+    assert.equal(entries.find((e) => /alert sweep/.test(e.text))?.mark?.fact, HOLD_FACT(cause), `${name}: ${JSON.stringify(entries)}`);
+  }
+});
+
+// #465 r1: a round whose alert issue lost its number in the Record, so the next round's sweep has an issue to close.
+// `wrap(fetchFn, state, clock)` wraps the second round's GitHub; `state.pinned` turns true once that round's beat posted.
+async function orphanRound({ wrap = (f) => f, wireOpts = {} } = {}) {
+  const w = withKey(world({ extra: APP }));
+  const gh = appGitHub(w);
+  const clock = { t: Date.parse('2026-11-03T10:00:00Z') };
+  const first = await wire(w.config, { fetchFn: gh.fetchFn, now: () => clock.t, log: () => {} });
+  const rec0 = first.rec;
+  const sense = (id, doc) => assert.ok(rec0.write({ actor: 'sensors', entity: 'fact', id, expectRev: rec0.read('fact', id)?.rev ?? 0, doc }).ok);
+  const dispatcherPass = () => assert.ok(rec0.write({ actor: 'dispatcher', entity: 'fact', id: LAST_PASS_FACT, expectRev: rec0.read('fact', LAST_PASS_FACT)?.rev ?? 0,
+    doc: { at: isoAt(clock.t), started_at: isoAt(clock.t), steps: {} }, kind: 'full_pass' }).ok);
+  dispatcherPass();
+  sense('signed-in-account', { account: null, signed_in: false, reason: 'nobody is signed in', observed_at: isoAt(clock.t) });
+  await first.passes.heartbeat();
+  const out = [...gh.issues.values()].find((i) => /heartbeat red: signed-out/.test(i.title));
+  const f = rec0.list('fact').find((x) => x.doc?.kind === 'fact.alert' && x.doc?.issue === out.number);
+  assert.ok(rec0.write({ actor: 'ledger', entity: 'fact', id: f.id, expectRev: f.rev, doc: { ...f.doc, issue: null } }).ok);
+  clock.t += 5 * MIN; dispatcherPass();
+  sense('signed-in-account', { account: 'b', observed_at: isoAt(clock.t) });
+  const state = { pinned: false };
+  const inner = wrap(gh.fetchFn, state, clock);
+  const fetchFn = async (url, init = {}) => {
+    const res = await inner(url, init);
+    if ((init.method ?? 'GET') !== 'GET' && /mini_alive_at:/.test(String(init.body ?? ''))) state.pinned = true;
+    return res;
+  };
+  const logs = [];
+  const second = await wire(w.config, { fetchFn, now: () => clock.t, log: (l) => logs.push(l), ...wireOpts });
+  return { ...second, gh, out, logs, state, clock };
+}
+const sweepEntries = (rec) => (rec.read('fact', ALERT_QUEUE_FACT)?.doc?.entries ?? []).filter((e) => /alert sweep/.test(e.text));
+const listCall = (url, init) => (init.method ?? 'GET') === 'GET' && new URL(url).pathname === `/repos/${ALERT_REPO}/issues`;
+
+test('#465 r1 m3: a close GitHub refused during the sweep is told under its own cause', async () => {
+  const o = await orphanRound({ wrap: (f, st) => async (url, init = {}) => {
+    if (st.pinned && (init.method ?? 'GET') === 'PATCH' && /"state":"closed"/.test(String(init.body ?? ''))) return { status: 500, json: async () => ({}) };
+    return f(url, init);
+  } });
+  const r = await o.passes.heartbeat();
+  assert.deepEqual(r.sweep.failed, [o.out.number], JSON.stringify(r.sweep));
+  assert.match(r.sweep.why, new RegExp(`GitHub refused to close issue #${o.out.number}; it is tried again a day on`));
+  assert.deepEqual(sweepEntries(o.rec).map((e) => e.mark?.fact), [HOLD_FACT(SWEEP_CAUSES.close)], JSON.stringify(sweepEntries(o.rec)));
+  assert.equal(r.failed, undefined, 'the heartbeat is not failed by it');
+});
+
+test('#465 r1 m5 (P8), c3: the Record refusing to keep where an alert is during the sweep is told; trouble the beat left is not the sweep\'s', async () => {
+  for (const when of ['sweep', 'beat']) {
+    // M13's own object, whose cacheTrouble says the Record refused a cache write: from the sweep on, or already after the beat.
+    let swept = false;
+    const alertsOf = (o) => { const a = makeAlerts(o); return { ...a, sweep: async (x) => { swept = true; return a.sweep(x); }, cacheTrouble: () => (when === 'beat' || swept ? 'the store is full' : a.cacheTrouble()) }; };
+    const o = await orphanRound({ wireOpts: { alertsOf } });
+    const r = await o.passes.heartbeat();
+    const causes = sweepEntries(o.rec).map((e) => e.mark?.fact);
+    if (when === 'sweep') {
+      assert.match(String(r.sweep.why), /the Record refused to keep where an alert is, this round \(the store is full\)/, JSON.stringify(r.sweep));
+      assert.ok(causes.includes(HOLD_FACT(SWEEP_CAUSES.cache)), JSON.stringify(causes));
+    } else assert.ok(!causes.includes(HOLD_FACT(SWEEP_CAUSES.cache)), `the beat's own trouble, told by its own report: ${JSON.stringify(causes)} ${JSON.stringify(r.sweep)}`);
+  }
+});
+
+test('#465 r1 m4, m5 (P9): a sweep trouble the queue refuses, or throws on, is logged and said in the sweep\'s tell', async () => {
+  for (const how of ['false', 'throws']) {
+    const hold = (a) => { if (String(a.cause).startsWith('robot-sweep-')) { if (how === 'false') return false; throw new Error('queue broke'); } return holdAlert(a); };
+    const o = await orphanRound({ wrap: (f, st) => async (url, init = {}) => (st.pinned && listCall(url, init) ? { status: 500, json: async () => ({}) } : f(url, init)), wireOpts: { hold } });
+    const r = await o.passes.heartbeat();
+    assert.ok(r.sweep.why, how);
+    assert.ok(String(r.sweep.tell).startsWith(`the alert sweep's trouble: ${SWEEP_CAUSES.list} could not be queued`), `${how}: ${JSON.stringify(r.sweep)}`);
+    assert.ok(o.logs.some((l) => l.startsWith(`robot: the alert sweep's trouble (${SWEEP_CAUSES.list}) could not be queued`)), `${how}: ${o.logs.join(' | ')}`);
+    assert.equal(r.failed, undefined, how);
+  }
+});
+
+test('#465 r1 m1: the sweep\'s limit is what the heartbeat pass has left, less the margin; with none left it is not run', async () => {
+  // A pass limit that leaves 50 ms: a hanging list is cut at 50, not at the sweep's own 30 s.
+  const hang = (f, st) => async (url, init = {}) => (st.pinned && listCall(url, init) ? new Promise(() => {}) : f(url, init));
+  const a = await orphanRound({ wrap: hang, wireOpts: { passDeadlineMs: SWEEP_MARGIN_MS + 50 } });
+  const ra = await a.passes.heartbeat();
+  assert.match(ra.sweep.why, /^it did not finish within 50 ms/);
+  assert.deepEqual(sweepEntries(a.rec).map((e) => e.mark?.fact), [HOLD_FACT(SWEEP_CAUSES.timeout)]);
+  // The beat took two minutes of a one-minute pass: the sweep is not run, GitHub is not asked, and it says why.
+  let listed = 0;
+  const slow = (f, st, clock) => async (url, init = {}) => {
+    if (st.pinned && listCall(url, init)) listed += 1;
+    const res = await f(url, init);
+    if ((init.method ?? 'GET') !== 'GET' && /mini_alive_at:/.test(String(init.body ?? ''))) clock.t += 2 * MIN;
+    return res;
+  };
+  const b = await orphanRound({ wrap: slow, wireOpts: { passDeadlineMs: MIN } });
+  const rb = await b.passes.heartbeat();
+  assert.match(rb.sweep.why, /^it was not run: the heartbeat pass had 0 ms of its 60000 left/);
+  assert.equal(listed, 0, 'GitHub\'s list was not read');
+  assert.deepEqual(sweepEntries(b.rec).map((e) => e.mark?.fact), [HOLD_FACT(SWEEP_CAUSES.timeout)]);
+  assert.equal(rb.failed, undefined);
+});
+
+test('#465 r1 m5 (P14): a slow sweep does not hold back the late alert\'s mark and drop', async () => {
+  const w = withKey(world({ extra: APP }));
+  const gh = appGitHub(w);
+  let pinned = false; let release; let hanging = false;
+  const gate = new Promise((r) => { release = r; });
+  const fetchFn = async (url, init = {}) => {
+    if (pinned && listCall(url, init)) { hanging = true; await gate; }
+    const res = await gh.fetchFn(url, init);
+    if ((init.method ?? 'GET') !== 'GET' && /mini_alive_at:/.test(String(init.body ?? ''))) pinned = true;
+    return res;
+  };
+  const { rec, passes } = await wire(w.config, { fetchFn, log: () => {}, sweepDeadlineMs: 20_000 });
+  const hb = passes.heartbeat();
+  for (let i = 0; i < 400 && !hanging; i += 1) await new Promise((r) => setTimeout(r, 5));
+  assert.ok(hanging, 'the sweep is waiting on GitHub\'s list');
+  const late = dispatcherLate(rec, { nowMs: Date.now(), holder: null });
+  assert.ok(rec.read('fact', HOLD_FACT(LATE_CAUSE(late.since)))?.doc?.told_at, `the late alert's hold is marked told while the sweep still waits: ${rec.list('fact').map((f) => f.id).join(', ')}`);
+  assert.ok(!queued(rec).some((q) => /the Dispatcher has no full pass on record/.test(q)), 'and its queued copy dropped');
+  release();
+  const r = await hb;
+  assert.equal(r.failed, undefined);
+});
+
+test('#465 r1 c2: a sweep answer that is not the shape, or none, is the sweep\'s trouble, never a failed heartbeat', async () => {
+  for (const [name, answer, want] of [['no lists', { swept: true }, null], ['nothing', null, /^it answered no result$/], ['a number', 3, /^it answered no result$/]]) {
+    const alertsOf = (o) => ({ ...makeAlerts(o), sweep: async () => answer });
+    const o = await orphanRound({ wireOpts: { alertsOf } });
+    const r = await o.passes.heartbeat();
+    assert.equal(r.failed, undefined, name);
+    assert.deepEqual([r.sweep.closed, r.sweep.failed, r.sweep.kept], [[], [], []], name);
+    if (want) assert.match(String(r.sweep.why), want, name); else assert.equal(r.sweep.why, null, name);
+  }
+});
+
+test('#465 r1: a beat that throws still has its sweep run, and the pass still fails with the beat\'s own error', async () => {
+  let swept = 0;
+  const alertsOf = (o) => { const a = makeAlerts(o); return { ...a, sweep: async (x) => { swept += 1; return a.sweep(x); } }; };
+  const o = await orphanRound({ wrap: (f, st) => async (url, init = {}) => { if ((init.method ?? 'GET') !== 'GET' && /mini_alive_at:/.test(String(init.body ?? ''))) throw new Error('pinned edit broke'); return f(url, init); }, wireOpts: { alertsOf } });
+  await assert.rejects(o.passes.heartbeat(), /pinned edit broke/);
+  assert.equal(swept, 1, 'the sweep ran');
+});
+
+test('#465 r2 M1: robot-main, run as its own process with the App named, wires and runs the sweep with its pass limit', () => {
+  // The job as launchd starts it: a wire that imported robot-main back would wait on its top-level main for ever (exit 13),
+  // and one not handed the pass limit would not run the sweep and queue that.
+  const w = withKey(world({ extra: APP }));
+  writeFileSync(w.f('fake-github.json'), JSON.stringify({ ...w.fake, app: { installation: APP.appInstallation, alertRepo: ALERT_REPO } }));
+  const r = boot(w);
+  assert.equal(r.code, 0, r.err);
+  assert.doesNotMatch(r.err, /it was not run/);
+  const rec = readRecord(w);
+  // Neither queued nor, once delivered, held as told: the sweep had no trouble, and the heartbeat pass did not fail.
+  assert.deepEqual(sweepEntries(rec), []);
+  assert.equal(rec.read('fact', HOLD_FACT(SWEEP_CAUSES.timeout)), null);
+  assert.doesNotMatch(r.err, /robot: heartbeat failed/);
+  assert.ok(!queued(rec).some((t) => /heartbeat pass failed/.test(t)), queued(rec).join(' | '));
+  assert.match(readFileSync(w.f('github.log'), 'utf8'), new RegExp(`GET /repos/${ALERT_REPO}/issues`), 'the alert repository was read');
+});
+
+test('#465 r2 M1: wire handed no pass limit does not run the sweep, and says so under the limit cause', async () => {
+  let swept = 0;
+  const alertsOf = (o) => { const a = makeAlerts(o); return { ...a, sweep: async (x) => { swept += 1; return a.sweep(x); } }; };
+  const o = await orphanRound({ wireOpts: { passDeadlineMs: undefined, alertsOf } });
+  const r = await o.passes.heartbeat();
+  assert.equal(swept, 0);
+  assert.match(r.sweep.why, /^it was not run: it was given no heartbeat pass limit/);
+  assert.deepEqual(sweepEntries(o.rec).map((e) => e.mark?.fact), [HOLD_FACT(SWEEP_CAUSES.timeout)]);
+  assert.equal(r.failed, undefined);
+});
+
+test('#465 r2 m5: a sweep mark the Record refuses is told under the mark cause', async () => {
+  const alertsOf = (o) => {
+    const inner = makeFactWriter(o.rec, { actor: 'ledger', now: o.now });
+    const writer = { ...inner, put: (id, doc) => (doc?.kind === 'fact.alert-sweep-list' ? { ok: false, reason: 'the store is full' } : inner.put(id, doc)) };
+    return makeAlerts({ ...o, writer });
+  };
+  const o = await orphanRound({ wireOpts: { alertsOf } });
+  const r = await o.passes.heartbeat();
+  assert.match(String(r.sweep.why), /the Record refused the sweep's mark \(the store is full\)/, JSON.stringify(r.sweep));
+  assert.deepEqual(sweepEntries(o.rec).map((e) => e.mark?.fact), [HOLD_FACT(SWEEP_CAUSES.mark)]);
+  assert.equal(r.failed, undefined);
+});
+
+test('#465 r2 m4: a why naming the login and a refused mark is queued under both causes', async () => {
+  const why = 'the robot\'s own login is not known, so its issues can\'t be told from another app\'s; nothing more was closed; the Record refused the sweep\'s list mark, so a key it tried may wait up to an hour';
+  const alertsOf = (o) => ({ ...makeAlerts(o), sweep: async () => ({ swept: false, closed: [], failed: [], kept: [], why }) });
+  const o = await orphanRound({ wireOpts: { alertsOf } });
+  const r = await o.passes.heartbeat();
+  assert.deepEqual(sweepEntries(o.rec).map((e) => e.mark?.fact).sort(), [HOLD_FACT(SWEEP_CAUSES.login), HOLD_FACT(SWEEP_CAUSES.mark)].sort());
+  assert.equal(r.failed, undefined);
+});
+
+test('#465 r2 m5: the sweep\'s limit runs from the pass\'s start, not from when the job was wired', async () => {
+  let swept = 0;
+  const alertsOf = (o) => { const a = makeAlerts(o); return { ...a, sweep: async (x) => { swept += 1; return a.sweep(x); } }; };
+  const o = await orphanRound({ wireOpts: { passDeadlineMs: MIN, alertsOf } });
+  o.clock.t += 2 * MIN;   // the round's earlier passes took longer than a whole pass limit
+  const r = await o.passes.heartbeat();
+  assert.equal(swept, 1, JSON.stringify(r.sweep));
+  assert.doesNotMatch(String(r.sweep.why), /not run|did not finish/);
+});
+
+test('#465 r2 m6: a sweep cause the queue refused joins the tell of a heartbeat pass that fails', async () => {
+  const hold = (a) => (String(a.cause).startsWith('robot-sweep-') ? false : holdAlert(a));
+  const o = await orphanRound({ wrap: (f, st) => async (url, init = {}) => {
+    if ((init.method ?? 'GET') !== 'GET' && /mini_alive_at:/.test(String(init.body ?? ''))) throw new Error('pinned edit broke');
+    return f(url, init);
+  }, wireOpts: { hold, passDeadlineMs: undefined } });
+  const e = await o.passes.heartbeat().then(() => null, (x) => x);
+  assert.match(String(e?.message), /pinned edit broke/);
+  assert.match(String(e?.tell), new RegExp(`the alert sweep's trouble: ${SWEEP_CAUSES.timeout} could not be queued`));
+});
+
+// #465 r2 audit m2: the other two failing-pass paths carry the sweep's refused cause too. No pass limit, so the sweep is
+// not run and holds its timeout cause, which this queue refuses.
+test('#465 r2 audit m2: a sweep cause the queue refused joins the tell when the late alert was neither queued nor told', async () => {
+  const w = withKey(world({ extra: APP }));
+  const gh = appGitHub(w);
+  const alertPost = (init) => { try { return init.method === 'POST' && /heartbeat red/.test(JSON.parse(init.body).title ?? ''); } catch { return false; } };
+  const fetchFn = async (url, init = {}) => (alertPost(init) ? { status: 500, json: async () => ({}) } : gh.fetchFn(url, init));
+  const { passes } = await wire(w.config, { fetchFn, hold: () => false, log: () => {}, passDeadlineMs: undefined });
+  const e = await passes.heartbeat().then(() => null, (x) => x);
+  assert.match(String(e?.message), /neither queued nor told/);
+  assert.equal(e.tell, `the Dispatcher-late alert could not be queued; the alert sweep's trouble: ${SWEEP_CAUSES.timeout} could not be queued`);
+});
+
+test('#465 r2 audit m2: a sweep cause the queue refused joins the tell when the pinned issue was not posted', async () => {
+  const w = withKey(world({ extra: APP }));
+  const gh = appGitHub(w);
+  const isPinned = (init) => { try { return /mini_alive_at:/.test(JSON.parse(init.body).body ?? ''); } catch { return false; } };
+  const fetchFn = async (url, init = {}) => (isPinned(init) && init.method === 'POST' ? { status: 500, json: async () => ({}) } : gh.fetchFn(url, init));
+  const hold = (a) => (String(a.cause).startsWith('robot-sweep-') ? false : holdAlert(a));
+  const { passes } = await wire(w.config, { fetchFn, hold, log: () => {}, passDeadlineMs: undefined });
+  const e = await passes.heartbeat().then(() => null, (x) => x);
+  assert.match(String(e?.message), /the pinned heartbeat issue was not posted/);
+  assert.equal(e.tell, `the alert sweep's trouble: ${SWEEP_CAUSES.timeout} could not be queued`);
+  // #465 r2 audit c2: in main, the heartbeat's own failure alert is queued, so its line does not say "could not be told".
+  const logs = [];
+  await main([w.configFile], { self: w.main, log: (l) => logs.push(l), wireOpts: { fetchFn, hold, passDeadlineMs: undefined } });
+  const line = logs.find((l) => /^robot: heartbeat failed: the pinned heartbeat issue was not posted/.test(l));
+  assert.ok(line, logs.join('\n'));
+  assert.doesNotMatch(line, /could not be told/);
+  assert.match(line, new RegExp(`\\(its failure is queued; the alert sweep's trouble: ${SWEEP_CAUSES.timeout} could not be queued\\)$`));
+});
+
+test('#465 r2 audit m3: a heartbeat with an alert GitHub lost still answers the sweep\'s status', async () => {
+  const w = withKey(world({ extra: APP }));
+  const gh = appGitHub(w);
+  const alertPost = (init) => { try { return init.method === 'POST' && /heartbeat red/.test(JSON.parse(init.body).title ?? ''); } catch { return false; } };
+  const fetchFn = async (url, init = {}) => (alertPost(init) ? { status: 500, json: async () => ({}) } : gh.fetchFn(url, init));
+  const { passes } = await wire(w.config, { fetchFn, log: () => {} });
+  const out = await passes.heartbeat();
+  assert.ok(out.red.includes('alert-not-told'), JSON.stringify(out));
+  assert.ok(out.failed >= 1, JSON.stringify(out));
+  assert.equal(typeof out.sweep, 'object', JSON.stringify(out));
+  assert.notEqual(out.sweep, null, JSON.stringify(out));
+  assert.equal(typeof out.sweep.swept, 'boolean', JSON.stringify(out.sweep));
+});
+
+test('#465 r2 audit m1: a per-key sweep mark the Record refuses (the close landed) is told under the mark cause', async () => {
+  const alertsOf = (o) => {
+    const inner = makeFactWriter(o.rec, { actor: 'ledger', now: o.now });
+    const writer = { ...inner, put: (id, doc) => (doc?.kind === 'fact.alert-sweep' ? { ok: false, reason: 'the store is full' } : inner.put(id, doc)) };
+    return makeAlerts({ ...o, writer });
+  };
+  const o = await orphanRound({ wireOpts: { alertsOf } });
+  const r = await o.passes.heartbeat();
+  assert.deepEqual(r.sweep.closed, [o.out.number], JSON.stringify(r.sweep));
+  assert.equal(o.gh.issues.get(o.out.number).state, 'closed', 'the close itself landed');
+  assert.match(String(r.sweep.why), /the Record refused the mark of /, JSON.stringify(r.sweep));
+  assert.deepEqual(sweepEntries(o.rec).map((e) => e.mark?.fact), [HOLD_FACT(SWEEP_CAUSES.mark)]);
+  assert.equal(r.failed, undefined);
 });
 
 test('L969: the robot heartbeat tells a stopped Sensors job by name: green while it writes, red with its alert past usage.stale_after_min', async () => {
