@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { fakeMac } from './fake-mac.test-helper.mjs';
@@ -90,6 +90,22 @@ test('bob: the folder holds exactly the commit\'s files less the skills, the lis
   writeFileSync(join(bob, 'rules.md'), 'changed\n');
   assert.match(checkBobFolder({ folder: bob, manifest: p.list, settings }).reason, /rules\.md differs from the pinned Bob commit/);
   assert.equal(checkBob(w.mac, w.cfg).some((x) => !x.ok), true, 'checkBob sees it too');
+});
+
+test('bob (PR-1 r2 m1): checkBob refuses what check 13 refuses: a linked top folder, and an empty list', () => {
+  const w = world();
+  w.run(commitOf(w.repo, FILES));
+  const bob = w.at(`${BASE}/bob`); const moved = w.at(`${BASE}/bob-real`);
+  renameSync(bob, moved); symlinkSync(moved, bob);
+  const linked = checkBob(w.mac, w.cfg);
+  assert.ok(linked.some((x) => !x.ok && /is a plain folder/.test(x.what) && /link/.test(x.why)), JSON.stringify(linked));
+  rmSync(bob); renameSync(moved, bob);
+  assert.ok(checkBob(w.mac, w.cfg).every((x) => x.ok), 'put back: it passes again');
+  for (const n of readdirSync(bob)) rmSync(join(bob, n), { recursive: true });
+  writeFileSync(w.at(`${w.realCopy}/${BOB_MANIFEST}`), '{}\n');
+  const empty = checkBob(w.mac, w.cfg);
+  assert.ok(empty.some((x) => !x.ok && /names at least one file/.test(x.what)), JSON.stringify(empty));
+  assert.ok(empty.some((x) => x.ok && /holds exactly the list's files/.test(x.what)), 'the folder does match the empty list: only the list check refuses');
 });
 
 test('bob: executable files stay executable; leftOut matches check 13\'s skill rule', () => {

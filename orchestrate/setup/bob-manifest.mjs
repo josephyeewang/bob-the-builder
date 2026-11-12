@@ -309,6 +309,11 @@ export function checkBob(io, cfg, { commit: commitWanted = null } = {}) {
   let list = null;
   try { list = JSON.parse(readFileSync(io.at(join(P.installRoot, BOB_MANIFEST)), 'utf8')); } catch (e) { item(false, `the Bob file list ${bobManifestPath(cfg)} can be read`, e?.code ?? 'not JSON'); return out; }
   item(true, `the Bob file list ${bobManifestPath(cfg)} can be read`);
+  // As check 13 refuses them (launch.mjs checkBobFolder): an empty list, and a top that is a link or not a folder (PR-1 r2 m1).
+  const isList = list !== null && typeof list === 'object' && !Array.isArray(list);
+  item(isList && Object.keys(list).length > 0, `the Bob file list ${bobManifestPath(cfg)} names at least one file`, isList ? 'it is empty' : 'it is not a list');
+  let top = null; try { top = io.lstat(bobPath(cfg)); } catch { /* below */ }
+  if (!top || top.isSymbolicLink() || !top.isDirectory()) { item(false, `the Bob folder ${bobPath(cfg)} is a plain folder`, top ? 'it is a link or not a folder' : 'it is missing'); return out; }
   let landed = null;
   try { landed = landedList(io.at(bobPath(cfg))); } catch (e) { item(false, `the Bob folder ${bobPath(cfg)} holds only plain files`, e.message); return out; }
   item(manifestText(landed) === manifestText(list), `the Bob folder ${bobPath(cfg)} holds exactly the list's files`, 'it differs from the list');
