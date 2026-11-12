@@ -30,7 +30,7 @@
 // seen, so step 6 also needs save-work's own ok answer. Claude Code's own transcripts of the proof's sessions stay in the
 // workers' home (<configDir>/projects/); the run's last line says so.
 
-import { closeSync, existsSync, lstatSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync, appendFileSync, chmodSync, mkdirSync } from 'node:fs';
+import { closeSync, existsSync, lstatSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync, appendFileSync, chmodSync, mkdirSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -141,10 +141,11 @@ export const hooksSet = (text) => {
  * io: { wiring(cfg, rec) → { start, saveWork }, stopGroup(s), groupListed(pid) → true/false/null, sleepers() → pids of
  * SLOW_INSTALL still running, verifyBundle(mirror, file) → null | why, exists(p), read(p), write(p, text, mode?), mkdir(p),
  * sleep(ms), now(), id(tag), reachable() → true/false (github.com from outside the sandbox, step 2's control),
- * warn(text), cleanup({ copy, outbox, settingsFile, saveSettingsFile, sleepers? }) }.
+ * warn(text), rm(p) (a link removed, not followed), cleanup({ copy, outbox, settingsFile, saveSettingsFile, settingsDir,
+ * sessionId, sleepers? }) }.
  * rec (one per launch, filled by io.wiring): answers (check n → its answer), settingsText (the session's settings after
- * check 4), runs (each claude run: pid, out, job, settingsText it started with), groups (each group runLocked was told of:
- * { job: 'install'|'save-work', pgid, pid, pid_start, job: { pgid, pid, pid_start }? } as `{ name, group }`).
+ * check 4), runs (each claude run: pid, out, job, settingsText it started with), groups (each group runLocked was told of,
+ * as { name: 'install'|'save-work', group: { pgid, pid, pid_start, job?: { pgid, pid, pid_start } } }).
  */
 export async function proveRunLocked({ c, product, io }) {
   const out = new Map();
@@ -221,9 +222,10 @@ export async function proveRunLocked({ c, product, io }) {
           const inc = join(git, 'trap.config');
           io.write(inc, `[core]\n\tfsmonitor = touch ${q(markers[1])}; true\n\thooksPath = ${join(git, 'hooks')}\n`);
           io.write(join(git, 'config'), `${io.read(join(git, 'config'))}[include]\n\tpath = ${inc}\n`);
-          // Step 3's bundle emptied, so only a bundle this save makes verifies (review m2).
-          io.write(bundle, '');
         } catch (e) { out.set(4, notRun(4, `the trap could not be planted in the copy (${e?.code ?? e?.message})`)); }
+        // Step 3's bundle removed, so only one this save makes verifies (review m2). Removed, never written: a link
+        // planted there is taken away, not followed to a file of the owner's (r2 review m1).
+        if (!out.has(4)) { try { io.rm(bundle); } catch (e) { out.set(4, notRun(4, `step 3's bundle ${bundle} could not be removed (${e?.code ?? e?.message})`)); } }
         if (!out.has(4)) {
           let b; try { b = await main.saveWork(s); } catch (e) { b = { ok: false, reason: e?.message ?? String(e) }; }
           const ran = markers.filter((m) => io.exists(m));
@@ -272,11 +274,12 @@ export async function proveRunLocked({ c, product, io }) {
       out.set(5, !c4 ? noFour(5, s5) : c4.ok ? fail(5, `check 4 passed an install that sleeps 20 minutes (${SLOW_INSTALL})`)
         : !/did not finish inside the lock-down \(it did not finish in time\)/.test(c4.reason ?? '') ? fail(5, `check 4 refused, but not for the time limit: ${c4.reason}`)
           : !Number.isInteger(jobPg) ? fail(5, 'the install\'s own process group was never recorded, so the job may never have started; a stop with nothing to stop proves nothing')
-            : jobPg === run5?.pid || jobPg === g5.pgid ? fail(5, `the job's process group (${jobPg}) is claude's own, not one of its own`)
+            : jobPg === g5.pgid ? fail(5, `the job's process group (${jobPg}) is claude's own, not one of its own`)
               : listed === null ? fail(5, `whether claude's group (${run5?.pid}) is gone can't be told`) : listed ? fail(5, `ps -g ${run5.pid} still lists processes of claude's group`)
                 : jobListed === null ? fail(5, `whether the job's group (${jobPg}) is gone can't be told`) : jobListed ? fail(5, `ps -g ${jobPg} still lists processes of the job's own group`)
                   : left === null ? fail(5, `whether ${SLOW_INSTALL} still runs can't be told`) : left.length ? fail(5, `${SLOW_INSTALL} still runs (${left.join(', ')}): the install was not stopped with claude. Left running, not killed; each ends by itself within 20 minutes`)
-                    : pass(5, { reason: c4.reason, claudeGroup: run5.pid, jobGroup: jobPg }));
+                    : pass(5, { reason: c4.reason, claudeGroup: run5.pid, jobGroup: jobPg,
+                      limit: 'the job\'s group was recorded; that the sleep itself began is not shown (a record read in the last poll before the limit gets no go-ahead)' }));
     }
 
     // Step 8: an install's leftover, looked at once the session has started (a known limit, never a fail). NOT SEEN counts
@@ -299,10 +302,13 @@ export async function proveRunLocked({ c, product, io }) {
       const files = { copy: s.r?.copy ?? s.copy, outbox: s.r?.outbox ?? s.outbox, settingsFile: join(c.settingsDir, `${s.sessionId}.json`),
         saveSettingsFile: join(c.settingsDir, saveSettingsName(s.sessionId)) };
       if (s.r?.ok === true || s.r?.running === true) {
-        const st = Number.isInteger(s.r.pgid) ? await stop(s.r) : { ok: false, reason: 'its process group is not known' };
+        // A start still running answers no leader start time, and a group is never stopped without one (it might be
+        // another's by now): named and left, its files with it (r2 review m3).
+        const st = !Number.isInteger(s.r.pgid) ? { ok: false, reason: 'its process group is not known' }
+          : typeof s.r.pidStart !== 'string' ? { ok: false, reason: 'its leader\'s start time is not known, so it can\'t be stopped safely' } : await stop(s.r);
         if (st?.ok !== true) { io.warn(`claude's group ${s.r.pgid ?? '(not known)'} for session ${s.sessionId} could not be stopped (${st?.reason ?? 'no answer'}); it may still run. Left in place: ${Object.values(files).join(', ')}. Stop it (ps -g ${s.r.pgid ?? '<pgid>'}), then remove them`); continue; }
       }
-      io.cleanup({ ...files, sleepers: s.sleepers ?? [] });
+      io.cleanup({ ...files, settingsDir: c.settingsDir, sessionId: s.sessionId, sleepers: s.sleepers ?? [] });
     }
   }
   return STEPS.map(([n]) => out.get(n) ?? notRun(n, 'not reached'));
@@ -404,13 +410,17 @@ export async function main(argv, { print = (t) => process.stdout.write(t), uid =
     id: (prefix) => `${prefix}-${tag}-${(n += 1)}`,
     reachable: () => spawnSync('/usr/bin/curl', ['-sS', '--max-time', '20', '-o', '/dev/null', 'https://github.com'], { timeout: 30_000 }).status === 0,
     warn: (t) => { print(`${t}\n`); log(t); },
-    cleanup: ({ copy, outbox, settingsFile, saveSettingsFile, sleepers = [] }) => {
+    rm: (p) => rmSync(p, { force: true }),
+    cleanup: ({ copy, outbox, settingsFile, saveSettingsFile, settingsDir, sessionId, sleepers = [] }) => {
       // Never killed: they are found by their command line, not by a pid this proof started (L1013). Step 5 has failed
       // and named them; each ends by itself within SLOW_INSTALL's 20 minutes.
       if (sleepers.length) log(`left running, not killed (found by command line, not started here): ${sleepers.join(', ')}`);
       const fs = { rm: rmSync, chmodTree };
       for (const d of [copy, outbox]) if (d) removeAll(fs, d, log);
-      for (const f of [settingsFile, saveSettingsFile]) if (f) { try { rmSync(f, { force: true }); } catch (e) { log(`the proof's settings file ${f} can't be removed (${e?.code ?? e?.message})`); } }
+      // Every settings file of the proof's own session (its id is the proof's, made by io.id): the session's, the save's,
+      // and the baseline's `<id>..baseline.json` if check 11 left it (r2 review m4). A `.json` left would stop the real runner.
+      let own = []; try { own = readdirSync(settingsDir).filter((n) => n.startsWith(`${sessionId}.`) && n.endsWith('.json')).map((n) => join(settingsDir, n)); } catch (e) { log(`the settings folder ${settingsDir} can't be listed (${e?.code ?? e?.message})`); }
+      for (const f of new Set([settingsFile, saveSettingsFile, ...own])) if (f) { try { rmSync(f, { force: true }); } catch (e) { log(`the proof's settings file ${f} can't be removed (${e?.code ?? e?.message})`); } }
     },
   };
   let results;

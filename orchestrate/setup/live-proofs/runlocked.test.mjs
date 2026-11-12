@@ -146,7 +146,7 @@ function world(over = {}) {
           }
           rec.answers[4] = { ok: true };
           if (w.leftoverStart.ok === false) return { ok: false, reason: 'launch check 13 (Bob method folder): no check is wired' };
-          if (w.leftoverStart.running) return { ok: false, running: true, pgid: 777, reason: 'still running' };
+          if (w.leftoverStart.running) return { ok: false, running: true, pgid: 777, ...(w.leftoverStart.pidStart ? { pidStart: w.leftoverStart.pidStart } : {}), reason: 'still running' };
           if (w.started) w.files.set(`${copy}/started`, '');
           if (w.leftover) w.files.set(`${copy}/leftover`, '');
           return started;
@@ -158,18 +158,19 @@ function world(over = {}) {
           const out = `/r/save-${w.saves}`; rec.runs.push({ pid: 5000 + w.saves, out, job: 'save-work', settingsText: w.saveSettings }); w.files.set(out, w.stream);
           w.clock += w.saveMs;
           const a = typeof w.save === 'function' ? w.save(w.saves) : w.save;
-          if (a.ok && (w.saves === 1 || w.rewrite)) w.files.set(`${s.outbox}/bundle-${s.card}.bundle`, 'b');
+          if (a.ok && (w.saves === 1 || w.rewrite)) w.files.set(`${s.outbox}/bundle-${s.card}.bundle`, w.saves === 2 && w.rewrite === 'junk' ? 'junk' : 'b');
           if (w.saves === 2 && w.trapRuns) w.files.set(`${s.copy}/marker-include`, '');
           if (w.saves === 2 && w.disarm) { w.files.set(`${s.copy}/.git/config`, CLONE_CONFIG_TEMPLATE); if (w.disarm !== 'config') for (const k of [...w.files.keys()]) if (k.startsWith(`${s.copy}/.git/hooks`)) w.files.delete(k); }
           return a;
         },
       };
     },
-    stopGroup: async (g) => { w.stopped.push(g); return g.pgid === w.stopFail ? { ok: false, reason: 'EPERM' } : w.stopOk; },
+    // As the real stopGroup: no leader start time, no stop.
+    stopGroup: async (g) => { w.stopped.push(g); if (typeof g.pid_start !== 'string') throw new Error('no group leader start time'); return g.pgid === w.stopFail ? { ok: false, reason: 'EPERM' } : w.stopOk; },
     groupListed: (pg) => (pg === w.jobGroup && pg !== 4242 ? w.jobListed : typeof w.listed === 'function' ? w.listed() : w.listed),
     sleepers: () => { w.sleeperCalls += 1; return w.sleeperCalls === 1 ? w.sleepersBefore : w.sleepers; },
     verifyBundle: (mirror, file) => { if (w.verify === 'throw') throw new Error('boom'); return w.files.get(file) === 'b' ? w.verify : 'not a bundle'; },
-    reachable: () => w.reachable, warn: (t) => { w.warned.push(t); },
+    reachable: () => w.reachable, warn: (t) => { w.warned.push(t); }, rm: (p) => { if (w.rmFails) throw Object.assign(new Error('x'), { code: 'EACCES' }); w.files.delete(p); },
     exists: (p) => w.files.has(p) || (p === '/Users/workers/x' && w.xBefore),
     read: (p) => { if (!w.files.has(p)) throw Object.assign(new Error('missing'), { code: 'ENOENT' }); return w.files.get(p); },
     write: (p, text) => { w.files.set(p, text); }, mkdir: (p) => { w.files.set(p, null); },
@@ -195,6 +196,8 @@ test('proveRunLocked: a runLocked that works passes 1 to 7, sees the leftover, a
   assert.ok(w.stopped.some((g) => g.pgid === 904), 'and the leftover session at the end');
   assert.deepEqual(w.cleaned.map((x) => x.settingsFile), w.launched.map((l) => `/w/state/settings/${l.req.sessionId}.json`), 'every session, refused ones too');
   assert.deepEqual(w.cleaned.map((x) => x.saveSettingsFile), w.launched.map((l) => `/w/state/settings/${l.req.sessionId}.save.json`), 'and its save settings (review M2)');
+  assert.match(by[5].found.limit, /that the sleep itself began is not shown/, 'and says what it does not show');
+  assert.equal(w.cleaned[0].sessionId, w.launched[0].req.sessionId); assert.equal(w.cleaned[0].settingsDir, '/w/state/settings');
   assert.equal(by[5].found.claudeGroup, 4242, 'step 5 names claude\'s group'); assert.equal(by[5].found.jobGroup, 4250, 'and the job\'s own');
   assert.deepEqual(w.warned, []);
   assert.equal(w.cleaned[0].copy, `/w/copies/trial/${w.launched[0].req.card}`);
@@ -242,7 +245,8 @@ test('proveRunLocked: each step fails on its own break', async () => {
     [{ saveSettings: '{"sandbox":{}}' }, 6, /settings the save ran under set no worker hook for Bash/],
     [{ saveSettings: null }, 6, /settings the save ran under set no worker hook/],
     [{ mainSha: null }, 3, /save-work refused: session .* has no save settings/],
-    [{ rewrite: false }, 4, /trapped copy's bundle does not verify from the mirror: not a bundle/],
+    [{ rewrite: false }, 4, /no bundle is in the outbox/],
+    [{ rewrite: 'junk' }, 4, /trapped copy's bundle does not verify from the mirror: not a bundle/],
     [{ jobGroup: null }, 5, /own process group was never recorded/],
     [{ jobGroup: 4242 }, 5, /is claude's own/],
     [{ jobListed: true }, 5, /ps -g 4250 still lists processes of the job's own group/],
@@ -277,6 +281,8 @@ test('proveRunLocked: a step that could not be tried is NOT RUN, with why, never
   assert.match(by[3].why, /^the session did not start \(launch check 11/, 'any other refusal is not called blocked');
   ({ by } = await run({ stopOk: { ok: false, reason: 'EPERM' } }));
   for (const n of [3, 4, 6, 7]) assert.match(by[n].why, /could not be stopped \(EPERM\)/);
+  ({ by } = await run({ rmFails: true }));
+  assert.equal(by[4].result, 'NOT RUN'); assert.match(by[4].why, /step 3's bundle .* could not be removed \(EACCES\)/);
   ({ by } = await run({ reachable: false }));
   assert.equal(by[2].result, 'NOT RUN', 'no network outside the sandbox: step 2 proves nothing'); assert.match(by[2].why, /could not be reached from outside the sandbox/);
   ({ by } = await run({ sleepersBefore: [99] }));
@@ -294,11 +300,14 @@ test('proveRunLocked: a step that could not be tried is NOT RUN, with why, never
 });
 
 test('proveRunLocked: a start still running, and a proof that throws part way, are still cleaned up', async () => {
-  const { w } = await run({ leftoverStart: { running: true } });
+  const { w } = await run({ leftoverStart: { running: true, pidStart: '2026-11-03T10:00:02.000Z' } });
   const last = w.cleaned.at(-1);
   assert.equal(last.copy, `/w/copies/trial/${w.launched[3].req.card}`, 'its paths named by the proof');
   assert.ok(w.stopped.some((g) => g.pgid === 777), 'and its group stopped');
-  const z = await run({ leftoverStart: { running: true }, stopFail: 777 });
+  const u = await run({ leftoverStart: { running: true } });
+  assert.ok(!u.w.stopped.some((g) => g.pgid === 777), 'no start time: never stopped');
+  assert.equal(u.w.cleaned.length, 3); assert.match(u.w.warned[0], /group 777 .* could not be stopped \(its leader's start time is not known, so it can't be stopped safely\)/);
+  const z = await run({ leftoverStart: { running: true, pidStart: '2026-11-03T10:00:02.000Z' }, stopFail: 777 });
   assert.equal(z.w.cleaned.length, 3, 'a group that could not be stopped keeps its folders (review m1)');
   assert.ok(!z.w.cleaned.some((x) => x.copy === `/w/copies/trial/${z.w.launched[3].req.card}`));
   assert.equal(z.w.warned.length, 1); assert.match(z.w.warned[0], /group 777 .* could not be stopped \(EPERM\); it may still run\. Left in place: \/w\/copies\/trial\//);
