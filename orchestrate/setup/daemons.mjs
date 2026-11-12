@@ -213,25 +213,29 @@ export function placeSteps(io, cfg, jobs = jobsFor(cfg)) {
 }
 
 /** Null, or why no job may be (re)loaded now: a job must not start against a copy that is not whole and root's alone (L149 m8; the same check as check-install). Used by load AND reload-account (L194 M1). */
-function installProblem(io, cfg) {
+function installProblem(io, cfg, { watchOnly = false } = {}) {
   const P = installPaths(cfg);
   const cur = currentCopy(io.at(P.installRoot), { owner: io.rootUid });
   if (cur.missing || cur.problem || !cur.link) return 'the install is not there yet (run the install first), so a job would start against nothing';
-  const bad = checkInstall(io, cfg).filter((r) => !r.ok);
-  return bad.length ? `the install check fails (${bad[0].what}: ${bad[0].why})${bad.length > 1 ? `, and ${bad.length - 1} more` : ''}; fix that first (node setup.mjs check-install shows all of it)` : null;
+  const bad = checkInstall(io, cfg, { watchOnly }).filter((r) => !r.ok);
+  return bad.length ? `the install check fails (${bad[0].what}: ${bad[0].why})${bad.length > 1 ? `, and ${bad.length - 1} more` : ''}; fix that first (node setup.mjs check-install${watchOnly ? ' --watch-only' : ''} shows all of it)` : null;
 }
 
 /**
  * Why these jobs may not start now → problems (none: they may). The one list both place and load refuse on, because a placed
  * job starts at boot without load (L807 M1): the install whole and root's; the watch job's rules; the robot's config and its
- * match with the Dispatcher's; the Dispatcher's config and check-dispatcher.
+ * match with the Dispatcher's; the Dispatcher's config and check-dispatcher. The watch job alone asks only what it uses of the
+ * install (L1026): the runner's role map is cutover-night work, and asking for it stopped the watch cutover. Any other job in
+ * the list brings the full check.
  */
 export function startProblems(io, cfg, jobs) {
   const problems = [];
-  const bad = installProblem(io, cfg); if (bad) problems.push(bad);
+  const watchOnly = jobs.length > 0 && jobs.every((j) => j === 'watch-only');
+  const bad = installProblem(io, cfg, { watchOnly }); if (bad) problems.push(bad);
   if (jobs.includes('watch-only')) {
-    let r = null; try { r = io.lstat(watchRulesPath(cfg)); } catch { /* below */ }
-    if (!r) problems.push(`${watchRulesPath(cfg)} is not there (run watch-rules first), so the hourly watch job would have no rules to judge by`);
+    let r = null; let denied = false; try { r = io.lstat(watchRulesPath(cfg)); } catch (e) { denied = e?.code === 'EACCES' || e?.code === 'EPERM'; }
+    // L1029: a dry run without root can't look into the folder; that is not the file missing.
+    if (!r) problems.push(denied ? `${watchRulesPath(cfg)} is unreadable without root (run with sudo to check it), so whether the hourly watch job has its rules is not known` : `${watchRulesPath(cfg)} is not there (run watch-rules first), so the hourly watch job would have no rules to judge by`);
   }
   if (jobs.includes(ROBOT_JOB)) {
     const why = robotConfigProblem(io, cfg); if (why) problems.push(`${why}, so the robot job would not start`);

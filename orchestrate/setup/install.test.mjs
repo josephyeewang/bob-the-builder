@@ -15,12 +15,12 @@ import { NODE, RUNNER_CONFIG, STAMP, UPDATER_CONFIG } from '../modules/M4-worksh
 import { MUST_KEEP, readUpdaterConfig } from '../modules/M4-workshop/launcher/review-updater.mjs';
 import { pinnedBinary } from '../modules/M4-workshop/launcher/hooks-check.mjs';
 import { realIo, writeNewFile } from './mac.mjs';
-import { ROOT_CONFIG_PATH, folderTable, outboxRootPath, workerCopiesPath } from './layout.mjs';
+import { ROOT_CONFIG_PATH, folderTable, outboxRootPath, watchRulesPath, workerCopiesPath } from './layout.mjs';
 import { BOOTSTRAP_FILES, LABEL_RE, installPaths, parseInstallConfig, spawnUpdater, updaterCommand, updaterConfigFor } from './install.mjs';
 import { FIRST_RUN_LIMIT_S, JOBS, checkDaemons, jobLogs, jobsFor, list, planLoad, planPlace, plistTexts, startProblems } from './daemons.mjs';
-import { ROBOT_NO_CONFIG, robotPlist } from './robot-setup.mjs';
+import { ROBOT_JOB, ROBOT_NO_CONFIG, robotPlist } from './robot-setup.mjs';
 import { ROBOT_KEY_FILE } from '../modules/M6-merge-gate/token.mjs';
-import { DISPATCHER_RUN_LIMIT_S, dispatcherConfigFor, dispatcherConfigText, dispatcherPlist, keysDiffer, planDispatcherConfig, robotMatchProblem } from './dispatcher-setup.mjs';
+import { DISPATCHER_JOB, DISPATCHER_RUN_LIMIT_S, dispatcherConfigFor, dispatcherConfigText, dispatcherPlist, keysDiffer, planDispatcherConfig, robotMatchProblem } from './dispatcher-setup.mjs';
 import { RUN_DEADLINE_MS, WATCHDOG_MARGIN_MS } from '../modules/M11-dispatcher/main.mjs';
 import { CONFIG_KEYS, checkConfig } from '../wiring/dispatcher-wiring.mjs';
 import { ROOT_CONFIG_PATH as _R } from './layout.mjs';
@@ -2091,4 +2091,72 @@ test('add-to-install: the next real update carries claude-code and hooks across,
   assert.equal(readFileSync(join(w.root, 'a.txt'), 'utf8'), 'two\n');
   assert.equal(readFileSync(pinnedBinary(w.root, PIN), 'utf8'), PROGRAM);
   assert.deepEqual(readdirSync(join(w.root, 'hooks')), ['guard.mjs']);
+});
+
+// ───────────────────────────── L1026: the watch job's start gate asks only what the watch job uses ─────────────────────────────
+
+/** The Mini on 12 Nov: installed, the watch week's rules in place, the robot and Dispatcher configured, and the copy's review.json the stub `{"installRoot": …}` (the full one, with the role map, is cutover-night work). */
+const miniStub = async () => {
+  const w = await dWorld({ robot: sameRobot, rules: 'version: 1\n' });
+  const r = w.run(['watch-rules', '--rules-source', w.rulesSrc]); assert.equal(r.code, 0, r.text);
+  const f = join(copyOf(w), RUNNER_CONFIG);
+  writeFileSync(f, JSON.stringify({ installRoot: JSON.parse(readFileSync(f, 'utf8')).installRoot })); chmodSync(f, 0o644);
+  return w;
+};
+const ROLE_MAP = /names a Mac user for every role/;
+
+test('L1026 (i): the Mini\'s state (stub review.json, watch config set) lets the watch job place and load; check-install --watch-only passes, plain check-install still names the map', async () => {
+  const w = await miniStub();
+  assert.deepEqual(startProblems(w.mac, w.cfg, ['watch-only']), [], 'planted: the watch gate asks for the runner\'s role map');
+  const pl = w.run(['daemons', 'place', '--only', 'watch-only']); assert.equal(pl.code, 0, pl.text);
+  assert.ok(existsSync(plistFile(w, 'watch-only')), 'the watch job file is down');
+  const ld = w.run(['daemons', 'load', '--only', 'watch-only']); assert.equal(ld.code, 0, ld.text);
+  assert.ok(w.mac.loaded.has(`${LABEL}.watch-only`), 'the watch job is loaded');
+  const wc = w.run(['check-install', '--watch-only']); assert.equal(wc.code, 0, wc.text);
+  assert.doesNotMatch(wc.text, ROLE_MAP, 'the watch form leaves the role-map line out');
+  const full = w.run(['check-install']); assert.equal(full.code, 1, full.text); assert.match(full.text, ROLE_MAP, 'a plain check-install keeps the full check');
+  assert.equal(failed(checkInstall(w.mac, w.cfg)).length, 1, 'the stub fails the role map alone');
+  assert.throws(() => parseArgs(['install', '--watch-only']), /--watch-only is only for check-install/);
+});
+
+test('L1026 (ii): the same state still refuses the robot, the Dispatcher and every review job by the role-map line, alone or beside the watch job', async () => {
+  const w = await miniStub();
+  for (const jobs of [[ROBOT_JOB], [DISPATCHER_JOB], ['review-runner'], ['review-account'], ['review-updater'], ['watch-only', 'review-runner'], ['watch-only', ROBOT_JOB], jobsFor(w.cfg)]) {
+    const gate = startProblems(w.mac, w.cfg, jobs);
+    assert.match(gate.join(' '), ROLE_MAP, `planted: ${jobs.join('+')} skips the role map`);
+    assert.match(gate.join(' '), /check-install shows all of it/, 'the full gate points at the full check');
+  }
+  for (const job of [ROBOT_JOB, DISPATCHER_JOB, 'review-runner']) { const p = w.run(['daemons', 'load', '--only', job]); assert.equal(p.code, 1, p.text); assert.match(p.text, ROLE_MAP); }
+});
+
+test('L1026 (iii): a broken copy still refuses the watch job (written by others, not root\'s, a link, an access list, no stamp)', async () => {
+  const w = await miniStub();
+  const refused = (why, { cli = true } = {}) => {
+    const gate = startProblems(w.mac, w.cfg, ['watch-only']);
+    assert.match(gate.join(' '), /the install check fails .*check-install --watch-only shows all of it|the install is not there yet/, `planted: the watch gate skips the copy (${why})`);
+    if (!cli) return;   // root faked as someone else: setup then refuses its own config before any gate
+    const p = w.run(['daemons', 'place', '--only', 'watch-only']); assert.equal(p.code, 1, `${why}: ${p.text}`);
+    assert.equal(w.run(['check-install', '--watch-only']).code, 1, why);
+  };
+  assert.deepEqual(startProblems(w.mac, w.cfg, ['watch-only']), [], 'the control passes');
+  chmodSync(w.root, 0o775); refused('written by its group'); chmodSync(w.root, 0o755);
+  const rootUid = w.mac.rootUid; w.mac.rootUid = rootUid + 1; refused('not root\'s', { cli: false }); w.mac.rootUid = rootUid;   // the copy's files are read for real: root is someone else
+  const link = join(copyOf(w), 'planted-link'); symlinkSync('/etc/hosts', link); refused('a link'); rmSync(link);
+  const sub = join(copyOf(w), readdirSync(copyOf(w), { withFileTypes: true }).find((e) => e.isDirectory()).name);
+  const on = spawnSync('/bin/chmod', ['+a', 'everyone allow write', sub], { encoding: 'utf8' }); assert.equal(on.status, 0, `${sub}: ${on.stderr}`); refused('an access list');
+  const off = spawnSync('/bin/chmod', ['-N', sub], { encoding: 'utf8' }); assert.equal(off.status, 0, off.stderr);
+  const stampFile = join(realCopy(w), STAMP); const stamp = readFileSync(stampFile, 'utf8'); rmSync(stampFile); refused('no stamp');
+  writeFileSync(stampFile, stamp); chmodSync(stampFile, 0o644);
+  assert.deepEqual(startProblems(w.mac, w.cfg, ['watch-only']), [], 'each one put back: the gate passes again');
+});
+
+test('L1029: without root the watch rules file\'s folder can\'t be looked into, and the gate says so instead of "not there"', async () => {
+  const w = await miniStub();
+  const dir = w.mac.at(dirname(watchRulesPath(w.cfg)));
+  const mode = statSync(dir).mode & 0o7777; chmodSync(dir, 0o000);
+  let gate; try { gate = startProblems(w.mac, w.cfg, ['watch-only']); } finally { chmodSync(dir, mode); }
+  assert.match(gate.join(' '), /rules-draft\.yaml is unreadable without root \(run with sudo to check it\)/, 'planted: a refused look reads as the file missing');
+  assert.doesNotMatch(gate.join(' '), /is not there/);
+  rmSync(w.mac.at(watchRulesPath(w.cfg)));
+  assert.match(startProblems(w.mac, w.cfg, ['watch-only']).join(' '), /rules-draft\.yaml is not there \(run watch-rules first\)/, 'a file truly missing still says so');
 });

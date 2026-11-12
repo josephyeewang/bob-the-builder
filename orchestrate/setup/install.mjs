@@ -340,8 +340,13 @@ function folderList(io, cfg) {
   return out;
 }
 
-/** Read only → [{ ok, what, why? }]. `main` is a commit the stamp must equal, when the caller knows it. */
-export function checkInstall(io, cfg, { main = null } = {}) {
+/**
+ * Read only → [{ ok, what, why? }]. `main` is a commit the stamp must equal, when the caller knows it. `watchOnly` checks only
+ * what the hourly watch job uses (L1026): the copy whole and root's, its stamp, no access lists, review.json readable and
+ * naming this copy. It leaves out the review runner's role-to-user map (L726) and the runner's files (RUNNER_NAMES), which
+ * the full review.json brings on cutover night; the watch job never starts the runner. Every other caller keeps the full check.
+ */
+export function checkInstall(io, cfg, { main = null, watchOnly = false } = {}) {
   const P = installPaths(cfg); const out = [];
   const item = (ok, what, why) => out.push({ ok, what, ...(ok ? {} : { why }) });
   const top = io.prefix || '/';
@@ -360,6 +365,7 @@ export function checkInstall(io, cfg, { main = null } = {}) {
   item(acl === null, `none of the ${dirs.length} install folders has an access list`, acl);
   let rc = null; try { rc = JSON.parse(io.readText(join(P.installRoot, RUNNER_CONFIG))); } catch { /* reported below */ }
   item(rc !== null && rc.installRoot === root, 'the copy\'s review.json is JSON and names this copy', 'unreadable or names another installRoot');
+  if (watchOnly) return out;
   if (rc !== null) {
     const what = 'review.json names a Mac user for every role, and every role the runner starts (the plan reviewer too) names review';
     const old = planReviewerOnlyMissing(io, rc.uids, P.installRoot);
