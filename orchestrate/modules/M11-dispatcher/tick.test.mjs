@@ -1952,3 +1952,127 @@ test('L946: the stops step gets p.stopReview and asks by card, role and head', a
   // L1000: with the stop's reason word for the runner (a cancelled card: 'cancel', ended quietly).
   assert.deepEqual(asked, [{ card: 'C-7', role: 'reviewer', head: hd, reason: 'cancel' }]);
 });
+
+// ---- L1048: nothing starts while home is unknown ----
+// Under the owner's copier, a host.lock copy that can't be trusted means this Mac can't tell which Mac is home. Then no
+// start path runs: a merge or review started from a Mac that isn't home is the double action the single-host rule stops.
+// Each path has its own test, with a control on a good read. Stops and Joe's own answers still run.
+const COPY_WHY = 'the host.lock copier\'s stamp is 9 minutes old';
+const copyFail = () => { throw Object.assign(new Error(COPY_WHY), { code: HOST_COPY_FAIL }); };
+const HOME_UNKNOWN = /host\.lock's copy can't be trusted, so which Mac is home is not known/;
+const leadOutbox = (name) => { const dir = join(tempDir(`m11-home-${name}-`), 'lead'); mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'think-q1.md'), 'Is A safe?'); return dir; };
+
+test('L1048 c1: host.lock is read once a tick, and the undo-starts step and the main pass get that one answer', async () => {
+  for (const [what, read] of [['good', () => 'mini'], ['copy fails', copyFail]]) {
+    let reads = 0;
+    const w = world([account(), usage()], { over: { hostLock: () => { reads += 1; return read(); } } });
+    const r = await w.pass();
+    assert.equal(reads, 1, what);
+    assert.equal(r.steps.pass.ok, true, `${what}: ${r.steps.pass.error}`);
+  }
+});
+
+test('L1048: a Lead\'s read-only helper (intake) does not start while home is unknown', async () => {
+  for (const held of [true, false]) {
+    const started = [];
+    const w = world([account(), usage()], { over: { outboxSessions: () => [{ sessionId: 'L-1', role: 'lead', outbox: leadOutbox('ro'), uid: process.getuid(), product: 'p1' }],
+      startReadonly: async (x) => { started.push(x.kind); return { ok: true }; }, ...(held && { hostLock: copyFail }) } });
+    await w.pass();
+    if (!held) { assert.deepEqual(started, ['think'], `control: ${w.calls.alerts.join(' | ')}`); continue; }
+    assert.deepEqual(started, []);
+    assert.match(String(w.rec.read('fact', 'intake-applied-L-1-think-q1.md')?.doc?.reason), HOME_UNKNOWN);
+  }
+});
+
+test('L1048: a plan reviewer (plan-go) does not start while home is unknown', async () => {
+  const plan = { product: 'p2', state: 'draft', tier: 1, plan_sha256: 'e'.repeat(64), main_commit: 'a'.repeat(40), files: ['src/a.mjs'], done_when: 'tests pass' };
+  const rules = rulesWith({ ...M2_RULES, 'onboarding.state': 'active' }, allow);
+  for (const held of [true, false]) {
+    const started = [];
+    const ports = { approvals: () => [{ product: 'p2', stateDir: join(tempDir('m11-approvals-'), 'm2') }], planRows: PLAN_ROWS, planReviewAnswer: async () => ({ ok: true }),
+      startPlanReview: async (x) => { started.push(x); return { ok: true, session: 'S-review' }; }, ...(held && { hostLock: copyFail }) };
+    const w = world([account(), usage(), card('C-3', plan)]);
+    const r = await w.pass(0, { rules, ports });
+    assert.equal(r.steps['plan-go'].ok, true, r.steps['plan-go'].error);
+    if (!held) { assert.equal(started.length, 1, `control: ${w.calls.alerts.join(' | ')}`); continue; }
+    assert.equal(started.length, 0);
+    assert.ok(w.calls.alerts.some((t) => /no plan reviewer could start for card C-3/.test(t) && HOME_UNKNOWN.test(t)), w.calls.alerts.join(' | '));
+  }
+});
+
+test('L1048: the Lead step sends no WRAP and restarts no Lead while home is unknown', async () => {
+  for (const held of [true, false]) {
+    const sent = [];
+    const starts = [];
+    const outbox = join(tempDir('m11-home-lead-'), 'lead', 'L-1');
+    mkdirSync(outbox, { recursive: true });
+    const w = world([account(), usage()], { over: { mainSha: async () => 'a'.repeat(40),
+      leads: () => [{ lead: { sessionId: 'L-1', product: 'p1' }, outboxNames: [], questionOpen: false,
+        size: { tokens: 300_000, turnEnded: true, endedAt: T0, openTools: [], compactions: 0 },
+        send: async (t) => { sent.push(t); return { outcome: 'sent' }; },
+        stopSession: async () => ({ ok: true }), startLead: async (x) => { starts.push(x); return { ok: true, sessionId: 'L-2' }; } }],
+      ...(held && { hostLock: copyFail }) } });
+    const r = await w.pass();
+    assert.equal(r.steps.leads.ok, true, r.steps.leads.error);
+    if (!held) { assert.deepEqual(r.steps.leads.result, [['L-1', 'WRAP sent']], 'control'); continue; }
+    assert.match(String(r.steps.leads.result), /the Lead step waits: host\.lock's copy can't be trusted/);
+    assert.deepEqual([sent, starts], [[], []]);
+  }
+});
+
+test('L1048: no review is requested (limits) while home is unknown', async () => {
+  for (const held of [true, false]) {
+    const w = world([account(), usage(), card('R-1', { state: 'in_review', changed_at: iso(T0 - 60 * MIN) })], { over: held ? { hostLock: copyFail } : {} });
+    const r = await w.pass();
+    assert.equal(r.steps.limits.ok, true, r.steps.limits.error);
+    if (!held) { assert.deepEqual(w.calls.reviewers, ['R-1'], 'control'); continue; }
+    assert.deepEqual(w.calls.reviewers, []);
+    assert.ok(r.steps.limits.result.some(([id, why]) => id === 'R-1' && HOME_UNKNOWN.test(why)), JSON.stringify(r.steps.limits.result));
+  }
+});
+
+test('L1048: no merge is requested while home is unknown, an undo\'s merge too', async () => {
+  for (const held of [true, false]) {
+    const w = world([account(), usage(), ...mergeReady('V-1', 7), ...undoReady('U-1', 8)], { over: held ? { hostLock: copyFail } : {} });
+    const r = await w.pass();
+    assert.equal(r.steps.merges.ok, true, r.steps.merges.error);
+    const merges = ['V-1', 'U-1'].filter((id) => requested(w.rec, id));
+    if (!held) { assert.deepEqual(merges, ['V-1', 'U-1'], 'control'); continue; }
+    assert.deepEqual(merges, []);
+    for (const id of ['V-1', 'U-1']) assert.ok(r.steps.merges.result.some(([c, why]) => c === id && HOME_UNKNOWN.test(why)), `${id}: ${JSON.stringify(r.steps.merges.result)}`);
+  }
+});
+
+test('L1048: the Front Door and Mini Base are not restarted while home is unknown; the phone step still runs', async () => {
+  for (const held of [true, false]) {
+    const calls = [];
+    const w = world([account(), usage()], { over: { frontDoorAlive: () => false,
+      restartFrontDoor: async () => { calls.push('front door'); return { ok: true }; }, startMinibase: async () => { calls.push('mini base'); return { ok: true }; },
+      ...(held && { hostLock: copyFail }) } });
+    for (const id of [FACTS.network, FACTS.reachable]) assert.equal(w.rec.write({ actor: factFamilyOf(id), entity: 'fact', id, expectRev: 0, doc: { value: true, observed_at: iso(T0) } }).ok, true);
+    assert.equal(w.rec.write({ actor: factFamilyOf(FACTS.minibase), entity: 'fact', id: FACTS.minibase, expectRev: 0, doc: { value: false, observed_at: iso(T0) } }).ok, true);
+    const r = await w.pass();
+    assert.equal(r.steps.phone.ok, true, r.steps.phone.error);
+    if (!held) { assert.deepEqual(calls, ['front door'], 'control: the Front Door missing is restarted'); continue; }
+    assert.deepEqual(calls, []);
+    assert.match(String(r.steps.phone.result), /Front Door missing; restart held: host\.lock's copy/);
+    // The Front Door back: Mini Base waits too.
+    const r2 = await w.pass(1, { ports: { frontDoorAlive: () => true } });
+    assert.deepEqual(calls, []);
+    assert.match(String(r2.steps.phone.result), /Mini Base not running; start held: host\.lock's copy/);
+  }
+});
+
+test('L1048 m2: while home is unknown, the account and band holds are not told (they say undo cards run); the copy hold is', async () => {
+  const red = ['fact', USAGE_FACT(ACCT), usageFact({ week: 90, h5: 20, account: ACCT, now: T0 })];
+  for (const [what, entries] of [['no account', [usage()]], ['red', [account(), red]]]) {
+    for (const held of [true, false]) {
+      const w = world(entries, { over: held ? { hostLock: copyFail } : {} });
+      await w.pass();
+      const undoRuns = w.calls.alerts.filter((a) => /but undo cards|undo still run/.test(a));
+      if (!held) { assert.equal(undoRuns.length, 1, `${what} control: ${w.calls.alerts.join(' | ')}`); continue; }
+      assert.deepEqual(undoRuns, [], what);
+      assert.equal(w.calls.alerts.filter((a) => /holds every start, undo cards too/.test(a)).length, 1, `${what}: ${w.calls.alerts.join(' | ')}`);
+    }
+  }
+});

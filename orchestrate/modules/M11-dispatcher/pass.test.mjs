@@ -1071,7 +1071,8 @@ test('audit 0b-6 r3 MAT-1: a host.lock that cannot be read, or rules that cannot
 // L1041, L1045: under the owner's copier, a host.lock port that can't vouch for its copy throws with code HOST_COPY_FAIL
 // (stale, missing, future or not-the-owner's stamp, or a copy it can't read). Every start waits, undo cards too (a bad
 // copy means this Mac can't tell which Mac is home). The owner is told once a day on one cause, each waiting undo at once
-// by name, and the mark clears on the first good read.
+// by name. The hold clears on the first good read, but the told mark lasts its day (L1048 m3), so a copier that flaps is
+// told at most once a day.
 test('L1045: a HOST_COPY_FAIL from hostLock holds every start, undo cards too, tells once and names the undo; a good read clears it; a plain throw is as before', async () => {
   const stale = () => { throw Object.assign(new Error('the host.lock copier last ran well at 2026-01-01T00:00:00.000Z, 9 minutes ago (the limit is 5), so the copy of host.lock may be old: restart the owner\'s host.lock copier'), { code: HOST_COPY_FAIL }); };
   const told = (w) => w.calls.alerts.filter((a) => /the Dispatcher holds every start, undo cards too: .*may be old: restart the owner's host\.lock copier/.test(a));
@@ -1092,11 +1093,21 @@ test('L1045: a HOST_COPY_FAIL from hostLock holds every start, undo cards too, t
   // A good read: the mark clears and both start, the undo first.
   const r3 = await w.pass(2);
   assert.deepEqual(r3.started, ['U-1', 'C-1']);
-  assert.equal(w.rec.read('fact', HOLD_FACT(HOST_COPY_CAUSE)).doc.told_at, null, 'cleared on the good read');
-  // A later stop is told afresh, the same day.
+  const cleared = w.rec.read('fact', HOLD_FACT(HOST_COPY_CAUSE)).doc;
+  assert.equal(cleared.cleared_at, iso(T0 + 2 * MIN), 'cleared on the good read');
+  assert.equal(cleared.told_at, iso(T0), 'the told mark is kept (L1048 m3)');
+  const rev = w.rec.read('fact', HOLD_FACT(HOST_COPY_CAUSE)).rev;
+  await w.pass(3);
+  assert.equal(w.rec.read('fact', HOLD_FACT(HOST_COPY_CAUSE)).rev, rev, 'a clear is written once, not every pass');
+  // The copier flaps the same day: starts stop again, but the owner is not told again within the day.
   w.setCard('C-1', { state: 'cancelled' });
-  await w.pass(3, { hostLock: stale });
-  assert.equal(told(w).length, 2, 'a return is told afresh');
+  const r4 = await w.pass(4, { hostLock: stale });
+  assert.ok(r4.notes.some((n) => /nothing starts, undo cards too/.test(n)), 'held again');
+  assert.equal(told(w).length, 1, 'a flap within the day is not told again');
+  await w.pass(5);
+  // A day after the last tell, a return is told again.
+  await w.pass(24 * 60 + 1, { hostLock: stale });
+  assert.equal(told(w).length, 2, 'told again once its day has passed');
   // A throw without the code (no copier: hostLockStamp not in the config) is as before: noted, starts go on, no alert.
   const p = world([card('C-2'), ...undoEntries('U-2')]);
   const rp = await p.pass(0, { hostLock: () => { throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }); } });
@@ -1114,13 +1125,18 @@ test('L1045: the usage hold and every other startsOff still let an undo card thr
 test('L1045: undoStarts, the tick\'s own undo step, reads host.lock and holds every undo card on HOST_COPY_FAIL, telling each at once', async () => {
   const rec = recWith([['product', 'p1', { state: 'active' }], ...undoEntries('U-1')]);
   const launched = [];
-  const alerts = [];
-  const ask = (hostLock) => undoStarts({ rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), now: T0, bands: { band: 'green', own_building: 'open', prodBlocked: false },
-    running: [], launch: async (x) => { launched.push(x.card.id); return { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/${x.product}/worker/${x.sessionId}`, pid: 4242, pidStart: 's4242', head: 'h'.repeat(40) }; }, filesOf: filesOfCommits, alert: (t) => alerts.push(t), hostLock });
-  const r = await ask(() => { throw Object.assign(new Error('the host.lock copier has never finished a run'), { code: HOST_COPY_FAIL }); });
-  assert.deepEqual([r.started, launched], [[], []]);
-  assert.ok(r.notes.some((n) => /no undo card starts: host\.lock's copy can't be trusted, so which Mac is home is not known \(the host\.lock copier has never finished a run\)/.test(n)), r.notes.join(' | '));
-  assert.equal(alerts.filter((a) => /^your undo \(card U-1\) is waiting: host\.lock's copy can't be trusted/.test(a)).length, 1, alerts.join(' | '));
+  const alert = fakeAlert();
+  // Through the outbox and its send, as the tick does: a cause is marked told only once a copy is delivered.
+  const ask = (hostLock) => withAlerts(rec, T0, alert, (queued) => undoStarts({ rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), now: T0, bands: { band: 'green', own_building: 'open', prodBlocked: false },
+    running: [], launch: async (x) => { launched.push(x.card.id); return { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/${x.product}/worker/${x.sessionId}`, pid: 4242, pidStart: 's4242', head: 'h'.repeat(40) }; }, filesOf: filesOfCommits, alert: queued, hostLock }));
+  const never = () => { throw Object.assign(new Error('the host.lock copier has never finished a run'), { code: HOST_COPY_FAIL }); };
+  // L1048 m5: asked twice, as the tick asks every pass: nothing starts either time, and the undo is told once.
+  for (const n of [1, 2]) {
+    const r = await ask(never);
+    assert.deepEqual([r.started, launched], [[], []], `call ${n}`);
+    assert.ok(r.notes.some((x) => /no undo card starts: host\.lock's copy can't be trusted, so which Mac is home is not known \(the host\.lock copier has never finished a run\)/.test(x)), `call ${n}: ${r.notes.join(' | ')}`);
+  }
+  assert.equal(alert.texts.filter((a) => /^your undo \(card U-1\) is waiting: host\.lock's copy can't be trusted/.test(a)).length, 1, alert.texts.join(' | '));
   // A plain throw (no copier) holds nothing, as before.
   const r2 = await ask(() => { throw new Error('EACCES'); });
   assert.deepEqual(r2.started, ['U-1']);

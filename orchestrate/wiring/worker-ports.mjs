@@ -163,7 +163,8 @@ export function cleanupPorts({ config: c, selfUid }, { run = safeGit } = {}) {
 // not the owner's own into the Record, and the owner can read their own files anyway (L739 self-review M1, L763).
 export const HOST_LOCK_MAX = 4096;
 /** The copier (setup host-lock-copy.mjs) runs every 60 s; a stamp older than five runs is a copier that stopped (L1041:
- * the one limit, which the copier and check-dispatcher take from here). */
+ * the one limit, which the copier and check-dispatcher take from here). It must stay at least twice the copier's
+ * interval, or a copier on time would read as stale between two of its runs (L1048; #486 checks it). */
 export const HOST_LOCK_STAMP_MAX_MS = 5 * 60_000;
 const STAMP_MAX_BYTES = 4096;
 

@@ -143,13 +143,15 @@ export const HOST_COPY_FAIL = 'HOST_LOCK_COPY';
 export const HOST_COPY_CAUSE = 'host-lock-copy';
 // L1045: under this hold undo cards wait too. A copy that can't be trusted means this Mac can't tell which Mac is home,
 // and two Macs running one undo is what the single-host rule stops. (Every other startsOff still lets undo cards through.)
-const hostCopyReason = (why) => `host.lock's copy can't be trusted, so which Mac is home is not known (${why})`;
+// L1048: the tick holds every other start on it too (reviews, merges, plan reviews, read-only helpers, Lead restarts, the
+// Front Door and Mini Base), reading host.lock once a tick. Stops and Joe's own answers still run.
+export const hostCopyReason = (why) => `host.lock's copy can't be trusted, so which Mac is home is not known (${why})`;
 /** The host.lock port's answer as { text, copyFail }: copyFail is the reason when the port marked HOST_COPY_FAIL,
- * text is undefined when the read threw. A throw without the mark (no copier) is "not known" and holds nothing. */
-function readHostLock(hostLock) {
-  try { return { text: hostLock(), copyFail: null, error: null }; } catch (e) {
+ * text is undefined when the read threw (thrown: what it threw). A throw without the mark (no copier) is "not known" and holds nothing. */
+export function readHostLock(hostLock) {
+  try { return { text: hostLock(), copyFail: null, error: null, thrown: null }; } catch (e) {
     const why = String(e?.message ?? e);
-    return { text: undefined, copyFail: e?.code === HOST_COPY_FAIL ? why : null, error: why };
+    return { text: undefined, copyFail: e?.code === HOST_COPY_FAIL ? why : null, error: why, thrown: e };
   }
 }
 // The shared still-waiting repeat, one definition (#164 audit c1).
@@ -579,7 +581,8 @@ export async function dispatcherPass({ rec, rules, now, clock = () => now, accou
 
   // 2. host.lock (m5). An unreadable file is "not known" and changes nothing (audit 0b-6 r3 MAT-1), except under the
   // owner's copier (L1040, L1041): a copy that is stale or can't be read (HOST_COPY_FAIL) turns starts off and is told
-  // once a day on one cause, whose mark clears once the copy is good again, so a later stop is told afresh.
+  // once a day on one cause. The hold clears on the first good read, but its told mark is kept (L1048 m3): a copier that
+  // flaps is told at most once a day. An alert still queued is dropped at the clear.
   const lock = readHostLock(hostLock);
   const lockText = lock.text;
   const hostCopy = lock.copyFail;
@@ -591,7 +594,7 @@ export async function dispatcherPass({ rec, rules, now, clock = () => now, accou
   }
   // Without a copier there is never such a hold, so this only looks and writes nothing.
   const copyHold = HOLD_FACT(HOST_COPY_CAUSE);
-  if (lockText !== undefined && (factDoc(rec, copyHold) || isQueued(rec, copyHold))) clearHold(rec, copyHold, now, report);
+  if (lockText !== undefined && (factDoc(rec, copyHold) || isQueued(rec, copyHold))) clearCopyHold(rec, copyHold, now, report);
   const seen = factDoc(rec, HOST_FACT);
   if (lockText !== undefined && (seen?.doc?.text ?? null) !== (lockText ?? null)) {
     putFact(rec, HOST_FACT, { text: lockText ?? null, at: iso(now) }, 'host_lock', seen?.doc);
@@ -816,6 +819,15 @@ function foldText(g) {
  * product and cause has waited a day, so a return is told afresh (#157 audit m3). Run on a full pass only: a pass that
  * starts undo cards alone sees no groups and must not clear them.
  */
+// The host.lock copy hold's clear (L1048 m3): like clearHold, but told_at stays, so holdAlert's day still runs from the
+// last tell. cleared_at is written once per clear (and whenever a queued alert was dropped, moving the version so a mark
+// on its way conflicts), never every pass.
+const clearedSince = (d) => typeof d?.cleared_at === 'string' && !(typeof d.told_at === 'string' && d.told_at > d.cleared_at);
+const clearCopyHold = (rec, fact, now, report) => clearCause(rec, fact, (moved) => {
+  const cur = rec.read('fact', fact)?.doc;
+  const was = typeof cur === 'object' && cur !== null ? cur : undefined;
+  if (moved || (cur != null && !clearedSince(was))) putFact(rec, fact, { ...was, cleared_at: iso(now) }, 'hold_cleared', was);
+}, report);
 export const clearHold = (rec, fact, now, report) => clearCause(rec, fact, (moved) => {
   const cur = rec.read('fact', fact)?.doc;
   const was = typeof cur === 'object' ? cur : undefined;

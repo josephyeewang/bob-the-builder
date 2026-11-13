@@ -49,7 +49,7 @@ import { READING_FUTURE_MS } from '../M12-sensors/facts.mjs';
 import { outageStep, OUTAGE_FACT } from './outage.mjs';
 import { intakePass } from './outbox-intake.mjs';
 import { leadRestartStep, leadInFlight, handoffVet, tellLeadSkipped, HANDOFF_NAME } from './lead-restart.mjs';
-import { dispatcherPass, stopPass, undoStarts, rulesMissingAlert, holdAlert, refusalReport, HELD_BANDS, HOLD_REPEAT_MS, TOLD_BANDS } from './pass.mjs';
+import { dispatcherPass, stopPass, undoStarts, rulesMissingAlert, holdAlert, refusalReport, readHostLock, hostCopyReason, HELD_BANDS, HOLD_REPEAT_MS, TOLD_BANDS } from './pass.mjs';
 import { startGate } from './gate.mjs';
 import { currentBands } from './usage.mjs';
 import { timeLimits, requestMerges } from './merges.mjs';
@@ -263,6 +263,13 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
   let acct;
   try { acct = signedInAccount({ rec, rules, now }); } catch (e) { acct = { account: null, reason: `the signed-in account could not be read (${e?.message ?? e})` }; }
   if (acct.missing) missing.push(acct.missing);
+  // host.lock is read once a tick (L1048 c1); the undo-starts step and the main pass get that one answer. Under the
+  // owner's copier, a copy that can't be trusted (HOST_COPY_FAIL) means which Mac is home is not known, and then nothing
+  // starts (L1048): no card or undo card, review, merge, plan review, read-only helper, Lead, Front Door or Mini Base.
+  // Stops and Joe's own answers still run. A plain throw (no copier) holds nothing here, as before.
+  const lockOnce = readHostLock(p.hostLock ?? (() => null));
+  const hostLock = () => { if (lockOnce.thrown !== null) throw lockOnce.thrown; return lockOnce.text; };
+  const homeUnknown = lockOnce.copyFail !== null ? hostCopyReason(lockOnce.copyFail) : null;
 
   // The safety acts, first and alone (L38).
   let stops = null;
@@ -276,7 +283,7 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
   });
   await run('undo', () => undoStep({ rec, rules, now, filesOf: p.filesOf, alert }));
   await run('undo-starts', async () => {
-    const r = await undoStarts({ rec, rules, now, bands: stops?.bands ?? HELD_BANDS, running: stops?.running ?? p.sessions(), launch: p.launch, stopGroup: p.stopGroup, outboxRoot: p.outboxRoot, filesOf: p.filesOf, alert, failureLog: failed('undo-starts'), hostLock: p.hostLock, ...portDeadlines });
+    const r = await undoStarts({ rec, rules, now, bands: stops?.bands ?? HELD_BANDS, running: stops?.running ?? p.sessions(), launch: p.launch, stopGroup: p.stopGroup, outboxRoot: p.outboxRoot, filesOf: p.filesOf, alert, failureLog: failed('undo-starts'), hostLock, ...portDeadlines });
     missing.push(...r.missing);
     if (stops) stops.running = r.running;
     return { started: r.started, refused: r.refused, notes: r.notes };
@@ -306,6 +313,7 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
   // read-only cap per Lead and an outage hold it here, whatever the wiring port does.
   const gatedReadonly = (start) => async (x) => {
     if (outageOpen) return { ok: false, reason: 'outage: nothing starts' };
+    if (homeUnknown) return { ok: false, reason: homeUnknown };
     const acct = signedInAccount({ rec, rules, now });
     if (!acct.account) return { ok: false, reason: acct.reason };
     // The running list (L688): the Dispatcher's sessions, and for the plan-review Lead also the plan reviewers the review
@@ -343,6 +351,7 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
   // During an outage no WRAP is sent and no new Lead starts (audit 0b-6 r2 MIN-6).
   await run('leads', async () => {
     if (outageOpen) return 'outage: the Lead step waits';
+    if (homeUnknown) return `the Lead step waits: ${homeUnknown}`;
     const out = [];
     const untold = [];
     for (const l of p.leads()) {
@@ -376,7 +385,7 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
     pass: (ctx) => planGoPass(ctx, { alert, startPlanReview: gatedReadonly((x) => p.startPlanReview(x)), planReviewAnswer: (x) => p.planReviewAnswer(x), planRows: (x) => p.planRows(x), planView: (x) => p.planView(x), replyToLead: (x) => p.replyToLead(x), mainSha: (x) => p.mainSha(x), passMs: p.approvalsProductMs ?? APPROVALS_PRODUCT_MS }) }));
   await run('pass', async () => {
     const r = await dispatcherPass({ rec, rules, now, account: acct.account, sessions: p.sessions(), probe: p.probe, launch: p.launch, stopGroup: p.stopGroup, outboxRoot: p.outboxRoot,
-      saveWork: p.saveWork, hostLock: p.hostLock, pauseLead: p.pauseLead, filesOf: p.filesOf, alert, failureLog: failed('pass'), startsOff: acct.reason, tellMissing: false, stops, ...portDeadlines });
+      saveWork: p.saveWork, hostLock, pauseLead: p.pauseLead, filesOf: p.filesOf, alert, failureLog: failed('pass'), startsOff: acct.reason, tellMissing: false, stops, ...portDeadlines });
     missing.push(...r.missing);
     bands = r.bands;
     running = r.running;
@@ -386,10 +395,11 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
   // r2 MIN-4): "unknown" would still let reviews and merges through while the real band may be red.
   // The time limits themselves still run.
   const held = { band: 'unknown', own_building: 'unknown', pace: null, prodBlocked: true, reason: 'the main pass did not finish' };
-  const startsHeld = outageOpen ? 'outage' : bands ? null : 'the main pass did not finish';
+  // While home is not known (L1048) every review and merge request waits, an undo's merge too.
+  const startsHeld = outageOpen ? 'outage' : homeUnknown ?? (bands ? null : 'the main pass did not finish');
   await run('limits', () => timeLimits({ rec, rules, now, clock, b: bands ?? held, running, gateAlive: p.gateAlive,
     hasReviewer: p.hasReviewer, requestReview: p.requestReview, reviewAlerts: p.reviewAlerts, alert, startsHeld, missing, failureLog: failed('limits') }));
-  await run('merges', () => requestMerges({ rec, rules, now, b: bands ?? held, running, startsHeld, missing, alert }));
+  await run('merges', () => requestMerges({ rec, rules, now, b: bands ?? held, running, startsHeld, homeUnknown, missing, alert }));
   // A card put on Joe whose alert was not delivered is told again (L130).
   await run('waits', () => retellWaits({ rec, alert, now }));
   await run('lost-cards', () => tellLostCards({ rec, alert, now, report: failed('lost-cards') }));
@@ -397,8 +407,9 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
   // A step that failed did not report what it lacked, so nothing already told is dropped this tick.
   const complete = ['stops', 'undo-starts', 'pass', 'limits', 'merges'].every((s) => res[s]?.ok);
   try { await rulesMissingAlert({ rec, keys: missing, alert, now, complete }); } catch (e) { alert(`the Dispatcher could not record missing rules values: ${e?.message ?? e}`); }
-  // No silent hold (L38). The band is not told while the account is unknown: that hold is the account's.
-  try {
+  // No silent hold (L38). The band is not told while the account is unknown: that hold is the account's. Neither is told
+  // while home is not known (L1048 m2): both say undo cards run, and that hold, the stronger, is told by the main pass.
+  if (!homeUnknown) try {
     // A missing rules value is told by the missing-values alert, not twice.
     if (acct.reason && !acct.missing) holdAlert({ rec, cause: 'account', text: `nothing new starts but undo cards: ${acct.reason}`, alert, now });
     const band = stops?.bands ?? bands;
@@ -407,7 +418,7 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
       holdAlert({ rec, cause: `band-${band.band}`, text: `the usage band is ${band.band}${band.reason ? ` (${band.reason})` : ''}: work it holds waits; stops and undo still run`, alert, now });
     }
   } catch (e) { alert(`the Dispatcher could not record a hold: ${e?.message ?? e}`); }
-  await run('phone', () => phoneLinkStep({ rec, rules, now, failureLog: failed('phone'), send: p.sendFrontDoor, restartFrontDoor: p.restartFrontDoor, startMinibase: p.startMinibase,
+  await run('phone', () => phoneLinkStep({ rec, rules, now, failureLog: failed('phone'), startsHeld: homeUnknown, send: p.sendFrontDoor, restartFrontDoor: p.restartFrontDoor, startMinibase: p.startMinibase,
     frontDoorAlive: p.frontDoorAlive, strayFrontDoor: p.strayFrontDoor, lastHandoff: p.frontDoorHandoff, alert }));
   await run('cleanup', () => cleanupPass({ rec, rules, now, ...p.cleanup, alert }));
 
