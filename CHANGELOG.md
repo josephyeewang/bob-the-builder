@@ -6,6 +6,12 @@ Until 2026-10-29 the history sat in four places that disagreed (the core's foote
 
 ## 1. v2.28 onward (v2.28 – v2.40 moved from the footer of `build-protocol-core.md`)
 
+v2.77 — 2026-11-13 — Grade, fix, guard and cover the same way every time (D-040)
+
+- Rule 30(j): a Material finding states four lines (trigger, path, outcome, reach) or goes back to the auditor; what is Minor is listed. Rule 30(a): a product that acts on its own tiers its code by the harm it can reach.
+- Rule 26: each change carries a collision table (callers by grep, what each expects, the test that proves it). Engineering Principle 12: contain first; strict guards use short allowed lists, never lists of bad inputs.
+- Change reviews cover a fixed list (named invariants, collision-table callers, the previous verified-good list) and report planted defects as caught or missed. Invariants each get an automatic check, with a set for products that act on their own. The repair guide, "build, then apply" and "whole suite in CI" are extended in their existing homes.
+
 v2.76 — 2026-11-13 — Evidence must match the claim (D-039)
 
 - Specification audits cannot pass with unavailable requested spec inputs or with an explicitly requested source that is unavailable or yields no candidates; lexical checks no longer claim complete semantic preservation.

@@ -1220,6 +1220,7 @@ This generates the full folder structure (`docs/`, `contracts/`, `evals/`, `scri
 After the script runs, Claude:
 - Customizes the hook commands in `.claude/settings.json` for the chosen stack (replace the placeholder `echo` commands with real format/typecheck commands per Step 6b)
 - **Once CI exists:** gives the owner the paste-ready edit that names its required jobs in `.claude/required-checks.json` (and lists every other job under `not_required` with a reason) — that moves the merge guard from "no CI yet" to guarding. Claude cannot make this edit itself (config-protection), by design.
+- **Once the product has pages:** adds Bob's quality checks (every page loads, matches its reference image, is accessible and fast enough; no new dead or duplicated code) by following `~/.claude/skills/bob/../templates/quality/README.md`.
 - Sets up hosting/deployment (if applicable — e.g., `vercel link`)
 - Pushes to GitHub
 - Initializes project memory directory (if not already created)

@@ -8,6 +8,7 @@ Set 29 Oct 2026 for the parallel build. One writer per folder. A lane that needs
 | 2. Workshop and Dispatcher | `orchestrate/modules/M4-workshop`, `orchestrate/modules/M11-dispatcher` | 0b-3, 0b-4, then 0b-6 |
 | 3. Sensors, Ledger, devices, Front Door | `orchestrate/modules/M12-sensors`, `orchestrate/modules/M13-ledger`, `orchestrate/modules/M1-front-door` | 0b-7, then 0b-8 |
 | 4. Mini setup kit (started 1 Nov, LEAD-CALLS L86) | `orchestrate/setup/` | R-0b-05, the install and background jobs, the owner folders and keys, then R-0b-122 (watch-only week) |
+| 7. Screen reading, the herdr harvest (LEAD-CALLS L1052, L1064) | `orchestrate/modules/M12-sensors/screen/`, `orchestrate/modules/M12-sensors/third_party/herdr/` (new files only; see the exception below) | 0b-herdr-harvest, then 0b-herdr-relay |
 | Lead (the ORCHESTRATE lead session) | `orchestrate/modules/M3-lead`, `orchestrate/modules/M5-review-audit`, `orchestrate/modules/M7-live-check`, `orchestrate/modules/M14-learning`, `orchestrate/test/`, this file | the cutover kit and the first cutover's runbook; the build rows; fresh audits |
 
 Exception (LEAD-CALLS L65, for the review runner, #50): lane 2 may edit M9's verdict intake (`M9-record/outbox.mjs` and the verdict matching in `writer.mjs`) and its tests, add the one new file `orchestrate/shared/review-roles.mjs` (no existing shared file changes), and (L65 addendum 2) edit M6 `gather.mjs`, `refusals.mjs` and the M6 tests, so the Merge Gate reads the review runner's launch records through M9's one check and never the Record's copy.
@@ -20,5 +21,6 @@ More exceptions (1 Nov 2026), each limited to the files named:
 - **Lane 4, M6 (L107):** new files only, `M6-merge-gate/watch-only.mjs`, `watch-run.mjs` and their tests, for the watch-only week (R-0b-122). Existing M6 files stay lane 1's and lane 2's as above.
 - **Lane 4, CI (L109):** the one macOS job in `.github/workflows/scripts-ci.yml` that runs the setup tests, and its guard test. The other jobs stay the lead's.
 - **Lane 4, M4 `launcher/review-daemons.mjs` (L113):** an export-only change (`plist`, `str`, `arr`, `LABEL`, `ABS`), with no behaviour change, as its own commit with lane 2 told, so the watch-only week's hourly job reuses the one plist builder. The rest of M4 stays lane 2's.
+- **Lane 7, M12 screen reading (L1052, L1064):** new files only, `M12-sensors/screen/` and `M12-sensors/third_party/herdr/`, for the herdr harvest (R-0b-149 to 153). `screen/waiting.mjs` is M4's decision, kept here until R-0b-153a wires it into sendSafe. Existing M12 and M4 files stay their lanes'.
 
 Only rows tagged `cutover: first` are built before the first cutover. Rows tagged `cutover: second` wait until after it.
