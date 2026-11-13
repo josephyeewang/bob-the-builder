@@ -10,6 +10,7 @@
 #          doc-pointers-check.mjs short paths · config-protection.js's required-checks advice · commit-sweep.sh
 #   D-036: templates/wired.test.mjs (Phase Gate 17)
 #   R-3-16, R-3-17: skill-size/test-skill-size.sh · skill-review-check.mjs (skill size and review)
+#   R-3-25: find-polluter.sh (which test leaves a file behind)
 #
 # Rule 28's discipline applied to Bob's own checkers: each check is run against the defect it
 # was written for (must catch it) AND against a clean case (must pass it). Everything happens in
@@ -1190,6 +1191,20 @@ expect "skill-review: second person in the body -> Minor, reported" 1 "Minor\] s
 printf 'no frontmatter here\n' > "$SR/broken/SKILL.md"
 expect "skill-review: no frontmatter -> FAIL" 1 "no YAML frontmatter" -- node "$HERE/skill-review-check.mjs" "$SR/broken"
 expect "skill-review: a skill it cannot read -> exit 2, never a pass" 2 "cannot read the skill" -- node "$HERE/skill-review-check.mjs" "$SR/absent"
+
+# ── 25. find-polluter.sh: which test leaves a file behind (R-3-25) ──────────
+echo "find-polluter (templates/debugging-protocol.md step 2)"
+FP="$TMP/polluter"; mkdir -p "$FP/tests" "$FP/bin"
+printf 'echo clean one\n' > "$FP/tests/a.test.sh"
+printf 'mkdir -p leftover-cache\n' > "$FP/tests/b.test.sh"
+printf 'echo clean three\n' > "$FP/tests/c.test.sh"
+# A stand-in for npm: "npm test <file>" runs just that file, as the template requires.
+printf '#!/usr/bin/env bash\n[ "$1" = test ] && bash "$2"\n' > "$FP/bin/npm"; chmod +x "$FP/bin/npm"
+fp() { (cd "$FP" && PATH="$FP/bin:$PATH" bash "$HERE/find-polluter.sh" leftover-cache 'tests/*.test.sh'); }
+expect "find-polluter: a planted polluting test -> found and named" 1 "Test: \./tests/b\.test\.sh" -- fp
+expect "find-polluter: thing already there -> still says clean (why the template says delete it first)" 0 "No polluter found" -- fp
+rm -rf "$FP/leftover-cache" "$FP/tests/b.test.sh"
+expect "find-polluter: no polluting test -> clean, exit 0" 0 "No polluter found" -- fp
 
 echo
 echo "selftest-gate-scripts: $PASS passed, $FAIL failed"
