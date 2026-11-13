@@ -22,6 +22,7 @@ import { homedir, hostname, tmpdir, userInfo } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { roleEnv } from '../../../M4-workshop/launcher/env-check.mjs';
+import { gitOk } from '../../../M4-workshop/git/safe-git.mjs';
 import { fixtureProblems, scrubScreen } from './fixture-check.mjs';
 import { ELICIT_MESSAGE } from './elicit-server.mjs';
 
@@ -157,7 +158,7 @@ function version(bin, env) {
   return execFileSync(bin, ['--version'], { env, encoding: 'utf8' }).trim().split(/\s+/)[0];
 }
 
-function write(out, result, meta) {
+function saveFixture(out, result, meta) {
   const dir = join(out, result.label);
   mkdirSync(dir, { recursive: true });
   result.files.forEach((f, i) => writeFileSync(join(dir, `${String(i + 1).padStart(2, '0')}.txt`), f.text));
@@ -187,7 +188,7 @@ export async function main(argv = process.argv.slice(2)) {
   const server = `bob-capture-${process.pid}`;
   const tmux = makeTmux(server, env);
   const repo = realpathSync(mkdtempSync(join(tmpdir(), 'bob-capture-')));
-  execFileSync('git', ['init', '-q', repo], { env });
+  await gitOk(['init', '-q', repo], { gitDir: join(repo, '.git'), cwd: repo, purpose: 'screen capture: a throwaway repo' });
   writeFileSync(join(repo, 'README.md'), 'A throwaway repo for screen captures.\n');
   const mcpConfig = join(repo, '..', `${server}-mcp.json`);
   writeFileSync(mcpConfig, JSON.stringify({ mcpServers: { fixture: { command: process.execPath, args: [join(HERE, 'elicit-server.mjs')] } } }));
@@ -199,7 +200,7 @@ export async function main(argv = process.argv.slice(2)) {
       const bin = s.newer ? newer : claude;
       const r = await runScenario(s, { tmux, claude: bin, repo, home, host, user, values, mcpConfig });
       if (s.then) await sleep(4000), tmux.kill();
-      if (r.saved && (!only || s.label === only)) write(out, r, { scenario: s.label, claude_code_version: version(bin, env), tool: 'screen/tools/capture.mjs', captured_on: new Date().toISOString().slice(0, 10) });
+      if (r.saved && (!only || s.label === only)) saveFixture(out, r, { scenario: s.label, claude_code_version: version(bin, env), tool: 'screen/tools/capture.mjs', captured_on: new Date().toISOString().slice(0, 10) });
       results.push(r);
       console.log(`${r.saved ? 'saved  ' : 'NOT    '} ${r.label}${r.saved ? '' : `: ${r.why}`}`);
     }

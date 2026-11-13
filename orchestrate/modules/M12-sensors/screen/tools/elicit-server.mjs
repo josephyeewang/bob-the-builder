@@ -8,8 +8,8 @@ import { pathToFileURL } from 'node:url';
 
 export const ELICIT_MESSAGE = 'Fixture asks: what name should it use?';
 
-export function serve(input = process.stdin, output = process.stdout) {
-  const send = (m) => output.write(`${JSON.stringify({ jsonrpc: '2.0', ...m })}\n`);
+export function serve(input = process.stdin, out = (line) => process.stdout.write(line)) {
+  const send = (m) => out(`${JSON.stringify({ jsonrpc: '2.0', ...m })}\n`);
   const waiting = new Map(); // our request id -> the tools/call id it answers
   let next = 1;
   createInterface({ input }).on('line', (line) => {
