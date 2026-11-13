@@ -4,6 +4,9 @@ import { undoStep as undoStep0, exactReverse, UNDO_CARD, FIX_CARD, REVERSE_FACT,
 import { rulesWith, recWith, T0, iso, withAlerts } from './fixtures.test-helper.mjs';
 import { outbox, ALERT_QUEUE_FACT } from './alerts.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
+import { MOVES, moveActors } from '../M9-record/moves.mjs';
+import { STATES } from '../../shared/record-names.mjs';
+import { PRODUCT, leadCard, must, plan as planM9, product as productM9, seed as seedM9, setup as setupM9 } from '../M9-record/fixtures.test-helper.mjs';
 
 // Each step runs as the tick runs it: its alerts are queued, then sent once it is done (alerts.mjs, L47).
 const undoStep = (a) => withAlerts(a.rec, a.now, a.alert ?? (() => {}), (alert) => undoStep0({ ...a, alert }));
@@ -296,6 +299,37 @@ test('L1008: a fix card written on the gate\'s fact is still told once, though t
     assert.match(alerts.texts[0], /could not be an exact reverse: no reason given; a fix card waits for the Lead/, label);
     assert.ok(w.rec.read('fact', UNDO_NOTE_FACT(U)), `${label}: noted once told`);
   }
+});
+
+// L1059 (#500 m-4, accepted as unreachable): a fix card's note is never told on a card that left `failed` or on a second fix
+// card, because neither can happen. Pinned here so a move out of failed, or a second fix card, reopens m-4.
+test('L1059 m-4: a failed card has no moves out, and a failed undo card has one fix card only', async () => {
+  assert.equal(Object.hasOwn(MOVES.card, 'failed'), false, 'no row of moves out of failed');
+  for (const to of STATES.card) assert.equal(moveActors('card', 'failed', to), null, `failed -> ${to}`);
+  const U = UNDO_CARD('A-1');
+  const w = world([target(), merge(), ['ask', 'A-1', ask()], failedUndo(), reverseFact({ state: 'not_clean', reason: 'a later change touched src/a.js' })]);
+  assert.deepEqual(await w.step(), [[U, 'fix card written']]);
+  for (let day = 1; day <= 3; day += 1) await w.step();
+  assert.deepEqual(w.rec.list('card').filter((c) => c.doc?.kind === 'fix').map((c) => c.id), [FIX_CARD(U)], 'M11 writes one');
+  // The real Store Writer (this module's tests run on a stand-in Record without it): a second fix card for the same failed
+  // card, under any id, is refused, and no write by any actor moves a failed card anywhere.
+  const m9 = setupM9({ prefix: 'm9-undo-m4-' });
+  productM9(m9);
+  leadCard(m9, 'C-1');
+  seedM9(m9, 'card', 'C-1', { ...m9.record.read('card', 'C-1').doc, state: 'failed' });
+  const fix = (id) => m9.record.write({ actor: 'dispatcher', entity: 'card', id, expectRev: 0, kind: 'undo_fix_card',
+    doc: { state: 'draft', product: PRODUCT, kind: 'fix', fix_of: 'C-1', ...planM9() } });
+  must(fix(FIX_CARD('C-1')), 'the one fix card');
+  const second = fix(`${FIX_CARD('C-1')}-2`);
+  assert.equal(second.ok, false); assert.match(second.reason, /C-1 already has a fix card/);
+  const { rev, doc } = m9.record.read('card', 'C-1');
+  for (const to of STATES.card.filter((s) => s !== 'failed')) {
+    for (const actor of ['dispatcher', 'merge_gate', 'approvals', 'workshop', 'lead']) {
+      const r = m9.record.write({ actor, entity: 'card', id: 'C-1', expectRev: rev, doc: { ...doc, state: to } });
+      assert.equal(r.ok, false, `${actor}: failed -> ${to}`);
+    }
+  }
+  assert.equal(m9.record.read('card', 'C-1').doc.state, 'failed', 'the card stays failed');
 });
 
 test('D8 / L74 addendum: a clean reverse, no word from M6, or a look-alike not_clean fact not written by the gate writes no fix card', async () => {
