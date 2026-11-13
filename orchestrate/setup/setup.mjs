@@ -17,6 +17,8 @@
 //                                       rules copy from the runner config, read back and the guard tried on it, THEN
 //                                       /Library/Application Support/ClaudeCode/managed-settings.json; never over one it did not write.
 //                                       The way out: sudo rm that file from the Terminal app (managed-settings.mjs)        (root)
+//   bob --from <a Bob checkout> --commit <40-hex sha> [--dry-run]   the Bob method folder the sessions read and its
+//                                       pinned file list, from that commit, together (launch check 13; bob-manifest.mjs)  (root)
 //   check-dispatcher     the review runner's launches folder, the job's dispatcher.json's outboxRoot and copiesRoot, and whether orchestrate can read the owner's host.lock, and if not why  (read only; sudo to read as orchestrate)
 //   dispatcher-config    [--dry-run]    write the Dispatcher's config, <base>/dispatcher.json (and the copy's, when the copy keeps it)  (root)
 //                                       an existing dispatcher.json without outboxRoot and copiesRoot won't start the Dispatcher until this is run again
@@ -63,6 +65,7 @@ import { checkDaemons, jobLive, list, onlyJobs, planLoad, planPlace, planReloadA
 import { checkRulesCopy, checkWatchAppConfig, checkWatchRules, planWatchApp, planWatchRules, proveWatchAppChecks, watchConfigLine } from './watch-setup.mjs';
 import { reviewConfigCommand } from './review-config.mjs';
 import { WAY_OUT, checkManagedSettings, planManagedSettings } from './managed-settings.mjs';
+import { bobGit, checkBob, planBob } from './bob-manifest.mjs';
 import { readUser } from './users-folders.mjs';
 import { proveToken, checkProposals, checkSafeDirectory, checkToken, planProposals, planSafeDirectory, planToken } from './extras.mjs';
 
@@ -73,9 +76,9 @@ const TOKEN_PAGE_NOTE = [
   '  - Repository access: only the one repository named in the config;',
   '  - Permissions: Metadata = Read-only (GitHub adds it by itself; fine if absent), Contents = Read-only (GitHub may call it "code"), Pull requests = Read-only, Commit statuses = Read-only (the watch job reads it to judge a merge), and nothing else. (Not Checks: the job reads check runs with the watcher App, which holds Checks: read.)',
 ];
-const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install|check-dispatcher|dispatcher-config|dispatcher-keys|review-config --pin <x.y.z> --input <file> --out <file> [--for-install]|add-to-install --pin <x.y.z> --sha256 <hex>|managed-settings|daemons place|load|unload|list|check [--only <job>]|daemons reload-account|prove-token|proposals|check-proposals|safe-directory|check-safe-directory|token|check-token|watch-rules|check-watch-rules|watch-app> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
+const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install|check-dispatcher|dispatcher-config|dispatcher-keys|review-config --pin <x.y.z> --input <file> --out <file> [--for-install]|add-to-install --pin <x.y.z> --sha256 <hex>|bob --from <Bob checkout> --commit <sha>|managed-settings|daemons place|load|unload|list|check [--only <job>]|daemons reload-account|prove-token|proposals|check-proposals|safe-directory|check-safe-directory|token|check-token|watch-rules|check-watch-rules|watch-app> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
 const DAEMON_SUBS = ['place', 'load', 'unload', 'list', 'check', 'reload-account'];
-const COMMANDS = ['users-folders', 'check', 'proofs', 'install', 'check-install', 'check-dispatcher', 'dispatcher-config', 'dispatcher-keys', 'review-config', 'add-to-install', 'managed-settings', 'daemons', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app'];
+const COMMANDS = ['users-folders', 'check', 'proofs', 'install', 'check-install', 'check-dispatcher', 'dispatcher-config', 'dispatcher-keys', 'review-config', 'add-to-install', 'bob', 'managed-settings', 'daemons', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app'];
 const READ_ONLY = ['check', 'check-install', 'check-dispatcher', 'dispatcher-keys', 'check-proposals', 'check-safe-directory', 'check-token', 'prove-token', 'check-watch-rules'];
 const PLAIN_CONFIG = ['users-folders', 'check', 'check-dispatcher', 'dispatcher-keys', 'proofs', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app', 'review-config'];
 
@@ -84,7 +87,7 @@ export function parseArgs(argv) {
   if (!COMMANDS.includes(cmd)) throw new Error(`first word must be ${COMMANDS.join(', ')}`);
   let rest = argv.slice(1); let sub = null;
   if (cmd === 'daemons') { sub = rest[0]; rest = rest.slice(1); if (!DAEMON_SUBS.includes(sub)) throw new Error(`daemons needs one of ${DAEMON_SUBS.join(', ')}`); }
-  const o = { cmd, sub, config: null, dry: false, prefix: '', main: null, repo: null, rulesSource: null, printLine: false, only: null, app: {}, pin: null, claudePin: null, sha256: null, input: null, out: null, forInstall: false };
+  const o = { cmd, sub, config: null, dry: false, prefix: '', main: null, repo: null, rulesSource: null, printLine: false, only: null, app: {}, pin: null, claudePin: null, sha256: null, input: null, out: null, forInstall: false, from: null, commit: null };
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (a === '--dry-run') o.dry = true;
@@ -99,11 +102,13 @@ export function parseArgs(argv) {
       if (typeof v !== 'string' || v.startsWith('--')) throw new Error(`${a} needs a value`);
       o.app[{ '--app-id': 'id', '--app-installation': 'installation', '--app-key-name': 'keyFile' }[a]] = v;
     }
-    else if (a === '--config' || a === '--root-prefix' || a === '--main' || a === '--repo' || a === '--rules-source' || a === '--only' || a === '--pin' || a === '--sha256' || a === '--input' || a === '--out') {
+    else if (a === '--config' || a === '--root-prefix' || a === '--main' || a === '--repo' || a === '--rules-source' || a === '--only' || a === '--pin' || a === '--sha256' || a === '--input' || a === '--out' || a === '--from' || a === '--commit') {
       const v = rest[++i];
       if (typeof v !== 'string' || v.startsWith('--')) throw new Error(`${a} needs a value`);
       if (a === '--pin') { if (!/^\d+\.\d+\.\d+$/.test(v)) throw new Error('--pin must be a version, x.y.z'); o.claudePin = v; continue; }
       if (a === '--sha256') { if (!/^[0-9a-f]{64}$/.test(v)) throw new Error('--sha256 must be 64 lower-case hex characters'); o.sha256 = v; continue; }
+      if (a === '--from') { o.from = v; continue; }
+      if (a === '--commit') { if (!/^[0-9a-f]{40}$/.test(v)) throw new Error('--commit must be the full commit: 40 lower-case hex characters'); o.commit = v; continue; }
       if (a === '--input') { o.input = v; continue; }
       if (a === '--out') { o.out = v; continue; }
       if (a === '--config') o.config = v; else if (a === '--main') { if (!/^[0-9a-f]{40}$/.test(v)) throw new Error('--main must be a 40-hex commit'); o.main = v; } else if (a === '--repo') o.repo = v; else if (a === '--rules-source') o.rulesSource = v; else if (a === '--only') o.only = v; else o.prefix = v;
@@ -126,6 +131,8 @@ export function parseArgs(argv) {
   if (o.sha256 !== null && cmd !== 'add-to-install') throw new Error('--sha256 is only for add-to-install');
   if (o.forInstall && cmd !== 'review-config') throw new Error('--for-install is only for review-config');
   if (cmd === 'review-config' && (o.claudePin === null || o.input === null || o.out === null)) throw new Error('review-config needs --pin <x.y.z>, --input <your file of the owner\'s fields> and --out <the file to write>');
+  if ((o.from !== null || o.commit !== null) && cmd !== 'bob') throw new Error('--from and --commit are only for bob');
+  if (cmd === 'bob' && (o.from === null || o.commit === null)) throw new Error('bob needs --from <the full path of a Bob checkout> and --commit <its 40-hex commit>');
   if (cmd === 'add-to-install' && (o.claudePin === null || o.sha256 === null)) throw new Error('add-to-install needs --pin <x.y.z> and --sha256 <hex>');
   return o;
 }
@@ -144,7 +151,7 @@ function report(res, out) {
  * every one of them starts with the same wall (L90 M3): the folders above the base must be root's alone, checked now (a
  * problem gives no steps at all) and again as the FIRST step of the run.
  */
-export function planCommand(io, cfg, o, { readSource = (p) => io.readSource(p), runUpdater = spawnUpdater, managed = {} } = {}) {
+export function planCommand(io, cfg, o, { readSource = (p) => io.readSource(p), runUpdater = spawnUpdater, bobGitOf = (from) => bobGit(io, cfg, from), managed = {} } = {}) {
   if (o.cmd === 'users-folders') return plan(io, cfg);   // carries the wall itself
   if (o.cmd === 'proposals') return guarded(io, cfg, planProposals(io, cfg));   // the base wall first (L150 m3), then its own wall for the parent (extras.mjs)
   if (o.cmd === 'watch-app') return guarded(io, cfg, planWatchApp(io, cfg, { raw: o.raw, text: o.text, app: o.app, rulesSha256: o.pin, dry: o.dry }));
@@ -153,14 +160,15 @@ export function planCommand(io, cfg, o, { readSource = (p) => io.readSource(p), 
   if (o.cmd === 'managed-settings') return guarded(io, cfg, planManagedSettings(io, cfg, { readSource, ...managed }));
   const res = o.cmd === 'install' ? planInstall(io, cfg, { readSource, runUpdater })
     : o.cmd === 'add-to-install' ? planAddToInstall(io, cfg, { pin: o.claudePin, sha256: o.sha256, readSource })
+    : o.cmd === 'bob' ? planBob(io, cfg, { from: o.from, commit: o.commit, git: bobGitOf(o.from) })
     : o.cmd === 'token' ? planToken(io, cfg)
     : o.cmd === 'dispatcher-config' ? planDispatcherConfig(io, cfg, { jobLive: () => jobLive(io, cfg, DISPATCHER_JOB) })
     : o.sub === 'place' ? planPlace(io, cfg, o.jobs) : o.sub === 'load' ? planLoad(io, cfg, o.jobs) : o.sub === 'reload-account' ? planReloadAccount(io, cfg) : planUnload(io, cfg, o.jobs);
   return guarded(io, cfg, res);
 }
 
-/** Runs one command. `io`, `runUpdater` and `managed` (managed-settings' nodeBin and guard) are ports for tests. → exit code. */
-export function main(argv, { io: given, runUpdater = spawnUpdater, managed = {}, out = (s) => process.stdout.write(`${s}\n`), err = (s) => process.stderr.write(`${s}\n`) } = {}) {
+/** Runs one command. `io`, `runUpdater`, `bobGitOf` and `managed` (managed-settings' nodeBin and guard) are ports for tests. → exit code. */
+export function main(argv, { io: given, runUpdater = spawnUpdater, bobGitOf, managed = {}, out = (s) => process.stdout.write(`${s}\n`), err = (s) => process.stderr.write(`${s}\n`) } = {}) {
   let o; let cfg;
   try { o = parseArgs(argv); } catch (e) { err(`${e.message}\n${USAGE}`); return 2; }
   const io = given ?? realIo({ prefix: o.prefix });
@@ -221,7 +229,7 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, managed = {},
   if (!o.dry) { const p = rootProblem(io); if (p) { err(`refused: ${p}`); return 2; } }
   // The machine-wide guard blocks every session on the Mac if it breaks: the way out is said first, every run (L1031 guard c).
   if (o.cmd === 'managed-settings') out(WAY_OUT);
-  const planned = planCommand(io, cfg, o, { runUpdater, managed });
+  const planned = planCommand(io, cfg, o, { runUpdater, managed, ...(bobGitOf ? { bobGitOf } : {}) });
   for (const n of planned.notes ?? []) out(`uses ${n}`);
   for (const w of planned.warnings ?? []) out(`WARNING  ${w}`);
   for (const p of planned.problems) err(`PROBLEM  ${p}`);
@@ -240,7 +248,7 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, managed = {},
   try { apply(planned.ops, { log: (t) => out(`run: ${t}`) }); } catch (e) { const why = String(e.message).replace(/\.+$/, '');   // a message that ends in its own period gets one, not two
     err(/run: daemons load/i.test(e.message) ? `stopped: ${why}.` : `stopped: ${why}. Run it again after fixing that; it picks up where it stopped.`); return 1; }
   const after = o.cmd === 'users-folders' ? check(io, cfg, { alsoKnown: rootMadeEntries(cfg, { dispatcher: o.dispatcherOn }) }) : o.cmd === 'install' || o.cmd === 'add-to-install' ? checkInstall(io, cfg)
-    : o.cmd === 'dispatcher-config' ? checkDispatcherConfig(io, cfg)
+    : o.cmd === 'dispatcher-config' ? checkDispatcherConfig(io, cfg) : o.cmd === 'bob' ? checkBob(io, cfg, { commit: o.commit })
     : o.cmd === 'managed-settings' ? checkManagedSettings(io, cfg)
     : o.cmd === 'proposals' ? checkProposals(io, cfg) : o.cmd === 'safe-directory' ? checkSafeDirectory(io, cfg) : o.cmd === 'token' ? checkToken(io, cfg) : o.cmd === 'watch-rules' ? checkRulesCopy(io, cfg) : o.cmd === 'watch-app' ? checkWatchAppConfig(io, cfg, o.app, o.pin)
     : o.sub === 'place' ? checkDaemons(io, cfg, o.jobs).filter((r) => /exactly the built job file$|under another label/.test(r.what)) : o.sub === 'load' ? checkDaemons(io, cfg, o.jobs).filter((r) => /is loaded$|loaded from the job file as it is now$/.test(r.what))

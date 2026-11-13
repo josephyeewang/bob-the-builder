@@ -137,5 +137,6 @@ test('L732: a recovery stop is a refused write, never a throw out of the Record 
   let r;
   assert.doesNotThrow(() => { r = env.record.write({ actor: 'dispatcher', entity: 'fact', id: 'probe', expectRev: 0, doc: { x: 1 } }); });
   assert.equal(r?.ok, false);
-  assert.match(r.reason, /^store error: recovery stopped: EACCES: .*writes stop until the owner fixes it$/);
+  // Match the start only (L1036): the reason carries the temp path and is capped, so a long temp folder cuts the tail.
+  assert.match(r.reason, /^store error: recovery stopped: EACCES: /);
 });
