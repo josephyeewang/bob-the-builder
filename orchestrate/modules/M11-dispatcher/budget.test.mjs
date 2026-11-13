@@ -3,7 +3,7 @@
 // Run: node --test orchestrate/modules/M11-dispatcher/budget.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { FETCH_GRACE_MS } from '../M10-rules/reader.mjs';
@@ -74,7 +74,8 @@ test('L1001: rules that are not usable are not written: the own product\'s stop 
   writeFileSync(join(dir2.file, 'x'), 'y');
   const f = writeRulesSnapshot(dir2.file, { product: PRODUCT, products: [PRODUCT], state: () => ({ status: 'deny_all', reason: 'rules file not found' }), now: T0 });
   assert.equal(f.removeFailed, true, JSON.stringify(f));
-  assert.match(f.reason, /could not be removed .*the runners may use it until it goes stale/);
+  assert.match(f.reason, /could not be removed or emptied \(.*\): the runners may use it for up to 300 s from its last fetch$/);
+  assert.equal(f.usable, false);
   // The own product's last_good is usable; another product's deny_all has no rules, but is still listed, so the runners'
   // engine reads it as deny_all as the Dispatcher's does (L1001 review M1; budget() below).
   const state = (p) => (p === PRODUCT ? okState(FIXTURE, C1, B1, 'last_good') : { status: 'deny_all' });
@@ -108,6 +109,10 @@ test('L1001: the snapshot goes stale once the writes stop, and is refused after 
   assert.match(read(file, T0 + FETCH_GRACE_MS + 1).reason, /is stale: the rules for .* were last fetched at 2026-11-11T12:00:00\.000Z, over 300 s ago/);
   // Written ahead of the clock while its rules were fetched before it: the write time alone is ahead, and that is refused.
   assert.match(read(file, T0 + 100_000).reason, /was written at .*, ahead of this Mac's clock/);
+  // L1042 m2 (A5): written in time, but holding rules fetched ahead of the clock: refused, never an age that counts back.
+  assert.equal(write(file, { now: T0, state: () => okState(FIXTURE, C1, B1, 'ok', T0 + 10_000) }).ok, true);
+  assert.match(read(file, T0 + 5_000).reason, new RegExp(`holds rules for ${PRODUCT} fetched at 2026-11-11T12:00:10\\.000Z, ahead of this Mac's clock`));
+  assert.equal(read(file, T0 + 10_000).ok, true, 'once the clock reaches the fetch');
 });
 
 test('L1002: an access list on the snapshot or its folder letting anyone but the two readers in, or letting them more than read, is refused', () => {
@@ -269,6 +274,16 @@ test('L1001 review m3: one read of the snapshot serves the uses inside a second,
   w.clock.t += 600;
   assert.throws(shake, /is stale/);
   assert.equal(reads, 3, 'refused on the reused read, not a new one');
+  // L1042 m2 (A6): a clock that goes back is never inside the second of the last read: read again, never reused.
+  w.clock.t += 10_000;
+  snap(w, () => at(w, withShakedown(false)));
+  w.clock.t += 500;
+  assert.equal(shake(), false);
+  assert.equal(reads, 4);
+  w.clock.t -= 400;
+  snap(w, () => at(w, withShakedown(true), C2, B2));
+  assert.equal(shake(), true, 'the clock went back 400 ms: read again, so the new snapshot');
+  assert.equal(reads, 5);
 });
 
 test('L995: budget() needs every path and uid it reads, and runningNow reads both runners\' status the one way (sessionsNow)', () => {
@@ -290,4 +305,76 @@ test('L995: budget() needs every path and uid it reads, and runningNow reads bot
   const withIo = budget(w.config, { now: () => w.clock.t, io });
   assert.deepEqual(withIo.runningNow(), []);
   assert.ok(seen.includes(dirname(w.config.workerStatusFile)), 'the worker runner\'s status file\'s folder was read');
+});
+
+test('L1042 m1: a write that fails while the rules are usable drops the last snapshot, so the runners never decide on older rules', () => {
+  const { dir, file } = folder();
+  // Each failure with usable rules: the product list, the own state short, a snapshot over the limit.
+  const big = `${FIXTURE}#${'x'.repeat(MAX_SNAPSHOT_BYTES)}\n`;
+  for (const [what, opts] of [
+    ['a list without the product', { products: ['other-app'] }],
+    ['a state with no commit', { state: () => ({ ...okState(), commit: undefined }) }],
+    ['over the limit', { state: () => okState(big) }],
+    ['a reader that throws', { state: () => { throw new Error('boom'); } }],
+  ]) {
+    assert.deepEqual(write(file), { ok: true });
+    const r = write(file, opts);
+    assert.equal(r.ok, false, what);
+    assert.equal(r.removed, true, `${what}: ${r.reason}`);
+    assert.match(r.reason, /, so the rules snapshot is removed: the runners refuse at once$/, what);
+    assert.equal(existsSync(file), false, what);
+    assert.match(read(file).reason, /is missing/, what);
+  }
+  assert.equal(write(file, { products: ['other-app'] }).usable, true, 'the alert follows the write\'s own read of the rules (c2)');
+  assert.equal(write(file, { state: () => ({ status: 'deny_all', reason: 'rules file not found' }) }).usable, false);
+  // A write that fails in the folder (it can't take a new file): the old one can't be removed there either, so it is
+  // emptied in place, which the runners refuse at once.
+  assert.deepEqual(write(file), { ok: true });
+  chmodSync(dir, 0o500);
+  try {
+    const r = write(file, { now: T0 + 1_000 });
+    assert.equal(r.ok, false); assert.equal(r.usable, true); assert.equal(r.removeFailed, true, r.reason);
+    assert.match(r.reason, /^the rules snapshot could not be written \(EACCES\); the rules snapshot could not be removed \(EACCES\), so it is emptied instead: the runners refuse at once, and a later pass removes it$/);
+    assert.equal(readFileSync(file, 'utf8'), '');
+    assert.match(read(file, T0 + 1_000).reason, /is not JSON/);
+    // A pass that can't reach GitHub tries again; still refused there, it says so, and the emptied one stays refused.
+    const off = write(file, { now: T0 + 2_000, state: () => ({ status: 'deny_all', reason: 'GitHub unreachable: offline' }) });
+    assert.match(off.reason, /still can't be removed \(EACCES\), and the runners refuse it$/);
+    assert.equal(off.removeFailed, undefined, 'told once, by the pass that emptied it');
+  } finally { chmodSync(dir, 0o700); }
+  // The next pass that can't reach GitHub removes it (L1042 m1: a failed removal is tried again).
+  const off = write(file, { now: T0 + 3_000, state: () => ({ status: 'deny_all', reason: 'GitHub unreachable: offline' }) });
+  assert.equal(off.removed, true, off.reason);
+  assert.match(off.reason, /so no snapshot is written \(it goes stale\); the emptied one an earlier pass left is removed$/);
+  assert.equal(existsSync(file), false);
+  // A snapshot with content is left to go stale, as before: only an emptied one is removed.
+  assert.deepEqual(write(file), { ok: true });
+  assert.equal(write(file, { state: () => ({ status: 'deny_all', reason: 'GitHub unreachable: offline' }) }).removed, undefined);
+  assert.equal(read(file).ok, true);
+  // A refusal of the own rules that can't remove it empties it too.
+  chmodSync(dir, 0o500);
+  try {
+    const g = write(file, { state: () => ({ status: 'deny_all', reason: 'rules file not found' }) });
+    assert.equal(g.removeFailed, true); assert.match(g.reason, /so it is emptied instead/);
+    assert.equal(readFileSync(file, 'utf8'), '');
+  } finally { chmodSync(dir, 0o700); }
+  // Never emptied through a second name: one that has another is left (and the runners refuse a second name anyway).
+  rmSync(file); assert.deepEqual(write(file), { ok: true });
+  const other = join(dirname(dir), 'other-name.json'); linkSync(file, other);
+  const held = readFileSync(other, 'utf8');
+  chmodSync(dir, 0o500);
+  try {
+    const g = write(file, { state: () => ({ status: 'deny_all', reason: 'rules file not found' }) });
+    assert.match(g.reason, /could not be removed or emptied \(EACCES\)/);
+    assert.equal(readFileSync(other, 'utf8'), held, 'the other name is untouched');
+  } finally { chmodSync(dir, 0o700); }
+  // A folder that is not safe is never touched: the snapshot there is left, and the runners refuse the folder.
+  rmSync(other); rmSync(file); assert.deepEqual(write(file), { ok: true });
+  chmodSync(dir, 0o750);
+  const f = write(file, { now: T0 + 1_000 });
+  assert.match(f.reason, /can be read or written by group or others \(mode 750\), so nothing is written there, and the runners refuse it$/);
+  assert.equal(f.removed, undefined); assert.equal(f.usable, true);
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).written_at, T0ISO, 'left as it was');
+  assert.match(read(file).reason, /can be read or written by group or others/);
+  chmodSync(dir, 0o700);
 });
