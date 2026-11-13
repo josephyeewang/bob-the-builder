@@ -22,6 +22,7 @@ import { DISPATCHER_CONFIG, dispatcherSourcePath } from './dispatcher-setup.mjs'
 import { HOST_LOCK_MAX } from '../wiring/worker-ports.mjs';
 import { currentCopy } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { PRODUCT } from '../shared/product-paths.mjs';
+import { COPY_MAX_AGE_MS, stampProblem } from './host-lock-copy.mjs';
 
 const SUDO = '/usr/bin/sudo';
 const DISPATCHER_USER = 'orchestrate';
@@ -75,9 +76,13 @@ export function unreadableWhy(io, file, real, stderr = '', mode) {
 // session's outbox as <outboxRoot>/<product>/<role>/<id>, and cleanup looks for copies at <copiesRoot>/<product>/<card>.
 // A root set to a product's own folder would put every outbox and copy one level too deep, so each is named here.
 const ROOTS = Object.freeze([['outboxRoot', 'the top outbox root'], ['copiesRoot', 'the workers\' top copies root']]);
+// And the host.lock it reads (L1029 E review M2): the rows below judge the setup config's hostLockPath, so a dispatcher.json
+// still naming another one (dispatcher-config not run again after hostLockPath moved to the copier's copy) is a FAIL here,
+// not a PASS on a file the Dispatcher never reads. Its own row label: the host.lock row already ends "(the Dispatcher's hostLockPath)".
+const HOST_LOCK_ROW = Object.freeze(['hostLockPath', 'the owner\'s host.lock', 'the host.lock this check reads']);
 
 /**
- * check-dispatcher's rows for outboxRoot and copiesRoot: the dispatcher.json the job reads (the copy's once there is a copy,
+ * check-dispatcher's rows for outboxRoot, copiesRoot and hostLockPath: the dispatcher.json the job reads (the copy's once there is a copy,
  * else the base's) names each as exactly the root users-folders makes (dispatcherKeys). Read only.
  */
 export function rootRows(io, cfg, k) {
@@ -87,15 +92,15 @@ export function rootRows(io, cfg, k) {
   const file = cur.missing ? src : inCopy; let text = null;   // a broken copy is the copy's file too: the job's plist names it
   try { text = io.readText(file); } catch { /* told below */ }
   let c = null; try { c = text === null ? null : JSON.parse(text); } catch { c = null; }
-  return ROOTS.map(([key, name]) => {
-    const want = io.at(k[key]); const what = `${file} names ${name} ${want} as ${key} (the Dispatcher's ${key})`;
+  return [...ROOTS, HOST_LOCK_ROW].map(([key, name, label = `the Dispatcher's ${key}`]) => {
+    const want = io.at(k[key]); const what = `${file} names ${name} ${want} as ${key} (${label})`;
     if (text === null) return { ok: false, what, why: `${file} can't be read${file === inCopy ? ' (the job reads the copy\'s)' : ''}; run dispatcher-config${file === inCopy ? ', then install again if the copy does not keep it' : ''}` };
     if (!c || typeof c !== 'object' || Array.isArray(c)) return { ok: false, what, why: `${file} is not a JSON object; run dispatcher-config` };
     if (!Object.hasOwn(c, key)) return { ok: false, what, why: `it has no ${key}, so an existing dispatcher.json without it won't start the Dispatcher until dispatcher-config is run again (an older setup wrote it)` };
     const got = c[key];
     if (got === want) return { ok: true, what };
     // A folder right under the root with a product's name: this config's products, or one it dropped.
-    const prod = typeof got === 'string' && dirname(got) === want && PRODUCT.test(basename(got)) ? basename(got) : undefined;
+    const prod = key !== 'hostLockPath' && typeof got === 'string' && dirname(got) === want && PRODUCT.test(basename(got)) ? basename(got) : undefined;
     if (prod) return { ok: false, what, why: `it names ${got}, product ${prod}'s own folder, not the root above it: the Dispatcher finds each product's folder under the root, so every outbox or copy would be looked for one level too deep; run dispatcher-config` };
     return { ok: false, what, why: `it names ${JSON.stringify(got)?.slice(0, 160)}, not ${want}; run dispatcher-config` };
   });
@@ -106,7 +111,7 @@ export function rootRows(io, cfg, k) {
  * Not part of checkInstall (install.mjs): `daemons load` and the watch cutover wait on that, and a host.lock the
  * Dispatcher can't read must not stop the review or watch jobs. Its own command is `check-dispatcher`.
  */
-export function checkDispatcherKeys(io, cfg, { dispatcher = cfg.dispatcher !== undefined, refused } = {}) {
+export function checkDispatcherKeys(io, cfg, { dispatcher = cfg.dispatcher !== undefined, refused, now = Date.now() } = {}) {
   const out = [];
   const item = (ok, what, why) => out.push({ ok, what, ...(ok ? {} : { why }) });
   const skip = (what, why) => out.push({ ok: true, skip: true, what, why });
@@ -127,6 +132,13 @@ export function checkDispatcherKeys(io, cfg, { dispatcher = cfg.dispatcher !== u
   const what = `the owner's host.lock (${k.hostLockPath}) is ${cfg.owner}'s and ${DISPATCHER_USER} can read it (the Dispatcher's hostLockPath)`;
   const owner = readUser(io, cfg.owner); const me = readUser(io, DISPATCHER_USER);
   if (!me.exists) { item(false, what, `the ${DISPATCHER_USER} user doesn't exist yet; run users-folders first`); return out; }
+  // With the owner's copier (hostLockSource, L1029 E), hostLockPath is its copy: the copy is only as good as the copier's last
+  // run, so a stamp older than COPY_MAX_AGE_MS (or none) is a FAIL, whatever the copy says (host-lock-copy.mjs).
+  if (cfg.hostLockSource !== undefined) {
+    const copied = `the owner's host.lock copier has copied ${cfg.hostLockSource} to ${k.hostLockPath} in the last ${COPY_MAX_AGE_MS / 60_000} minutes`;
+    const bad = owner.exists ? stampProblem(io, k.hostLockPath, { now, ownerUid: owner.uid }) : `the owner ${cfg.owner} is not a user on this Mac`;
+    item(bad === null, copied, bad);
+  }
   const needsRoot = `reading it as ${DISPATCHER_USER} needs root; run check-dispatcher with sudo`;
   // The real place, with the disk's own case (r1 m1): the guarded-folder test reads it.
   const realOf = (p) => { const at = realpathSync.native(io.at(p)); return io.prefix ? at.slice(realpathSync.native(io.prefix).length) || sep : at; };

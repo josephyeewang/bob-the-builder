@@ -1,0 +1,42 @@
+{
+  "note": "Illustration only. Merge the learning object into the existing audit ledger, retaining its entries and format. Evidence files below are placeholders: create truthful project-local receipts, do not treat this example as verified. Paths are relative to the ledger directory. Incidents identify distinct defects, never review rounds; kind separates new discoveries, repeats and defects introduced by repairs. Each linked change records CURRENT Material remaining. Round counts preserve initial/follow-up separation. Prevention records are human attestations checked for shape and local file existence only.",
+  "learning": {
+    "version": 1,
+    "incidents": [
+      {
+        "id": "order-edit-lost",
+        "class": "stale-write",
+        "kind": "repeat",
+        "change_id": "order-save-repair",
+        "source": "evidence/order-edit-incident.md",
+        "check": "Does a concurrent order edit survive, or does saving visibly refuse the outdated draft?",
+        "status": "closed",
+        "prevention": {
+          "invariant": "A save never silently replaces an order changed since its draft was read.",
+          "mechanism": "All order-save callers use one revision-checked writer.",
+          "command": "node --test test/order-save.test.mjs",
+          "scope_evidence": "evidence/order-save-callers.md",
+          "regression_evidence": "evidence/order-save-fail-then-pass.md",
+          "clean_control_evidence": "evidence/order-save-current-draft.md",
+          "new_instance_evidence": "evidence/order-save-alternate-caller.md",
+          "builder": "builder-session",
+          "reviewer": "independent-review-session",
+          "adoption": {
+            "status": "verified",
+            "evidence": "evidence/order-save-installed-check.md"
+          }
+        }
+      }
+    ],
+    "changes": [
+      {
+        "id": "order-save-repair",
+        "material_remaining": 0,
+        "rounds": [
+          { "id": "review-one", "kind": "initial", "material_found": 1 },
+          { "id": "review-two", "kind": "follow-up", "material_found": 0 }
+        ]
+      }
+    ]
+  }
+}

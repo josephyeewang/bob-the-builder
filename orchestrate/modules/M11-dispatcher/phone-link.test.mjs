@@ -19,7 +19,7 @@ function world({ outcome = 'sent', restartOk = true, minibaseOk = true, alert = 
     restartFrontDoor: async () => { calls.restarts += 1; return restartOk ? { ok: true } : { ok: false, reason: 'did not start' }; },
     startMinibase: async () => { calls.minibase += 1; return minibaseOk ? { ok: true } : { ok: false, reason: 'no' }; },
   };
-  const step = (min, rules = rulesWith()) => withAlerts(rec, T0 + min * MIN, alert ?? ((t) => calls.alerts.push(t)), (a) => phoneLinkStep({ rec, rules, now: T0 + min * MIN, ...ports, alert: a }));
+  const step = (min, rules = rulesWith(), more = {}) => withAlerts(rec, T0 + min * MIN, alert ?? ((t) => calls.alerts.push(t)), (a) => phoneLinkStep({ rec, rules, now: T0 + min * MIN, ...ports, ...more, alert: a }));
   // one reading of every sensor at minute `min`
   const read = (min, { net = true, fd = true, mb = true } = {}) => { fact(FACTS.network, net, min); fact(FACTS.reachable, fd, min); fact(FACTS.minibase, mb, min); };
   const diary = () => rec.read('fact', 'phone-link-note')?.rev ?? 0;
@@ -95,6 +95,21 @@ test('L15: refused and unreachable for 10 min -> Front Door restarted, one diary
   assert.equal(w.diary(), 1);
   assert.match(w.rec.read('fact', 'phone-link-note').doc.text, /restarted under its fixed name/);
   assert.equal(w.calls.alerts.length, 0);
+});
+
+// L1048: while which Mac is home is not known (the tick's startsHeld), a Front Door refused for too long is not restarted
+// and nothing is marked as tried, so the first pass after the hold restarts it; the reconnect sends before it still go.
+test('L1048: refused and unreachable for 10 min while home is unknown -> no restart until the hold ends', async () => {
+  const w = world({ outcome: 'suppressed_awaiting_user' });
+  const held = { startsHeld: 'which Mac is home is not known' };
+  const out = [];
+  for (let m = 0; m <= 12; m += 1) { w.read(m, { fd: false }); out.push(...(await w.step(m, rulesWith(), held))); }
+  assert.ok(w.calls.sent.length > 0, 'the reconnect sends still go');
+  assert.equal(w.calls.restarts, 0);
+  assert.ok(out.includes('Front Door restart held: which Mac is home is not known'), out.join(' | '));
+  w.read(13, { fd: false });
+  assert.ok((await w.step(13)).includes('Front Door restarted'));
+  assert.equal(w.calls.restarts, 1);
 });
 
 test('L15: not yet 10 min refused -> no restart', async () => {
