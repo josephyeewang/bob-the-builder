@@ -905,3 +905,32 @@ test('L976: an undo launch hands its reversed commit to the start; a missing or 
   const s = z.read();
   bad.forEach(([more, why], i) => { const id = `S-${i + 1}`; assert.equal(s.requests[id].state, 'refused', id); assert.match(s.answers[`launch-${id}`].reason, why, JSON.stringify(more)); });
 });
+
+test('R-0b-175a: with a hook store, each pass applies its new lines and every status carries its held list, read back by the Dispatcher', async () => {
+  const w = world();
+  const H = { sessionId: 'lead-1', role: 'lead', product: 'p1', reason: 'no first signal within 120 s of its start', since: new Date(T0).toISOString(), launchId: 'L1' };
+  let ticks = 0; let held = [H];
+  const hooks = { tick: () => { ticks += 1; }, held: () => held };
+  await w.pass([], { hooks });
+  assert.equal(ticks, 1);
+  assert.deepEqual(w.read().held, [H]);
+  assert.deepEqual(w.sync().interactiveHolds(), [H]);
+  // A held list that can't be had, or is not the store's shape, is one entry naming no session: never "nothing held".
+  for (const h of [() => { throw new Error('gone'); }, () => [{ ...H, role: 'worker' }], () => 'x']) {
+    held = null; hooks.held = h;
+    await w.pass([], { hooks });
+    const [e] = w.read().held;
+    assert.equal(e.sessionId, null); assert.match(e.reason, /^the hook store gave/);
+  }
+  // A tick that throws is noted, and the status is still written.
+  hooks.tick = () => { throw new Error('disk full'); }; hooks.held = () => [];
+  await w.pass([], { hooks });
+  assert.match(w.notes.join('\n'), /hook store's new lines could not all be applied \(disk full\)/);
+  assert.deepEqual(w.read().held, []);
+  // No store: no held list in the status, and the reader gives none.
+  const z = world(); await z.pass();
+  assert.equal('held' in z.status, false); assert.deepEqual(z.read().held, []);
+  // A held list not of the runner's shape makes the whole status not known.
+  z.status = { ...z.status, held: [{ ...H, extra: 1 }] };
+  assert.throws(() => z.read(), /held list is not what the runner writes/);
+});
