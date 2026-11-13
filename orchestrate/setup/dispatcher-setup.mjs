@@ -28,7 +28,7 @@ import { FOLDERS } from '../modules/M4-workshop/launcher/review-runner.mjs';
 import { CONFIG_KEYS, checkConfig } from '../wiring/dispatcher-wiring.mjs';
 import { tokenPath } from './extras.mjs';
 import { dispatcherRulesPath, homeOf, privatePath } from './layout.mjs';
-import { installPaths } from './install.mjs';
+import { installPaths, keepsNotWarning } from './install.mjs';
 import { readUser } from './users-folders.mjs';
 import { checkDispatcherKeys, dispatcherKeysOn } from './dispatcher-check.mjs';
 import { lockFolderProblem } from './robot-setup.mjs';
@@ -212,7 +212,11 @@ export function planDispatcherConfig(io, cfg, { jobLive } = {}) {
   // The copy is root's (and every folder above it), so writing in it through its link is root writing in root's folders.
   const P = installPaths(cfg); const inCopy = join(P.installRoot, DISPATCHER_CONFIG);
   const toBase = fileProblem(io, src, text) !== null;
-  const toCopy = copyKeeps(io, cfg) === true && fileProblem(io, inCopy, text, { inCopy: true }) !== null;
+  const keeps = copyKeeps(io, cfg);
+  const toCopy = keeps === true && fileProblem(io, inCopy, text, { inCopy: true }) !== null;
+  // A copy that does not keep the file never gets it from this command: said in the plan, the dry run too, not only by the
+  // check after it (L1029; the 12 Nov rehearsal's bug B).
+  const warnings = keeps === false ? [keepsNotWarning(cfg, [DISPATCHER_CONFIG])] : [];
   // A job that runs (or starts at boot) reads the copy's file on every pass, so new text reaches it with no load to refuse it:
   // the checks load makes come first. The base file is held back too, since the next update carries it into the copy (L807 m1).
   if (toBase || toCopy) {
@@ -234,11 +238,11 @@ export function planDispatcherConfig(io, cfg, { jobLive } = {}) {
     if (bad) {
       const why = `the installed copy is not root's alone (${bad}), so root won't write in it; install the copy again (unload the jobs, remove ${P.install}, run install), which carries ${src} into it`;
       ops.push({ text: `stop: ${why}`, run: () => { throw new Error(why); } });
-      return { ops, problems: [], notes };
+      return { ops, problems: [], notes, warnings };
     }
     ops.push(write(inCopy));
   }
-  return { ops, problems: [], notes };
+  return { ops, problems: [], notes, warnings };
 }
 
 /**

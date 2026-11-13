@@ -111,7 +111,7 @@ When root runs `install` for real, the `runnerConfig` file must be root's own, w
 Every name, path and layout rule comes from the launcher's own modules (`install-check.mjs`, `review-daemons.mjs`,
 `review-updater.mjs`); `install.test.mjs` pins the two copies it cannot import (the label rule, the updater's file set).
 
-**The order, for the review runner's file (L731):** (1) `review-config --for-install`, then put the file in place as `runnerConfig`; (2) `install`, then `check-install`; (2b, L995) `bob`, so step 3 names the Bob file list; (3) `review-config` again without `--for-install`, put that file in place; (4) `add-to-install`; (5) `daemons place` and `load`. Jobs loaded before step 4 show FAIL in `daemons check` (the runner refuses its file until `claudeBin` is there).
+**The order, for the review runner's file (L731):** (1) `review-config --for-install`, then put the file in place as `runnerConfig`; (2) `install`, then `check-install`; (2b, L995) `bob`, so step 3 names the Bob file list; (3) `review-config` again without `--for-install`, put that file in place; (4) `add-to-install`; (5) `daemons place` and `load`. Jobs loaded before step 4 show FAIL in `daemons check` (the runner refuses its file until `claudeBin` is there). **On a Mac that already has a copy** (L1029 C), step 2's `install` does nothing ("already installed"), and `check-install` FAILs the role-map item (`review.json names a Mac user for every role…`) until step 4 puts the full `review.json` in. That FAIL is expected there: go on to steps 2b, 3 and 4, then run `check-install` again. If the setup config gained the `dispatcher` entry or `"robot": true` since the copy was made, the copy must be installed again first (Part 6, below).
 
 | Command | What it does | Root? |
 |---|---|---|
@@ -275,8 +275,13 @@ that are missing, extra or other than setup's (the first five).
 | `sudo node setup.mjs install` | with the entry, refuses unless `<base>/dispatcher.json` is there, root's 0644, and the config this setup writes now; then carries it into the copy, and the updater keeps it on every update (it is one of `keep`), as `review.json` | yes |
 | `sudo node setup.mjs daemons place` / `load` / `check` (also `--only dispatcher`) | a job `<label>.dispatcher`: runs as `orchestrate`, from the installed copy, `modules/M11-dispatcher/main.mjs <copy>/dispatcher.json`, every 60 s and once at load, `HOME` orchestrate's home and `Umask 63`, logs `dispatcher.out.log` / `dispatcher.err.log` (orchestrate's). Built by M11's `loginJobPlist`, as the robot job. `load` refuses, and `check` FAILs, unless the copy's `dispatcher.json` is root's alone and exactly what `dispatcher-config` writes now, and the copy keeps it. With the robot job on, the copy's `robot.json` must name the same Record (product, Record folder and owner, products file, rules state, token file) and the Dispatcher's lock as its `dispatcherLockFile`, which is also checked when only the robot job is loaded or checked. The Dispatcher's lock's folder must be orchestrate's, not writable by others, under root's folders. `place` and `load` also run check-dispatcher first and refuse on any FAIL in it, and `check` FAILs on one. A NOT TRIED line (host.lock in a folder macOS guards) does not stop the load, because only the job's own read can prove it. `daemons check` reads a Dispatcher run as stuck only past its deadline and the watchdog's margin (about 35 minutes). `daemons unload --only dispatcher` works even after the entry is gone | yes |
 
-A copy installed before the entry existed has an updater that does not keep `dispatcher.json`: `dispatcher-config` and
-`check` say so, and the copy must be installed again (unload the jobs, remove `<base>/install`, run `install`).
+A copy installed before the entry existed has an updater that does not keep `dispatcher.json`, and one installed before
+`"robot": true` does not keep `robot.json`: an updater's keep list is fixed at the first install. `install --dry-run` (and
+`install`) on such a copy, and `dispatcher-config --dry-run`, print a WARNING naming the files it won't keep and the way out
+(L1029 B); `check-dispatcher` and `daemons load` refuse a copy that won't keep `dispatcher.json`. The copy must be installed again, and **that reinstall comes first**,
+before the pinned Claude Code and `add-to-install`, since a new install throws both away: unload the jobs, remove
+`<base>/install`, put the `--for-install` `review.json` at `runnerConfig`, run `install`, then put the full `review.json` back
+and run `add-to-install` (Part 2's order, steps 3 to 5).
 
 **On the always-on Mac (owner-run steps):**
 1. Add `hostLockPath` and the `dispatcher` entry to the setup config, and put it in place.

@@ -37,7 +37,9 @@
 //        claude starts, `beforeStart` runs checks 1, 2, 3 and 8 again (runner-main.mjs RECHECK; #369 M1, r1 m1 and m2),
 //        since checks 4 and 11 run the branch's own code;
 //     6. claude is spawned detached (review-launch.mjs spawnClaude), so it leads its own process group (pid = pgid), with
-//        the prompt from `promptFor` (another lane's; none, and nothing starts). Its start time is read at once
+//        the prompt from `promptFor` (by default workerPromptText, M5 worker-prompt.mjs; it is asked before any copy
+//        is made, with no head or outbox yet, so today it gives none and nothing starts until lane 2 moves the call,
+//        L970). Its start time is read at once
 //        (runner-loop.mjs leaderStart, in UTC, the one reader the stop checks against); one that can't be read gets the group killed and the start refused, since the runner tells its own
 //        group from a reused number only by that time (step-4 review M3).
 //     A refusal once the copy is made removes the copy, the outbox and the settings file this start made (claude never ran in
@@ -81,6 +83,8 @@ import { createSaveWork } from '../modules/M4-workshop/git/save-work.mjs';
 import { cardBranch } from '../modules/M4-workshop/git/branch.mjs';
 import { git } from '../modules/M4-workshop/git/safe-git.mjs';
 import { PUSH_FACT, bundleName } from '../modules/M4-workshop/git/push.mjs';
+import { PRODUCT_OUTBOX_ROLES } from '../shared/product-paths.mjs';
+import { workerPrompt } from '../modules/M5-review-audit/worker-prompt.mjs';
 
 export const TRANSCRIPT_PLACE_CHECKED_AGAINST = null;
 const refuse = (reason) => ({ ok: false, reason });
@@ -126,8 +130,8 @@ export function sizePort({ read = readTranscriptFile, lstat = lstatSync } = {}) 
 // The states intake is done with (L852): lane 2's one list (M11 intake-facts.mjs USED_STATES), which lead-restart reads too.
 export const INTAKE_DONE = USED_STATES;
 // The roles whose sessions are a card's own work: 'waiting' is done for them (#388 r1 m2), and only theirs carry the
-// card's bundle (#388 r2 m1).
-const WAITING_DONE_FOR = new Set(['worker', 'script']);
+// card's bundle (#388 r2 m1). The one list (L1006 M1): PRODUCT_OUTBOX_ROLES, which M4 push and M11 intake read too.
+const WAITING_DONE_FOR = new Set(PRODUCT_OUTBOX_ROLES);
 const doneFor = (s, state) => INTAKE_DONE.has(state) && (state !== 'waiting' || WAITING_DONE_FOR.has(s.role));
 const noFactReader = () => ({ ok: false, reason: 'no Record fact reader is wired' });
 const noSessionReader = () => ({ ok: false, reason: 'no Record session reader is wired' });
@@ -363,10 +367,13 @@ export function liveWallProblem(live, product, places, read) {
  * The request: { card, kind, product, sessionId, live, undoCommit? } (live: the runner's other live sessions, liveWallProblem;
  * undoCommit: the reversed commit, 40 hex, an undo's only, L976).
  */
+/** The start's default prompt (L970): the worker prompt's text, or null (and the start is refused) when it gives none. */
+export const workerPromptText = (x) => { const p = workerPrompt(x); return p.ok ? p.text : null; };
+
 export function startPort(c, deps = {}) {
   const {
     readCard = (card) => readCardFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, card }),
-    startCommit = cardStartCommit, prepare = prepareWorkerCopy, checksFor = () => ({}), promptFor = () => null,
+    startCommit = cardStartCommit, prepare = prepareWorkerCopy, checksFor = () => ({}), promptFor = workerPromptText,
     names = {}, account = () => accountInUse({ home: c.home }), spawn = childSpawn, pidStartOf = leaderStart, kill, there, launchFn = launch,
     walled = walledLaunchSettings, ownUid = () => process.getuid(), stopped = () => false, beforeStart, mainOf = mirrorMain,
     readSettings = sessionSettingsOf(c.settingsDir), undoCheck = undoCommitProblem,

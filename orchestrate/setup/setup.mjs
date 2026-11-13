@@ -223,6 +223,7 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, bobGitOf, out
   if (!o.dry) { const p = rootProblem(io); if (p) { err(`refused: ${p}`); return 2; } }
   const planned = planCommand(io, cfg, o, { runUpdater, ...(bobGitOf ? { bobGitOf } : {}) });
   for (const n of planned.notes ?? []) out(`uses ${n}`);
+  for (const w of planned.warnings ?? []) out(`WARNING  ${w}`);
   for (const p of planned.problems) err(`PROBLEM  ${p}`);
   if (planned.problems.length) { err('nothing was changed.'); return 1; }
   if (!planned.ops.length) out(planned.installed ? 'nothing to do: already installed.' : 'nothing to do: already as needed.');
