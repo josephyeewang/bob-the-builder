@@ -22,7 +22,7 @@
 // tests, test helpers and fixtures are left out (alert-inventory.mjs isTestPath), as is a generated bundle
 // (GENERATED, below), whose sources are scanned instead.
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { mask } from './alert-answer-scan.mjs';
@@ -103,7 +103,8 @@ export function scanAll(root, old = { I3: [], I4: [], I7: [] }) {
   return { I3: scanI3(files).map(why(keyI, old.I3)), I4: scanI4(files).map(why(keyI, old.I4)), I7: scanI7(files).map(why(keyI7, old.I7)) };
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+const isMain = () => { try { return Boolean(process.argv[1]) && fileURLToPath(import.meta.url) === realpathSync(process.argv[1]); } catch { return false; } };
+if (isMain()) { // a link resolves (#261 class, M12 script-guard.test)
   const root = join(dirname(fileURLToPath(import.meta.url)), '..');
   let old;
   try { old = readList(root); } catch { old = undefined; }

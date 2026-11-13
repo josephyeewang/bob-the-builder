@@ -796,6 +796,16 @@
    "file": "wiring/worker-runner.mjs",
    "line": "const asked = Date.parse(body?.asked_at ?? '');",
    "why": "baseline (L1078)"
+  },
+  {
+   "file": "setup/host-lock-copy.mjs",
+   "line": "try { at = Date.parse(JSON.parse(io.readText(p))?.at); } catch { at = NaN; }",
+   "why": "#489 (landed after the baseline): host.lock stamp age read with Date.parse; follow-up for the lead: read it through pastTime"
+  },
+  {
+   "file": "wiring/worker-ports.mjs",
+   "line": "try { const d = JSON.parse(text); at = typeof d?.at === 'string' ? Date.parse(d.at) : NaN; } catch { at = NaN; }",
+   "why": "#489 (landed after the baseline): host.lock stamp age read with Date.parse; follow-up for the lead: read it through pastTime"
   }
  ],
  "I7": [
@@ -1764,6 +1774,24 @@
     "modules/M2-approvals/payload.mjs"
    ],
    "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": " can be written by its group or others",
+   "files": [
+    "setup/host-lock-copy.mjs",
+    "setup/robot-setup.mjs"
+   ],
+   "why": "#489 (landed after the baseline): the same file-permission text in two setup checks; follow-up for the lead: one shared text"
+  },
+  {
+   "kind": "text",
+   "copy": " is not the owner's (its owner is uid ",
+   "files": [
+    "setup/host-lock-copy.mjs",
+    "wiring/worker-ports.mjs"
+   ],
+   "why": "#489 (landed after the baseline): the same file-permission text in two setup checks; follow-up for the lead: one shared text"
   }
  ]
 }
