@@ -33,7 +33,7 @@
 // The Record: M9 read-view.mjs recordView, read only, on the same checks as the review runner's own reads. The sessions:
 // wiring/worker-ports.mjs sessionsNow, the one reading the Dispatcher's caps count from (L994).
 
-import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, readSync, renameSync, rmSync, writeSync } from 'node:fs';
+import { closeSync, constants, fstatSync, fsyncSync, ftruncateSync, lstatSync, openSync, readSync, renameSync, rmSync, writeSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { FETCH_GRACE_MS } from '../M10-rules/reader.mjs';
@@ -79,42 +79,53 @@ export function rulesSnapshotFolderProblem(dir, uid, { lstat = lstatSync } = {})
  * last_good; with it, the whole list `products` and the rules of each whose state is usable (one with none is read as
  * deny_all by the runners, as by the Dispatcher's engine; L1001 review M1), each with when it was last fetched (L1001
  * review M2: the runners' grace counts from that fetch, as the reader's own does). Atomic: a new file beside it (0600, made
- * exclusive), synced, renamed over, and the folder synced. → { ok: true } or { ok: false, reason }; never throws.
+ * exclusive), synced, renamed over, and the folder synced. → { ok: true } or { ok: false, usable, reason, removed? |
+ * removeFailed? }; never throws. `usable` is whether the own rules were usable on this one read of them (L1042 c2: the
+ * Dispatcher alerts on that, never on a second read at another time).
+ *
+ * The last snapshot is dropped (dropSnapshot) on every failure but two: GitHub not reached (it goes stale, L1001), and a
+ * folder that is not safe (nothing is touched there; the runners refuse it anyway). So a write that fails while the rules
+ * are usable never leaves the runners deciding on older rules than the Dispatcher's (L1042 m1).
  */
 // M10 reader.mjs refreshOne's words for a launch that could not reach GitHub (the only refusal left to go stale).
 const UNREACHED = /^GitHub unreachable: /;
 export function writeRulesSnapshot(file, { product, products, state, now = Date.now(), uid = process.getuid() }) {
+  if (typeof file !== 'string' || !isAbsolute(file)) return { ok: false, usable: false, reason: 'the rules snapshot needs a full path' };
   let tmp = null;
+  let usable = false;
+  let why;
   try {
-    if (typeof file !== 'string' || !isAbsolute(file)) return { ok: false, reason: 'the rules snapshot needs a full path' };
     const own = state(product);
-    if (!USABLE.includes(own?.status)) {
-      // GitHub not reached this launch: the last snapshot goes stale on the reader's own grace (L1001). Any other refusal
-      // (the rules file or main deleted, a reader error, no rules ever adopted) is the Dispatcher refusing now, so the
-      // snapshot is removed and the runners refuse at once, as it does (PR-2 r2 M1). A reason in other words is removed too.
-      if (UNREACHED.test(String(own?.reason ?? ''))) return { ok: false, reason: `${product}'s rules are ${own.status} (${String(own.reason).slice(0, 200)}), so no snapshot is written (it goes stale)` };
-      const why = `${product}'s rules are ${own?.status ?? 'not known'}${own?.reason ? ` (${String(own.reason).slice(0, 200)})` : ''}`;
-      try { rmSync(file, { force: true }); } catch (e) {
-        return { ok: false, removeFailed: true, reason: `${why}, but the last rules snapshot could not be removed (${e?.code ?? e?.message ?? e}): the runners may use it until it goes stale` };
+    usable = USABLE.includes(own?.status);
+    if (!usable) {
+      if (UNREACHED.test(String(own?.reason ?? ''))) {
+        const said = `${product}'s rules are ${own.status} (${String(own.reason).slice(0, 200)}), so no snapshot is written (it goes stale)`;
+        // An emptied one is what an earlier pass left when it could not remove the snapshot: removed now (L1042 m1).
+        if (!emptiedSnapshot(file)) return { ok: false, usable, reason: said };
+        try { rmSync(file); } catch (e) { return { ok: false, usable, reason: `${said}; the emptied one an earlier pass left still can't be removed (${e?.code ?? e?.message ?? e}), and the runners refuse it` }; }
+        return { ok: false, usable, removed: true, reason: `${said}; the emptied one an earlier pass left is removed` };
       }
-      return { ok: false, removed: true, reason: `${why}, so the rules snapshot is removed: the runners refuse at once` };
+      // Any other refusal (the rules file or main deleted, a reader error, no rules ever adopted) is the Dispatcher
+      // refusing now, so the runners refuse at once, as it does (PR-2 r2 M1). A reason in other words is dropped too.
+      return dropped(file, usable, `${product}'s rules are ${own?.status ?? 'not known'}${own?.reason ? ` (${String(own.reason).slice(0, 200)})` : ''}`);
     }
-    if (!Array.isArray(products) || !products.includes(product) || !products.every((p) => typeof p === 'string' && NAME.test(p)) || new Set(products).size !== products.length) return { ok: false, reason: `the product list does not name ${product} once, by plain names` };
+    why = 'the rules snapshot could not be written';
+    if (!Array.isArray(products) || !products.includes(product) || !products.every((p) => typeof p === 'string' && NAME.test(p)) || new Set(products).size !== products.length) return dropped(file, usable, `the product list does not name ${product} once, by plain names`);
     const rules = {};
     for (const p of products) {
       const s = state(p);
       if (!USABLE.includes(s?.status)) continue;
       if (typeof s.text !== 'string' || !HEX40.test(s.commit ?? '') || !HEX40.test(s.blob ?? '') || !Number.isFinite(s.fetchedAt)) {
-        if (p === product) return { ok: false, reason: `${product}'s rules state carries no text, commit, blob and fetch time` };
+        if (p === product) return dropped(file, usable, `${product}'s rules state carries no text, commit, blob and fetch time`);
         continue;
       }
       rules[p] = { status: s.status, text: s.text, commit: s.commit, blob: s.blob, fetched_at: iso(s.fetchedAt) };
     }
     const dir = dirname(file);
     const bad = rulesSnapshotFolderProblem(dir, uid);
-    if (bad) return { ok: false, reason: bad };
+    if (bad) return { ok: false, usable, reason: `${bad}, so nothing is written there, and the runners refuse it` };
     const body = Buffer.from(`${JSON.stringify({ format: SNAPSHOT_FORMAT, product, written_at: iso(now), products, rules })}\n`, 'utf8');
-    if (body.length > MAX_SNAPSHOT_BYTES) return { ok: false, reason: `the rules snapshot would be ${body.length} bytes, over ${MAX_SNAPSHOT_BYTES}` };
+    if (body.length > MAX_SNAPSHOT_BYTES) return dropped(file, usable, `the rules snapshot would be ${body.length} bytes, over ${MAX_SNAPSHOT_BYTES}`);
     tmp = join(dir, `.${basename(file)}.${process.pid}.${randomBytes(6).toString('hex')}.new`);
     const fd = openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
     try {
@@ -128,10 +139,41 @@ export function writeRulesSnapshot(file, { product, products, state, now = Date.
     try { fsyncSync(dfd); } finally { closeSync(dfd); }
     return { ok: true };
   } catch (e) {
-    return { ok: false, reason: `the rules snapshot could not be written (${e?.code ?? e?.message ?? e})` };
+    return dropped(file, usable, `${why ?? `${product}'s rules could not be read`} (${e?.code ?? e?.message ?? e})`);
   } finally {
     if (tmp) { try { rmSync(tmp, { force: true }); } catch { /* the next write makes its own */ } }
   }
+}
+
+// Whether `file` is an empty plain file: only dropSnapshot leaves one (every write is a whole JSON line). Never throws.
+function emptiedSnapshot(file) {
+  try { const st = lstatSync(file); return st.isFile() && st.size === 0; } catch { return false; }
+}
+
+// The last snapshot dropped, so the runners refuse at once. One that can't be removed is emptied in place instead
+// (opened as itself, never through a link, and only while it is the file's one name), which the runners refuse just the
+// same and a later pass removes, even one that can't reach GitHub (L1042 m1). → { removed } | { emptied } | { failed }.
+function dropSnapshot(file) {
+  try { rmSync(file, { force: true }); return { removed: true }; } catch (e) {
+    const code = e?.code ?? e?.message ?? e;
+    let fd = null;
+    try {
+      fd = openSync(file, constants.O_WRONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      const st = fstatSync(fd);
+      if (!st.isFile() || st.nlink !== 1) return { failed: code };
+      ftruncateSync(fd, 0);
+      fsyncSync(fd);
+      return { emptied: code };
+    } catch { return { failed: code }; } finally { if (fd !== null) { try { closeSync(fd); } catch { /* closed */ } } }
+  }
+}
+
+// What dropping it answers, said once, with what it means for the runners (L1042 c1: one consequence per reason).
+function dropped(file, usable, why) {
+  const d = dropSnapshot(file);
+  if (d.removed) return { ok: false, usable, removed: true, reason: `${why}, so the rules snapshot is removed: the runners refuse at once` };
+  if (d.emptied) return { ok: false, usable, removeFailed: true, reason: `${why}; the rules snapshot could not be removed (${d.emptied}), so it is emptied instead: the runners refuse at once, and a later pass removes it` };
+  return { ok: false, usable, removeFailed: true, reason: `${why}; the last rules snapshot could not be removed or emptied (${d.failed}): the runners may use it for up to ${Math.round(FETCH_GRACE_MS / 1000)} s from its last fetch` };
 }
 
 /**

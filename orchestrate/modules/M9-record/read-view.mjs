@@ -122,6 +122,8 @@ const MAX_LINE_BYTES = 64 * 1024 * 1024;
 /**
  * Who created one document, from the diary: read only, a chunk at a time, each complete line replayed by store.mjs's
  * absorbDiaryLine. Created before a line that is cut short or refused: answered (a creator never changes once set).
+ * Only createdBy and createdKind are sure then: ts, seq and stateSince are as of the last sound line, and a later move
+ * may be in what was not read (L1042 c3), so no caller may decide on those from such an answer.
  * Not found by then: refused, saying where the diary stopped. Not in a whole, sound diary: { ok: true, meta: null }.
  */
 export function readMeta({ recordRoot, recordUid, entity, id }) {

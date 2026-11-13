@@ -147,8 +147,6 @@ export function checkConfig(c, { keys = CONFIG_KEYS, paths = PATHS, optional = k
   return c;
 }
 
-const USABLE_RULES = Object.freeze(['ok', 'last_good']);
-
 // privateFolder lives in private-folder.mjs (L739: worker-ports.mjs uses it too, without importing this file).
 export { privateFolder };
 
@@ -233,12 +231,14 @@ export async function wire(config, { limitedSync, log = (s) => process.stderr.wr
   // Launch check 12's rules for the two runners (L1001, M11 budget.mjs): one launch is one pass, and every pass whose own
   // rules are usable (ok or last_good) writes the snapshot again, changed or not, so its written_at stays fresh. One that
   // could not reach GitHub leaves it to go stale; any other refusal removes it, so the runners refuse at once (PR-2 r2 M1).
-  // A write, or a removal, that fails is logged and queued.
+  // A write, or a removal, that fails is logged and queued; a write that fails while the rules are usable drops the last
+  // snapshot too, so the runners never decide on older rules than this pass's (L1042 m1).
   if (c.rulesSnapshotFile) {
     const w = writeRulesSnapshot(c.rulesSnapshotFile, { product: c.product, products, state: (p) => reader.state(p), now: now() });
-    if (!w.ok && (w.removeFailed || USABLE_RULES.includes(reader.state(c.product)?.status))) {
+    // Alerted on the write's own read of the rules (L1042 c2); each reason says once what it means for the runners (c1).
+    if (!w.ok && (w.removeFailed || w.usable)) {
       log(`dispatcher: ${w.reason}`);
-      try { queueAlert(rec, `check 12's rules for the runners could not be kept: ${w.reason}; no worker or review session starts once the last snapshot goes stale`, { now: now() }); } catch (e) { log(`dispatcher: that could not be queued (${e?.message ?? e})`); }
+      try { queueAlert(rec, `check 12's rules for the runners could not be kept: ${w.reason}`, { now: now() }); } catch (e) { log(`dispatcher: that could not be queued (${e?.message ?? e})`); }
     } else if (!w.ok) log(`dispatcher: ${w.reason}`);
   }
   const ports = { alert: logOnlyAlert(log) };
