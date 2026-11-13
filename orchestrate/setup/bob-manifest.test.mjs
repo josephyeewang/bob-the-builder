@@ -3,13 +3,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from '../shared/test-tmp.mjs';
-import { fakeMac } from './fake-mac.test-helper.mjs';
+import { fakeMac, macTest } from './fake-mac.test-helper.mjs';
 import { apply } from './users-folders.mjs';
 import { BOB_COMMIT, BOB_MANIFEST, BOB_NEW, BOB_OLD, bobGit, bobManifestPath, checkBob, landedList, leftOut, manifestText, planBob, readCommit } from './bob-manifest.mjs';
-import { parseArgs, planCommand } from './setup.mjs';
+import { main, parseArgs, planCommand } from './setup.mjs';
+import { ROOT_CONFIG_PATH } from './layout.mjs';
 import { RUNNER_CONFIG, UPDATER_CONFIG } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { readUpdaterConfig } from '../modules/M4-workshop/launcher/review-updater.mjs';
 import { checkBobFolder } from '../modules/M4-workshop/launcher/launch.mjs';
@@ -19,6 +20,8 @@ import { SETTINGS as S } from '../modules/M4-workshop/launcher/settings-names.mj
 const BASE = '/Users/Shared/orch';
 const COPY_COMMIT = 'c'.repeat(40);
 const sha = (b) => createHash('sha256').update(b).digest('hex');
+/** A plain copy of a folder of plain files and folders. */
+const cpTree = (from, to) => { mkdirSync(to); for (const n of readdirSync(from)) { const a = join(from, n); if (lstatSync(a).isDirectory()) cpTree(a, join(to, n)); else writeFileSync(join(to, n), readFileSync(a)); } };
 const git = (dir, args, input) => {
   const r = spawnSync('git', ['-C', dir, ...args], { input, encoding: 'buffer', env: { PATH: '/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin', GIT_CONFIG_NOSYSTEM: '1', HOME: dir, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@x', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@x' } });
   if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`);
@@ -48,15 +51,21 @@ const FILES = {
 };
 const KEPT = ['README.md', 'modes/deep/audit.md', 'rules.md', 'scripts/check.sh'];
 
+/** The installed copy under `base` as install leaves it: the link the updater flips and its real folder, with the updater's config. → the real folder. */
+function installedCopy(at, base) {
+  const install = `${base}/install`;
+  const realCopy = `${install}/orchestrate.v-${COPY_COMMIT}/orchestrate`;
+  mkdirSync(at(realCopy), { recursive: true });
+  symlinkSync(`orchestrate.v-${COPY_COMMIT}/orchestrate`, at(`${install}/orchestrate`));
+  writeFileSync(at(`${realCopy}/${UPDATER_CONFIG}`), JSON.stringify({ installRoot: `${install}/orchestrate`, clone: `${install}/clone.git`, gitBin: '/usr/bin/git', address: 'https://github.com/o/r.git', keep: ['bin', UPDATER_CONFIG, RUNNER_CONFIG] }));
+  return realCopy;
+}
+
 /** A Mac with the installed copy (its link and real folder, root's), the base, the empty Bob folder and a Bob checkout. */
 function world() {
   const mac = fakeMac({ users: { orchestrate: { UniqueID: '501', PrimaryGroupID: '501', UserShell: '/usr/bin/false', NFSHomeDirectory: '/var/empty' } } });
   const at = (p) => join(mac.prefix, p);
-  const install = `${BASE}/install`;
-  const realCopy = `${install}/orchestrate.v-${COPY_COMMIT}/orchestrate`;
-  mkdirSync(at(realCopy), { recursive: true }); mkdirSync(at(`${BASE}/bob`), { recursive: true });
-  symlinkSync(`orchestrate.v-${COPY_COMMIT}/orchestrate`, at(`${install}/orchestrate`));
-  writeFileSync(at(`${realCopy}/${UPDATER_CONFIG}`), JSON.stringify({ installRoot: `${install}/orchestrate`, clone: `${install}/clone.git`, gitBin: '/usr/bin/git', address: 'https://github.com/o/r.git', keep: ['bin', UPDATER_CONFIG, RUNNER_CONFIG] }));
+  const realCopy = installedCopy(at, BASE); mkdirSync(at(`${BASE}/bob`), { recursive: true });
   const cfg = { base: BASE, owner: 'sam', gitBin: '/usr/bin/git' };
   const repo = realpathSync(tempDir('orch-bob-repo-'));
   const plan = (commit, over = {}) => planBob(mac, cfg, { from: repo, commit, git: port(repo), ...over });
@@ -310,4 +319,130 @@ test('setup.mjs bob: needs --from and a full --commit, which belong to it alone;
   assert.ok(planned.ops.some((o) => /write the 4 files of .* \(left out: 4 skill file\(s\)\)/.test(o.text)), planned.ops.map((o) => o.text).join('\n'));
   assert.deepEqual(readdirSync(w.at(`${BASE}/bob`)), [], 'planning changes nothing');
   assert.equal(bobManifestPath(w.cfg), `${BASE}/install/orchestrate/${BOB_MANIFEST}`);
+});
+
+// L1035: tests for the plants #472's audit found uncaught (audit-pr472-r1 m3, c3).
+
+// macTest: users-folders sets access lists with the Mac's own chmod +a, so on Linux this skips (said aloud) and the
+// macOS job runs it (#491's Linux failure: "/bin/chmod: needs macOS tools").
+macTest('L1035 A9/A10: setup.mjs bob, run end to end as root, checks the pair after the run, and the recorded commit against --commit', () => {
+  const B = '/Library/orch-bob';   // an install config's base is never under /Users
+  const raw = { base: B, owner: 'sam', products: ['alpha'], address: 'https://example.invalid/org/repo.git', label: 'com.example.orch-bob', runnerConfig: '/nowhere/review.json' };
+  const mac = fakeMac({ euid: 0 });
+  const run = (args) => {
+    const f = mac.at(ROOT_CONFIG_PATH); rmSync(f, { force: true }); writeFileSync(f, JSON.stringify(raw)); chmodSync(f, 0o644);
+    const lines = []; const code = main(args, { io: mac, bobGitOf: (from) => port(from), out: (s) => lines.push(s), err: (s) => lines.push(`ERR ${s}`) });
+    return { code, text: lines.join('\n') };
+  };
+  const uf = run(['users-folders']); assert.equal(uf.code, 0, uf.text);
+  installedCopy(mac.at, B);
+  const repo = realpathSync(tempDir('orch-bob-main-'));
+  const c1 = commitOf(repo, FILES);
+  const ok = run(['bob', '--from', repo, '--commit', c1]);
+  assert.equal(ok.code, 0, ok.text);
+  assert.match(ok.text, /^done: all \d+ items PASS\.$/m, 'the after-run check ran');
+  assert.doesNotMatch(ok.text, /^done\.$/m);
+  // The step records a commit other than --commit: only the check given --commit sees it.
+  const other = 'd'.repeat(40);
+  const write = mac.write; mac.write = (p, t, m) => write(p, p.includes(BOB_COMMIT) ? `${other}\n` : t, m);
+  const c2 = commitOf(repo, { 'README.md': '# Bob 2\n' });
+  const bad = run(['bob', '--from', repo, '--commit', c2]);
+  mac.write = write;
+  assert.equal(bad.code, 1, bad.text);
+  assert.match(bad.text, new RegExp(`^ERR FAIL  the Bob commit ${c2} is recorded beside the list \\(${BOB_COMMIT.replace('.', '\\.')}\\) — it records ${other}$`, 'm'));
+  assert.match(bad.text, /^1 item\(s\) still FAIL after the run\.$/m);
+});
+
+test('L1035 A7: --commit in upper case is refused when the arguments are read', () => {
+  assert.throws(() => parseArgs(['bob', '--from', '/x', '--commit', 'A'.repeat(40)]), /--commit must be the full commit/);
+  assert.throws(() => parseArgs(['bob', '--from', '/x', '--commit', `${'a'.repeat(39)}F`]), /--commit must be the full commit/);
+});
+
+test('L1035 A12/A13: --from that is a link or a file is refused, and so is an orchestrate user with id 0; nothing changes', () => {
+  const w = world();
+  const c = commitOf(w.repo, { 'a.md': 'a\n' });
+  const d = realpathSync(tempDir('orch-bob-from-'));
+  symlinkSync(w.repo, join(d, 'link'));
+  writeFileSync(join(d, 'file'), 'x');
+  for (const from of [join(d, 'link'), join(d, 'file'), join(d, 'none')]) {
+    const p = w.plan(c, { from });
+    assert.equal(p.ops.length, 0, from); assert.match(p.problems.join('\n'), new RegExp(`--from ${from.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')} is not a folder \\(a link is not taken`), from);
+  }
+  assert.deepEqual(w.plan(c).problems, [], 'the folder itself is taken');
+  w.mac.users.set('orchestrate', { ...w.mac.users.get('orchestrate'), UniqueID: '0' });
+  const root = w.plan(c);
+  assert.equal(root.ops.length, 0); assert.match(root.problems.join('\n'), /the Mac user orchestrate \(the Bob folder's owner\) was not found/);
+  assert.deepEqual(readdirSync(w.at(`${BASE}/bob`)), []);
+});
+
+test('L1035 A15/A16/A39: checkBob FAILs an unreadable or non-JSON list, a link inside the folder, and (without --commit) a record that is not a commit', () => {
+  const w = world();
+  const c = commitOf(w.repo, FILES); w.run(c);
+  assert.ok(checkBob(w.mac, w.cfg).every((x) => x.ok));
+  const list = w.at(`${w.realCopy}/${BOB_MANIFEST}`); const text = readFileSync(list, 'utf8');
+  const failed = (re, why, opts) => { const bad = checkBob(w.mac, w.cfg, opts).filter((x) => !x.ok); assert.ok(bad.some((x) => re.test(x.what) && (why === undefined || why.test(x.why))), JSON.stringify(bad)); };
+  writeFileSync(list, 'not json'); failed(/the Bob file list .* can be read$/, /not JSON/);
+  rmSync(list); failed(/the Bob file list .* can be read$/, /ENOENT/);
+  writeFileSync(list, text);
+  // A link inside the folder (a top-level one, and one deeper down).
+  const bob = w.at(`${BASE}/bob`);
+  symlinkSync('README.md', join(bob, 'extra.md')); failed(/the Bob folder .* holds only plain files$/, /extra\.md landed as a link/);
+  rmSync(join(bob, 'extra.md'));
+  symlinkSync('/etc', join(bob, 'modes/deep/etc')); failed(/holds only plain files$/, /landed as a link/);
+  rmSync(join(bob, 'modes/deep/etc'));
+  assert.ok(checkBob(w.mac, w.cfg).every((x) => x.ok), 'put back: it passes');
+  // The record is checked for a commit's form even when no --commit is given.
+  const rec = w.at(`${w.realCopy}/${BOB_COMMIT}`);
+  for (const junk of ['', 'garbage', c.slice(0, 39), c.toUpperCase()]) {
+    writeFileSync(rec, `${junk}\n`); failed(/the Bob commit is recorded beside the list/, undefined);
+  }
+  writeFileSync(rec, `${c}\n`); assert.ok(checkBob(w.mac, w.cfg).every((x) => x.ok));
+});
+
+test('L1035 A31: the list, the commit record and the updater config are written 0644, root\'s', () => {
+  const w = world();
+  const c = commitOf(w.repo, FILES); w.run(c);
+  for (const n of [BOB_MANIFEST, BOB_COMMIT, UPDATER_CONFIG]) {
+    assert.equal(lstatSync(w.at(`${w.realCopy}/${n}`)).mode & 0o7777, 0o644, n);
+    assert.deepEqual(w.mac.owners.get(`${w.realCopy}/${n}`), { uid: w.mac.rootUid, gid: 0 }, n);
+  }
+});
+
+test('L1035 A18: an object whose header names another id is refused as not that object', () => {
+  const w = world();
+  const c = commitOf(w.repo, { 'rules.md': 'r\n' });
+  const swapped = (args, input) => {
+    const r = port(w.repo)(args, input);
+    if (!args.includes('--batch')) return r;
+    const s = r.stdout.toString('latin1'); const nl = s.indexOf('\n');
+    return { ...r, stdout: Buffer.from(`${'f'.repeat(40)}${s.slice(40, nl)}${s.slice(nl)}`, 'latin1') };
+  };
+  assert.match(readCommit(swapped, c).problems.join('\n'), /git gave something other than object [0-9a-f]{40}/);
+});
+
+test('L1035 A40: a folder that can\'t be read never counts as matching the list: a crash\'s .bob-old that does is put back', () => {
+  const w = world();
+  const c1 = commitOf(w.repo, FILES); w.run(c1);
+  const old = w.pair();
+  // As a crash leaves it: the old folder aside (it matches the list in force), and the folder in place holds a link.
+  cpTree(w.at(`${BASE}/bob`), w.at(`${BASE}/${BOB_OLD}`));
+  symlinkSync('README.md', w.at(`${BASE}/bob/extra.md`));
+  const p = w.plan(commitOf(w.repo, { 'z.md': 'z\n' }));
+  apply(p.ops.slice(0, 1), { log: () => {} });
+  assert.equal(existsSync(w.at(`${BASE}/${BOB_OLD}`)), false);
+  assert.equal(existsSync(w.at(`${BASE}/bob/extra.md`)), false, 'the folder with the link is gone');
+  assert.deepEqual(w.pair().folder, old.list, 'the old folder, which matches the list, is back');
+});
+
+test('L1035 A45: a commit of exactly 20000 files is taken; 20001 is refused', () => {
+  const w = world();
+  commitOf(w.repo, { 'a.md': 'a\n' });   // makes the repository
+  const blob = git(w.repo, ['hash-object', '-w', '--stdin'], Buffer.from('x'));
+  const of = (n) => {
+    const t = git(w.repo, ['mktree'], Buffer.from(`${Array.from({ length: n }, (_, i) => `100644 blob ${blob}\t${String(i).padStart(5, '0')}.md`).join('\n')}\n`));
+    return git(w.repo, ['commit-tree', t, '-m', 'x']);
+  };
+  const at = readCommit(port(w.repo), of(20000));
+  assert.deepEqual(at.problems, []); assert.equal(at.files.length, 20000);
+  assert.match(readCommit(port(w.repo), of(20001)).problems.join('\n'), /the commit holds more than 20000 files/);
 });
