@@ -195,6 +195,82 @@ test('#487 r2 m1: in the machine-wide form, a wildcard is judged in the folder i
   assert.equal(decide({ tool_name: 'Bash', cwd: d, tool_input: { command: 'ls .p*' } }, { snapshot: f, maxAgeMs: Infinity }).block, true);
 });
 
+// #487 r4 M1 (LEAD-CALLS L1066): a runner starts a program from words the plain read does not take as a command. In the
+// machine-wide form a line using one is refused when any word names a production program; the same runner naming none
+// passes. One test per family.
+const HD = (head, body) => `${head} <<'EOF'\n${body}\nEOF`;
+const RUNNERS = {
+  'package runners': [['pnpm vercel deploy --prod', 'yarn vercel deploy --prod', 'pnpm --dir /x dlx vercel deploy', 'npm --prefix /x exec vercel deploy',
+    'bun x vercel deploy', 'bun run vercel deploy', 'corepack pnpm dlx vercel deploy', "npx concurrently 'vercel deploy'"],
+  ['npm i vercel', 'pnpm add -D vercel', 'yarn add vercel', 'npm test -- vercel/', 'npm run build', 'pnpm install', 'corepack enable', 'corepack pnpm install vercel', 'npm --prefix /x install vercel']],
+  'interpreters reading -': [[HD('python3 -', "import os\nos.system('vercel deploy --prod')"), HD('python3 -u -', "os.system('vercel deploy')"),
+    'echo "os.system(\'vercel deploy\')" | python3 -', 'echo "x(\'vercel deploy\')" | node -', HD('node -', "x('vercel deploy')")],
+  [HD('python3 -', 'print(1)'), 'echo "print(1)" | python3 -']],
+  'tmux and screen': [['tmux new-session -d vercel deploy', "tmux send-keys -t x 'vercel deploy' Enter", 'screen -dmS x vercel deploy'], ['tmux ls', 'screen -ls']],
+  'git bisect run and rebase --exec': [['git bisect run vercel deploy', "git rebase --exec 'vercel deploy'", 'git rebase -x "vercel deploy" main', "git rebase --exec='vercel deploy' main"],
+    ['git bisect run npm test', 'git rebase main', "git rebase --exec 'npm test' main"]],
+  'fd -x': [['fd -x vercel deploy', 'fd -e ts -X vercel deploy', 'fd --exec vercel deploy'], ['fd -x wc -l', 'fd vercel']],
+  'watchers': [['watchexec -- vercel deploy', "nodemon --exec 'vercel deploy'", 'ls | entr vercel deploy'], ['watchexec -- npm test', 'ls | entr make']],
+  'at, batch and crontab': [["echo 'vercel deploy' | at now", "echo 'vercel deploy' | batch", "echo '* * * * * vercel deploy' | crontab -"], ['crontab -l', 'atq']],
+  'launchctl asuser': [['launchctl asuser 501 vercel deploy'], ['launchctl list']],
+  'ssh': [['ssh localhost vercel deploy', "ssh host 'cd app && vercel deploy'"], ['ssh localhost ls']],
+  'lua, Rscript, pwsh, expect': [["lua -e 'os.execute(\"vercel deploy\")'", "Rscript -e 'system(\"vercel deploy\")'", "pwsh -c 'vercel deploy'", "expect -c 'spawn vercel deploy'"],
+    ["lua -e 'print(1)'", "Rscript -e 'print(1)'"]],
+};
+for (const [family, [blocked, passing]] of Object.entries(RUNNERS)) {
+  test(`#487 r4 M1 (L1066): in the machine-wide form, ${family} naming a production program are blocked; naming none they pass`, () => {
+    const { d, f } = copyAt();
+    const bash = (command) => decide({ tool_name: 'Bash', cwd: d, tool_input: { command } }, wide(f));
+    for (const c of blocked) {
+      const r = bash(c);
+      assert.equal(r.block, true, c); assert.match(r.reason, /names the production program "vercel"/, c);
+      assert.ok(!r.reason.includes('sudo rm'), `a block by rule is no lock-out: ${c}`);
+    }
+    for (const c of passing) assert.deepEqual(bash(c), { block: false }, c);
+  });
+}
+
+// #487 r4 m2 (L1066): words that are only text never count as a program call, in the machine-wide form; the same word used
+// as a call elsewhere in the line still refuses. One test per narrowing.
+const MSG = (head, body) => `${head} "$(cat <<'EOF'\n${body}\nEOF\n)"`;
+const NARROWED = {
+  'a commit, tag or gh message': [[MSG('git commit -m', 'Fix Vercel build config'), MSG('git commit -m', 'Move to Supabase auth'), "git commit -am 'vercel'",
+    `${MSG('gh pr create --title "Vercel" --body', 'Runs psql against staging')}`, MSG('gh issue comment 5 --body', 'vercel'), HD('git commit -F -', 'vercel deploy'),
+    MSG('git tag -a v1 -m', 'vercel'), 'git commit --message="$(cat <<\'EOF\'\nvercel\nEOF\n)"', HD('gh pr edit 5 --body-file -', 'supabase'), HD('timeout 5 echo hi; git commit -F -', 'vercel')],
+  [`${MSG('git commit -m', 'Fix vercel')} && timeout 300 vercel deploy --prod`, 'git commit -m "$(vercel deploy)"', 'git commit -m "x `vercel deploy`"',
+    'git commit -F - <<EOF\n$(vercel deploy)\nEOF', `${MSG('gh pr create --body', 'psql')} && timeout 5 psql -c x`,
+    // A here-document ends at its first end line: what follows it inside $( ) runs.
+    "git commit -m \"$(cat <<'EOF'\nx\nEOF\nvercel deploy\nEOF\n)\"", HD('git commit -F - <<\'A\'\nok\nA\ntimeout 5 echo; python3 -', 'vercel')]],
+  'a search pattern': [['git ls-files | xargs grep -l supabase', 'find . -exec grep -l vercel {} +', 'rg supabase $(git ls-files)', 'grep -e vercel $(git ls-files)', 'git grep vercel $(git ls-files)'],
+    ['git ls-files | xargs grep -l supabase | xargs supabase db push', 'find . -exec grep -l vercel {} + -exec vercel deploy \;', 'rg supabase $(supabase db dump)',
+      'grep "$(vercel env pull)" x', 'rg --pre vercel x $(git ls-files)']],
+  'a command -v, which or type name': [['command -v vercel', 'command -v vercel || echo missing', 'command -v vercel >/dev/null && echo ok', 'which vercel; timeout 5 echo hi', 'type -a vercel && sudo -u me ls'],
+    ['command -v vercel && timeout 5 vercel deploy', 'command -v vercel; vercel deploy', '$(which vercel) deploy', '$(command -v vercel) deploy', '`which vercel` deploy',
+      'which vercel | xargs -I{} {} deploy', 'command -v vercel | sh']],
+  'a for-in path word': [['for f in src/lib/supabase/*.ts; do echo $f; done', 'for d in src/vercel/ lib/vercel/x; do ls $d; done'],
+    ['for f in src/lib/supabase/*.ts; do supabase $f; done', 'for f in $(vercel ls); do echo $f; done', 'for f in a/vercel; do $f deploy; done', 'for f in vercel; do $f deploy; done']],
+};
+for (const [place, [passing, blocked]] of Object.entries(NARROWED)) {
+  test(`#487 r4 m2 (L1066): in the machine-wide form, ${place} is only text; a real call next to it still refuses`, () => {
+    const { d, f } = copyAt(makeSnapshot({ ...RULES, production: { ...RULES.production, programs: ['vercel', 'supabase', 'psql'] } }));
+    const bash = (command) => decide({ tool_name: 'Bash', cwd: d, tool_input: { command } }, wide(f));
+    for (const c of passing) assert.deepEqual(bash(c), { block: false }, c);
+    for (const c of blocked) assert.equal(bash(c).block, true, c);
+  });
+}
+
+// The chdir/z cases are also caught by the first-command rule (a wildcard after `chdir p &&` is never in the first command),
+// so a plant taking chdir or z off the folder changers alone is not caught here: the list is a second guard.
+test('#487 r4 m1 (L1066): chdir and z change folder, and a wildcard is judged by its folder only in the first command of the line', () => {
+  const p = realpathSync(tempDir('orch-mw-prod-'));
+  const { d, f } = copyAt(makeSnapshot({ production: { env_files: [join(p, '.prodsettings')], programs: ['vercel'], hosts: ['prod.example.com'] }, secrets: { paths: [] } }));
+  const bash = (command, cwd = d) => decide({ tool_name: 'Bash', cwd, tool_input: { command } }, wide(f));
+  for (const c of [`chdir ${p} && cat .p*`, `z ${p} && cat .p*`, `zi app; cat .p*`, 'true; cat .p*', 'ls && cat .p*', 'ls | cat .p*', 'echo "$(cat .p*)"']) {
+    assert.equal(bash(c).block, true, c); assert.match(bash(c).reason, /production settings file/, c);
+  }
+  for (const c of ['cat .p*', 'cat .p* | wc -l', 'ls -d .* && echo done', 'cat x .p*; true']) assert.deepEqual(bash(c), { block: false }, `first command, in a project folder: ${c}`);
+});
+
 test('L1044 A1, A2: the root chain is judged all the way up: a folder written by others two levels above the copy is refused', () => {
   const { d } = copyAt();
   const mid = join(d, 'a'); const low = join(mid, 'b'); mkdirSync(low, { recursive: true }); chmodSync(low, 0o755);
