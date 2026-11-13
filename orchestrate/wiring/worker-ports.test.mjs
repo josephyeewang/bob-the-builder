@@ -570,11 +570,14 @@ function asksWorld({ runner = {}, session = true } = {}) {
   // A session the runner started earlier, still running: what a save or a stop is asked about.
   const listed = { id: LIVE, product: P, kind: 'editing', card: 'C-9', lead: null, role: 'worker', pgid: 4321, signin: 's', config_dir: '/cfg', bundle_files: [], outbox, uid: OWNER,
     outbox_open: true, stop_requested: false, alive: true, ended: false, pid: 4321, pid_start: '2026-11-11T11:00:00Z', head: HEAD, copy: join(c.copiesRoot, P, 'C-9'), started_at: AT - 60_000 };
+  // The product's folders, as setup makes them (L836).
+  for (const f of [join(c.copiesRoot, P), join(c.outboxRoot, P, 'worker')]) mkdirSync(f, { recursive: true, mode: 0o700 });
   const x = { now: AT, nonces: 0, notes: [], stops: [], state: session ? { sessions: [listed], requests: { [LIVE]: { state: 'started', at: AT - 60_000 } }, answers: {}, seen: {} } : {}, pending: new Map() };
-  const rc = { copiesRoot: c.copiesRoot, outboxRoot: c.outboxRoot, products: { [P]: { repo: 'o/r', mirror: w.mirror, render: { paths: {} } } } };
+  const rc = { copiesRoot: c.copiesRoot, outboxRoot: c.outboxRoot, settingsDir: join(w.base, 'worker-runner', 'runner', 'settings'), products: { [P]: { repo: 'o/r', mirror: w.mirror, render: { paths: {} } } } };
   x.ports = {
     // Real: the start port as runner-main.mjs makes it, less what it reads first (the card, claimed for the asked session).
-    start: startPort(rc, { readCard: () => ({ ok: true, doc: { state: 'claimed', product: P, claim: { session_id: x.sid } } }) }),
+    // The start commit and the sign-in are stood in for too (L970: the prompt is asked for once the copy and the outbox are made).
+    start: startPort(rc, { readCard: () => ({ ok: true, doc: { state: 'claimed', product: P, claim: { session_id: x.sid } } }), startCommit: async () => w.first, account: () => ({ account: 's', env: {} }) }),
     saveWork: saveWorkPort({ mirrorOf: () => w.mirror }),
     pauseLead: pauseLeadPort(),
     groupGone: async (g) => x.stops.includes(g.pgid),
@@ -600,7 +603,7 @@ function asksWorld({ runner = {}, session = true } = {}) {
 }
 
 test('C (L963): launch, stopGroup, saveWork and pauseLead are wired: each writes its request into the runner\'s folder and takes the answer the runner wrote', async () => {
-  const ok = { start: async (q) => (mkdirSync(join(c0().outboxRoot, P, 'worker', q.sessionId), { recursive: true }), { ok: true, pid: 5001, pidStart: '2026-11-11T12:00:01Z', pgid: 5001, head: HEAD, outbox: join(c0().outboxRoot, P, 'worker', q.sessionId), signin: 's', configDir: '/cfg', copy: join(c0().copiesRoot, P, q.card) }),
+  const ok = { start: async (q) => (mkdirSync(join(c0().outboxRoot, P, 'worker', q.sessionId), { recursive: true }), { ok: true, saveSettingsSha: 'a'.repeat(64), pid: 5001, pidStart: '2026-11-11T12:00:01Z', pgid: 5001, head: HEAD, outbox: join(c0().outboxRoot, P, 'worker', q.sessionId), signin: 's', configDir: '/cfg', copy: join(c0().copiesRoot, P, q.card) }),
     saveWork: async () => ({ ok: true }), pauseLead: async () => ({ ok: true }) };
   let cfg; const c0 = () => cfg;
   const { c, x } = asksWorld({ runner: ok }); cfg = c;
@@ -623,7 +626,8 @@ test('C (L963): the three refusals the runner gives today reach the Dispatcher w
   // 1. launch: the runner's start port has no worker prompt (runner-ports.mjs promptFor), so nothing starts.
   x.sid = 'S-new';
   const l = await x.ports4.launch({ card: 'C-1', kind: 'editing', product: P, sessionId: 'S-new' });
-  assert.deepEqual(l, { ok: false, reason: 'not wired: no worker prompt is given to the runner' });
+  // #463 merge: the refusal now carries the prompt builder's own reason after the plain words (workerPromptText).
+  assert.equal(l.ok, false); assert.match(l.reason, /^not wired: no worker prompt is given to the runner \(no worker prompt: /);
   assert.equal(x.state.requests['S-new'].state, 'refused', 'used up, so the claim can be let go');
   assert.equal(existsSync(join(c.copiesRoot, P, 'C-1')), false, 'no copy made'); assert.equal(existsSync(join(c.outboxRoot, P, 'worker', 'S-new')), false, 'no outbox made');
   // 2. saveWork: M4 save-work runs only inside the worker's lock-down (runLocked), which the runner does not have.
