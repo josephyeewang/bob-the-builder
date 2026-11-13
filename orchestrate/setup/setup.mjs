@@ -251,8 +251,8 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, bobGitOf, out
   const after = o.cmd === 'users-folders' ? check(io, cfg, { alsoKnown: rootMadeEntries(cfg, { dispatcher: o.dispatcherOn }) }) : o.cmd === 'install' || o.cmd === 'add-to-install' ? checkInstall(io, cfg)
     : o.cmd === 'dispatcher-config' ? checkDispatcherAndSensors(io, cfg) : o.cmd === 'bob' ? checkBob(io, cfg, { commit: o.commit })
     : o.cmd === 'proposals' ? checkProposals(io, cfg) : o.cmd === 'safe-directory' ? checkSafeDirectory(io, cfg) : o.cmd === 'token' ? checkToken(io, cfg) : o.cmd === 'watch-rules' ? checkRulesCopy(io, cfg) : o.cmd === 'watch-app' ? checkWatchAppConfig(io, cfg, o.app, o.pin)
+    : o.cmd === 'owner-job' ? (o.sub === 'unload' ? null : checkOwnerJob(io, cfg).filter((r) => (o.sub === 'place' ? /exactly the built job file/ : /is loaded in the owner's session/).test(r.what)))   // before the daemons' place/load: owner-job has the same sub names
     : o.sub === 'place' ? checkDaemons(io, cfg, o.jobs).filter((r) => /exactly the built job file$|under another label/.test(r.what)) : o.sub === 'load' ? checkDaemons(io, cfg, o.jobs).filter((r) => /is loaded$|loaded from the job file as it is now$/.test(r.what))
-    : o.cmd === 'owner-job' ? (o.sub === 'unload' ? null : checkOwnerJob(io, cfg).filter((r) => (o.sub === 'place' ? /exactly the built job file/ : /is loaded in the owner's session/).test(r.what)))
     : o.sub === 'reload-account' ? checkDaemons(io, cfg).filter((r) => /review-account (is loaded|was loaded from the job file as it is now)$/.test(r.what)) : null;
   if (!after) { out('done.'); return 0; }
   const bad = after.filter((r) => !r.ok);
