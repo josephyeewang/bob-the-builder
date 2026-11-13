@@ -245,6 +245,11 @@ export function check12({ rules, rec, bandsNow, runningNow, filesOf }) {
       try { e = ctx.card ? (await import('./undo.mjs')).exactReverse({ rec, card: ctx.card, filesOf }) : { ok: false, reason: 'it has no card' }; }
       catch (err) { e = { ok: false, reason: `the check could not be made (${err?.message ?? err})` }; }
       if (e?.ok !== true) return refuse(`it is not an exact reverse: ${e?.reason ?? 'no answer'}`);
+      // L976: the launch must name the commit it was handed, and it must be the one the card's source names. #468 m1:
+      // fails closed, so an undo caller that leaves the key out is refused, never let past the comparison (the review
+      // caller, review-launch.mjs, never asks for an undo).
+      if (!Object.hasOwn(ctx, 'undoCommit')) return refuse('it is not an exact reverse: the launch names no reversed commit');
+      if (ctx.undoCommit !== e.commit) return refuse('it is not an exact reverse: the reversed commit it was handed is not the one its source names');
       exact = true;
     }
     return startGate({ rules, rec, card: ctx.card, kind: ctx.kind, product: ctx.product, b: bandsNow(), running: runningNow(), lead: ctx.lead, exactReverse: exact });

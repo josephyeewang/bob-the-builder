@@ -6,11 +6,12 @@ import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
+import { workerPrompt } from '../modules/M5-review-audit/worker-prompt.mjs';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { SETTINGS as S } from '../modules/M4-workshop/launcher/settings-names.mjs';
 import { gitOk, initMirror } from '../modules/M4-workshop/git/safe-git.mjs';
 import { launch } from '../modules/M4-workshop/launcher/launch.mjs';
-import { INTAKE_DONE, chmodTree, removeAll, cardStartCommit, drainedPort, groupThere, pauseLeadPort, liveWallProblem, productWallGap, projectFolderName, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath } from './runner-ports.mjs';
+import { INTAKE_DONE, chmodTree, removeAll, cardStartCommit, undoCommitProblem, drainedPort, groupThere, pauseLeadPort, liveWallProblem, productWallGap, projectFolderName, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath, workerPromptText } from './runner-ports.mjs';
 import { walledLaunchSettings } from './runner-launch.mjs';
 import { leaderStart } from './runner-loop.mjs';
 import { FLAGS, namesIn } from '../modules/M4-workshop/launcher/settings-names.mjs';
@@ -334,6 +335,40 @@ test('step 5: a start makes the copy, the outbox and the walled settings, and an
     assert.deepEqual(w.left(), { copy: true, outbox: true, settings: true });
     assert.equal(existsSync(join(w.mine.outboxes, 'worker', SID2)), false);
   } finally { rmSync(w.d, { recursive: true, force: true }); }
+});
+
+// L970: the default promptFor is the worker prompt builder. It is asked once the copy and the outbox exist (#463 moves
+// the call), with the copy's head and the outbox, so a full card's start gets the worker's prompt; a card it can't make
+// one for is refused with the builder's reason, and the copy and outbox it made are taken away again.
+test('L970: the default promptFor is the worker prompt builder, asked with the head and the outbox, its reason told when it gives none', async () => {
+  const b = { goal: 'Add search.', done_when: 'The test passes.', files: ['src/s.js'], not_in_scope: 'The store.' };
+  const w = world();
+  try {
+    delete w.deps.promptFor;
+    let read = 0;   // only the prompt builder reads the brief, so this counts that the default asked it
+    w.card = { ...w.card, kind: 'ordinary', tier: 2, get brief() { read += 1; return b; } };
+    const a = await w.start();
+    assert.equal(a.ok, true, a.reason);
+    assert.ok(read >= 1, 'the default promptFor is the worker prompt builder');
+  } finally { rmSync(w.d, { recursive: true, force: true }); }
+  // A card with no brief: no prompt, the builder's reason said, nothing left.
+  const v = world();
+  try {
+    delete v.deps.promptFor;
+    v.card = { ...v.card, kind: 'ordinary', tier: 2, brief: undefined };
+    const a = await v.start();
+    assert.equal(a.ok, false); assert.match(a.reason, /^not wired: no worker prompt is given to the runner \(no worker prompt: /);
+    assert.deepEqual(v.left(), { copy: false, outbox: false, settings: false });
+  } finally { rmSync(v.d, { recursive: true, force: true }); }
+  // The port's own default: no head, no prompt and the reason; with the head and outbox, the worker's.
+  const asked = { role: 'worker', kind: 'editing', card: 'C-1', cardDoc: { ...w.card, brief: b }, product: 'p1' };
+  assert.deepEqual(workerPromptText(asked), { ok: false, reason: workerPrompt(asked).reason });
+  assert.match(workerPrompt(asked).reason, /no head given/);
+  const full = { ...asked, head: HEAD, outbox: '/o/p1/worker/S-1' };
+  // The same prompt but for its random heading tag (L1006 m-A), which is new each time.
+  const untag = (t) => t.replace(/\[[0-9a-f]{24}\]/g, '[tag]');
+  assert.equal(untag(workerPromptText(full)), untag(workerPrompt(full).text));
+  assert.match(workerPromptText(full), /^You are a worker\./);
 });
 
 test('step 5: a script card gets the script outbox', async () => {
@@ -889,4 +924,93 @@ test('#463 r1 m5 (P11): a settings write that reads back other than written, or 
       assert.equal(r.ok, false); assert.match(r.reason, re);
     } finally { rmSync(w.d, { recursive: true, force: true }); }
   }
+});
+
+// L976, L985: an undo start names the commit it reverses. It is checked (40 hex, an undo only) and then found in the
+// mirror as an ancestor of the start commit before any copy is made; only then does the prompt get it.
+test('L976 / L985: an undo start checks its reversed commit before the copy and hands it to the prompt; a bad one makes nothing', async () => {
+  const U = 'f'.repeat(40);
+  const seen = { prompts: [], checks: [] };
+  const deps = { promptFor: (x) => { seen.prompts.push(x); return 'do the card'; }, undoCheck: async (x) => { seen.checks.push(x); return null; } };
+  const w = world(deps);
+  w.deps.checksFor = (x) => { w.calls.push(['checks', x]); return {}; };
+  try {
+    const a = await w.start({ kind: 'undo', undoCommit: U });
+    assert.equal(a.ok, true, a.reason);
+    assert.equal(seen.prompts.at(-1).undoCommit, U);
+    assert.deepEqual(seen.checks, [{ mirror: w.c.products.p1.mirror, commit: U, head: HEAD }], 'checked against the start commit');
+    assert.equal(w.calls.find((c) => c[0] === 'checks')[1].undoCommit, U, 'the launch checks are handed it (check 12)');
+  } finally { rmSync(w.d, { recursive: true, force: true }); }
+  const e = world(deps);
+  e.deps.checksFor = (x) => { e.calls.push(['checks', x]); return {}; };
+  try {
+    seen.checks.length = 0;
+    const a = await e.start();
+    assert.equal(a.ok, true, a.reason);
+    assert.equal('undoCommit' in seen.prompts.at(-1), false, 'an editing prompt is given none');
+    assert.equal('undoCommit' in e.calls.find((c) => c[0] === 'checks')[1], false, 'nor its checks');
+    assert.deepEqual(seen.checks, [], 'and the mirror is not asked');
+  } finally { rmSync(e.d, { recursive: true, force: true }); }
+  const cases = [
+    ['an undo with no commit', { kind: 'undo' }, {}, /the undo launch names no reversed commit/],
+    ['an undo with a short commit', { kind: 'undo', undoCommit: U.slice(1) }, {}, /names no reversed commit/],
+    ['an undo with an upper-case commit', { kind: 'undo', undoCommit: U.toUpperCase() }, {}, /names no reversed commit/],
+    ['an editing start naming a commit', { undoCommit: U }, {}, /only an undo launch names a reversed commit/],
+    ['a script start naming a commit', { kind: 'script', undoCommit: U }, {}, /only an undo launch/],
+    ['a commit not in the mirror', { kind: 'undo', undoCommit: U }, { undoCheck: async () => 'the reversed commit ffffffffffff is not a commit in the mirror' }, /is not a commit in the mirror/],
+    ['a check that throws', { kind: 'undo', undoCommit: U }, { undoCheck: async () => { throw new Error('git broke'); } }, /the reversed commit can't be checked \(git broke\)/],
+  ];
+  for (const [what, x, over, re] of cases) {
+    const v = world(over);
+    try {
+      const a = await v.start(x);
+      assert.equal(a.ok, false, what); assert.match(a.reason, re, what);
+      assert.deepEqual(v.left(), { copy: false, outbox: false, settings: false }, `${what}: nothing made`);
+      assert.equal(v.calls.some((c) => c[0] === 'prepare' || c[0] === 'spawn'), false, `${what}: no copy is asked for`);
+    } finally { rmSync(v.d, { recursive: true, force: true }); }
+  }
+});
+
+test('L985: undoCommitProblem, on a real mirror: an ancestor passes; a commit not there, off the line, or not checkable is refused plainly', async () => {
+  const d = realpathSync(tempDir('orch-undo-commit-'));
+  const src = join(d, 'src'); const mirror = join(d, 'mirror'); mkdirSync(src);
+  const o = { gitDir: join(src, '.git'), workTree: src, cwd: src };
+  const commit = async (f) => { writeFileSync(join(src, f), `${f}\n`); await gitOk(['add', '-A'], o); await gitOk(['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', f], o); return (await gitOk(['rev-parse', 'HEAD'], o)).trim(); };
+  try {
+    await gitOk(['init', '-q', '-b', 'main', src], o);
+    const A = await commit('a.txt'); const B = await commit('b.txt');
+    await gitOk(['checkout', '-q', '-b', 'side', A], o); const S = await commit('s.txt');
+    await initMirror(mirror);
+    await gitOk(['fetch', '-q', src, 'refs/heads/main:refs/heads/main', 'refs/heads/side:refs/heads/side'], { gitDir: mirror });
+    assert.equal(await undoCommitProblem({ mirror, commit: A, head: B }), null, 'an ancestor of the start commit');
+    assert.equal(await undoCommitProblem({ mirror, commit: B, head: B }), null, 'the start commit itself');
+    assert.equal(await undoCommitProblem({ mirror, commit: 'e'.repeat(40), head: B }), 'the reversed commit eeeeeeeeeeee is not a commit in the mirror');
+    assert.equal(await undoCommitProblem({ mirror, commit: S, head: B }), `the reversed commit ${S.slice(0, 12)} is not an ancestor of the start commit ${B.slice(0, 12)}`);
+    assert.equal(await undoCommitProblem({ mirror, commit: B, head: A }), `the reversed commit ${B.slice(0, 12)} is not an ancestor of the start commit ${A.slice(0, 12)}`, 'a later commit is not an ancestor');
+    // A tree or blob id is not a commit.
+    const tree = (await gitOk(['rev-parse', `${A}^{tree}`], o)).trim();
+    assert.match(await undoCommitProblem({ mirror, commit: tree, head: B }), /is not a commit in the mirror/);
+    assert.match(await undoCommitProblem({ mirror, commit: A, head: 'e'.repeat(40) }), /can't be checked against the start commit \(git \d+\)/);
+    // An annotated tag's id peels to a commit, and is still not the commit reversed (self-review m1).
+    await gitOk(['-c', 'user.name=t', '-c', 'user.email=t@t', 'tag', '-a', '-m', 't', 'v1', A], o);
+    await gitOk(['fetch', '-q', src, 'refs/tags/v1:refs/tags/v1'], { gitDir: mirror });
+    const tag = (await gitOk(['rev-parse', 'refs/tags/v1'], { gitDir: mirror })).trim();
+    assert.notEqual(tag, A);
+    assert.equal(await undoCommitProblem({ mirror, commit: tag, head: B }), `the reversed commit ${tag.slice(0, 12)} is not a commit in the mirror`);
+    // #468 m3: its own inputs are checked first; a leading-dash or short value never reaches git.
+    const asked = [];
+    const run = async (args) => { asked.push(args); return { code: 0, stdout: 'commit\n' }; };
+    for (const commit of ['--output=/tmp/x', `-${A.slice(1)}`, A.slice(1), A.toUpperCase(), undefined, null, 7]) {
+      assert.equal(await undoCommitProblem({ mirror, commit, head: B }, { run }), 'the reversed commit is not 40 lower-case hex', String(commit));
+    }
+    for (const head of ['--all', `-${B.slice(1)}`, B.slice(1), undefined]) {
+      assert.equal(await undoCommitProblem({ mirror, commit: A, head }, { run }), 'the start commit is not 40 lower-case hex', String(head));
+    }
+    assert.deepEqual(asked, [], 'git is never asked');
+    assert.equal(await undoCommitProblem({ mirror, commit: A, head: B }, { run }), null, 'control: the fake git answers for good inputs');
+    assert.equal(asked.length, 2);
+    // A lookup that can't be made is said as such, never as "not a commit" (self-review m2).
+    assert.match(await undoCommitProblem({ mirror: join(d, 'none'), commit: A, head: B }), /can't be looked up in the mirror \(git -1\)/, 'no mirror');
+    assert.equal(await undoCommitProblem({ mirror, commit: A, head: B }, { run: async () => ({ code: -1, stdout: '', stderr: 'refused' }) }), `the reversed commit ${A.slice(0, 12)} can't be looked up in the mirror (git -1)`);
+  } finally { rmSync(d, { recursive: true, force: true }); }
 });

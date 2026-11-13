@@ -826,3 +826,23 @@ test('#463 r2 self-review M-2: a job group told after its pass returned is kept 
   assert.throws(() => onG({ pgid: 7001, pid: 7001, pid_start: 'x', job: { pgid: 7050, pid: 7050, pid_start: 'y' } }), /disk full/);
   h2.keep = keep;
 });
+
+// L976: the runner takes an undo launch only with the commit it reverses, hands that commit to its start, and refuses
+// a commit on any other launch; nothing is started for a refused one.
+test('L976: an undo launch hands its reversed commit to the start; a missing or bad one, or one on another kind, is refused unstarted', async () => {
+  const SHA = 'e'.repeat(40);
+  const seen = [];
+  const w = world({ startAnswer: (x) => { seen.push(x); return { ok: false, reason: 'seen' }; } });
+  await w.pass([launchReq('S-1', { kind: 'undo', undo_commit: SHA }), launchReq('S-2')]);
+  assert.deepEqual(seen.map((x) => [x.sessionId, x.kind, x.undoCommit]), [['S-1', 'undo', SHA], ['S-2', 'editing', undefined]]);
+  assert.equal('undoCommit' in seen[1], false, 'an editing start is handed none');
+  const bad = [[{ kind: 'undo' }, /the undo launch names no reversed commit/], [{ kind: 'undo', undo_commit: null }, /names no reversed commit/],
+    [{ kind: 'undo', undo_commit: SHA.toUpperCase() }, /names no reversed commit/], [{ kind: 'undo', undo_commit: SHA.slice(2) }, /names no reversed commit/],
+    [{ kind: 'undo', undo_commit: [SHA] }, /names no reversed commit/],
+    [{ undo_commit: SHA }, /only an undo launch names a reversed commit/], [{ kind: 'script', undo_commit: SHA }, /only an undo launch/], [{ undo_commit: null }, /only an undo launch/]];
+  const z = world();
+  await z.pass(bad.map(([more], i) => launchReq(`S-${i + 1}`, more)));
+  assert.deepEqual(z.started, [], 'nothing started');
+  const s = z.read();
+  bad.forEach(([more, why], i) => { const id = `S-${i + 1}`; assert.equal(s.requests[id].state, 'refused', id); assert.match(s.answers[`launch-${id}`].reason, why, JSON.stringify(more)); });
+});

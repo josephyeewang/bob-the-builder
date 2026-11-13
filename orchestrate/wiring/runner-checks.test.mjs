@@ -117,14 +117,16 @@ test('step 6: a port for each check whose inputs are there, none for one whose i
     let seen; let given;
     const budget = { rules: {}, filesOf: () => [] };
     const gateOf = (b) => { given = b; return (ctx) => { seen = ctx; return { ok: true }; }; };
-    const p = workerChecks({ ...x, budget, kind: 'undo' }, { gateOf });
+    const p = workerChecks({ ...x, budget, kind: 'undo', undoCommit: 'f'.repeat(40) }, { gateOf });
     assert.deepEqual(await p[12](), { ok: true });
-    assert.equal(given, budget); assert.deepEqual(seen, { card: { id: x.card, ...x.cardDoc }, kind: 'undo', product: 'p1' }); assert.equal(seen.card.id, x.card, 'L863: the card carries its id');
+    // L976: an undo's gate is handed its reversed commit, to hold it to the source's.
+    assert.equal(given, budget); assert.deepEqual(seen, { card: { id: x.card, ...x.cardDoc }, kind: 'undo', product: 'p1', undoCommit: 'f'.repeat(40) }); assert.equal(seen.card.id, x.card, 'L863: the card carries its id');
     assert.match((await workerChecks({ ...x, budget, cardDoc: null }, { gateOf })[12]()).reason, /not in the Record/);
     // #369 r2 m4: the budget carries the pass's filesOf; an undo with none is refused here, saying so. Other kinds don't need it.
     seen = undefined;
     assert.match((await workerChecks({ ...x, budget: { rules: {} }, kind: 'undo' }, { gateOf })[12]()).reason, /carries no filesOf/); assert.equal(seen, undefined);
     assert.deepEqual(await workerChecks({ ...x, budget: { rules: {} }, kind: 'editing' }, { gateOf })[12](), { ok: true });
+    assert.equal('undoCommit' in seen, false, 'an editing gate is handed no reversed commit');
     assert.equal(typeof workerChecks({ ...x, bobFolder: '/b', bobManifest: { a: 'x' } })[13], 'function');
     assert.equal(workerChecks({ ...x, bobFolder: '/b', bobManifest: null })[13], undefined, 'no pinned list, no port');
     // Check 1 on the copy: this user's alone and holding the head.

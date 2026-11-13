@@ -227,7 +227,8 @@ export function workerChecks(x, { gateOf = check12 } = {}) {
       if (!x.cardDoc) return refuse('the card is not in the Record');
       if (x.kind === 'undo' && typeof x.budget.filesOf !== 'function') return refuse('the budget carries no filesOf (the pass\'s own), so the undo can\'t be shown an exact reverse');
       // The card with its id (L863): without one, check12 reads the card's own claim as an undo already running.
-      return gate({ card: { id: x.card, ...x.cardDoc }, kind: x.kind, product: x.product });
+      // An undo's reversed commit too (L976): check12 holds it to the commit the card's source names.
+      return gate({ card: { id: x.card, ...x.cardDoc }, kind: x.kind, product: x.product, ...(x.kind === 'undo' ? { undoCommit: x.undoCommit } : {}) });
     };
   }
   if (x.bobManifest && has(x.bobFolder)) ports[13] = r[13];
