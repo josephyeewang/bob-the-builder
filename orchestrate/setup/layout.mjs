@@ -30,6 +30,9 @@ export const ROOT_CONFIG_PATH = '/Library/orchestrate-setup.json';
 // The note root leaves in the base the moment it makes it (NEW-1): a base that exists without it was not made by this setup
 // and is refused, never adopted. It sits in the base so a second base has its own.
 export const BASE_MARKER = '.made-by-setup';
+/** Where a bob run builds the new Bob folder, and puts the old one aside, inside the base (bob-manifest.mjs). */
+export const BOB_NEW = '.bob-new';
+export const BOB_OLD = '.bob-old';
 export const baseMarkerPath = (cfg) => join(cfg.base, BASE_MARKER);
 
 const NAME = /^[a-z_][a-z0-9_.-]{0,31}$/;

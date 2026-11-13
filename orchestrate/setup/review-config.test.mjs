@@ -1,10 +1,10 @@
 // review-config (L709): the review runner's review.json, each field from one source, read back with the runner's own readConfig.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { join } from 'node:path';
-import { INSTALL_LATER, OWNER_INPUT, SOURCES, buildReviewConfig, ownerFields, pinFields, pinProblem, reviewConfigCommand, setupFields, writingName } from './review-config.mjs';
+import { INSTALL_LATER, OWNER_INPUT, SOURCES, bobListThere, buildReviewConfig, ownerFields, pinFields, pinProblem, reviewConfigCommand, setupFields, writingName } from './review-config.mjs';
 import { CONFIG_FIELDS, readConfig } from '../modules/M4-workshop/launcher/review-runner-main.mjs';
 import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.mjs';
 import { TOOLS_CHECKED } from '../modules/M10-rules/roles.mjs';
@@ -323,4 +323,12 @@ test('L995: bobManifest is named once the bob step\'s list is in the copy, and t
     assert.match(none.out.join('\n'), /bobManifest \(run the bob step first, then this again\)\. Until they are, launch check 12 and 13 refuse every review/);
     assert.match(ownerFields(w.cfg, { ...w.input(), bobManifest: '/x' }).problems.join('\n'), /may not set bobManifest: it comes from the bob step/);
   } finally { w.done(); }
+});
+
+test('L1035 A3: the bob step\'s list counts as there only as a plain file: not a folder, a link or nothing', () => {
+  const d = realpathSync(tempDir('orch-bob-there-'));
+  assert.equal(bobListThere(join(d, 'none.json')), false, 'nothing there');
+  writeFileSync(join(d, 'list.json'), '{}\n'); assert.equal(bobListThere(join(d, 'list.json')), true, 'a plain file');
+  mkdirSync(join(d, 'folder.json')); assert.equal(bobListThere(join(d, 'folder.json')), false, 'a folder');
+  symlinkSync(join(d, 'list.json'), join(d, 'link.json')); assert.equal(bobListThere(join(d, 'link.json')), false, 'a link to a plain file');
 });
