@@ -9,6 +9,8 @@ Global invariants are architectural rules that, if violated, cause cascading pro
 
 **How to define them:** During Step 3 (Architecture Contract) or Step 4 (Domain Specs), identify the 5-15 rules that must ALWAYS be true. Write them as a numbered checklist in the Architecture Contract. Claude MUST verify ALL of them at the end of EVERY phase.
 
+**Each invariant gets an automatic check (2026-11-13, D-040; Rule 31 rung 2):** a grep, lint or test that fails the build when the invariant breaks, so the phase-end check is a run, not a re-read. An invariant no check can express says so, and is re-read by hand. Each phase or roadmap row names the invariants it touches, and its review covers those (`audit-lenses/_evidence-accounting.md` § "Fixed coverage for a change review").
+
 **Enforcement:** If ANY invariant is violated → FIX immediately → DO NOT proceed to next phase. Invariant violations are never deferred.
 
 **Example invariants (adapt to your project):**
@@ -33,6 +35,17 @@ For a data pipeline / analysis tool:
 - [ ] All scoring formulas match the documented specification
 - [ ] Output format matches schema (no silent field additions or removals)
 - [ ] All calculations use consistent units (no implicit conversions)
+```
+
+For a product that acts on its own (it merges, sends, spends or deletes; D-040):
+```
+- [ ] Fail closed: unknown, unreadable, stale or future-dated input means hold and tell the owner
+- [ ] Safety steps run first and alone, never batched with other work
+- [ ] Every hold tells the owner once at once, then again on a cadence
+- [ ] Stored times are read through one helper; no bare date parsing in a wait or an expiry
+- [ ] Refused writes and refused alerts are retried
+- [ ] Untrusted input is refused unless it is on an allowed list (Engineering Principle 12)
+- [ ] One definition per concept (Engineering Principle 1)
 ```
 
 **Enforcement:** If ANY invariant is violated at phase end → fix immediately. Do NOT proceed to next phase.

@@ -81,6 +81,8 @@ L07 is the foundation UX lens. L08 (Friction & Trust), L09 (Wow), and L10 (Edge 
    - **Constraints** — does the design prevent invalid actions (greying out, disabling, blocking)?
    - **Conceptual model** — does the user form an accurate mental model of how the product works after 1-2 sessions?
 
+**Structure before visual refinement:** at an ordinary laptop viewport, demonstrate current task → next action → exact visible result → next task, including first-use/example state. A shortcut must open the requested result, not merely the job that produced it. Check the working journey before approving visual refinement; do not prescribe one universal layout or treat a prototype as shipped behavior.
+
 5. **Capability invisibility scan (consumer-app pattern).** What does the product DO that the user has no way to discover? Memory? History? Settings? Power features? Each "exists but undiscoverable" is a finding.
 
 6. **Engineer-syntax-on-user-surface scan.** Any place where developer terminology leaks into user-visible UI/copy. (consumer app: PACKS using `car_ownership`. Generic: error codes, debug strings, internal IDs, jargon.)

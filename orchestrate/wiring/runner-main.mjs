@@ -56,6 +56,8 @@ import { accountInUse } from '../modules/M4-workshop/launcher/accounts.mjs';
 import { LOCKED_MS, lockedRunner } from './runner-locked.mjs';
 import { apart } from '../modules/M4-workshop/launcher/render-settings.mjs';
 import { installProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
+import { INTERACTIVE_ROLES, hookStore, nodeHookFs } from '../modules/M4-workshop/send-safe/hook-store.mjs';
+import { writeStatus } from './runner-files.mjs';
 
 const ABS = ['installRoot', 'requestsDir', 'statusFile', 'outboxRoot', 'copiesRoot', 'home', 'claudeBin', 'recordRoot'];
 const UIDS = ['orchestrateUid', 'recordUid'];
@@ -136,11 +138,43 @@ export function checkRunnerConfig(c) {
     if (snaps.has(foldKey(s))) fail(`product ${name}: render.paths.snapshot is another product's`);
     snaps.add(foldKey(s));
   }
+  // R-0b-175a: the interactive sessions' hook store, optional until R-0b-174 starts those sessions (left out: no store,
+  // and the status has no held list). A folder only the owner opens (checked on the disk by main, hookStoreOf), apart
+  // from the folder the Dispatcher reads, the requests folder, and everywhere a worker session can write, where a session
+  // could write a hook line for another.
+  if (c.hookStateDir !== undefined) {
+    if (!fullPath(c.hookStateDir)) fail('hookStateDir must be a full path in its simplest form, not / itself');
+    if (!apart(c.hookStateDir, own) || !apart(c.hookStateDir, c.requestsDir)) fail(`hookStateDir must be apart from the runner's own folder (${own}) and its requests folder (${c.requestsDir})`);
+    for (const [what, dir] of writable) if (!apart(c.hookStateDir, dir)) fail(`hookStateDir must not sit in ${what} (${dir}), where a worker session can write`);
+  }
+  if (c.start_timeout_s !== undefined) {
+    const t = c.start_timeout_s;
+    if (c.hookStateDir === undefined) fail('start_timeout_s needs hookStateDir');
+    if (!t || typeof t !== 'object' || Array.isArray(t)) fail('start_timeout_s must give seconds per interactive role');
+    for (const [role, v] of Object.entries(t)) {
+      if (!INTERACTIVE_ROLES.includes(role)) fail(`start_timeout_s: ${role} is not one of ${INTERACTIVE_ROLES.join(', ')}`);
+      if (!Number.isFinite(v) || v <= 0 || v > 3600) fail(`start_timeout_s.${role} must be seconds, above 0 and at most 3600`);
+    }
+  }
   return { ...c, ownDir: own, memoryFile: join(own, 'memory.json'), settingsDir: join(own, 'settings'),
     workerRunner: { requestsDir: c.requestsDir, statusFile: c.statusFile } };
 }
 
 const insideCopy = (root, p) => p.startsWith(`${root}/`);
+
+/** R-0b-175a: the hook store at `c.hookStateDir`, its folder and hooks/ made 0o700 if missing; either one not a folder,
+ * not the owner's, or open to anyone else is a throw (the runner does not start). An unreadable store file is not: it
+ * holds every send, and is told (hook-store.mjs). */
+export function hookStoreOf(c, { uid = process.getuid(), lstat = lstatSync, mkdir = mkdirSync, open = hookStore } = {}) {
+  for (const d of [c.hookStateDir, join(c.hookStateDir, 'hooks')]) {
+    try { mkdir(d, { mode: 0o700 }); } catch (e) { if (e?.code !== 'EEXIST') throw new Error(`hookStateDir ${d} can't be made (${e?.code ?? e?.message})`); }
+    const st = lstat(d);
+    if (!st.isDirectory()) throw new Error(`hookStateDir ${d} is not a folder`);
+    if (st.uid !== uid) throw new Error(`hookStateDir ${d} is not the owner's`);
+    if (st.mode & 0o077) throw new Error(`hookStateDir ${d} can be opened by others; it must be 0700`);
+  }
+  return open({ dir: c.hookStateDir, fs: nodeHookFs(), saveFile: (f, text, { mode }) => writeStatus(f, text, { mode }), startTimeoutS: c.start_timeout_s ?? {} });
+}
 
 /**
  * What the launch checks read for one start (runner-checks.mjs workerChecks): the start port's x and the config's, the
@@ -403,7 +437,7 @@ export function keepSnapshots(c, { fresh = keepSnapshotFresh, log = () => {}, re
 export async function main(argv, { readConfig = (f) => { const self = selfPath(); if (!self) throw new Error('its own script\'s path can\'t be read, so it can\'t be checked'); return readJobConfig(f, { code: [], optionalCode: ['budget'], self }); }, lock = (dir) => makeLock({ dir, timeoutMs: 2_000 }),
   ports = {}, run = runRunner, log = (s) => process.stderr.write(`${new Date().toISOString()} ${s}\n`), onStop = listenStop, fresh = keepSnapshotFresh,
   realpath = (p) => realpathSync.native(p), memory = loadMemory, folderProblem = (dir) => snapshotFolderProblem(dir),
-  pinnedProblem = (root, files) => installProblem(root, files, { owner: 0 }), loadBudget = importBudget, readManifest = readRootFile, portsOf = realRunnerPorts } = {}) {
+  pinnedProblem = (root, files) => installProblem(root, files, { owner: 0 }), loadBudget = importBudget, readManifest = readRootFile, portsOf = realRunnerPorts, hooksOf = hookStoreOf } = {}) {
   let c;
   try { c = checkRunnerConfig(readConfig(argv[0])); } catch (e) { log(`the worker runner did not start: ${e.message}`); return 1; }
   // The roots each deny is spelled from are their real paths (#378 r1 m4): the Mac's sandbox does not apply a deny reached
@@ -456,7 +490,12 @@ export async function main(argv, { readConfig = (f) => { const self = selfPath()
     let m = null; try { m = memory(c.memoryFile, { uid: process.getuid() }); } catch { m = null; }
     const why = m ? carriedOverProblem(c, m, { groupGone: P.groupGone }) : null;
     if (why) { log(`the worker runner did not start: ${why}`); return 1; }
-    await run({ requestsDir: c.requestsDir, statusFile: c.statusFile, memoryFile: c.memoryFile, orchestrateUid: c.orchestrateUid, uid: process.getuid(),
+    let hooks = null;
+    if (c.hookStateDir !== undefined) {
+      try { hooks = hooksOf(c); } catch (e) { log(`the worker runner did not start: ${e?.message ?? e}`); return 1; }
+      if (hooks.broken) log(`worker runner: ${hooks.broken}; no Lead, Front Door or Mini Base session is typed into until it is fixed by hand`);
+    }
+    await run({ ...(hooks ? { hooks } : {}), requestsDir: c.requestsDir, statusFile: c.statusFile, memoryFile: c.memoryFile, orchestrateUid: c.orchestrateUid, uid: process.getuid(),
       outboxRoot: c.outboxRoot, copiesRoot: c.copiesRoot, claimMs: c.claimMs, ports: P, note: log, stopWhen: () => stopping });
     return 0;
   } catch (e) { log(`the worker runner stopped: ${e?.message ?? e}`); return 1; } finally {

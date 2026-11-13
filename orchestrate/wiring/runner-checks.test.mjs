@@ -385,7 +385,7 @@ test('step 6: the runner\'s config feeds the checks (pin, machine-wide file, the
     path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/rec', recordUid: 502, claimMs: 1, products: { p1: { repo: 'o/p', mirror: '/m', render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] } } } } } };
   assert.throws(() => checkRunnerConfig({ ...base, pin: 'latest' }), /pin must be/);
   // #419 r3 c1, m1: any value but the fixed file, a near miss or an unsimple path, is told the fixed file.
-  for (const machineWide of ['mw', '/mw/', '/a/../mw', '//mw', '/m w', ...NEAR_MISSES]) assert.throws(() => checkRunnerConfig({ ...base, machineWide }), new RegExp(`config: machineWide must be ${esc(FIXED)}: claude 2\\.1\\.322 reads only that file$`), JSON.stringify(machineWide));
+  for (const machineWide of ['mw', '/mw/', '/a/../mw', '//mw', '/m w', ...NEAR_MISSES]) assert.throws(() => checkRunnerConfig({ ...base, machineWide }), new RegExp(`config: machineWide must be ${esc(FIXED)}: claude 2\\.1\\.316 reads only that file$`), JSON.stringify(machineWide));
   // L915 (#420 m2): render.paths node, hooksDir, notes and bobFolder, when given, in their simplest form, at load.
   for (const k of ['node', 'hooksDir', 'notes', 'bobFolder']) {
     const at = (v) => ({ ...base, products: { p1: { ...base.products.p1, render: { paths: { ...base.products.p1.render.paths, [k]: v } } } } });
@@ -395,7 +395,7 @@ test('step 6: the runner\'s config feeds the checks (pin, machine-wide file, the
     assert.doesNotThrow(() => checkRunnerConfig(at(`/x/${k}`)), k);
   }
   // L913 (a): any file but claude's fixed one is refused at load, not session by session at check 10.
-  assert.throws(() => checkRunnerConfig({ ...base, machineWide: '/mw.json' }), /machineWide must be \/Library\/Application Support\/ClaudeCode\/managed-settings\.json: claude 2\.1\.322 reads only that file/);
+  assert.throws(() => checkRunnerConfig({ ...base, machineWide: '/mw.json' }), /machineWide must be \/Library\/Application Support\/ClaudeCode\/managed-settings\.json: claude 2\.1\.316 reads only that file/);
   assert.equal(checkRunnerConfig({ ...base, machineWide: '/Library/Application Support/ClaudeCode/managed-settings.json' }).machineWide, '/Library/Application Support/ClaudeCode/managed-settings.json');
   assert.throws(() => checkRunnerConfig({ ...base, products: { p1: { ...base.products.p1, rules: [] } } }), /rules must be/);
   // #369 m4: the rules' production lists, as the review runner requires; one snapshot per product, apart from the runner's folders (L916).

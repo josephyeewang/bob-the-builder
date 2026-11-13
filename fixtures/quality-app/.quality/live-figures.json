@@ -1,0 +1,13 @@
+{
+  "_doc": "The test product's live figures (a filled copy of templates/quality/live-figures.json).",
+  "product": "quality-app",
+  "figures": [
+    {
+      "figure": "Total of the sample values",
+      "liveAddress": "https://quality-app.example.com/api/health",
+      "readAt": "$.total",
+      "secondWayQuery": "select sum(value) from sample_values",
+      "tolerance": "0"
+    }
+  ]
+}

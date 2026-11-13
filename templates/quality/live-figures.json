@@ -1,0 +1,13 @@
+{
+  "_doc": "The product's short list of live figures to re-check after each deploy: each figure people act on, where the live product shows it, and a second way to compute it from the product's own data. After a deploy the figure is read from liveAddress at readAt and compared with secondWayQuery's answer; a gap larger than tolerance is a wrong number on the live site. Every field is required; check the file with: node scripts/quality/live-figures-check.mjs .quality/live-figures.json (templates/quality/README.md).",
+  "product": "",
+  "figures": [
+    {
+      "figure": "",
+      "liveAddress": "",
+      "readAt": "",
+      "secondWayQuery": "",
+      "tolerance": ""
+    }
+  ]
+}
