@@ -3,11 +3,14 @@
 //
 // What each one does, and what is still another lane's (each such piece is a port that refuses until it is given, so no
 // session ever runs on a guess; the list is in the step-5 PR and on the lead's Mini list):
-//   start({ card, kind, product, sessionId, live }) → { ok: true, pid, pgid, pidStart, head, base, outbox, signin, configDir, copy }
+//   start({ card, kind, product, sessionId, live, undoCommit? }) → { ok: true, pid, pgid, pidStart, head, base, outbox, signin, configDir, copy }
 //     1. the card is read from the Record (read only) and must be claimed for this very session (claim.session_id): a
 //        launch request for a card claimed by another session starts nothing;
 //     2. the copy's start commit comes from `startCommit` (default cardStartCommit, L825: a Tier 1 card, or one with no
-//        tier, starts on its plan's main_commit, which must be 40 hex; any other card on the mirror's main), then M4's
+//        tier, starts on its plan's main_commit, which must be 40 hex; any other card on the mirror's main). An undo
+//        launch's reversed commit (undoCommit, L976) must be in the mirror and an ancestor of that start commit
+//        (undoCommitProblem, safe-git; L985), or the start is refused with no copy made. promptFor is handed it (it is asked
+//        once the copy and outbox exist, L970), and so is launch check 12, which holds it to the commit the card's source names. Then M4's
 //        prepareWorkerCopy makes <copiesRoot>/<product>/<card> (never over a folder that is there). The answer's `base` names that
 //        commit; it is kept in the runner's own session row and its answer (#364 r1 m2). The launch record has no field
 //        for it yet (writeLaunch, lane 2), and the status file's session fields don't carry it;
@@ -34,7 +37,8 @@
 //        claude starts, `beforeStart` runs checks 1, 2, 3 and 8 again (runner-main.mjs RECHECK; #369 M1, r1 m1 and m2),
 //        since checks 4 and 11 run the branch's own code;
 //     6. claude is spawned detached (review-launch.mjs spawnClaude), so it leads its own process group (pid = pgid), with
-//        the prompt from `promptFor` (another lane's; none, and nothing starts). Its start time is read at once
+//        the prompt from `promptFor` (by default workerPromptText, M5 worker-prompt.mjs; it is asked once the copy
+//        and the outbox exist, with the copy's head and the outbox, L970; its reason is told when it gives none). Its start time is read at once
 //        (runner-loop.mjs leaderStart, in UTC, the one reader the stop checks against); one that can't be read gets the group killed and the start refused, since the runner tells its own
 //        group from a reused number only by that time (step-4 review M3).
 //     A refusal once the copy is made removes the copy, the outbox and the settings file this start made (claude never ran in
@@ -59,7 +63,7 @@ import { fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, r
 import { createHash } from 'node:crypto';
 import { execFileSync, spawn as childSpawn } from 'node:child_process';
 import { dirname, join } from 'node:path';
-import { RUNNER_ROLE_OF, runnerCopy, runnerOutbox, runnerPlaces } from './owner-status.mjs';
+import { RUNNER_ROLE_OF, UNDO_COMMIT, runnerCopy, runnerOutbox, runnerPlaces } from './owner-status.mjs';
 import { SETTINGS as S } from '../modules/M4-workshop/launcher/settings-names.mjs';
 import { USED_STATES } from '../modules/M11-dispatcher/intake-facts.mjs';
 import { DRAIN_CAUSES } from '../modules/M11-dispatcher/drain-alerts.mjs';
@@ -79,6 +83,8 @@ import { createSaveWork } from '../modules/M4-workshop/git/save-work.mjs';
 import { cardBranch } from '../modules/M4-workshop/git/branch.mjs';
 import { git } from '../modules/M4-workshop/git/safe-git.mjs';
 import { PUSH_FACT, bundleName } from '../modules/M4-workshop/git/push.mjs';
+import { PRODUCT_OUTBOX_ROLES } from '../shared/product-paths.mjs';
+import { workerPrompt } from '../modules/M5-review-audit/worker-prompt.mjs';
 
 export const TRANSCRIPT_PLACE_CHECKED_AGAINST = null;
 const refuse = (reason) => ({ ok: false, reason });
@@ -124,8 +130,8 @@ export function sizePort({ read = readTranscriptFile, lstat = lstatSync } = {}) 
 // The states intake is done with (L852): lane 2's one list (M11 intake-facts.mjs USED_STATES), which lead-restart reads too.
 export const INTAKE_DONE = USED_STATES;
 // The roles whose sessions are a card's own work: 'waiting' is done for them (#388 r1 m2), and only theirs carry the
-// card's bundle (#388 r2 m1).
-const WAITING_DONE_FOR = new Set(['worker', 'script']);
+// card's bundle (#388 r2 m1). The one list (L1006 M1): PRODUCT_OUTBOX_ROLES, which M4 push and M11 intake read too.
+const WAITING_DONE_FOR = new Set(PRODUCT_OUTBOX_ROLES);
 const doneFor = (s, state) => INTAKE_DONE.has(state) && (state !== 'waiting' || WAITING_DONE_FOR.has(s.role));
 const noFactReader = () => ({ ok: false, reason: 'no Record fact reader is wired' });
 const noSessionReader = () => ({ ok: false, reason: 'no Record session reader is wired' });
@@ -218,7 +224,8 @@ export function saveWorkPort({ mirrorOf, runLocked, settingsDir, make = createSa
         if (st.uid !== uid) throw new Error('the copy\'s .git is not the runner\'s own');
         let cwd; try { cwd = realpath(git); } catch (e) { throw new Error(`the copy's .git can't be read (${e?.code ?? e?.message})`); }
         return runLocked({ ...j, sessionId: s.id, role: RUNNER_ROLE_OF[s.kind], settingsFile: typeof settingsDir === 'string' ? join(settingsDir, saveSettingsName(s.id)) : undefined,
-          // cwd .git: see runner-locked.mjs's capability note (claude 2.1.322 denies <cwd>/.git/config and hooks).
+          // cwd .git: see runner-locked.mjs's capability note (read in claude 2.1.322, which denies <cwd>/.git/config and
+          // hooks; not yet checked on the pin, 2.1.316: Mini proof 9).
           settingsSha: s.save_settings_sha, cwd, ...(typeof onGroup === 'function' ? { onGroup } : {}) });
       }
       : undefined;
@@ -270,6 +277,27 @@ export async function cardStartCommit({ mirror, cardDoc }, { main = mirrorMain }
     return cardDoc.main_commit;
   }
   return main(mirror);
+}
+
+/**
+ * An undo's reversed commit in the mirror (L976, L985): there as a commit, and an ancestor of the start commit, so the
+ * copy holds what the undo reverses. → null, or the plain reason the start is refused. Asked before the copy is made.
+ * Both commits must be 40 lower-case hex, or it refuses without running git (#468 m3).
+ */
+export async function undoCommitProblem({ mirror, commit, head }, { run = git } = {}) {
+  // #468 m3: its own inputs are checked before git sees them, so a value starting with '-' is never read as an option.
+  if (!(typeof commit === 'string' && UNDO_COMMIT.test(commit))) return 'the reversed commit is not 40 lower-case hex';
+  if (!(typeof head === 'string' && SHA.test(head))) return 'the start commit is not 40 lower-case hex';
+  const at = { gitDir: mirror, purpose: 'runner-undo-commit', timeoutMs: 30_000 };
+  const short = String(commit).slice(0, 12);
+  // -t, never -e with ^{commit}: an annotated tag's id peels to a commit, and is still not the commit reversed.
+  const there = await run(['cat-file', '-t', commit], at);
+  if (there?.code === 128 || there?.code === 1 || (there?.code === 0 && String(there?.stdout ?? '').trim() !== 'commit')) return `the reversed commit ${short} is not a commit in the mirror`;
+  if (there?.code !== 0) return `the reversed commit ${short} can't be looked up in the mirror (git ${there?.code})`;
+  const up = await run(['merge-base', '--is-ancestor', commit, head], at);
+  if (up?.code === 1) return `the reversed commit ${short} is not an ancestor of the start commit ${String(head).slice(0, 12)}`;
+  if (up?.code !== 0) return `the reversed commit ${short} can't be checked against the start commit (git ${up?.code})`;
+  return null;
 }
 
 /** The mirror's main, as a fresh copy starts on it. → the commit, or a throw. */
@@ -366,23 +394,29 @@ export function liveWallProblem(live, product, places, read) {
  * #364 self-review M1), log (what is told, such as a throwaway that can't be removed), productHeld(product) → null or why
  * the product starts no session (runner-main.mjs keepSnapshots, #369 r2 m2; asked at the start and again before claude),
  * readSettings(id) → a live session's settings (#378 r1 M1).
- * The request: { card, kind, product, sessionId, live } (live: the runner's other live sessions, liveWallProblem).
+ * The request: { card, kind, product, sessionId, live, undoCommit?, onGroup? } (live: the runner's other live sessions, liveWallProblem;
+ * undoCommit: the reversed commit, 40 hex, an undo's only, L976; onGroup: told check 4's install process groups, #463 r3 m1).
  */
+/** The start's default prompt (L970): the worker prompt's text, or null (and the start is refused) when it gives none. */
+export const workerPromptText = (x) => { const p = workerPrompt(x); return p.ok ? p.text : { ok: false, reason: p.reason }; };
+
 export function startPort(c, deps = {}) {
   const {
     readCard = (card) => readCardFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, card }),
-    startCommit = cardStartCommit, prepare = prepareWorkerCopy, checksFor = () => ({}), promptFor = () => null,
+    startCommit = cardStartCommit, prepare = prepareWorkerCopy, checksFor = () => ({}), promptFor = workerPromptText,
     names = {}, account = () => accountInUse({ home: c.home }), spawn = childSpawn, pidStartOf = leaderStart, kill, there, launchFn = launch,
     walled = walledLaunchSettings, ownUid = () => process.getuid(), stopped = () => false, beforeStart, mainOf = mirrorMain,
-    readSettings = sessionSettingsOf(c.settingsDir),
+    readSettings = sessionSettingsOf(c.settingsDir), undoCheck = undoCommitProblem,
   } = deps;
   const fs = { mkdir: mkdirSync, rm: rmSync, writeNew, list: readdirSync, lstat: lstatSync, chmodTree, rename: renameSync, ...(deps.fs ?? {}) };
   const log = deps.log ?? (() => {});
-  return async ({ card, kind, product, sessionId, live = [] } = {}) => {
+  return async ({ card, kind, product, sessionId, live = [], undoCommit, onGroup } = {}) => {
     if (stopped()) return refuse('the worker runner is stopping');
     if (typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) return refuse('the session id is not one the Dispatcher makes');
     if (typeof card !== 'string' || !CARD_ID.test(card) || card.startsWith('.')) return refuse('not a card id');
     if (!Object.hasOwn(RUNNER_ROLE_OF, kind)) return refuse(`the worker runner does not start ${JSON.stringify(kind)} sessions`);
+    if (kind === 'undo' && !(typeof undoCommit === 'string' && UNDO_COMMIT.test(undoCommit))) return refuse('the undo launch names no reversed commit');
+    if (kind !== 'undo' && undoCommit !== undefined) return refuse('only an undo launch names a reversed commit');
     const role = RUNNER_ROLE_OF[kind];
     const profile = DESIGN_PROFILES[role];
     const p = Object.hasOwn(c.products ?? {}, product) ? c.products[product] : null;
@@ -397,6 +431,10 @@ export function startPort(c, deps = {}) {
     const who = account();
     if (!who?.account) return refuse(`no sign-in to start with (${who?.reason ?? 'no answer'})`);
     let commit; try { commit = await startCommit({ mirror: p.mirror, card, cardDoc: cd.doc }); } catch (e) { return refuse(`the copy's start commit can't be read (${e?.message ?? e})`); }
+    if (kind === 'undo') {
+      let why; try { why = await undoCheck({ mirror: p.mirror, commit: undoCommit, head: commit }); } catch (e) { why = `the reversed commit can't be checked (${e?.message ?? e})`; }
+      if (why) return refuse(why);
+    }
     let mine; let copy; let outbox;
     try {
       mine = runnerPlaces({ copiesRoot: c.copiesRoot, outboxRoot: c.outboxRoot, product });
@@ -421,7 +459,7 @@ export function startPort(c, deps = {}) {
     try { fs.mkdir(outbox, { mode: 0o700 }); ours.push(outbox); } catch (e) { return undo(`the outbox can't be made (${e?.code ?? e?.message})`); }
     // The worker's prompt (L970): built once the copy's head and the outbox exist, since the builder names both. A string,
     // or { ok: false, reason }; either way no prompt takes the copy and the outbox away again, and says the builder's reason.
-    let given; try { given = await promptFor({ role, kind, card, cardDoc: cd.doc, product, head: made.head, outbox }); } catch (e) { given = { ok: false, reason: e?.message ?? String(e) }; }
+    let given; try { given = await promptFor({ role, kind, card, cardDoc: cd.doc, product, ...(kind === 'undo' ? { undoCommit } : {}), head: made.head, outbox }); } catch (e) { given = { ok: false, reason: e?.message ?? String(e) }; }
     if (typeof given !== 'string' || !given) {
       const why = given && typeof given === 'object' && typeof given.reason === 'string' && given.reason ? ` (${given.reason.slice(0, 300)})` : '';
       return undo(`not wired: no worker prompt is given to the runner${why}`);
@@ -501,7 +539,9 @@ export function startPort(c, deps = {}) {
       let back; try { back = readSettings(sessionId); } catch (e) { return refuse(`not read back (${e?.code ?? e?.message})`); }
       return `${JSON.stringify(back, null, 2)}\n` === text ? { ok: true } : refuse('not read back as written');
     };
-    const x = { role, profile, kind, sessionId, card, cardDoc: cd.doc, product, copy, outbox, env, head: made.head, mainAt, claudeBin: c.claudeBin, settings: { file: settingsFile, settings: w.settings }, ownUid, throwaway, renderPhase, writeSettings };
+    const x = { role, profile, kind, sessionId, card, cardDoc: cd.doc, product, ...(kind === 'undo' ? { undoCommit } : {}), copy, outbox, env, head: made.head, mainAt, claudeBin: c.claudeBin, settings: { file: settingsFile, settings: w.settings }, ownUid, throwaway, renderPhase, writeSettings,
+      // Told the install's process groups (check 4, #463 r3 m1), kept by the runner as a save's are (worker-runner.mjs `installs`).
+      ...(typeof onGroup === 'function' ? { onGroup } : {}) };
     let l;
     try {
       // Launch check 0 sees the very flags claude is started with (#364 self-review m5), as review-wiring.mjs does.

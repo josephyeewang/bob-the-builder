@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { writeSnapshot } from '../modules/M4-workshop/hooks/snapshot.mjs';
 import { makeLock } from '../modules/M9-record/lock.mjs';
 import { loginJobPlist } from '../modules/M11-dispatcher/login-job.mjs';
-import { DENY_KEYS, aclWriteEntries, carriedOverProblem, checkRunnerConfig, keepSnapshots, snapshotFolderProblem, startDeps, listenStop, main, realRunnerPorts } from './runner-main.mjs';
+import { DENY_KEYS, aclWriteEntries, carriedOverProblem, checkRunnerConfig, keepSnapshots, snapshotFolderProblem, startDeps, listenStop, main, readRootFile, realRunnerPorts } from './runner-main.mjs';
 import { RUNNER_JOB_LOG, RUNNER_JOB_UMASK, fullPath, workerRunnerPlist } from './runner-job.mjs';
 
 const config = (d, over = {}) => ({ installRoot: join(d, 'install'), requestsDir: join(d, 'requests'), statusFile: join(d, 'runner', 'status.json'), orchestrateUid: 501,
@@ -588,5 +588,76 @@ test('L852: main\'s drain reads the Record\'s own fact file (M4 readFactFile): a
     chmodSync(sdir, 0o777);
     assert.deepEqual(p.outboxDrained(s), held('record-unreadable'), 'a session folder others can write is not read');
     chmodSync(sdir, 0o755);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+// ---- L1001: the worker runner's budget (check 12) and Bob file list (check 13) ----
+const PIN_OPTS = (d) => ({ budget: join(d, 'install', 'modules', 'M11-dispatcher', 'budget.mjs'), bobManifest: join(d, 'install', 'bob-manifest.json'),
+  dispatcherRules: join(d, 'products', 'p1', 'rules', 'dispatcher-rules.json'), reviewStatusFile: join(d, 'review', 'status.json'), reviewUid: 503 });
+
+test('L1001: the config\'s budget needs the snapshot, the review runner\'s status file and user; both files sit inside the copy', () => {
+  const d = '/x';
+  assert.equal(checkRunnerConfig(config(d, PIN_OPTS(d))).budget, PIN_OPTS(d).budget);
+  for (const k of ['dispatcherRules', 'reviewStatusFile', 'reviewUid']) {
+    const o = PIN_OPTS(d); delete o[k];
+    assert.throws(() => checkRunnerConfig(config(d, o)), new RegExp(`config: ${k} must be set with budget`), k);
+  }
+  assert.throws(() => checkRunnerConfig(config(d, { ...PIN_OPTS(d), budget: '/elsewhere/budget.mjs' })), /config: budget must be inside installRoot/);
+  assert.throws(() => checkRunnerConfig(config(d, { bobManifest: '/x/installed/m.json' })), /config: bobManifest must be inside installRoot/, 'a sibling spelled alike is not inside');
+  assert.throws(() => checkRunnerConfig(config(d, { ...PIN_OPTS(d), budget: 'budget.mjs' })), /config: budget must be a full path/);
+  assert.throws(() => checkRunnerConfig(config(d, { ...PIN_OPTS(d), reviewUid: -1 })), /config: reviewUid must be a uid/);
+  // The Bob file list alone needs nothing else.
+  assert.equal(checkRunnerConfig(config(d, { bobManifest: PIN_OPTS(d).bobManifest })).bobManifest, PIN_OPTS(d).bobManifest);
+});
+
+test('L1001: main stops when the budget or Bob file list is not root\'s alone in the copy, and otherwise loads each once for the ports', async () => {
+  const d = roots(tempDir('orch-rmain-'));
+  try {
+    mkdirSync(join(d, 'runner'), { recursive: true });
+    const cfg = config(d, PIN_OPTS(d));
+    // The real check: this test's copy is not root's, so the runner does not start.
+    let logs = []; let ran = false;
+    assert.equal(await main(['/cfg.json'], { readConfig: () => cfg, log: (s) => logs.push(s), run: async () => { ran = true; }, onStop: () => {} }), 1);
+    assert.match(logs.join('\n'), /^the worker runner did not start: its budget or Bob file list is not root's alone in the installed copy: /m);
+    assert.equal(ran, false);
+    // Root's alone (stood in for): each is loaded once, with the runner's own status file and user, and handed to the ports.
+    const loads = []; const reads = []; const got = [];
+    const budget = { rules: {}, rec: {}, bandsNow: () => ({}), runningNow: () => [] };
+    const opts = (o = {}) => ({ readConfig: () => cfg, log: (s) => logs.push(s), onStop: () => {}, run: async () => {},
+      pinnedProblem: (root, files) => { got.push(['pinned', root, files]); return null; },
+      loadBudget: async (file, c) => { loads.push([file, c]); return budget; }, readManifest: (f) => { reads.push(f); return '{"a.md":"x"}'; },
+      portsOf: (c, ports, x) => { got.push(['ports', x.budget, x.bobManifest]); return realRunnerPorts(c, ports, x); }, ...o });
+    logs = [];
+    assert.equal(await main(['/cfg.json'], opts()), 0, logs.join('\n'));
+    assert.deepEqual(got[0], ['pinned', cfg.installRoot, [cfg.budget, cfg.bobManifest]]);
+    assert.equal(loads.length, 1); assert.equal(loads[0][0], cfg.budget);
+    assert.equal(loads[0][1].workerStatusFile, cfg.statusFile); assert.equal(loads[0][1].workerUid, process.getuid());
+    assert.equal(loads[0][1].dispatcherRules, cfg.dispatcherRules); assert.equal(loads[0][1].reviewUid, 503);
+    assert.deepEqual(reads, [cfg.bobManifest]);
+    assert.deepEqual(got[1], ['ports', budget, { 'a.md': 'x' }]);
+    // One that can't be loaded, or answers nothing, is logged and leaves its check without a port; the runner still runs.
+    for (const [o, said] of [[{ loadBudget: async () => { throw new Error('no snapshot'); } }, /the budget module could not be loaded \(no snapshot\); no session starts/],
+      [{ loadBudget: async () => ({ rules: {} }) }, /the budget module gave no rules, rec, bandsNow and runningNow; no session starts/],
+      [{ readManifest: () => '{not json' }, /the Bob file list could not be read/]]) {
+      logs = []; got.length = 0;
+      assert.equal(await main(['/cfg.json'], opts(o)), 0, logs.join('\n'));
+      assert.match(logs.join('\n'), said);
+      const p = got.find((g) => g[0] === 'ports');
+      assert.equal(o.readManifest ? p[2] : p[1], null);
+    }
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test('L1001: the Bob file list is read only as root\'s own plain file, never through a link', () => {
+  const d = tempDir('orch-rmain-');
+  try {
+    const f = join(d, 'm.json'); writeFileSync(f, '{}'); chmodSync(f, 0o644);
+    assert.equal(readRootFile(f, { uid: process.getuid() }), '{}');
+    assert.throws(() => readRootFile(f), /is not root's own plain file/, 'the test\'s own file is not root\'s');
+    chmodSync(f, 0o664);
+    assert.throws(() => readRootFile(f, { uid: process.getuid() }), /is not root's own plain file/);
+    chmodSync(f, 0o644);
+    const l = join(d, 'l.json'); symlinkSync(f, l);
+    assert.throws(() => readRootFile(l, { uid: process.getuid() }), /ELOOP|link/);
   } finally { rmSync(d, { recursive: true, force: true }); }
 });

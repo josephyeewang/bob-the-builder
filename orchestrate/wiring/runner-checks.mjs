@@ -38,7 +38,7 @@
 //                           write, so the lock-down is shown on before any of the branch's code runs (#369 M2); then a
 //                           worker's baseline (the product's test command, run once through runner-locked.mjs guardedRun,
 //                           must exit 0: its own process group recorded and killed with claude's, the Bash tool's wait its
-//                           limit, BASELINE_MS 10 min, #463 r2 M3). The baseline never runs in the session's copy (#369 r1 M1): the start port makes a
+//                           limit, BASELINE_MS 10 min, our cap, #463 r2 M3, r3 m2). The baseline never runs in the session's copy (#369 r1 M1): the start port makes a
 //                           throwaway copy of the same commit (`x.throwaway()`), with its own settings that allow writes
 //                           there only and deny the session's copy and outbox, and removes it after. So a process the
 //                           tests leave running, one that started its own session (setsid) too, can't reach the copy
@@ -59,7 +59,8 @@
 //                           sessions themselves). The budget is check12's own inputs, and carries the pass's `filesOf`
 //                           (#369 r2 m4): check12 works out an undo's exact reverse with it (lane 2's #393, gate.mjs;
 //                           until it lands, check12 does not), so an undo is refused here, saying so, when the budget has
-//                           none. No budget source yet (runner-main.mjs budget: null), so no port
+//                           none. The budget is the one main loaded from the config's `budget` (M11 budget.mjs); with
+//                           none named, or one that could not be loaded, no port
 //   13 Bob method folder    reviewChecks' 13 against the pinned file list; no list, no port
 // The inputs come from the start port's `x` and the runner's config (runner-main.mjs workerCheckInputs).
 
@@ -78,9 +79,10 @@ const refuse = (reason) => ({ ok: false, reason });
 // The ports of guardedRun a test may swap in (#463 r2 self-review c1): its reads and waits, never what it runs.
 const JOB_PORTS = Object.freeze(['read', 'info', 'pidStartOf', 'jobGone', 'pollMs', 'answer', 'rm']);
 const jobPortsOf = (p) => (p && typeof p === 'object' ? Object.fromEntries(JOB_PORTS.filter((k) => Object.hasOwn(p, k)).map((k) => [k, p[k]])) : {});
-// #463 r2 M3 (L1010): the baseline runs as one Bash-tool command, so its limit is that tool's longest wait (LOCKED_MS,
-// 10 min, a claim on claude 2.1.322: RECHECK ON EVERY UPGRADE of the pin), not the 15 min it had. A branch whose tests
-// need longer is refused at the start ("did not finish in time"); its test command must be split by its product.
+// #463 r2 M3 (L1010): the baseline runs as one Bash-tool command under guardedRun, so its limit is the lock-down's cap
+// (LOCKED_MS, 10 min), not the 15 min it had. The cap is our own choice (#463 r3 m2), not a tool limit: guardedRun sets
+// the Bash tool's longest wait (BASH_MAX_TIMEOUT_MS) to the limit. A branch whose tests need longer is refused at the
+// start ("did not finish in time"); its test command must be split by its product, or the cap raised in runner-locked.mjs.
 export const BASELINE_MS = LOCKED_MS;
 const has = (v) => v !== undefined && v !== null && v !== '';
 export const WALK_LIMIT = 200_000;
@@ -219,7 +221,9 @@ export function workerChecks(x, { gateOf = check12 } = {}) {
     ports[4] = () => installStep({ render: x.renderPhase, write: x.writeSettings, registryHosts: Array.isArray(x.registryHosts) ? x.registryHosts : [],
       install: () => x.runLocked({ job: 'install', command: x.installCommand, sessionId: x.sessionId, role: x.role, settingsFile: x.settings?.file, cwd: x.copy,
         // The start's own environment (#463 r1 m6), which launch check 9 holds: the sign-in is not read a second time.
-        ...(x.env && typeof x.env === 'object' ? { env: x.env } : {}) }) });
+        ...(x.env && typeof x.env === 'object' ? { env: x.env } : {}),
+        // The install's process groups, kept in the runner's memory as a save's are (#463 r3 m1).
+        ...(typeof x.onGroup === 'function' ? { onGroup: x.onGroup } : {}) }) });
   }
   if (x.budget) {
     const gate = gateOf(x.budget);
@@ -227,7 +231,8 @@ export function workerChecks(x, { gateOf = check12 } = {}) {
       if (!x.cardDoc) return refuse('the card is not in the Record');
       if (x.kind === 'undo' && typeof x.budget.filesOf !== 'function') return refuse('the budget carries no filesOf (the pass\'s own), so the undo can\'t be shown an exact reverse');
       // The card with its id (L863): without one, check12 reads the card's own claim as an undo already running.
-      return gate({ card: { id: x.card, ...x.cardDoc }, kind: x.kind, product: x.product });
+      // An undo's reversed commit too (L976): check12 holds it to the commit the card's source names.
+      return gate({ card: { id: x.card, ...x.cardDoc }, kind: x.kind, product: x.product, ...(x.kind === 'undo' ? { undoCommit: x.undoCommit } : {}) });
     };
   }
   if (x.bobManifest && has(x.bobFolder)) ports[13] = r[13];

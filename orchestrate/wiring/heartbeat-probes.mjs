@@ -20,17 +20,41 @@
 // `labels` turn a or b into the private config's label; an account with no label is shown as its letter.
 //
 // Usage. heartbeatOnce takes one window at a time, so it gets the fuller of the two.
+//
+// Sensors alive (L967, L969; #464 r1). Whether the Sensors job itself is still writing: the age of the newest reading it
+// wrote among the families its loop writes on every pass, whatever the reading says (EVERY_PASS below; M12 loop.mjs
+// LOOP). Its limit is usage.stale_after_min, the same age at which the Dispatcher holds starts for a stale account
+// reading (tick.mjs), so the plain "the Sensors job may have stopped" turns red no later than that hold, and one rule
+// means the two never disagree: `stale` is decided in milliseconds, as that hold decides it (`now - seen > staleMs`), and
+// the minutes are only for the line. The answer, one of:
+//   null                                   not known: no limit in the rules, or inside the grace after the Mini
+//                                          started (GRACE_MS: its Sensors job has had no time to write yet)
+//   { none, limitMin, why }                no reading at all: never written, deleted, or the Record could not be read
+//                                          (why 'record'). Not known at first; heartbeat.mjs keeps when it began
+//                                          (heartbeat-sensors-none-since) and turns it red past the limit, as the
+//                                          Dispatcher's line is red with no pass on record (#464 r1 M1, m2a)
+//   { clock, aheadMin, limitMin }          a reading stamped more than READING_FUTURE_MS ahead: the Mini's clock (r1 m2)
+//   { ageMin, limitMin, stale, newestAt,   the newest reading; `account` is the signed-in-account reading's own
+//     account: { ageMin, stale, at,        age, the one the Dispatcher holds on, red alone when it is past the limit
+//                why? } }                  while the others are not (r1 m1); why 'record' when its row is damaged or
+//                                          the read throws, so it is told as the Record's, not "never" (r2 m-A)
+// Every reading here is the Record's: there is no heartbeat at all without the robot's App token (robot-wiring.mjs builds
+// none without one), so a Mini with no App says nothing here, not even "not known" (r1 c3).
 
 import { sensorsFact } from '../modules/M11-dispatcher/sensor-facts.mjs';
+import { READING_FUTURE_MS } from '../modules/M12-sensors/facts.mjs';
 import { ACCOUNT_FACT, LAST_PASS_FACT } from '../modules/M11-dispatcher/tick.mjs';
 import { FACTS, READING_MAX_AGE_MS } from '../modules/M11-dispatcher/phone-link.mjs';
 import { KEYS, minutes } from '../modules/M11-dispatcher/keys.mjs';
 import { USAGE_FACT, readFact } from '../modules/M11-dispatcher/usage.mjs';
+import { uptime } from 'node:os';
+import { EVERY_S, RUN_DEADLINE_MS } from '../modules/M12-sensors/loop.mjs';
 
-const FUTURE_MS = 60_000;
+/** After the Mini starts, one Sensors interval and its first pass's time limit, before a missing reading is told (r1 m3). */
+export const GRACE_MS = EVERY_S * 1000 + RUN_DEADLINE_MS;
 const current = (at, nowMs, maxMs) => {
   const seen = Date.parse(at ?? '');
-  return Number.isFinite(seen) && seen <= nowMs + FUTURE_MS && nowMs - seen <= maxMs;
+  return Number.isFinite(seen) && seen <= nowMs + READING_FUTURE_MS && nowMs - seen <= maxMs;
 };
 
 // The one reading of the account fact: the account signed in, 'out' when the reading says signed_in false in so many
@@ -45,7 +69,10 @@ const whoOf = (d) => {
 // probe that throws as red, which for these would be a loud false alarm (#451 r1 m3).
 const orNull = (fn) => async () => { try { return await fn(); } catch { return null; } };
 
-export function heartbeatProbes({ rec, rules, now, labels = {} }) {
+/** The families the Sensors loop writes on every pass, each its own fact (no per-account or per-PR suffix). */
+export const EVERY_PASS = Object.freeze([ACCOUNT_FACT, FACTS.network, FACTS.reachable, FACTS.minibase]);
+
+export function heartbeatProbes({ rec, rules, now, labels = {}, upMs = () => uptime() * 1000 }) {
   // No age limit in the rules means no reading can be called current, so all of them are not known.
   const staleMs = () => { try { return minutes(rules, KEYS.staleAfterMin); } catch { return null; } };
   const reading = () => {
@@ -55,6 +82,42 @@ export function heartbeatProbes({ rec, rules, now, labels = {} }) {
   };
   return {
     dispatcherLastGood: async () => rec.read('fact', LAST_PASS_FACT)?.doc?.at ?? null,
+    // → see "Sensors alive" at the top. A Record read that throws is no reading (why 'record'), never not known for ever
+    // (r1 m2a); anything else that throws is the heartbeat's "could not be read" red.
+    sensorsAlive: async () => {
+      const ms = staleMs();
+      if (ms === null) return null;
+      const t = now();
+      if (!Number.isFinite(t)) throw new Error('the time now is not a time');
+      const limitMin = ms / 60_000;
+      let at;
+      let damaged;
+      try {
+        at = EVERY_PASS.map((id) => [id, Date.parse(sensorsFact(rec, id)?.doc?.observed_at ?? '')]).filter(([, s]) => Number.isFinite(s));
+        // A damaged row reads as no reading (sensorsFact), so each missing one is checked on its own: the Record is then the
+        // cause, not "never written" (#464 r2 m1; per family, r2 m-A). One guard: a read that throws here is the Record's too,
+        // even with readings there (a store that reads one row and then throws is broken).
+        damaged = new Set(EVERY_PASS.filter((id) => !at.some(([i]) => i === id) && rec.read('fact', id)?.corrupt === true));
+      } catch {
+        return { none: true, limitMin, why: 'record' };
+      }
+      const ahead = at.filter(([, s]) => s > t + READING_FUTURE_MS);
+      if (ahead.length) return { clock: true, aheadMin: Math.floor((Math.max(...ahead.map(([, s]) => s)) - t) / 60_000), limitMin };
+      if (!at.length) return { none: true, limitMin, why: damaged.size ? 'record' : 'none' };
+      const newest = Math.max(...at.map(([, s]) => s));
+      const acc = at.find(([id]) => id === ACCOUNT_FACT)?.[1];
+      const account = acc === undefined ? { ageMin: null, stale: true, at: null, ...(damaged.has(ACCOUNT_FACT) ? { why: 'record' } : {}) }
+        : { ageMin: Math.max(0, Math.floor((t - acc) / 60_000)), stale: t - acc > ms, at: new Date(acc).toISOString() };
+      const stale = t - newest > ms;
+      // Just started: readings left from before the Mini went down are old, and the Sensors job has not written yet.
+      // Known limit: os.uptime() counts time asleep, so a wake from sleep is not covered and can give one stale notice
+      // before the Sensors job's next write clears it (#464 r2 m2). Known limit, the same size (#464 r2 m-D): a clock set back
+      // by more than READING_FUTURE_MS puts the readings ahead of it, so one "check the clock" notice opens and closes once
+      // the clock passes them (about a minute); and a real stop while such a stamp is there is told as the clock until the
+      // stamp ages out, then as the stop: told late, never missed.
+      if ((stale || account.stale) && upMs() < GRACE_MS) return null;
+      return { ageMin: Math.max(0, Math.floor((t - newest) / 60_000)), limitMin, stale, newestAt: new Date(newest).toISOString(), account };
+    },
     frontDoorReachable: orNull(() => {
       const d = sensorsFact(rec, FACTS.reachable)?.doc;
       if (!d || !current(d.observed_at, now(), READING_MAX_AGE_MS)) return null;

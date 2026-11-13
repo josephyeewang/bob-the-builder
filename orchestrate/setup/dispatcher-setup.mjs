@@ -27,8 +27,8 @@ import { RUNNER_LOG } from '../modules/M4-workshop/launcher/review-daemons.mjs';
 import { FOLDERS } from '../modules/M4-workshop/launcher/review-runner.mjs';
 import { CONFIG_KEYS, checkConfig } from '../wiring/dispatcher-wiring.mjs';
 import { tokenPath } from './extras.mjs';
-import { homeOf, privatePath } from './layout.mjs';
-import { installPaths } from './install.mjs';
+import { dispatcherRulesPath, homeOf, privatePath } from './layout.mjs';
+import { installPaths, keepsNotWarning } from './install.mjs';
 import { readUser } from './users-folders.mjs';
 import { checkDispatcherKeys, dispatcherKeysOn } from './dispatcher-check.mjs';
 import { lockFolderProblem } from './robot-setup.mjs';
@@ -113,6 +113,7 @@ export function dispatcherConfigFor(io, cfg, { keys = CONFIG_KEYS } = {}) {
     reviewRunnerLog: at(join(P.logDir, RUNNER_LOG)), reviewInstallRoot: root,
     reviewRoot: at(k.reviewRoot), mirror: at(k.mirror), sealRoot: at(k.sealRoot), outboxRoot: at(k.outboxRoot), copiesRoot: at(k.copiesRoot), hostLockPath: at(k.hostLockPath), hostLockUid: k.hostLockUid,
     workerRequestsDir: at(k.workerRequestsDir), workerStatusFile: at(k.workerStatusFile), workerUid: k.workerUid,
+    rulesSnapshotFile: at(dispatcherRulesPath(cfg, d.product)),
   };
   // The other way too (L871): a key setup writes that the wiring doesn't take would stop the Dispatcher's start (an
   // unknown key), so it is told here, never written or dropped.
@@ -211,7 +212,11 @@ export function planDispatcherConfig(io, cfg, { jobLive } = {}) {
   // The copy is root's (and every folder above it), so writing in it through its link is root writing in root's folders.
   const P = installPaths(cfg); const inCopy = join(P.installRoot, DISPATCHER_CONFIG);
   const toBase = fileProblem(io, src, text) !== null;
-  const toCopy = copyKeeps(io, cfg) === true && fileProblem(io, inCopy, text, { inCopy: true }) !== null;
+  const keeps = copyKeeps(io, cfg);
+  const toCopy = keeps === true && fileProblem(io, inCopy, text, { inCopy: true }) !== null;
+  // A copy that does not keep the file never gets it from this command: said in the plan, the dry run too, not only by the
+  // check after it (L1029; the 12 Nov rehearsal's bug B).
+  const warnings = keeps === false ? [keepsNotWarning(cfg, [DISPATCHER_CONFIG])] : [];
   // A job that runs (or starts at boot) reads the copy's file on every pass, so new text reaches it with no load to refuse it:
   // the checks load makes come first. The base file is held back too, since the next update carries it into the copy (L807 m1).
   if (toBase || toCopy) {
@@ -233,11 +238,11 @@ export function planDispatcherConfig(io, cfg, { jobLive } = {}) {
     if (bad) {
       const why = `the installed copy is not root's alone (${bad}), so root won't write in it; install the copy again (unload the jobs, remove ${P.install}, run install), which carries ${src} into it`;
       ops.push({ text: `stop: ${why}`, run: () => { throw new Error(why); } });
-      return { ops, problems: [], notes };
+      return { ops, problems: [], notes, warnings };
     }
     ops.push(write(inCopy));
   }
-  return { ops, problems: [], notes };
+  return { ops, problems: [], notes, warnings };
 }
 
 /**

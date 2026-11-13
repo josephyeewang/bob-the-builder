@@ -26,6 +26,7 @@ import { stillWaiting, STILL_WAITING_MS, pastTime } from '../../shared/still-wai
 import { OUTBOX_KINDS, leadLaunchHead } from '../../shared/record.mjs';
 import { PRODUCT_OUTBOX_ROLES } from '../../shared/product-paths.mjs';
 import { NEVER_RAN } from '../M9-record/outbox.mjs';
+import { bundleName } from '../M4-workshop/git/push.mjs';
 
 export const READONLY_REQUESTS = Object.freeze({ think: 'reviewer', scout: 'scout', write: 'writer' });
 export const SETTLE_MS = 2000;
@@ -257,7 +258,11 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
   }
   for (const s of sessions) {
     let names;
-    try { names = list(s.outbox).filter((n) => !n.startsWith('.')); } catch { out.push({ session: s.sessionId, skipped: 'outbox unreadable' }); continue; }
+    // A card session's bundle of its own card (M4 push.mjs reads it; L982) is not a hand-in file: it is left for the
+    // push. Every role that saves one (a worker, a script: stopPass saves for each stopped one) is PRODUCT_OUTBOX_ROLES,
+    // the one list runner-ports and the push read too (L1006 M1).
+    const ownBundle = PRODUCT_OUTBOX_ROLES.includes(s.role) && typeof s.card === 'string' ? bundleName(s.card) : null;
+    try { names = list(s.outbox).filter((n) => !n.startsWith('.') && n !== ownBundle); } catch { out.push({ session: s.sessionId, skipped: 'outbox unreadable' }); continue; }
     listed.push(s.sessionId);
     for (const name of names) seen.push({ s, name, first: look(join(s.outbox, name)) });
   }

@@ -12,7 +12,7 @@ import { tempDir } from '../shared/test-tmp.mjs';
 import { pushWorld } from '../modules/M4-workshop/git/push-world.test-helper.mjs';
 import { createSaveWork } from '../modules/M4-workshop/git/save-work.mjs';
 import { bundleName } from '../modules/M4-workshop/git/push.mjs';
-import { JOBS_DIR, JOB_ACK_WAIT_MS, LOCKED_JOBS, LOCKED_MS, LOCKED_SAVE_MS, RESULT_MAX_BYTES, SAVE_DELAYS_MS, ackFile, groupFile, groupRecordCommand, jobFile, lockedRunner, readGroupRecord, runToEnd, settingsSha } from './runner-locked.mjs';
+import { JOBS_DIR, JOB_ACK_WAIT_MS, LOCKED_JOBS, LOCKED_MS, LOCKED_SAVE_MS, RESULT_MAX_BYTES, SAVE_DELAYS_MS, ackFile, groupFile, groupRecordCommand, guardedRun, jobFile, lockedRunner, readGroupRecord, runToEnd, settingsSha } from './runner-locked.mjs';
 import { EventEmitter } from 'node:events';
 import { SAVE_DEADLINE_MS } from '../modules/M11-dispatcher/pass.mjs';
 import { partialName } from '../modules/M4-workshop/git/save-work.mjs';
@@ -398,10 +398,16 @@ test('#463 r2 M1: no job runs without the runner\'s go-ahead, and a record that 
   await assert.rejects(runner({ spawn: detachedClaude(calls), answer: () => { throw Object.assign(new Error('x'), { code: 'EACCES' }); } })({ job: 'install', command: `touch '${ran}'`, sessionId: 'S-1', role: 'worker', settingsFile, cwd }),
     /its job's process group can't be kept \(the job's go-ahead can't be written \(EACCES\)\), so it is stopped/);
   assert.equal(existsSync(ran), false, 'never ran');
-  // A record naming a process older than claude (the runner's own here): refused, nothing run.
-  const recordPath = (args) => /\/bin\/echo \$\$ > '([^']+)'/.exec(recordOf(args))[1];
-  const old = (bin, args, opts) => childSpawn('/bin/sh', ['-c', `echo ${process.pid} > '${recordPath(args)}'; sleep 1; touch '${ran}'`], opts);
-  await assert.rejects(runner({ spawn: old })({ job: 'install', command: 'true', sessionId: 'S-1', role: 'worker', settingsFile, cwd }), /names a process that did not start after claude/);
+  // A record naming a process older than claude: refused, nothing run. The older process is a sleep in its own group,
+  // started 1.5 s ahead (start times are whole seconds), never this test's own: if the check broke, the kill that follows
+  // would reach the test runner's group and whatever started it, not just fail this test (lane 2 plant run, 12 Nov).
+  const older = childSpawn('/bin/sleep', ['60'], { detached: true, stdio: 'ignore' });
+  try {
+    await new Promise((r) => setTimeout(r, 1_500));
+    const recordPath = (args) => /\/bin\/echo \$\$ > '([^']+)'/.exec(recordOf(args))[1];
+    const old = (bin, args, opts) => childSpawn('/bin/sh', ['-c', `echo ${older.pid} > '${recordPath(args)}'; sleep 1; touch '${ran}'`], opts);
+    await assert.rejects(runner({ spawn: old })({ job: 'install', command: 'true', sessionId: 'S-1', role: 'worker', settingsFile, cwd }), /names a process that did not start after claude/);
+  } finally { try { process.kill(-older.pid, 'SIGKILL'); } catch { /* already gone */ } }
   // No record at all (a claude that ran something else): refused, whatever result it left.
   const f = jobFile({ cwd, job: 'install', sessionId: 'S-1' });
   await assert.rejects(runner({ spawn: (bin, args, opts) => childSpawn('/bin/sh', ['-c', `echo 0 > '${f}'`], opts) })({ job: 'install', command: 'true', sessionId: 'S-1', role: 'worker', settingsFile, cwd }),
@@ -422,8 +428,8 @@ test('#463 r2 M1: no job runs without the runner\'s go-ahead, and a record that 
   assert.throws(() => readGroupRecord(rec, { since: '2026-01-01T00:00:00Z', info: () => null }), /can't be read/);
 });
 
-test('#463 r2 m1: the Bash tool waits as long as the job may run; the install\'s limit is at most its longest wait', () => {
-  assert.equal(LOCKED_MS, 600_000, 'claude 2.1.322\'s BASH_MAX_TIMEOUT_MS ceiling');
+test('#463 r2 m1: the Bash tool waits as long as the job may run; the install\'s limit is at most the lock-down\'s cap', () => {
+  assert.equal(LOCKED_MS, 600_000, 'our own cap (#463 r3 m2): the Bash tool\'s wait is set to each run\'s limit, not a tool ceiling');
   assert.throws(() => runner({ ms: LOCKED_MS + 1 }), /the install's limit can't pass 600000 ms/);
 });
 
@@ -443,4 +449,53 @@ test('#463 r2 self-review m2: each run\'s record has a name of its own, so a she
   for (let i = 0; i < 2; i += 1) await assert.rejects(run({ job: 'install', command: 'true', sessionId: 'S-1', role: 'worker', settingsFile, cwd }), /result was not written/);
   assert.equal(seen.length, 2); assert.notEqual(seen[0], seen[1]);
   for (const f of seen) assert.match(f, /\.orch-job-install-S-1\.group\.[0-9a-f]{16}$/);
+});
+
+// #463 r2 plants (lane 2, 2026-11-12): at the time limit the stop itself ends the job's own group, not only claude's later
+// close (a claude that never closes still has the job killed), and a job group that can't be told about is said.
+test('#463 r2 M1: the time limit kills the job\'s own group at once, before claude closes; one that can\'t be told about is said', async () => {
+  for (const [gone, kills, said] of [[() => false, [4242, 5151], false], [() => { throw new Error('EPERM'); }, [4242], true], [() => true, [4242], false]]) {
+    const child = Object.assign(new EventEmitter(), { pid: 4242 });   // never closes
+    const killed = [];
+    const job = { everyMs: 5, read: () => ({ pgid: 5151, pid: 5151, pid_start: '2026-11-12T00:00:00Z' }), gone, found: () => {}, ack: () => {} };
+    const err = await runToEnd(() => child, '/x/claude', [], {}, 60, (g) => killed.push(g), () => true, undefined, job).then(() => null, (e) => e);
+    assert.match(err?.message ?? '', /it did not finish in time/);
+    assert.deepEqual(killed, kills, 'the stop kills claude\'s group, then the job\'s when it is still there');
+    assert.equal(/its job's own process group may still run/.test(err.message), said, err.message);
+  }
+});
+
+// #463 r3 m4 (A4): a record first read at a stop or at claude's close is kept (found) but never answered: the job's shell
+// is never told to go once the runner has stopped waiting for it.
+test('#463 r3 m4 A4: a record first read at the time limit or at claude\'s close is found but never given its go-ahead', async () => {
+  for (const end of ['close', 'time limit']) {
+    const child = Object.assign(new EventEmitter(), { pid: 4242 });
+    const calls = [];
+    // The poll never fires before the end (everyMs far past the limit), so the record is first read by the end itself.
+    const job = { everyMs: 3_600_000, read: () => ({ pgid: 5151, pid: 5151, pid_start: '2026-11-12T00:00:00Z' }), gone: () => true,
+      found: (g) => calls.push(['found', g.pgid]), ack: () => calls.push(['ack']) };
+    const p = runToEnd(() => child, '/x/claude', [], {}, end === 'close' ? 3_600_000 : 30, () => {}, () => false, undefined, job);
+    if (end === 'close') setTimeout(() => child.emit('close', 0), 10);
+    await p.then(() => null, (e) => e);
+    assert.deepEqual(calls, [['found', 5151]], `${end}: found, never acked`);
+  }
+});
+
+// #463 r3 m4 (A10): a save-work answer is refused when its job's group was never recorded, as the install's exit code is.
+test('#463 r3 m4 A10: a save-work run that left a valid answer but no group record is refused', async () => {
+  const { cwd, settingsFile, sha } = world();
+  const f = jobFile({ cwd, job: 'save-work', sessionId: 'S-1' });
+  const run = runner({ spawn: (bin, args, opts) => childSpawn('/bin/sh', ['-c', `echo '{"ok":true}' > '${f}'`], opts) });
+  await assert.rejects(run({ job: 'save-work', args: {}, sessionId: 'S-1', role: 'worker', settingsFile, settingsSha: sha, cwd }),
+    /the save-work job's process group was not recorded/);
+});
+
+// #463 r3 m4 (A8): guardedRun itself refuses a limit past the Bash tool wait it sets (not only lockedRunner's install limit).
+test('#463 r3 m4 A8: guardedRun refuses a limit past LOCKED_MS, a zero and a non-integer before anything runs', async () => {
+  for (const ms of [LOCKED_MS + 1, 0, 1.5]) {
+    let spawned = false;
+    await assert.rejects(guardedRun({ spawn: () => { spawned = true; }, claudeBin: '/x/claude', settingsFile: '/x/s.json', inner: 'true', cwd: '/x', env: {}, ms, gfile: '/x/g', label: 'the x job' }),
+      /the x job's limit is not a time limit/);
+    assert.equal(spawned, false, String(ms));
+  }
 });

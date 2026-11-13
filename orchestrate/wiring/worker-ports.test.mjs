@@ -603,7 +603,7 @@ function asksWorld({ runner = {}, session = true } = {}) {
 }
 
 test('C (L963): launch, stopGroup, saveWork and pauseLead are wired: each writes its request into the runner\'s folder and takes the answer the runner wrote', async () => {
-  const ok = { start: async (q) => (mkdirSync(join(c0().outboxRoot, P, 'worker', q.sessionId), { recursive: true }), { ok: true, pid: 5001, pidStart: '2026-11-11T12:00:01Z', pgid: 5001, head: HEAD, outbox: join(c0().outboxRoot, P, 'worker', q.sessionId), signin: 's', configDir: '/cfg', copy: join(c0().copiesRoot, P, q.card) }),
+  const ok = { start: async (q) => (mkdirSync(join(c0().outboxRoot, P, 'worker', q.sessionId), { recursive: true }), { ok: true, saveSettingsSha: 'a'.repeat(64), pid: 5001, pidStart: '2026-11-11T12:00:01Z', pgid: 5001, head: HEAD, outbox: join(c0().outboxRoot, P, 'worker', q.sessionId), signin: 's', configDir: '/cfg', copy: join(c0().copiesRoot, P, q.card) }),
     saveWork: async () => ({ ok: true }), pauseLead: async () => ({ ok: true }) };
   let cfg; const c0 = () => cfg;
   const { c, x } = asksWorld({ runner: ok }); cfg = c;
@@ -626,7 +626,8 @@ test('C (L963): the three refusals the runner gives today reach the Dispatcher w
   // 1. launch: the runner's start port has no worker prompt (runner-ports.mjs promptFor), so nothing starts.
   x.sid = 'S-new';
   const l = await x.ports4.launch({ card: 'C-1', kind: 'editing', product: P, sessionId: 'S-new' });
-  assert.deepEqual(l, { ok: false, reason: 'not wired: no worker prompt is given to the runner' });
+  // #463 merge: the refusal now carries the prompt builder's own reason after the plain words (workerPromptText).
+  assert.equal(l.ok, false); assert.match(l.reason, /^not wired: no worker prompt is given to the runner \(no worker prompt: /);
   assert.equal(x.state.requests['S-new'].state, 'refused', 'used up, so the claim can be let go');
   assert.equal(existsSync(join(c.copiesRoot, P, 'C-1')), false, 'no copy made'); assert.equal(existsSync(join(c.outboxRoot, P, 'worker', 'S-new')), false, 'no outbox made');
   // 2. saveWork: M4 save-work runs only inside the worker's lock-down (runLocked), which the runner does not have.

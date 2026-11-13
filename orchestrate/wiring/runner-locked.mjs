@@ -8,7 +8,8 @@
 //              with the save's arguments; it writes its answer as JSON into the result file. It runs in the copy's .git
 //              under the session's save-phase settings (L991 M1, runner-ports.mjs saveWorkPort: the session's walls,
 //              the network off, the start's file by its hash), so it writes in .git and the outbox only.
-//              CAPABILITY NOTE, checked on claude 2.1.322 (its bundled sandbox code): RECHECK ON EVERY UPGRADE of the pin.
+//              CAPABILITY NOTE, read in claude 2.1.322's bundled sandbox code; not yet checked on the pin (2.1.316, M10
+//              TOOLS_CHECKED): the Mini proof below checks it there. RECHECK ON EVERY UPGRADE of the pin.
 //              That claude's sandbox always denies writes to <cwd>/.git/config and <cwd>/.git/hooks (and **/.git/...).
 //              With the copy as cwd, the job's reset of .git/config and .git/hooks (resetCloneGit) would be refused;
 //              with <copy>/.git as cwd those paths are .git/.git/... and do not apply. M4 README item 9, step 9 proves it.
@@ -25,7 +26,8 @@
 // ended by a signal, a result file left from before that can't be removed, the time limit (the whole process group is
 // killed: LOCKED_SAVE_MS for save-work, under the Dispatcher's SAVE_DEADLINE_MS so one ask can be answered; LOCKED_MS
 // for the install), and no result, one over RESULT_MAX_BYTES, or one that is not the job's form ("not written").
-// The job's own process group (#463 r2 M1): claude 2.1.322's Bash tool runs each command detached, in a group of its
+// The job's own process group (#463 r2 M1): claude's Bash tool (read in 2.1.317 and 2.1.322; the pin, 2.1.316, is a Mini
+// proof) runs each command detached, in a group of its
 // own, so claude's group alone does not hold the job. The job's shell first records its pid (groupRecordCommand) and
 // waits; the runner reads its group and leader start time outside the sandbox, keeps them (onGroup is told claude's
 // group, then the same record with `job`), and only then lets the job run. Both groups are killed at the time limit, on
@@ -39,11 +41,13 @@
 // wall; save-work's answer is checked again on the disk by createSaveWork (the bundle a plain file in the outbox).
 //
 // Proven on the Mini only (a capability claim tied to the pinned claude version, void on a pin move; the Mini checklist,
-// modules/M4-workshop/README.md "Live proofs still to run", item 9): that claude 2.1.322's Bash tool runs the job in a group
-// of its own that the record names, and honours the BASH_*_TIMEOUT_MS wait; that claude runs the job's command under dontAsk with the worker hooks; that
-// node can read orchestrate's code from inside the sandbox; that safe-git's temporary folder is writable there. That
-// Bash tool's longest wait is 10 minutes, so LOCKED_MS and check 11's BASELINE_MS (guardedRun, #463 r2 M3) are held to it;
-// a product whose tests need longer splits its test command (a capability claim on 2.1.322: RECHECK ON EVERY UPGRADE).
+// modules/M4-workshop/README.md "Live proofs still to run", item 9, run on the pin, 2.1.316): that claude's Bash tool runs
+// the job in a group of its own that the record names, and honours the BASH_*_TIMEOUT_MS wait (both read in claude 2.1.317
+// and 2.1.322's code, not yet checked on 2.1.316); that claude runs the job's command under dontAsk with the worker hooks;
+// that node can read orchestrate's code from inside the sandbox; that safe-git's temporary folder is writable there.
+// The 10 minutes of LOCKED_MS (and check 11's BASELINE_MS, guardedRun, #463 r2 M3) is our own cap, a choice, not a tool
+// limit (#463 r3 m2): the Bash tool's longest wait is BASH_MAX_TIMEOUT_MS when it is set (2.1.317, 2.1.322), and the runner
+// sets it to the job's limit. A product whose tests need longer splits its test command, or the cap is raised here.
 import { closeSync, constants, fstatSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
 import { dirname, join } from 'node:path';
@@ -64,9 +68,10 @@ import { SETTINGS as S } from '../modules/M4-workshop/launcher/settings-names.mj
 
 export const LOCKED_JOBS = Object.freeze(['save-work', 'install']);
 /**
- * The install's limit, and the cap on every guardedRun (check 11's baseline too, #463 r2 M3): at most the Bash tool's own
- * longest wait (600 s on claude 2.1.322, BASH_MAX_TIMEOUT_MS), which the command's claude gets as both its default and
- * its longest (#463 r2 m1), so the tool never moves the command to the background and ends its turn while it still runs.
+ * The install's limit, and the cap on every guardedRun (check 11's baseline too, #463 r2 M3): 10 minutes, our own choice
+ * (#463 r3 m2), not a tool limit. Each run's limit is given to the command's claude as both the Bash tool's default and its
+ * longest wait (BASH_DEFAULT_TIMEOUT_MS, BASH_MAX_TIMEOUT_MS, #463 r2 m1; read in claude 2.1.317 and 2.1.322, not yet
+ * checked on the pin, 2.1.316), so the tool never moves the command to the background and ends its turn while it runs.
  */
 export const LOCKED_MS = 10 * 60_000;
 /** How often the job's process-group record is looked for while claude runs (#463 r2 M1). */
@@ -120,7 +125,8 @@ export function exitCodeCommand(command, file, what = 'command') {
 // tell; runner-loop.mjs processGroupPorts' groupGone, the leader's start time checked), found(g) (told the job's group,
 // when it is not claude's), ack() (the go-ahead the job's shell waits for: given only after found, and never on a stop
 // or a close, so a job whose group is not kept never runs), everyMs }. Claude's Bash tool
-// runs each command detached, in a process group of its own (checked on claude 2.1.322), so killing claude's group
+// runs each command detached, in a process group of its own (read in claude 2.1.317 and 2.1.322; not yet checked on the
+// pin, 2.1.316: Mini proof 9), so killing claude's group
 // leaves the job running. The record is read every everyMs while claude runs, and once more at every end; the job's
 // group is then killed with claude's on the time limit and on every stop, and at claude's close: one still there then is
 // killed and said (`job.left` 'killed'; 'unknown' when it can't be told), so runLocked refuses it (#463 r2 m6).
@@ -209,7 +215,7 @@ export async function guardedRun({ spawn, claudeBin, settingsFile, inner, profil
   read = readNoLink, info = processInfo, pidStartOf = leaderStart, jobGone = processGroupPorts().groupGone, pollMs = JOB_GROUP_POLL_MS,
   answer = answerFile, rm = rmSync }) {
   if (!env || typeof env !== 'object') throw new Error(`no environment to run ${label} with`);
-  if (!Number.isInteger(ms) || ms <= 0 || ms > LOCKED_MS) throw new Error(`${label}'s limit is not a time limit within the Bash tool's longest wait (${LOCKED_MS} ms)`);
+  if (!Number.isInteger(ms) || ms <= 0 || ms > LOCKED_MS) throw new Error(`${label}'s limit is not a time limit within the lock-down's cap (${LOCKED_MS} ms)`);
   // The Bash tool's own wait is the limit (#463 r2 m1): it never moves the command to the background before it.
   const wait = { ...env, BASH_DEFAULT_TIMEOUT_MS: String(ms), BASH_MAX_TIMEOUT_MS: String(ms) };
   // Claude's start time bounds the record: { pgid, pid, pid_start, job?: { pgid, pid, pid_start } }.
@@ -346,7 +352,7 @@ export function lockedRunner({ claudeBin, envOf, spawn = childSpawn, node = proc
   if (typeof envOf !== 'function') throw new Error('the lock-down runner needs the sign-in environment');
   for (const [k, v] of [['ms', ms], ['saveMs', saveMs]]) if (!Number.isInteger(v) || v <= 0) throw new Error(`the lock-down runner's ${k} is not a time limit`);
   if (saveMs > LOCKED_SAVE_MS) throw new Error(`save-work's limit can't pass ${LOCKED_SAVE_MS} ms (the Dispatcher's save deadline)`);
-  if (ms > LOCKED_MS) throw new Error(`the install's limit can't pass ${LOCKED_MS} ms (the Bash tool's longest wait)`);
+  if (ms > LOCKED_MS) throw new Error(`the install's limit can't pass ${LOCKED_MS} ms (the lock-down's own cap)`);
   return async function runLocked({ job, args, command, sessionId, role, settingsFile, cwd, settingsSha: sha, env: given, onGroup } = {}) {
     if (!LOCKED_JOBS.includes(job)) throw new Error(`${JSON.stringify(job)} is not a lock-down job`);
     if (typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) throw new Error('the lock-down job names no session the Dispatcher makes');

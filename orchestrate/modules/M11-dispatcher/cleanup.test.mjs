@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, mkdirSync, writeFileSync, existsSync, statSync, readFileSync, symlinkSync, readdirSync, rmSync, utimesSync } from 'node:fs';
+import { chmodSync, mkdirSync, writeFileSync, existsSync, statSync, readFileSync, symlinkSync, readdirSync, realpathSync, rmSync, utimesSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, resolve, sep } from 'node:path';
 import { cleanupCopy, cleanupPass, ASK_ID, CLEANUP_FACT, COPIES_NOT_PRODUCT_CAUSE, COPIES_UNREAD_CAUSE, STRAY_FACT, namesInMark, hashCopy, mirrorTree, namedCopy, ownCopy, STALE_STAGING_MS, sweepStaging } from './cleanup.mjs';
@@ -516,7 +516,11 @@ test('L836: cleanupPass walks each product\'s folder and touches no copy outside
   const text = String(told[0]?.text ?? told[0]);
   // r2 m1: named by the Dispatcher's own product (every product's Dispatcher tells it, on purpose, L908).
   assert.match(text, /^the Dispatcher for products p1, p2, p3: the worker copies folder .* holds 3 folders that don't belong to any product: "C-7", "p3", "worker"\. Each is a card folder from before/);
-  assert.doesNotMatch(text.replace(/^[^:]*: /, ''), /c-8|p2/);
+  // L1036: the copies folder's own path is a random temp name, which can hold "p2" or "c-8" by chance; it is taken out
+  // (as given and as its real path) before the check, so only a name the notice itself gives can fail it.
+  const named = [w.copiesRoot, realpathSync(w.copiesRoot)].reduce((t, p) => t.split(p).join('<copies>'), text.replace(/^[^:]*: /, ''));
+  assert.match(named, /<copies>/, 'the notice names the copies folder, so the path is taken out');
+  assert.doesNotMatch(named, /c-8|p2/);
   assert.match(text, /or a link \(a product's own folder that is a link counts too\)\./, 'p3, a product\'s folder that is a link, is named as one');
   // r2 M1: no folder's product is confirmed and a link's target is never looked at, so no move or delete is advised:
   // the notice says not to, and the only move it names is the lead's, once the card's product is confirmed.

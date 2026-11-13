@@ -354,3 +354,18 @@ test('#463 r1 m2: a save still on when the runner stops has its kept process gro
   assert.equal(/asks again/.test(w.notes.join('\n')), false, 'never the old claim');
   assert.ok(state.saves['S-1'], 'kept until the next runner sees it gone');
 });
+
+// #463 r2 plant 'SR M-2 loop gives no keeper': the loop hands every tick the one saveHolder, so a save's job group told
+// after its pass returned (between ticks) is in the memory file at once, before its go-ahead, not only at the last tick.
+test('#463 r2 self-review M-2: the loop\'s ticks keep a job group told between ticks in the memory at once', async () => {
+  const w = world(); let n = 0; let late; let kept = null;
+  w.ask(...launch('S-1'));
+  w.ports.saveWork = (s, { onGroup }) => { onGroup({ pgid: 7101, pid: 7101, pid_start: S0 }); late = () => onGroup({ pgid: 7101, pid: 7101, pid_start: S0, job: { pgid: 7102, pid: 7102, pid_start: S0 } }); return new Promise(() => {}); };
+  await runRunner({ ...w.ctx({ portMs: 30 }), drainMs: 30, stopWhen: () => n >= 3, sleep: async () => {
+    if (n === 0) w.ask('saveWork-S-1-0123456789abcdef.json', { saveWork: { id: 'S-1' } });
+    if (n === 1) { late(); kept = loadMemory(w.memoryFile, { uid: UID }); }   // the save's pass has returned; no tick runs now
+    n += 1;
+  } });
+  assert.ok(late, 'the save was asked and started');
+  assert.deepEqual(kept?.saves?.['S-1']?.job, { pgid: 7102, pid: 7102, pid_start: S0 }, JSON.stringify(kept?.saves ?? null));
+});
