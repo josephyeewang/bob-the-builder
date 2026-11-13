@@ -278,6 +278,20 @@ test('an undo card whose change is not an exact reverse loses every exemption', 
   assert.ok(ns.includes(9) && ns.includes(1) && ns.includes(5) && ns.includes(11));
 });
 
+// #466 r3 Minor 2: an answer gather did not take (the pull request is not the card's change, open and ready) is still a
+// final 9, with no not_clean, but its wording says it was not checked rather than that the content is not a reverse.
+test('an undo whose exact-reverse answer was not taken at this head: 9 says it was not checked, and keeps no finding', () => {
+  const r = judge(clean((f) => { reverse(f); f.exactReverse = false; f.exactReverseNotHere = true; }));
+  const nine = r.refusals.find((x) => x.n === 9);
+  assert.equal(r.decision, 'refuse');
+  assert.equal(nine.reason, 'whether the undo is an exact reverse was not checked: the pull request is not the card\'s change, open and ready');
+  assert.equal(nine.temporary, undefined);
+  assert.equal(nine.not_clean, undefined);
+  const plain = judge(clean((f) => { reverse(f); f.exactReverse = false; f.exactReverseReasons = ['src/x.mjs is not in the reversed commit']; })).refusals.find((x) => x.n === 9);
+  assert.equal(plain.reason, 'an undo card whose change is not an exact reverse');
+  assert.deepEqual(plain.not_clean, ['src/x.mjs is not in the reversed commit']);
+});
+
 test('first cutover: an undo merges only when it reverses a merge the gate made', () => {
   assert.equal(judge(clean((f) => { reverse(f); f.cutoverStage = 'first'; })).decision, 'merge');
   assert.deepEqual(only(clean((f) => { reverse(f); f.cutoverStage = 'first'; f.reversesGateMerge = false; })), [9]);

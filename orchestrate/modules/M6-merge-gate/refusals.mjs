@@ -43,6 +43,8 @@
 //   exactReverse bool                        the change recomputes as an exact reverse (M10 exact-reverse.mjs)
 //   reversesGateMerge bool                   the reversed commit carries the robot's mark (first-cutover undo)
 //   exactReverseUnread, reversesGateMergeUnread true | undefined   a read under either check failed: unknown (L205)
+//   exactReverseNotHere true | undefined     the check answered, but the pull request is not the card's change, open
+//                                            and ready, so the answer was not taken (#466 r3 Minor 2: 9's wording)
 //   lane { decision, reason, tier }          rules.may('merge', subject): M10 picks docs lane or deep by cutover
 //   approve { needed, why, stands, reason, unread? }  M2 approveNeeded + approvalStands (refusals 8, 13, 14); unread:
 //                                            the Approve could not be read from GitHub, so it is not known (L205)
@@ -248,7 +250,9 @@ export function judge(f) {
       return { decision: 'hold', refusals: [{ n: 9, reason: f.exactReverseUnread === true ? 'whether the undo is an exact reverse could not be read' : 'whether the undo reverses a merge the gate made could not be read', temporary: true }], hold: WAITING_HOLD, notes };
     }
     if (kind === 'exact_reverse' && !reverse) {
-      no(9, 'an undo card whose change is not an exact reverse');
+      // #466 r3 Minor 2: a pull request pushed past the card, or not open and ready, was not checked; saying "not an
+      // exact reverse" would be untrue of its content. Final either way: 6, 5 or 3 says what is wrong with it.
+      no(9, f.exactReverseNotHere === true ? 'whether the undo is an exact reverse was not checked: the pull request is not the card\'s change, open and ready' : 'an undo card whose change is not an exact reverse');
       // L980: final and what the check found, so the gate records it (reverse-<card> not_clean) and M11 writes the fix card.
       if (Array.isArray(f.exactReverseReasons) && f.exactReverseReasons.length) refusals.at(-1).not_clean = f.exactReverseReasons.slice(0, 20);
     }
