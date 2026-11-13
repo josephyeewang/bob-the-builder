@@ -825,6 +825,24 @@ test('L914 check: a flat outbox folder of a worker runner role, left from before
   rmSync(mac.at(P('outboxes/stray')), { recursive: true });
 });
 
+test('L1035 c4: a .bob-new or .bob-old a cut-off bob run left in the base FAILs the base saying to run bob again; any other stray does not', () => {
+  const mac = applied();
+  const baseRow = () => check(mac, cfg).find((x) => !x.ok && x.what.startsWith(`${cfg.base} `));
+  assert.equal(baseRow(), undefined, 'a clean base passes');
+  mkdirSync(mac.at(P('.bob-new')));
+  assert.match(baseRow().why, /holds an entry the setup did not make: \.bob-new; \.bob-new was left by a cut-off bob run: run bob again/);
+  mkdirSync(mac.at(P('.bob-old')));
+  assert.match(baseRow().why, /\.bob-new and \.bob-old were left by a cut-off bob run: run bob again/);
+  rmSync(mac.at(P('.bob-new')), { recursive: true }); rmSync(mac.at(P('.bob-old')), { recursive: true });
+  mkdirSync(mac.at(P('stray')));
+  assert.doesNotMatch(baseRow().why, /cut-off bob run/, 'another stray is not called a bob leftover');
+  rmSync(mac.at(P('stray')), { recursive: true });
+  // The hint is the base's own: the same name in another root-owned folder is just a stray.
+  mkdirSync(mac.at(P('outboxes/.bob-new')));
+  const other = check(mac, cfg).find((x) => !x.ok);
+  assert.match(other.why, /holds an entry the setup did not make: \.bob-new/); assert.doesNotMatch(other.why, /cut-off bob run/);
+});
+
 test('L921: the worker runner\'s requests, own and snapshots folders: each apart, no links, under a root-owned parent, as the runner and the Dispatcher read them', async () => {
   const { WORKER_REQUESTS_ACL, WORKER_RUNNER_FOLDERS, mirrorPath, outboxRootPath, workerCopiesPath, workerRunnerPath, workerRunnerPaths } = await import('./layout.mjs');
   const { runnerWallDirs } = await import('../modules/M4-workshop/launcher/render-settings.mjs');
