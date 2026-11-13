@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from '../shared/test-tmp.mjs';
-import { fakeMac } from './fake-mac.test-helper.mjs';
+import { fakeMac, macTest } from './fake-mac.test-helper.mjs';
 import { apply } from './users-folders.mjs';
 import { BOB_COMMIT, BOB_MANIFEST, BOB_NEW, BOB_OLD, bobGit, bobManifestPath, checkBob, landedList, leftOut, manifestText, planBob, readCommit } from './bob-manifest.mjs';
 import { main, parseArgs, planCommand } from './setup.mjs';
@@ -323,7 +323,9 @@ test('setup.mjs bob: needs --from and a full --commit, which belong to it alone;
 
 // L1035: tests for the plants #472's audit found uncaught (audit-pr472-r1 m3, c3).
 
-test('L1035 A9/A10: setup.mjs bob, run end to end as root, checks the pair after the run, and the recorded commit against --commit', () => {
+// macTest: users-folders sets access lists with the Mac's own chmod +a, so on Linux this skips (said aloud) and the
+// macOS job runs it (#491's Linux failure: "/bin/chmod: needs macOS tools").
+macTest('L1035 A9/A10: setup.mjs bob, run end to end as root, checks the pair after the run, and the recorded commit against --commit', () => {
   const B = '/Library/orch-bob';   // an install config's base is never under /Users
   const raw = { base: B, owner: 'sam', products: ['alpha'], address: 'https://example.invalid/org/repo.git', label: 'com.example.orch-bob', runnerConfig: '/nowhere/review.json' };
   const mac = fakeMac({ euid: 0 });
