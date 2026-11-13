@@ -828,6 +828,36 @@ test('L980 (#466 r2 M1): an undo whose head is a catch-up the gate did not recor
   assert.notEqual(w.env.record.read('card', 'U-1').doc.state, 'failed');
 });
 
+// #466 r2 M1, the review not carried over: the gate's catch-up brought in a main that changed one of the undo's own
+// paths, so the caught-up head is not the change the card was verified at: nothing is recorded, nothing is failed.
+test('L980 (#466 r2 M1): a caught-up undo whose review does not carry over: no fact, the card is not failed', async () => {
+  const w = world();
+  await notCleanUndo(w);
+  w.g.main = w.g.commit([w.g.main], { 'src/extra.mjs': 'main' }, { from: w.g.main });
+  for (let i = 0; i < 4; i++) { w.env.clock.t += 60_000; await gatePass(w.ctx); }
+  const u = mergeOf(w, 'U-1');
+  assert.equal(u.doc.catch_ups?.length, 1, JSON.stringify(u.doc));
+  assert.equal(u.doc.not_clean, undefined, JSON.stringify(u.doc));
+  assert.equal(w.env.record.read('fact', REVERSE_FACT('U-1')), null);
+  assert.notEqual(w.env.record.read('card', 'U-1').doc.state, 'failed');
+});
+
+// #466 r2 a16: what the check found is kept to 20 lines on the merge.
+test('L980 (#466 r2): a not-clean finding is kept to 20 lines', async () => {
+  const w = world();
+  verifiedCard(w);
+  await gatePass(w.ctx);
+  const flagged = mergeOf(w).doc.merge_commit;
+  must(put(w.env.record, 'dispatcher', 'card', 'C-1', { state: 'closed' }), 'closed');
+  const files = { 'src/a.mjs': 'one' };
+  for (let i = 0; i < 25; i++) files[`src/extra${i}.mjs`] = `x${i}`;
+  verifiedCard(w, 'U-1', { pr: 9, files, undo: flagged });
+  await gatePass(w.ctx);
+  const u = mergeOf(w, 'U-1');
+  assert.equal(u.doc.state, 'refused', JSON.stringify(u.doc));
+  assert.equal(u.doc.not_clean?.length, 20, JSON.stringify(u.doc.not_clean));
+});
+
 // #466 r2 m1: GitHub's answer for the undo's pull request, changed by `over` (the test merge stays current).
 function prSays(w, over) {
   const real = w.ctx.gh;
