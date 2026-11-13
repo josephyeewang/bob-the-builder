@@ -77,7 +77,7 @@ import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.m
 import { prepareWorkerCopy } from '../modules/M4-workshop/launcher/worker-copy.mjs';
 import { sessionArgs, spawnClaude } from '../modules/M4-workshop/launcher/review-launch.mjs';
 import { accountInUse } from '../modules/M4-workshop/launcher/accounts.mjs';
-import { roleEnv } from '../modules/M4-workshop/launcher/env-check.mjs';
+import { startEnv } from '../modules/M4-workshop/launcher/env-check.mjs';
 import { readCardFile } from '../modules/M4-workshop/launcher/review-runner-main.mjs';
 import { createSaveWork } from '../modules/M4-workshop/git/save-work.mjs';
 import { cardBranch } from '../modules/M4-workshop/git/branch.mjs';
@@ -233,8 +233,11 @@ export function saveWorkPort({ mirrorOf, runLocked, settingsDir, make = createSa
   };
 }
 
-/** The session's environment (#463 r1 m6): the one form, for the start and the lock-down runner. */
-export const sessionEnv = (c, who, base = process.env) => roleEnv(base, { path: c.path, extra: { ...who.env, HOME: c.home } });
+/**
+ * The session's environment (#463 r1 m6): the one form, for the start and the lock-down runner, built by the launcher's
+ * one check (R-0b-156 startEnv: the allow-list). → { ok: true, env } | { ok: false, reason }.
+ */
+export const sessionEnv = (c, who, base = process.env) => startEnv(base, { path: c.path, extra: { ...who.env, HOME: c.home } });
 
 /** pauseLead({ product }): not wired (see the top of this file). */
 export const pauseLeadPort = () => async () => notWired('the Lead\'s wrap-up needs the activity tracker\'s feed, which the runner does not have yet');
@@ -503,7 +506,9 @@ export function startPort(c, deps = {}) {
     const saveText = `${JSON.stringify(ws.settings, null, 2)}\n`;
     try { fs.writeNew(saveFile, saveText); ours.push(saveFile); } catch (e) { return undo(`the save's settings file can't be written (${e?.code ?? e?.message})`); }
     const saveSha = createHash('sha256').update(saveText).digest('hex');
-    const env = sessionEnv(c, who);
+    const built = sessionEnv(c, who);
+    if (!built?.ok) return undo(`the session's environment: ${built?.reason ?? 'no answer'}`);
+    const { env } = built;
     // A throwaway copy of the same commit for the baseline (#369 r1 M1), with settings that allow writes there and in its
     // own outbox only, and deny the session's copy and outbox; done() removes it. The session's own settings deny it.
     const throwaway = async () => {

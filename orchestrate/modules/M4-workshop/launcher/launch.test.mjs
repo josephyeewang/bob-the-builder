@@ -10,7 +10,7 @@ import { DESIGN_PROFILES } from './role-profiles.mjs';
 import { REFUSED_ENV, SETTINGS as S, HOOK_FIELDS as H, HOOK_EVENTS as E } from './settings-names.mjs';
 import { renderRoleSettings, POLICY_HOOKS, bobFolderDeny, bobFolderShell } from './render-settings.mjs';
 import { roleArgs, checkInit, readBack } from './readback.mjs';
-import { roleEnv, checkRoleEnv, checkMachineWide, listDropIns, readPlist, MANAGED_READERS, CLAUDE_FILE } from './env-check.mjs';
+import { roleEnv, checkRoleEnv, startEnv, PASS_ENV, LAUNCHER_ENV, ROLE_ENV_ALLOWED, checkMachineWide, listDropIns, readPlist, MANAGED_READERS, CLAUDE_FILE } from './env-check.mjs';
 import { userInfo } from 'node:os';
 import { HOOKS_SOURCE, installHooks, checkHooks, checkVersion, pinnedBinary, productionProbe, checkSnapshot } from './hooks-check.mjs';
 import { emptyOutbox, readOutboxFile } from './outbox.mjs';
@@ -313,6 +313,29 @@ test('check 9: every refused variable is stripped, and a planted one refuses the
   }
   // Extra variables are stripped too if they are on the list.
   assert.equal(checkRoleEnv(roleEnv({}, { extra: { [REFUSED_ENV[0]]: 'x' } })).ok, true);
+});
+
+// R-0b-156 (L1060): the twelve session names seen leaking on 13 Nov (claude 2.1.322), plus Codex's.
+const LEAKED = ['CLAUDECODE', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_MESSAGING_TOKEN', 'CLAUDE_CODE_MESSAGING_SOCKET',
+  'CLAUDE_CODE_BRIDGE_SESSION_ID', 'CLAUDE_CODE_SESSION_ATTENDED', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_EXECPATH', 'CLAUDE_PID', 'CLAUDE_JOB_DIR',
+  'CLAUDE_EFFORT', 'CODEX_THREAD_ID'];
+test('R-0b-156: a role\'s environment is an allow-list: no session variable of the launcher reaches it, and any name off the list in extra refuses', () => {
+  assert.deepEqual([...ROLE_ENV_ALLOWED].sort(), [...PASS_ENV, 'PATH', ...LAUNCHER_ENV].sort());
+  assert.deepEqual([...LAUNCHER_ENV], ['CLAUDE_CONFIG_DIR']);
+  const base = { HOME: '/h', LANG: 'C' };
+  for (const k of LEAKED) base[k] = 'leaked';
+  const built = startEnv(base, { path: '/w/bin' });
+  assert.equal(built.ok, true, built.reason);
+  assert.deepEqual(Object.keys(built.env).sort(), ['HOME', 'LANG', 'PATH']);
+  for (const k of LEAKED) assert.equal(Object.hasOwn(built.env, k), false, `${k} reaches the role`);
+  for (const k of [...LEAKED, 'CLAUDE_CODE_NEW_THING']) {
+    const r = startEnv(base, { path: '/w/bin', extra: { [k]: 'x' } });
+    assert.equal(r.ok, false, k); assert.match(r.reason, new RegExp(`(allow-list|key-like variables).*${k}`), k);
+    assert.equal(checkRoleEnv({ ...built.env, [k]: 'x' }).ok, false, `check 9 alone refuses ${k}`);
+  }
+  // The launcher's own name passes in extra; a key-like name is still named as one.
+  assert.deepEqual(startEnv(base, { extra: { CLAUDE_CONFIG_DIR: '/h/.claude-b' } }), { ok: true, env: { HOME: '/h', LANG: 'C', CLAUDE_CONFIG_DIR: '/h/.claude-b' } });
+  assert.match(startEnv(base, { extra: { SOME_API_TOKEN: 't' } }).reason, /key-like variables/);
 });
 
 // ---- check 10: the machine-wide production block (R-0b-36) ----

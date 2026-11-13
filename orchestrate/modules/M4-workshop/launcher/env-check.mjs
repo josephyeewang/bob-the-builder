@@ -21,7 +21,15 @@ const refuse = (reason) => ({ ok: false, reason });
 
 // Plain variables a role may inherit. Everything else is dropped.
 export const PASS_ENV = Object.freeze(['HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'TERM', 'TMPDIR', 'SHELL', 'TZ']);
-// Names that look like a key for some service, on top of the refused list.
+// Variables the launcher itself sets for a role (R-0b-156): the second account's sign-in folder (accounts.mjs accountEnv).
+export const LAUNCHER_ENV = Object.freeze(['CLAUDE_CONFIG_DIR']);
+// The allow-list (R-0b-156, L1060): the only names a role's environment may hold. It is the guard, not a list of refused
+// names: a session variable of whatever started the launcher (CLAUDECODE, CLAUDE_CODE_SESSION_ID, CODEX_THREAD_ID, a
+// name a newer claude adds) is off it, so it never reaches a role. CAPABILITY NOTE: the leaking names were seen on claude
+// 2.1.322 (13 Nov, R-0b-155's check); the allow-list does not depend on them, but the planted test lists them; RECHECK
+// at every pin change.
+export const ROLE_ENV_ALLOWED = Object.freeze([...PASS_ENV, 'PATH', ...LAUNCHER_ENV]);
+// Names that look like a key for some service: named as such when refused, so the reason says what slipped in.
 const KEYISH = /(^|_)(TOKEN|API_KEY|SECRET|PASSWORD|PRIVATE_KEY|ACCESS_KEY)(_|$)|^(GH|GITHUB)_|^GIT_ASKPASS$|^SSH_AUTH_SOCK$/;
 
 export function roleEnv(base, { path, extra = {} } = {}) {
@@ -33,12 +41,25 @@ export function roleEnv(base, { path, extra = {} } = {}) {
   return env;
 }
 
+// Launch check 9: every name in the role's environment is on the allow-list. `extra` may carry only allowed names.
 export function checkRoleEnv(env) {
   const left = REFUSED_ENV.filter((k) => Object.hasOwn(env, k));
   if (left.length) return refuse(`refused variables in the role's environment: ${left.join(', ')}`);
-  const keyish = Object.keys(env).filter((k) => KEYISH.test(k));
+  const off = Object.keys(env).filter((k) => !ROLE_ENV_ALLOWED.includes(k));
+  const keyish = off.filter((k) => KEYISH.test(k));
   if (keyish.length) return refuse(`key-like variables in the role's environment: ${keyish.join(', ')}`);
+  if (off.length) return refuse(`variables not on the role's allow-list (${ROLE_ENV_ALLOWED.join(', ')}): ${off.join(', ')}`);
   return { ok: true };
+}
+
+/**
+ * The one check every start path calls to build a session's environment (R-0b-156): roleEnv, held to check 9.
+ * → { ok: true, env } | { ok: false, reason }. R-0b-155d's resume form and R-0b-174's tmux server call it too.
+ */
+export function startEnv(base, opts = {}) {
+  const env = roleEnv(base, opts);
+  const nine = checkRoleEnv(env);
+  return nine.ok ? { ok: true, env } : nine;
 }
 
 // MANAGED SOURCES: the managed (policy) settings sources check 10 reads, as claude reads them.

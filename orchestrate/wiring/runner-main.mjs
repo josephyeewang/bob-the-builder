@@ -51,7 +51,7 @@ import { keepSnapshotFresh, writeSnapshot } from '../modules/M4-workshop/hooks/s
 import { spawn as childSpawn, spawnSync } from 'node:child_process';
 import { fullPath } from './runner-job.mjs';
 import { productRoleClash } from './owner-status.mjs';
-import { CLAUDE_FILE, MANAGED_SOURCES_CHECKED_ON, checkRoleEnv } from '../modules/M4-workshop/launcher/env-check.mjs';
+import { CLAUDE_FILE, MANAGED_SOURCES_CHECKED_ON } from '../modules/M4-workshop/launcher/env-check.mjs';
 import { accountInUse } from '../modules/M4-workshop/launcher/accounts.mjs';
 import { LOCKED_MS, lockedRunner } from './runner-locked.mjs';
 import { apart } from '../modules/M4-workshop/launcher/render-settings.mjs';
@@ -225,10 +225,9 @@ export function lockedOf(c, { make = lockedRunner, who: account = accountInUse, 
   return make({ claudeBin: c.claudeBin, ...(c.lockedMs !== undefined ? { ms: c.lockedMs } : {}), envOf: () => {
     const who = account({ home: c.home });
     if (!who?.account) throw new Error(who?.reason ?? 'no answer');
-    const env = sessionEnv(c, who, base);
-    const nine = checkRoleEnv(env);
-    if (!nine?.ok) throw new Error(nine?.reason ?? 'check 9 gave no answer');
-    return env;
+    const built = sessionEnv(c, who, base);
+    if (!built?.ok) throw new Error(built?.reason ?? 'check 9 gave no answer');
+    return built.env;
   } });
 }
 

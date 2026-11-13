@@ -401,6 +401,8 @@ test('step 5: a start refused before the copy makes nothing; one refused after i
     ['a Tier 1 card with no main_commit', { startCommit: cardStartCommit }, /main_commit/],
     ['a runner that is stopping', { stopped: () => true }, /is stopping$/],
     ['no sign-in', { account: () => ({ account: null, reason: 'not set up' }) }, /not set up/],
+    // R-0b-156: the start builds the environment through the launcher's one check (the allow-list).
+    ['a sign-in handing a session variable', { account: () => ({ account: 'a', dir: '/nowhere', env: { CLAUDE_CODE_SESSION_ID: 'x' } }) }, /allow-list.*CLAUDE_CODE_SESSION_ID/],
     ['no start commit', { startCommit: async () => { throw new Error('no main'); } }, /no main/],
     ['a copy that can\'t be made', { prepare: async () => ({ ok: false, reason: 'copy folder already exists' }) }, /already exists/],
   ];
