@@ -4,7 +4,8 @@
 The DOCUMENT twin of Rule 25 (data silent-failures) and Rule 26 (engineering
 silent-failures). A spec can pass every mechanical check — headings resolve,
 cross-refs valid, counts match, nothing dangling — and still be incoherent.
-Those checks are SYNTACTIC. This one is SEMANTIC.
+This script adds lexical and structural heuristics to support a semantic review;
+it does not establish semantic completeness or correctness.
 
 It catches what a human otherwise has to catch by reading:
 
@@ -14,7 +15,7 @@ It catches what a human otherwise has to catch by reading:
   4  ONE-WAY COVERAGE      capabilities described in prose, never in the inventory
   5  STRUCTURAL DUPLICATION  two SECTIONS doing the same job
   6  PHRASE DUPLICATION    the same clause in two places
-  7  SOURCE FIDELITY       a concept from the origin notes silently dropped
+  7  SOURCE FIDELITY       selected source snippets lacking lexical coverage
 
 Usage:
   scripts/spec-audit.py SPEC [SPEC ...] [--source ORIGIN] [--inventory "Features"]
@@ -23,7 +24,10 @@ Usage:
   --source    the earlier notes/intake doc the spec derives from (fidelity diff)
   --inventory heading text of the capability inventory, for one-way coverage
 
-Exit: 0 = no hard failures; 1 = at least one. Review prompts never fail the run.
+Exit: 0 = no hard failures; 1 = at least one; 2 = cannot judge an explicitly
+requested check because an input is missing, unreadable, empty, or unsuitable.
+Known hard failures take precedence over unavailable checks. Omitting --source intentionally skips that check.
+Review prompts never fail the run.
 
 Two disciplines this script exists to serve, and cannot enforce for you:
   * REGRESSION-TEST every check against the defect it was written for. This
@@ -92,12 +96,27 @@ def main():
     ap.add_argument("--inventory", default="", help="heading of the capability inventory")
     a = ap.parse_args()
 
-    raw = "\n".join(open(f, encoding="utf-8").read() for f in a.spec if os.path.exists(f))
-    if not raw:
-        print("no readable spec files"); return 2
+    fails, notes, unavailable = [], [], []
+    spec_texts = []
+    for f in a.spec:
+        try:
+            with open(f, encoding="utf-8") as spec_file:
+                content = spec_file.read()
+        except (OSError, UnicodeError) as exc:
+            unavailable.append(f"spec input: cannot read {f!r} ({type(exc).__name__})")
+            continue
+        if not content.strip():
+            unavailable.append(f"spec input: {f!r} is empty")
+            continue
+        spec_texts.append((f, content))
+    specs_complete = not unavailable
+    if not spec_texts:
+        print("CANNOT JUDGE — no usable spec files")
+        print("UNASSESSED: " + " · ".join(unavailable))
+        return 2
+    raw = "\n".join(content for _, content in spec_texts)
     flat = re.sub(r"\s+", " ", strip(raw)).lower()
     secs = sections(raw)
-    fails, notes = [], []
     P = print
     P("=" * 72); P("SPEC STRUCTURE AUDIT  (Bob Rule 28)"); P("=" * 72)
 
@@ -198,27 +217,43 @@ def main():
     else: P("  ok  none")
 
     # ---- 7: source fidelity --------------------------------------------------
-    P("\n7    SOURCE FIDELITY — every concept in the origin notes still present")
-    if not a.source or not os.path.exists(a.source or ""):
+    P("\n7    SOURCE FIDELITY — lexical coverage of selected source snippets")
+    if a.source is None:
         P("  --  no --source given; skipped")
     else:
-        o = open(a.source, encoding="utf-8").read()
-        cand = set(re.findall(r"\*\*(.+?)\*\*", o)) | set(re.findall(r"`([^`]+)`", o)) \
-             | set(re.findall(r"^[-*] (.+)$", o, re.M))
-        cl = lambda s: re.sub(r"[*`\[\]]", "", re.sub(r"\(.*?\)", "", s)).strip().lower()
-        cand = {cl(i) for i in cand}
-        cand = {i for i in cand if 3 < len(i) < 90 and not re.match(r"^\d+\.|^(status|takeaway)", i)}
-        gone = []
-        for t in cand:
-            t = t.rstrip(".")
-            if t in flat: continue
-            ws = [w for w in re.findall(r"[a-z][a-z'_/-]{3,}", t) if w not in STOP]
-            if ws and sum(1 for w in ws if w in flat) / len(ws) < 0.6: gone.append(t)
-        if gone:
-            fails.append(f"{len(gone)} concept(s) dropped from {os.path.basename(a.source)}")
-            for g in sorted(gone): P(f"  !!  dropped from the source: {g}")
+        try:
+            with open(a.source, encoding="utf-8") as source_file:
+                o = source_file.read()
+        except (OSError, UnicodeError) as exc:
+            unavailable.append(f"source check: cannot read {a.source!r} ({type(exc).__name__})")
+            P(f"  ??  CANNOT JUDGE — {unavailable[-1]}")
         else:
-            P(f"  ok  all {len(cand)} concepts from {os.path.basename(a.source)} still present")
+            cand = set(re.findall(r"\*\*(.+?)\*\*", o)) | set(re.findall(r"`([^`]+)`", o)) \
+                 | set(re.findall(r"^[-*] (.+)$", o, re.M))
+            cl = lambda s: re.sub(r"[*`\[\]]", "", re.sub(r"\(.*?\)", "", s)).strip().lower()
+            cand = {cl(i) for i in cand}
+            cand = {i for i in cand if 3 < len(i) < 90 and not re.match(r"^\d+\.|^(status|takeaway)", i)}
+            candidates = []
+            for t in sorted(cand):
+                t = t.rstrip(".")
+                ws = [w for w in re.findall(r"[a-z][a-z'_/-]{3,}", t) if w not in STOP]
+                if ws: candidates.append((t, ws))
+            P(f"  examined {len(candidates)} candidate snippet(s) from {os.path.basename(a.source)}")
+            P("  limits: selected bold/code/bullet text only; lexical matches do not prove meaning or completeness")
+            if not candidates:
+                unavailable.append("source check: no extractable candidate snippets; source coverage is unassessed")
+                P(f"  ??  CANNOT JUDGE — {unavailable[-1]}")
+            elif not specs_complete:
+                unavailable.append("source check: requested spec inputs are incomplete; omissions cannot be judged")
+                P(f"  ??  CANNOT JUDGE — {unavailable[-1]}")
+            else:
+                gone = [t for t, ws in candidates if t not in flat and
+                        sum(1 for w in ws if w in flat) / len(ws) < 0.6]
+                if gone:
+                    fails.append(f"{len(gone)} source snippet(s) lack lexical coverage in the spec")
+                    for g in gone: P(f"  !!  possible source omission (review meaning): {g}")
+                else:
+                    P("  ok  no lexical omissions detected in the examined candidates; semantic review still required")
 
     # ---- 8: leftover placeholders ---------------------------------------------
     # Our own check; the idea (only a marker that OPENS the text counts, quoted code
@@ -226,10 +261,9 @@ def main():
     # TBD pending benchmarks" is a real sentence with an open question and is left alone.
     P("\n8    LEFTOVER PLACEHOLDERS — TODO / TBD / FIXME opening a line, or ???")
     left = []
-    for f in a.spec:
-        if not os.path.exists(f): continue
+    for f, content in spec_texts:
         fence = False
-        for n, line in enumerate(open(f, encoding="utf-8"), 1):
+        for n, line in enumerate(content.splitlines(), 1):
             if line.lstrip().startswith(("```", "~~~")): fence = not fence; continue
             if fence: continue
             text = re.sub(r"`[^`]*`", "", strip(line))
@@ -245,14 +279,17 @@ def main():
     P("\n" + "=" * 72)
     if fails:
         P("FAIL (fix before advancing):"); [P("  · " + f) for f in fails]
+    elif unavailable:
+        P("CANNOT JUDGE — requested input coverage was not established")
     else:
         P("PASS — no hard structural failures")
+    if unavailable: P("UNASSESSED: " + " · ".join(unavailable))
     if notes: P("REVIEW (judge each, does not fail the run): " + " · ".join(notes))
     P("\nNow read for what no script can see: altitude drift (mechanisms where the")
     P("concept belongs), jargon in reader-facing sections, and whether the bold leads")
     P("of any list reword each other with the detail covered up.")
     P("=" * 72)
-    return 1 if fails else 0
+    return 1 if fails else 2 if unavailable else 0
 
 if __name__ == "__main__":
     sys.exit(main())

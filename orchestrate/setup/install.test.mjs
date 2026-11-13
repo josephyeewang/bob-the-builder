@@ -38,6 +38,7 @@ import { uidsProblem } from '../modules/M4-workshop/launcher/review-user.mjs';
 import { reviewUid as runnerReviewUid } from '../modules/M9-record/outbox.mjs';
 import { codeFileProblem, openJobJson } from '../shared/job-config.mjs';
 import { robotToken } from '../wiring/robot-wiring.mjs';
+import { BOB_MANIFEST } from './bob-manifest.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ME = process.getuid();
@@ -481,6 +482,11 @@ test('PLANT install: review.json names another copy → "names this copy" FAILS;
   writeFileSync(f, good);
   rmSync(join(copyOf(w), 'claude-bin'));
   assert.ok(failed(checkInstall(w.mac, w.cfg)).some((b) => /claudeBin exists/.test(b.what)));
+  // L1035 m1: the Bob file list is one of them; named and not there, check-install says so.
+  const rc = JSON.parse(good); writeFileSync(f, JSON.stringify({ ...rc, bobManifest: join(rc.installRoot, BOB_MANIFEST) }));
+  assert.ok(failed(checkInstall(w.mac, w.cfg)).some((b) => /review\.json's bobManifest exists in the copy/.test(b.what)), 'planted: bobManifest left out of RUNNER_NAMES');
+  writeFileSync(join(copyOf(w), BOB_MANIFEST), '{}\n');
+  assert.equal(failed(checkInstall(w.mac, w.cfg)).some((b) => /bobManifest/.test(b.what)), false, 'there: that item passes');
 });
 
 test('PLANT install: a link in the folder above the copy\'s name (the install folder is a link) → FAILS, nothing passes silently', async () => {
@@ -1501,6 +1507,15 @@ test('L871 PLANT check-dispatcher: the job\'s dispatcher.json without a root, wi
   const O = w.mac.at(`${BASE}/outboxes`); const C = w.mac.at(`${BASE}/worker-copies`);
   const rowOf = (key) => checkDispatcherKeys(w.mac, w.cfg).find((r) => r.what.endsWith(`(the Dispatcher's ${key})`));
   for (const key of ['outboxRoot', 'copiesRoot']) assert.deepEqual(rowOf(key), { ok: true, what: `${BASE}/install/orchestrate/dispatcher.json names ${key === 'outboxRoot' ? 'the top outbox root' : 'the workers\' top copies root'} ${key === 'outboxRoot' ? O : C} as ${key} (the Dispatcher's ${key})` });
+  // The job's hostLockPath is checked too (L1029 E review M2): the host.lock rows judge the setup config's, so a dispatcher.json
+  // naming another (hostLockPath moved to the copier's copy, dispatcher-config not run again) FAILs by name; load refuses.
+  const H = w.mac.at(w.cfg.hostLockPath); const hRow = () => checkDispatcherKeys(w.mac, w.cfg).find((r) => r.what.endsWith('(the host.lock this check reads)'));
+  assert.deepEqual(hRow(), { ok: true, what: `${BASE}/install/orchestrate/dispatcher.json names the owner's host.lock ${H} as hostLockPath (the host.lock this check reads)` });
+  put((c) => { c.hostLockPath = `${H}.old`; });
+  assert.equal(hRow().why, `it names ${JSON.stringify(`${H}.old`)}, not ${H}; run dispatcher-config`);
+  { const cd = w.run(['check-dispatcher']); assert.equal(cd.code, 1, cd.text); assert.ok(cd.text.includes(`not ${H}; run dispatcher-config`), cd.text);
+    const ld = w.run(['daemons', 'load', '--only', 'dispatcher']); assert.equal(ld.code, 1, ld.text); assert.match(ld.text, /dispatcher\.json is not the config this setup writes now: hostLockPath is /, ld.text); }
+  put(() => {}); assert.equal(hRow().ok, true, 'restored');
   const cases = [
     ['outboxRoot', (c) => { delete c.outboxRoot; }, 'it has no outboxRoot, so an existing dispatcher.json without it won\'t start the Dispatcher until dispatcher-config is run again (an older setup wrote it)'],
     ['copiesRoot', (c) => { delete c.copiesRoot; }, 'it has no copiesRoot, so an existing dispatcher.json without it won\'t start the Dispatcher until dispatcher-config is run again (an older setup wrote it)'],
@@ -1995,6 +2010,8 @@ test('add-to-install: every refusal comes before any change', async () => {
     // A wiring of the right form that the copy does not hold: refused at the plan, not after every step (#243 r1 Minor 2).
     ['a wiring the copy does not hold', {}, (w) => { const f = join(w.ext, 'review.json'); const c = JSON.parse(readFileSync(f, 'utf8')); writeFileSync(f, JSON.stringify({ ...c, wiring: `${c.installRoot}/modules/M4-workshop/launcher/nope.mjs` })); }, /wiring .*is not a file in the copy/],
     ['a budget module the copy does not hold', {}, (w) => { const f = join(w.ext, 'review.json'); const c = JSON.parse(readFileSync(f, 'utf8')); writeFileSync(f, JSON.stringify({ ...c, budget: `${c.installRoot}/modules/M4-workshop/launcher/gone.mjs` })); }, /budget .*is not a file in the copy/],
+    // L1035 m1: the Bob file list the config names must be carried by the updater, or the first update drops it.
+    ['a Bob file list the updater does not keep', {}, (w) => { const f = join(w.ext, 'review.json'); const c = JSON.parse(readFileSync(f, 'utf8')); writeFileSync(f, JSON.stringify({ ...c, bobManifest: join(c.installRoot, BOB_MANIFEST) })); }, /bobManifest .*is not inside any of the extras/],
     ['an updater config the updater refuses', {}, (w) => { const f = join(real(w), UPDATER_CONFIG); const c = JSON.parse(readFileSync(f, 'utf8')); writeFileSync(f, JSON.stringify({ ...c, keep: ['bin'] })); }, /updater\.json was refused/],
   ];
   for (const [name, over, change, why] of cases) {
@@ -2076,6 +2093,14 @@ test('add-to-install: a second run gives the same copy, and replaces a hook fold
   assert.deepEqual(tree(real(w)), once);
 });
 
+test('L1035 m1: add-to-install takes a review.json naming the Bob file list once the updater keeps it (the bob step ran)', async () => {
+  const w = await readyToAdd();
+  const f = join(w.ext, 'review.json'); const c = JSON.parse(readFileSync(f, 'utf8')); writeFileSync(f, JSON.stringify({ ...c, bobManifest: join(c.installRoot, BOB_MANIFEST) }));
+  const uc = join(real(w), UPDATER_CONFIG); const u = JSON.parse(readFileSync(uc, 'utf8')); writeFileSync(uc, JSON.stringify({ ...u, keep: [...u.keep, BOB_MANIFEST] }));
+  const r = w.run([...ADD, '--dry-run']); assert.equal(r.code, 0, r.text);
+  assert.doesNotMatch(r.text, /bobManifest/);
+});
+
 test('add-to-install: a dry run lists the steps and changes nothing; the flags belong to this command', async () => {
   const w = await readyToAdd(); const before = tree(real(w));
   const r = w.run([...ADD, '--dry-run']); assert.equal(r.code, 0, r.text);
@@ -2115,6 +2140,32 @@ test('add-to-install: the next real update carries claude-code and hooks across,
   assert.equal(readFileSync(join(w.root, 'a.txt'), 'utf8'), 'two\n');
   assert.equal(readFileSync(pinnedBinary(w.root, PIN), 'utf8'), PROGRAM);
   assert.deepEqual(readdirSync(join(w.root, 'hooks')), ['guard.mjs']);
+});
+
+// L1031: managed-settings through setup.mjs's own main, after add-to-install: the way out is said first, a dry run changes
+// nothing, the real run places the copy and the file, and its after-check passes. The guard trial is the in-process guard with
+// this test's uid as root (the `managed` port); managed-settings.test.mjs has the rest.
+test('L1031: managed-settings after add-to-install, through main: dry run, real run, the way out said, again nothing to do', async () => {
+  const MW = '/Library/Application Support/ClaudeCode/managed-settings.json';
+  const rules = { production: { env_files: ['/srv/app/prod-settings.conf'], programs: ['vercel'], hosts: ['prod.example.com'] }, secrets: { paths: [] } };
+  const w = await readyToAdd({ machineWide: MW, rules });
+  assert.equal(w.run(ADD).code, 0);
+  // The copy's hooks folder holds the stand-in origin's scripts: the real guard and its two modules go in beside them, root's.
+  const hooksDir = join(w.root, 'hooks'); const src = join(dirname(fileURLToPath(import.meta.url)), '../modules/M4-workshop/hooks');
+  for (const n of ['production-write-guard.mjs', 'lib.mjs', 'snapshot.mjs']) { writeFileSync(join(hooksDir, n), readFileSync(join(src, n))); chmodSync(join(hooksDir, n), 0o644); }
+  mkdirSync(w.mac.at('/Library/Application Support'), { recursive: true });
+  const { decide } = await import('../modules/M4-workshop/hooks/production-write-guard.mjs');
+  const managed = { nodeBin: join(w.ext, 'node'), guard: ({ copy, input }) => { const r = decide(input, { machineWide: true, snapshot: copy, ownerUid: w.mac.rootUid }); return { code: r.block ? 2 : 0, stderr: r.block ? `[orchestrate] blocked: ${r.reason}\n` : '' }; } };
+  const way = `sudo rm "${MW}"`;
+  const dry = w.run(['managed-settings', '--dry-run'], { managed });
+  assert.equal(dry.code, 0, dry.text); assert.ok(dry.text.includes(way), dry.text); assert.match(dry.text, /would run: read back .*\.next as the guard will.*would run: run the guard in .*would run: rename .*managed-settings\.json\.writing →/s);
+  assert.equal(existsSync(w.mac.at(MW)), false, 'a dry run places nothing');
+  const r = w.run(['managed-settings'], { managed });
+  assert.equal(r.code, 0, r.text); assert.ok(r.text.includes(way)); assert.match(r.text, /done: all \d+ items PASS/);
+  assert.match(readFileSync(w.mac.at(MW), 'utf8'), /machine-wide-guard\/production-write-guard\.mjs --machine-wide --snapshot \S+machine-wide-guard\/rules\.json \|\| \{ \[ \$\? -eq 2 \]/);
+  assert.match(w.run(['managed-settings'], { managed }).text, /nothing to do: already installed/);
+  // check knows the copy: it is no stranger in the base.
+  assert.equal(check(w.mac, w.cfg, { alsoKnown: rootMadeEntries(w.cfg) }).filter((x) => !x.ok && /machine-wide-guard/.test(`${x.what} ${x.why}`)).length, 0);
 });
 
 // ───────────────────────────── L1026: the watch job's start gate asks only what the watch job uses ─────────────────────────────
@@ -2172,18 +2223,37 @@ test('L1026 (iii): a broken copy still refuses the watch job (written by others,
   const above = w.mac.at(dirname(installPaths(w.cfg).installRoot));   // the install folder, above the copy: only the access-list line looks there
   const on2 = spawnSync('/bin/chmod', ['+a', 'everyone allow write', above], { encoding: 'utf8' }); assert.equal(on2.status, 0, on2.stderr);
   try { refused('an access list above the copy'); } finally { spawnSync('/bin/chmod', ['-N', above]); }
+  // L1043 (#479 r1 m3): the program the watch job runs. Taken away, nothing else the narrowed check looks at changes.
+  const node = join(w.root, 'bin', 'node'); const nodeAside = `${node}.aside`; renameSync(node, nodeAside); refused('no node'); renameSync(nodeAside, node);
   const stampFile = join(realCopy(w), STAMP); const stamp = readFileSync(stampFile, 'utf8'); rmSync(stampFile); refused('no stamp');
   writeFileSync(stampFile, stamp); chmodSync(stampFile, 0o644);
   assert.deepEqual(startProblems(w.mac, w.cfg, ['watch-only']), [], 'each one put back: the gate passes again');
 });
 
-test('L1029: without root the watch rules file\'s folder can\'t be looked into, and the gate says so instead of "not there"', async () => {
+test('L1029, L1043: without root the watch rules file\'s folder can\'t be looked into, and the gate says so instead of "not there"', async () => {
   const w = await miniStub();
   const dir = w.mac.at(dirname(watchRulesPath(w.cfg)));
   const mode = statSync(dir).mode & 0o7777; chmodSync(dir, 0o000);
-  let gate; try { gate = startProblems(w.mac, w.cfg, ['watch-only']); } finally { chmodSync(dir, mode); }
-  assert.match(gate.join(' '), /rules-draft\.yaml is unreadable without root \(run with sudo to check it\)/, 'planted: a refused look reads as the file missing');
-  assert.doesNotMatch(gate.join(' '), /is not there/);
+  let gate; let asRoot; try { w.mac.as = 501; gate = startProblems(w.mac, w.cfg, ['watch-only']); w.mac.as = 0; asRoot = startProblems(w.mac, w.cfg, ['watch-only']); } finally { chmodSync(dir, mode); w.mac.as = 0; }
+  assert.match(gate.join(' '), /rules-draft\.yaml can't be looked into without root \(run with sudo to check it\)/, 'planted: a refused look reads as the file missing');
+  assert.doesNotMatch(gate.join(' '), /is not there|unreadable/);
+  // c1: refused as root, sudo would not help, so the line does not send Joe to it.
+  assert.match(asRoot.join(' '), /rules-draft\.yaml can't be looked into, even as root \(EACCES\)/);
+  assert.doesNotMatch(asRoot.join(' '), /run with sudo/);
   rmSync(w.mac.at(watchRulesPath(w.cfg)));
   assert.match(startProblems(w.mac, w.cfg, ['watch-only']).join(' '), /rules-draft\.yaml is not there \(run watch-rules first\)/, 'a file truly missing still says so');
+});
+
+test('L1043 (#479 r1 m2): a dry run without root does not tell Joe to unload a healthy, loaded watch job, only to run with sudo', async () => {
+  const w = await miniStub();
+  for (const step of ['place', 'load']) { const r = w.run(['daemons', step, '--only', 'watch-only']); assert.equal(r.code, 0, r.text); }
+  const dir = w.mac.at(dirname(watchRulesPath(w.cfg)));
+  const mode = statSync(dir).mode & 0o7777; chmodSync(dir, 0o000);
+  let dry; let root; try { w.mac.as = 501; dry = planPlace(w.mac, w.cfg, ['watch-only']); w.mac.as = 0; root = planPlace(w.mac, w.cfg, ['watch-only']); } finally { chmodSync(dir, mode); w.mac.as = 0; }
+  assert.deepEqual(dry.ops, []);
+  assert.match(dry.problems.join(' '), /can't be looked into without root \(run with sudo to check it\)/);
+  assert.doesNotMatch(dry.problems.join(' '), /still in place|daemons unload/, 'planted: not known to be broken, yet told to unload');
+  // Refused as root it is known: the job file still starts at boot, and place says so, as for any other refusal.
+  assert.match(root.problems.join(' '), /watch-only's job file .* is still in place and launchd starts it at boot: sudo node setup\.mjs daemons unload --only watch-only/);
+  assert.deepEqual(planPlace(w.mac, w.cfg, ['watch-only']).problems, [], 'looked into again: the gate passes');
 });

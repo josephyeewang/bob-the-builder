@@ -72,8 +72,10 @@ const reading = (rec, id, now) => {
  * `restartFrontDoor` on the stuck path) are called with no try, so a throw fails the whole phone step. A `startMinibase`
  * that throws also never sets minibase_started_at, so it is tried again next pass with no 5-minute wait. A port must
  * answer, not throw, for anything it can tell; `frontDoorAlive` must answer at once (a Promise reads as not known).
+ * `startsHeld` (a reason; the tick's, while which Mac is home is not known, L1048): no Front Door or Mini Base is
+ * started or restarted, and nothing is marked as tried, so the first pass after the hold acts; sends still go.
  */
-export async function phoneLinkStep({ rec, rules, now, send, restartFrontDoor, startMinibase, frontDoorAlive = () => null, strayFrontDoor = null, lastHandoff = () => null, alert, failureLog = () => {} }) {
+export async function phoneLinkStep({ rec, rules, now, startsHeld = null, send, restartFrontDoor, startMinibase, frontDoorAlive = () => null, strayFrontDoor = null, lastHandoff = () => null, alert, failureLog = () => {} }) {
   const stuckMs = minutes(rules, KEYS.frontDoorStuckMin);
   // Whether a stored time is within `ms` of now. One that can't be read, or lies ahead (a clock that went back, a bad
   // write), is not recent (L329, shared pastTime): the step acts, never holds for ever as "done recently".
@@ -109,6 +111,7 @@ export async function phoneLinkStep({ rec, rules, now, send, restartFrontDoor, s
   if (alive === true) clearTold(rec, now, FD_RESTART_FACT, report);
   if (alive === false) {
     if (recent(st.fd_restarted_at, RETRY_MS)) done.push('Front Door missing; restarted recently, waiting');
+    else if (startsHeld) { done.push(`Front Door missing; restart held: ${startsHeld}`); return done; }
     else {
       let r;
       try { r = await restartFrontDoor({ handoff: lastHandoff() }); } catch (e) { r = { ok: false, reason: e.message }; }
@@ -140,7 +143,8 @@ export async function phoneLinkStep({ rec, rules, now, send, restartFrontDoor, s
   }
 
   const mb = reading(rec, FACTS.minibase, now);
-  if (mb.value === false && !recent(st.minibase_started_at, RETRY_MS)) {
+  if (mb.value === false && !recent(st.minibase_started_at, RETRY_MS) && startsHeld) done.push(`Mini Base not running; start held: ${startsHeld}`);
+  else if (mb.value === false && !recent(st.minibase_started_at, RETRY_MS)) {
     const r = await startMinibase();
     st.minibase_started_at = iso(now);
     done.push(r?.ok ? 'Mini Base started' : 'Mini Base start failed');
@@ -169,6 +173,7 @@ export async function phoneLinkStep({ rec, rules, now, send, restartFrontDoor, s
   // A refused-since that can't be read or lies ahead counts as long enough (L329): restarted, not refused for ever.
   const refusedAt = st.refused_since ? pastTime(st.refused_since, now) : undefined;
   if (st.refused_since && (refusedAt === null || now - refusedAt >= stuckMs)) {
+    if (startsHeld) { save(); return [...done, `Front Door restart held: ${startsHeld}`]; }
     const r = await restartFrontDoor({ handoff: lastHandoff() });
     const howLong = refusedAt === null ? 'since a time that can\'t be read' : `for ${Math.round((now - refusedAt) / 60_000)} min`;
     writeNote(`the Front Door was unreachable and could not be reconnected ${howLong}; restarted under its fixed name`);

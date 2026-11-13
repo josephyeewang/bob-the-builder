@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { writeSnapshot } from '../modules/M4-workshop/hooks/snapshot.mjs';
 import { makeLock } from '../modules/M9-record/lock.mjs';
 import { loginJobPlist } from '../modules/M11-dispatcher/login-job.mjs';
-import { DENY_KEYS, aclWriteEntries, carriedOverProblem, checkRunnerConfig, keepSnapshots, launchInputs, snapshotFolderProblem, startDeps, listenStop, main, readRootFile, realRunnerPorts } from './runner-main.mjs';
+import { DENY_KEYS, aclWriteEntries, carriedOverProblem, checkRunnerConfig, hookStoreOf, keepSnapshots, launchInputs, snapshotFolderProblem, startDeps, listenStop, main, readRootFile, realRunnerPorts } from './runner-main.mjs';
 import { RUNNER_JOB_LOG, RUNNER_JOB_UMASK, fullPath, workerRunnerPlist } from './runner-job.mjs';
 
 const config = (d, over = {}) => ({ installRoot: join(d, 'install'), requestsDir: join(d, 'requests'), statusFile: join(d, 'runner', 'status.json'), orchestrateUid: 501,
@@ -682,4 +682,62 @@ test('L1092: launchInputs, the one loader of checks 12 and 13 (the runner\'s and
   let asked = false;
   assert.deepEqual(await launchInputs({ installRoot: '/i' }, { pinnedProblem: () => { asked = true; return 'x'; } }), { budget: null, bobManifest: null });
   assert.equal(asked, false);
+});
+
+test('R-0b-175a: hookStateDir is optional, a folder apart from the Dispatcher\'s, the requests and every place a worker writes; start_timeout_s per interactive role', () => {
+  const c = checkRunnerConfig(config('/x', { hookStateDir: '/x/hookstate', start_timeout_s: { lead: 90, minibase: 200 } }));
+  assert.equal(c.hookStateDir, '/x/hookstate');
+  assert.equal(checkRunnerConfig(config('/x')).hookStateDir, undefined, 'left out: no store');
+  const bad = [
+    [{ hookStateDir: 'hooks' }, /hookStateDir must be a full path/], [{ hookStateDir: '/x/runner/hooks' }, /apart from the runner's own folder/],
+    [{ hookStateDir: '/x/requests' }, /apart from the runner's own folder/], [{ hookStateDir: '/x/outboxes/h' }, /must not sit in the outboxes/],
+    [{ hookStateDir: '/x/home/h' }, /must not sit in the sessions' home/], [{ hookStateDir: '/x/mirror/h' }, /must not sit in product p1's mirror/],
+    [{ start_timeout_s: { lead: 90 } }, /start_timeout_s needs hookStateDir/],
+    [{ hookStateDir: '/x/h', start_timeout_s: { worker: 90 } }, /worker is not one of lead, frontDoor, minibase/],
+    [{ hookStateDir: '/x/h', start_timeout_s: { lead: 0 } }, /start_timeout_s.lead must be seconds/],
+    [{ hookStateDir: '/x/h', start_timeout_s: [] }, /seconds per interactive role/],
+  ];
+  for (const [over, re] of bad) assert.throws(() => checkRunnerConfig(config('/x', over)), re, JSON.stringify(over));
+});
+
+test('R-0b-175a: main opens the hook store in a 0700 folder it makes, hands it to the loop, and does not start on a folder others can open', async () => {
+  const d = roots(tempDir('orch-rmain-'));
+  try {
+    mkdirSync(join(d, 'runner'), { recursive: true });
+    const logs = []; let ctx;
+    const code = await main(['/cfg.json'], { readConfig: () => config(d, { hookStateDir: join(d, 'hookstate'), start_timeout_s: { lead: 30 } }), log: (s) => logs.push(s), onStop: () => {},
+      run: async (x) => { ctx = x; } });
+    assert.equal(code, 0, logs.join('\n'));
+    for (const f of ['hookstate', 'hookstate/hooks']) assert.equal(statSync(join(d, f)).mode & 0o777, 0o700, f);
+    assert.equal(typeof ctx.hooks.tick, 'function'); assert.deepEqual(ctx.hooks.held(), []);
+    assert.equal(ctx.hooks.addSession('lead-1', { role: 'lead', product: 'p1' }), true);
+    assert.equal(statSync(join(d, 'hookstate', 'activity.json')).mode & 0o777, 0o600);
+    // Without the key, the loop has no store.
+    await main(['/cfg.json'], { readConfig: () => config(d), log: () => {}, onStop: () => {}, run: async (x) => { ctx = x; } });
+    assert.equal('hooks' in ctx, false);
+    chmodSync(join(d, 'hookstate'), 0o750);
+    const l2 = [];
+    assert.equal(await main(['/cfg.json'], { readConfig: () => config(d, { hookStateDir: join(d, 'hookstate') }), log: (s) => l2.push(s), onStop: () => {}, run: async () => assert.fail('ran') }), 1);
+    assert.match(l2.join('\n'), /did not start: hookStateDir .* can be opened by others; it must be 0700/);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test('R-0b-175a: hookStoreOf refuses a hook folder that is a link or another user\'s; an unreadable store file starts, held and said', async () => {
+  const d = realpathSync.native(tempDir('orch-hooks-'));
+  try {
+    const c = { hookStateDir: join(d, 'hs') };
+    mkdirSync(join(d, 'elsewhere'), { mode: 0o700 }); symlinkSync(join(d, 'elsewhere'), join(d, 'hs'));
+    assert.throws(() => hookStoreOf(c), /is not a folder/);
+    rmSync(join(d, 'hs'));
+    assert.throws(() => hookStoreOf(c, { uid: process.getuid() + 1 }), /is not the owner's/);
+    writeFileSync(join(d, 'hs', 'activity.json'), 'garbage', { mode: 0o600 });
+    assert.match(hookStoreOf(c).broken, /the hook store can't be read/);
+    const logs = [];
+    const r = roots(tempDir('orch-rmain-'));
+    try {
+      mkdirSync(join(r, 'runner'), { recursive: true });
+      assert.equal(await main(['/cfg.json'], { readConfig: () => config(r, { hookStateDir: join(d, 'hs') }), log: (s) => logs.push(s), onStop: () => {}, run: async () => {} }), 0);
+      assert.match(logs.join('\n'), /hook store can't be read .*no Lead, Front Door or Mini Base session is typed into until it is fixed by hand/);
+    } finally { rmSync(r, { recursive: true, force: true }); }
+  } finally { rmSync(d, { recursive: true, force: true }); }
 });
