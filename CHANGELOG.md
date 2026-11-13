@@ -6,6 +6,12 @@ Until 2026-10-29 the history sat in four places that disagreed (the core's foote
 
 ## 1. v2.28 onward (v2.28 – v2.40 moved from the footer of `build-protocol-core.md`)
 
+v2.75 — 2026-11-13 — Field learning reaches the next builder (D-038)
+
+- Existing audit ledgers can retain incident classes, prevention checks, independent evidence and adoption; a read-only checker refuses incomplete recurring-class closure and unresolved Material.
+- AUDIT and EVOLVE load prior lessons before work, preserve verified behavior when repairing findings, and distinguish first-pass failures from follow-up findings. No review-round cap or relaxed safety threshold.
+- One execution guide covers caller discovery, real verifier journeys, state-change boundaries, stable triage and finishing built-but-inactive capabilities. Private project evidence stays outside public history.
+
 *v2.74 — 2026-11-04: the D-036 follow-ups. (1) `/bob UPGRADE` reports two hand steps and applies neither, because the project fills these files in itself: an older Capability Traceability Matrix without the Works and Evidence columns, and the wiring check (`templates/wired.test.mjs`), when it is missing or older than Bob's apart from its CONFIG and UNWIRED blocks. A phase report that records "Gate 17: no units of work" counts as done. (2) `phase-report-check.mjs` requires the Capability Scoreboard and the Wiring and Simplicity sections when the project keeps a Capability Traceability Matrix (found by its heading in the project's git folder, or named with `--matrix FILE`). Until now a report that left them out still passed. Both scripts find the matrix through one helper, `scripts/lib/capability-matrix.mjs`. (3) Rule 30 no longer says the Phase Gate has items 1–9; it has eighteen, and Tier 2 exits on every one but item 10. Seventeen new self-tests.*
 
 *v2.73 — 2026-11-03: Bob's method files have one owner, Bob upkeep (D-037). The NEW mode and startup text, `build-protocol.md` Part II, and `bob-init.sh`, `spec-audit.py` and `doc-pointers-check.mjs` move from the ORCHESTRATE lead to Bob upkeep in `AGENTS.md`'s ownership table; the lead keeps `orchestrate/`, `templates/blueprint-roadmap/`, `scripts/blueprint/` and any ORCHESTRATE mode text. The two sections `one-home-check.mjs` skipped while another session owned them are fixed: the core and Part II name `reference/project-profiles.md` instead of "Appendix K", and two Bob commands in Part II now work from a project. Its skip list is empty.*

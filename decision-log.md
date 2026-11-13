@@ -662,3 +662,13 @@ The companion `audit-log.md` records *deferred* items (Defer verdicts that may s
 ## Anti-pattern reminder
 
 ADRs that describe the decision without consequences are useless. The Consequences section is where future-you discovers why the seemingly clever shortcut is the thing now blocking a new requirement. Every decision in this file has a Consequences block — keep it that way.
+
+### D-038: Field learning changes the next builder's work, not just the audit report
+
+**Date:** 2026-11-13
+
+**Decision:** Extend the existing audit ledger and incident intake with optional learning records, a checker, and pre-handoff/repair steps consumed by AUDIT and EVOLVE. The maintained execution guide is `reference/field-learning.md`. Preserve existing entries and severity obligations; unknown evidence and unknown adoption stay explicit.
+
+**Why:** Field reviews showed repeat failures despite written rules, repairs creating new defects, static scope lists missing new instances, and completion claims outrunning real consumer tests. A rung label, a test count or another review round does not establish prevention. Checks need clean controls and independently examined counterexamples, and builders need applicable contracts before coding.
+
+**Boundaries:** No automatic rule rewriting, fixed audit-round cap, product migrations or parallel-owned runtime changes. Machine validation checks records and evidence presence, not their truth. No measured reduction in field failures is claimed at publication; compare like-for-like first-pass and follow-up outcomes after adoption.
