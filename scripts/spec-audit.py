@@ -129,12 +129,24 @@ def main():
                     fails.append(f"[{title[:24]}] an item in {n!r} fits {bn!r} better")
                     P(f"    !!  item {k+1} of {n[:22]!r} sits closer to {bn[:22]!r} ({own:.2f} vs {best:.2f})")
         for n in names:                                   # delivery
-            # Only a heading that makes a CLAIM can fail to deliver one. "X -> Y"
-            # or "X (vs Y)" is a claim; "Install path" is an organisational label.
-            if not re.search(r"→|->|\bvs\b", n): continue
+            # "X -> Y" or "X (vs Y)" is an explicit claim: every word of Y must be
+            # delivered. A plain heading that JOINS things ("Reusable agents and
+            # automations", the check's origin case) promises each of them, so it
+            # fails when one joined part ("and" or "&"; not commas, which also
+            # split qualifiers like "High value, build in week 1") has no word at
+            # all in its items. Other plain headings are labels ("Install path"):
+            # checking their words cried wolf on two real specs (2 hard fails
+            # became 16), so they are skipped. Joined parts match on the first 5
+            # letters ("automation" delivers "automations"); explicit claims keep
+            # the exact match they always had.
             have = set().union(*pop[n]) if pop[n] else set()
-            claim = words(n.split("→")[-1].split("->")[-1])
-            miss = [w for w in claim if w not in have]
+            if re.search(r"→|->|\bvs\b", n):
+                miss = [w for w in words(n.split("→")[-1].split("->")[-1]) if w not in have]
+            else:
+                parts = [words(p) for p in re.split(r"\band\b|&", n)]
+                if sum(1 for p in parts if p) < 2: continue
+                stems = {w[:5] for w in have}
+                miss = sorted(w for p in parts if p and not any(w[:5] in stems for w in p) for w in p)
             if miss and pop[n]:
                 fails.append(f"[{title[:24]}] {n!r} promises {miss} its items don't deliver")
                 P(f"    !!  {n[:30]!r} promises {miss} — nothing under it delivers that")
