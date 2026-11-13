@@ -85,6 +85,9 @@ bar-sha256: UNSET
 - Webhook delivery confirmed: [Yes/No/N/A]
 - Auth flow end-to-end: [PASS/FAIL/N/A]
 - **Rollback plan verified:** [Yes/No — confirm the flag/env-var/revert path defined in Build Manifest actually works]
+- Compatibility evidence where versions overlap: old/new readers × old/new saved records; existing client session × new admission rules; admitted in-flight job × rollback. Name unsupported combinations and the rollout order that prevents them.
+- Recovery after intervening changes: which earlier undo records become invalid, why, and the replacement recovery path. Test an intervening unrelated update and a schema addition where applicable; avoid unnecessarily invalidating undo through whole-record comparison.
+- If reverting would lose or hide accepted state, test pausing new writes while retaining compatible readers and history. Do not destructively reverse stored data merely to restore an older code version.
 
 ### [C] AI Eval Results — *required if phase touched AI behavior (prompts, decision logic, routing, summarization, tone)*
 - Eval set version: [git SHA of `evals/behavioral-core.yaml`]

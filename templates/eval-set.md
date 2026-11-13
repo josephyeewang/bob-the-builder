@@ -28,6 +28,14 @@ Target count: 10-30 evals. Fewer than 10 → coverage is probably thin. More tha
 
 ---
 
+## Applicability and retained value
+
+Before reusing a result, record in the existing eval file or run receipt: claimed capability; input population/formats and ordinary messy cases; task and real acceptance path; denominator and excluded cases; model/prompt/method revision; selection rules and identity mappings; data cutoff and whether the answers were previously inspected. Keep answer keys outside product inputs. A changed task, population, selection or threshold needs a new evaluation; it cannot inherit the old accuracy claim or be called untouched confirmation.
+
+Pair safety/refusal cases with **useful-output controls**: complete valid input should receive the supported answer or action, not needless clarification or blanket hedging. Score correctness separately from clarity, priority, concrete next action and preservation of important conclusions. A short summary must signal additional consequential decisions when it omits their details. Allow legitimate variation where the task has multiple valid answers.
+
+Bind qualitative grades to the exact output artifact hash and evaluation revision in the run receipt. A changed output invalidates its old grade. Record whether source material was fully read, sampled, reused as an exact duplicate, or could not be extracted; file counts and hashes alone do not prove understanding. Apply `audit-lenses/_evidence-accounting.md` for coverage and task-result evidence.
+
 ## Eval Entry Schema
 
 ```yaml

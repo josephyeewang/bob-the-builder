@@ -1,0 +1,23 @@
+name: field-learning
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  learning-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Learning records reject false closure and preserve legacy ledgers
+        run: node --test scripts/learning-check.test.mjs
+      - name: Unfilled example cannot claim prevention
+        run: |
+          if node scripts/learning-check.mjs templates/learning-record.example.json --stage close; then
+            echo "An unfilled example must not pass"
+            exit 1
+          else
+            test "$?" -eq 1
+          fi
