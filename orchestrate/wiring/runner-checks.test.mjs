@@ -65,7 +65,7 @@ test('step 6, check 2: the copy\'s setup files are main\'s exactly; one changed,
 // claude as its Bash tool runs a command (#463 r2 M3, claude 2.1.322): detached, in a process group of its own, so claude's
 // group is not the command's; claude ends when the command does.
 const bashTool = (cmd, opts) => childSpawn(process.execPath, ['-e',
-  'const c = require(\'node:child_process\').spawn(\'/bin/sh\', [\'-c\', process.argv[1]], { detached: true, stdio: \'ignore\' }); c.on(\'exit\', (x) => process.exit(x ?? 1));', cmd], opts);
+  "const c = require('node:child_process').spawn('/bin/sh', ['-c', process.argv[1]], { detached: true, stdio: 'ignore' }); c.on('exit', (x) => process.exit(x ?? 1));", cmd], opts);
 // A stand-in claude: it runs the one shell command its prompt names, in its working folder, and ends. The baseline's runs
 // as the Bash tool runs it (bashTool), its group's record and the runner's go-ahead (#463 r2 M3) for real; `baseline:
 // false`, it runs nothing (a claude that never ran the command).
