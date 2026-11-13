@@ -248,7 +248,8 @@ export function checkRunnerWall({ settings, workerRunner, paths, realpath = (p) 
  * reviewWalls { outboxRoot, runnerRoot }: needed for a reviewer or auditor (L66 M3), refused without. runnerRoot is the
  * review runner's folder (its config's `root`).
  * product: { commands, hosts }         rulesHosts: the rules' allowed hosts; registryHosts: allowed during install only
- * phase: 'session' | 'install'
+ * phase: 'session' | 'install' | 'save'. 'save' (L991 M1) is the save-work job's: the session's walls with the network off
+ * (no host at all); the job runs in the copy's .git (wiring/runner-locked.mjs), so it writes there and in the outbox only.
  * realpath, lstat: how the snapshot folder's real path is read (L921), the disk's by default. A folder not made yet is
  * resolved through the nearest folder above it that is there (nearestReal), and walled in that spelling too: a role the
  * worker runner does not start (the Lead, the Front Door, the rooms) gets no launch-time pass (checkRunnerWall), so the
@@ -262,8 +263,9 @@ export function checkRunnerWall({ settings, workerRunner, paths, realpath = (p) 
  */
 export function renderRoleSettings({ role, profile, paths, product = {}, rulesHosts = [], registryHosts = [], phase = 'session', productionFiles, proposalOutboxes, realpath = (p) => realpathSync.native(p), lstat = (p) => lstatSync(p) }) {
   if (!DESIGN_PROFILES[role]) return refuse(`no such role "${role}"`);
-  if (phase !== 'session' && phase !== 'install') return refuse('bad phase');
+  if (phase !== 'session' && phase !== 'install' && phase !== 'save') return refuse('bad phase');
   if (phase === 'install' && role !== 'worker') return refuse('only a worker has an install step');
+  if (phase === 'save' && role !== 'worker') return refuse('only a worker has a save step');
   const shell = hasShell(profile);
 
   // Network: only hosts the rules allow. An off-list host is refused, never asked.
@@ -272,7 +274,7 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
     if (!HOST.test(h)) return refuse(`host "${h}" is not a plain host name`);
     if (!rulesHosts.includes(h)) return refuse(`host "${h}" is not on the rules' allowed list`);
   }
-  const allowedDomains = phase === 'install' ? [...hosts, ...registryHosts] : hosts;
+  const allowedDomains = phase === 'install' ? [...hosts, ...registryHosts] : phase === 'save' ? [] : hosts;
 
   let allow = [];
   if (shell && role === 'worker') {
@@ -424,7 +426,8 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
       [S.allow]: allow,
       [S.deny]: deny,
       [S.ask]: [],
-      [S.additionalDirectories]: [paths.outbox, ...(paths.bobFolder ? [paths.bobFolder] : [])],
+      // The save (L991 M1) reaches its outbox only: the Bob folder is not one of its folders.
+      [S.additionalDirectories]: [paths.outbox, ...(paths.bobFolder && phase !== 'save' ? [paths.bobFolder] : [])],
     },
     [S.sandbox]: {
       [S.sandboxEnabled]: true,

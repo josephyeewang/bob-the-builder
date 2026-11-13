@@ -12,6 +12,15 @@ import { shapeFact } from './fact-shapes.mjs';
 
 /** Who reports the Record refusing alert writes. Each has its own alert (M13 alerts.mjs reportTrouble), so a caller using
  * another's name would close what that one opened. Kept here because the watcher doesn't import M13. */
+/**
+ * How far ahead of this clock a Sensors reading may be stamped and still count (#464 r2 m-E). One allowance for every
+ * reader of a reading's time: the account hold (M11 tick.mjs), the usage reading (M11 usage.mjs) and the Rules check of
+ * its time (M10 engine.mjs), the phone link (M11 phone-link.mjs), and the heartbeat's Sensors line
+ * (wiring/heartbeat-probes.mjs, M13 heartbeat.mjs). Kept here, beside the writer of readings, so each of those can import
+ * it; a reading one counts is then never "check the clock" or "stale" on another.
+ */
+export const READING_FUTURE_MS = 60_000;
+
 export const TROUBLE_SOURCES = Object.freeze({ CHANNEL: 'alert-channel', HEARTBEAT: 'heartbeat', WATCHER: 'prod-watcher' });
 
 /** Whether the Record holds what put was given: it took the write, or it already holds exactly that (M9's "nothing changed"). */

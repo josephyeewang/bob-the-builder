@@ -1,10 +1,10 @@
 // review-config (L709): the review runner's review.json, each field from one source, read back with the runner's own readConfig.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { join } from 'node:path';
-import { INSTALL_LATER, OWNER_INPUT, SOURCES, buildReviewConfig, ownerFields, pinFields, pinProblem, reviewConfigCommand, setupFields, writingName } from './review-config.mjs';
+import { INSTALL_LATER, OWNER_INPUT, SOURCES, bobListThere, buildReviewConfig, ownerFields, pinFields, pinProblem, reviewConfigCommand, setupFields, writingName } from './review-config.mjs';
 import { CONFIG_FIELDS, readConfig } from '../modules/M4-workshop/launcher/review-runner-main.mjs';
 import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.mjs';
 import { TOOLS_CHECKED } from '../modules/M10-rules/roles.mjs';
@@ -14,6 +14,7 @@ import { planInstall } from './install.mjs';
 import { pinnedBinary } from '../modules/M4-workshop/launcher/hooks-check.mjs';
 import { SNAPSHOT_FILE } from '../modules/M10-rules/snapshot.mjs';
 import { main, parseArgs } from './setup.mjs';
+import { bobManifestPath } from './bob-manifest.mjs';
 
 const FIXED = '/Library/Application Support/ClaudeCode/managed-settings.json';
 // #419 r3 m1: near misses of the fixed file, each refused by this layer's own check.
@@ -34,10 +35,10 @@ function world() {
   // The runner's own readConfig, with its ports pointed at this folder (the walls stop at `top`; no access lists here).
   const check = (f) => readConfig(f, { top: base, acl: () => null });
   const input = () => ({ product: 'acme', machineWide: '/Library/Application Support/ClaudeCode/managed-settings.json', rules: { production: { env_files: ['/srv/acme/.env'], programs: ['vercel'], hosts: ['api.example.com'] }, secrets: { paths: [] } } });
-  const run = ({ pin = PIN, give = input(), dry = false, forInstall = false, euid = me, outFile = join(base, 'out', 'review.json'), useCheck = check } = {}) => {
+  const run = ({ pin = PIN, give = input(), dry = false, forInstall = false, euid = me, outFile = join(base, 'out', 'review.json'), useCheck = check, bobThere } = {}) => {
     const inFile = join(base, 'out', 'input.json'); writeFileSync(inFile, typeof give === 'string' ? give : JSON.stringify(give));
     const lines = { out: [], err: [] };
-    const code = reviewConfigCommand(cfg, { pin, input: inFile, out: outFile, dry, forInstall }, { euid, userOf, out: (s) => lines.out.push(s), err: (s) => lines.err.push(s), ...(useCheck ? { check: useCheck } : {}) });
+    const code = reviewConfigCommand(cfg, { pin, input: inFile, out: outFile, dry, forInstall }, { euid, userOf, out: (s) => lines.out.push(s), err: (s) => lines.err.push(s), ...(useCheck ? { check: useCheck } : {}), ...(bobThere ? { bobThere } : {}) });
     return { code, ...lines, outFile, text: existsSync(outFile) ? readFileSync(outFile, 'utf8') : null };
   };
   return { top, base, cfg, users, userOf, check, input, run, done: () => rmSync(top, { recursive: true, force: true }) };
@@ -47,7 +48,7 @@ test('every field the runner reads has exactly one source, and the built file ho
   const w = world();
   try {
     assert.deepEqual(Object.keys(SOURCES).sort(), [...CONFIG_FIELDS].sort(), 'SOURCES names every field readConfig reads, and no other');
-    for (const [k, s] of Object.entries(SOURCES)) assert.ok(['setup', 'pin', 'owner', 'later'].includes(s), `${k}: ${s}`);
+    for (const [k, s] of Object.entries(SOURCES)) assert.ok(['setup', 'pin', 'owner', 'bob'].includes(s), `${k}: ${s}`);
     const s = setupFields(w.cfg, { pin: PIN, userOf: w.userOf }).fields;
     const o = ownerFields(w.cfg, w.input()).fields;
     const p = pinFields(w.cfg, PIN);
@@ -55,8 +56,15 @@ test('every field the runner reads has exactly one source, and the built file ho
     assert.equal(new Set(all).size, all.length, 'no field comes from two sources');
     for (const [src, part] of [['setup', s], ['owner', o], ['pin', p]]) assert.deepEqual(Object.keys(part).sort(), Object.keys(SOURCES).filter((k) => SOURCES[k] === src).sort(), `${src} gives exactly its fields`);
     const { config } = buildReviewConfig(w.cfg, { pin: PIN, input: w.input(), userOf: w.userOf });
-    assert.deepEqual(Object.keys(config).sort(), CONFIG_FIELDS.filter((k) => SOURCES[k] !== 'later').sort());
-    assert.deepEqual(OWNER_INPUT.filter((k) => k !== 'product').sort(), Object.keys(SOURCES).filter((k) => SOURCES[k] === 'owner' && k !== 'recordRoot').sort(), 'the input keys are the owner fields (product stands for recordRoot)');
+    assert.deepEqual(Object.keys(config).sort(), CONFIG_FIELDS.filter((k) => SOURCES[k] !== 'bob').sort(), 'no Bob list named before the bob step has run');
+    // L1035 m4: every field has a source now; none is left for later.
+    assert.deepEqual([...new Set(Object.values(SOURCES))].sort(), ['bob', 'owner', 'pin', 'setup']);
+    // L995: once the bob step's list is in the installed copy, bobManifest names exactly it, and nothing else changes.
+    assert.deepEqual(Object.keys(SOURCES).filter((k) => SOURCES[k] === 'bob'), ['bobManifest']);
+    const withBob = buildReviewConfig(w.cfg, { pin: PIN, input: w.input(), userOf: w.userOf, bobInstalled: true }).config;
+    assert.deepEqual(withBob, { ...config, bobManifest: bobManifestPath(w.cfg) });
+    assert.equal(bobManifestPath(w.cfg), join(w.base, 'install/orchestrate/bob-manifest.json'));
+    assert.deepEqual(OWNER_INPUT.filter((k) => k !== 'product').sort(), Object.keys(SOURCES).filter((k) => SOURCES[k] === 'owner' && k !== 'recordRoot' && k !== 'dispatcherRules').sort(), 'the input keys are the owner fields (product stands for recordRoot and dispatcherRules)');
   } finally { w.done(); }
 });
 
@@ -66,7 +74,8 @@ test('the file written is the one the runner\'s own readConfig takes, with setup
     const r = w.run();
     assert.equal(r.code, 0, r.err.join('\n'));
     assert.match(r.out.join('\n'), /the review runner's own check takes it/);
-    assert.match(r.out.join('\n'), /Left out \(no source yet\): budget, bobManifest/);
+    assert.match(r.out.join('\n'), /Left out \(its step not run yet\): bobManifest \(run the bob step first, then this again\)\. Until it is named, launch check 13 refuses every review\./);
+    assert.doesNotMatch(r.out.join('\n'), /budget|check 12/, 'check 12 has its source now (L1035 m4)');
     const c = w.check(r.outFile);
     assert.deepEqual(JSON.parse(r.text), JSON.parse(JSON.stringify(c)));
     const B = w.base;
@@ -85,8 +94,13 @@ test('the file written is the one the runner\'s own readConfig takes, with setup
     assert.equal(c.pin, PIN);
     assert.deepEqual(Object.keys(c.uids).sort(), Object.keys(DESIGN_PROFILES).sort());
     for (const [role, uid] of Object.entries(c.uids)) assert.equal(uid, RUNNER_ROLES.includes(role) ? me : OWNER_UID, role);
-    assert.equal(c.budget, undefined); assert.equal(c.bobManifest, undefined);
-    assert.equal(r.text.includes('2.1.316') && !/"(budget|bobManifest)"/.test(r.text), true);
+    // Launch check 12 (L1001): M11's budget module in the copy, the product's rules snapshot, the worker runner's status file and user.
+    assert.equal(c.budget, join(B, 'install/orchestrate/modules/M11-dispatcher/budget.mjs'));
+    assert.equal(c.dispatcherRules, join(B, 'products/acme/rules/dispatcher-rules.json'));
+    assert.equal(c.workerStatusFile, join(B, 'worker-runner/runner/status.json'));
+    assert.equal(c.workerUid, OWNER_UID);
+    assert.equal(c.bobManifest, undefined);
+    assert.equal(r.text.includes('2.1.316') && !/"bobManifest"/.test(r.text), true);
   } finally { w.done(); }
 });
 
@@ -113,7 +127,7 @@ test('a missing owner field is refused by name, never defaulted, and nothing is 
 test('the input file may not set a field setup or the pin gives, nor any field the runner does not read', () => {
   const w = world();
   try {
-    for (const [k, v, why] of [['installRoot', '/x', /comes from setup/], ['deny', ['/x'], /comes from setup/], ['uids', {}, /comes from setup/], ['claudeBin', '/x', /comes from --pin/], ['pin', '9.9.9', /comes from --pin/], ['budget', '/x.mjs', /no source yet/], ['recordRoot', '/x', /may not set recordRoot: it comes from the product named \(set product instead\)/], ['colour', 'red', /no field of the runner's config/]]) {
+    for (const [k, v, why] of [['installRoot', '/x', /comes from setup/], ['deny', ['/x'], /comes from setup/], ['uids', {}, /comes from setup/], ['claudeBin', '/x', /comes from --pin/], ['pin', '9.9.9', /comes from --pin/], ['budget', '/x.mjs', /comes from setup/], ['bobManifest', '/x', /comes from the bob step \(setup\.mjs bob\)/], ['dispatcherRules', '/x', /may not set dispatcherRules: it comes from the product named/], ['recordRoot', '/x', /may not set recordRoot: it comes from the product named \(set product instead\)/], ['colour', 'red', /no field of the runner's config/]]) {
       const r = w.run({ give: { ...w.input(), [k]: v } });
       assert.equal(r.code, 1, k);
       assert.ok(r.err.some((l) => why.test(l)), `${k}: ${r.err.join(' | ')}`);
@@ -300,4 +314,29 @@ test('setup.mjs: review-config needs --pin, --input and --out, and --input, --ou
   assert.throws(() => parseArgs(['install', '--pin', PIN]), /--pin is only for review-config/);
   assert.equal(parseArgs(['review-config', '--pin', PIN, '--input', '/a', '--out', '/b', '--for-install']).forInstall, true);
   assert.throws(() => parseArgs(['install', '--for-install']), /--for-install is only for review-config/);
+});
+
+test('L995: bobManifest is named once the bob step\'s list is in the copy, and the runner\'s own check takes it', () => {
+  const w = world();
+  try {
+    const asked = [];
+    const r = w.run({ bobThere: (p) => { asked.push(p); return true; } });
+    assert.equal(r.code, 0, r.err.join('\n'));
+    assert.deepEqual(asked, [bobManifestPath(w.cfg)], 'it looks where the bob step writes the list');
+    assert.equal(w.check(r.outFile).bobManifest, join(w.base, 'install/orchestrate/bob-manifest.json'));
+    assert.doesNotMatch(r.out.join('\n'), /Left out/, 'with the list in the copy, nothing is left out');
+    const none = w.run({ bobThere: () => false });
+    assert.equal(none.code, 0, none.err.join('\n'));
+    assert.equal(Object.hasOwn(JSON.parse(none.text), 'bobManifest'), false, 'no list named before the step has run');
+    assert.match(none.out.join('\n'), /bobManifest \(run the bob step first, then this again\)\. Until it is named, launch check 13 refuses every review\./);
+    assert.match(ownerFields(w.cfg, { ...w.input(), bobManifest: '/x' }).problems.join('\n'), /may not set bobManifest: it comes from the bob step/);
+  } finally { w.done(); }
+});
+
+test('L1035 A3: the bob step\'s list counts as there only as a plain file: not a folder, a link or nothing', () => {
+  const d = realpathSync(tempDir('orch-bob-there-'));
+  assert.equal(bobListThere(join(d, 'none.json')), false, 'nothing there');
+  writeFileSync(join(d, 'list.json'), '{}\n'); assert.equal(bobListThere(join(d, 'list.json')), true, 'a plain file');
+  mkdirSync(join(d, 'folder.json')); assert.equal(bobListThere(join(d, 'folder.json')), false, 'a folder');
+  symlinkSync(join(d, 'list.json'), join(d, 'link.json')); assert.equal(bobListThere(join(d, 'link.json')), false, 'a link to a plain file');
 });

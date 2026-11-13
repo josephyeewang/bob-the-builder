@@ -4,7 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { CLOCK_SKEW_MS, RUNNER_KEEP_USED_UP_MS, RUNNER_STATUS_EVERY_MS, ownerSyncPorts, readOwnerStatus } from './owner-status.mjs';
 import { ownerAsyncPorts } from './owner-asks.mjs';
-import { RUNNER_DRAIN_HELD_MS, RUNNER_NOTE_EVERY_MS, RUNNER_PORT_MS, requestKey, workerRunnerPass } from './worker-runner.mjs';
+import { RUNNER_DRAIN_HELD_MS, RUNNER_NOTE_EVERY_MS, RUNNER_PORT_MS, requestKey, saveKey, workerRunnerPass } from './worker-runner.mjs';
 import { DRAIN_CAUSES } from '../modules/M11-dispatcher/drain-alerts.mjs';
 import { FUTURE_SKEW_MS } from '../shared/still-waiting.mjs';
 
@@ -18,7 +18,7 @@ function world({ startAnswer, stopAnswer, gone = new Set(), drained = () => true
   const w = { now: T0, state: {}, saves: [], writes: [], notes: [], removed: [], started: [], stops: [], gone, status: null, n: 0 };
   w.ports = {
     start: async (x) => { w.started.push(x.sessionId); if (startAnswer) return startAnswer(x); w.n += 1; const role = x.kind === 'script' ? 'script' : 'worker';
-      return { ok: true, pid: 4000 + w.n, pidStart: `2026-11-10T12:${String(w.n % 60).padStart(2, '0')}:00Z`, pgid: 4000 + w.n, head: 'a'.repeat(40), outbox: `${ROOT}/${x.product}/${role}/${x.sessionId}`, signin: 's', configDir: '/cfg', copy: `${COPIES}/${x.product}/${x.card}` }; },
+      return { ok: true, saveSettingsSha: 'a'.repeat(64), pid: 4000 + w.n, pidStart: `2026-11-10T12:${String(w.n % 60).padStart(2, '0')}:00Z`, pgid: 4000 + w.n, head: 'a'.repeat(40), outbox: `${ROOT}/${x.product}/${role}/${x.sessionId}`, signin: 's', configDir: '/cfg', copy: `${COPIES}/${x.product}/${x.card}` }; },
     groupGone: async (s) => w.gone.has(s.pgid),
     stopGroup: async (s) => { w.stops.push({ id: s.id, flagWritten: w.writes.at(-1)?.sessions.find((x) => x.id === s.id)?.stop_requested === true });
       if (stopAnswer) return stopAnswer(s); w.gone.add(s.pgid); return { ok: true, how: 'SIGTERM' }; },
@@ -228,7 +228,7 @@ test('self-review M1: an ended session is final; a process group number used aga
 // #384 m1: the start's base reaches the answer the Dispatcher's launch ask reads; a start that says none leaves it out,
 // never null (owner-asks launchAnswerWrong refuses a null one).
 test('#384 m1: a start\'s base is handed on in its answer, and left out when the start names none', async () => {
-  const ok = (x, more = {}) => ({ ok: true, pid: 4001, pidStart: '2026-11-10T12:00:01Z', pgid: 4001, head: 'a'.repeat(40), outbox: `${ROOT}/${x.product}/worker/${x.sessionId}`, signin: 's', configDir: '/cfg', copy: `${COPIES}/${x.product}/${x.card}`, ...more });
+  const ok = (x, more = {}) => ({ ok: true, saveSettingsSha: 'a'.repeat(64), pid: 4001, pidStart: '2026-11-10T12:00:01Z', pgid: 4001, head: 'a'.repeat(40), outbox: `${ROOT}/${x.product}/worker/${x.sessionId}`, signin: 's', configDir: '/cfg', copy: `${COPIES}/${x.product}/${x.card}`, ...more });
   const w = world({ startAnswer: (x) => ok(x, { base: 'b'.repeat(40) }) });
   await w.pass([launchReq('S-1')]);
   assert.equal(w.read().answers['launch-S-1'].base, 'b'.repeat(40));
@@ -248,7 +248,7 @@ test('self-review M2: a start answer the reader would refuse is never listed; it
     'no start time (step-4 review M3)': { pidStart: '' }, 'a leader not its group\'s (step-4 review M3)': { pgid: 4002 },
     'no commit (#358 r1 m1)': { head: 'not-a-sha' }, 'another card\'s copy (#358 r1 m1)': { copy: '/somewhere/else' } };
   for (const [what, more] of Object.entries(bad)) {
-    const w = world({ startAnswer: (x) => ({ ok: true, pid: 4001, pidStart: '2026-11-10T12:00:01Z', pgid: 4001, head: 'a'.repeat(40), outbox: `${ROOT}/p1/worker/${x.sessionId}`, signin: 's', configDir: '/cfg', copy: `${COPIES}/p1/C-1`, ...more }) });
+    const w = world({ startAnswer: (x) => ({ ok: true, saveSettingsSha: 'a'.repeat(64), pid: 4001, pidStart: '2026-11-10T12:00:01Z', pgid: 4001, head: 'a'.repeat(40), outbox: `${ROOT}/p1/worker/${x.sessionId}`, signin: 's', configDir: '/cfg', copy: `${COPIES}/p1/C-1`, ...more }) });
     await w.pass([launchReq('S-1')]);
     const s = w.read();
     assert.deepEqual(s.sessions, [], what);
@@ -257,7 +257,7 @@ test('self-review M2: a start answer the reader would refuse is never listed; it
     assert.match(s.answers['launch-S-1'].reason, /it was stopped/, what);
   }
   // One whose group can't be shown gone stays waiting (the session may run), so its claim stays.
-  const v = world({ startAnswer: () => ({ ok: true, pid: 4001, pidStart: '2026-11-10T12:00:01Z', pgid: 4001, head: 'a', outbox: '/elsewhere', signin: 's', configDir: '/c', copy: '/c' }), stopAnswer: () => ({ ok: false, reason: 'EPERM' }) });
+  const v = world({ startAnswer: () => ({ ok: true, saveSettingsSha: 'a'.repeat(64), pid: 4001, pidStart: '2026-11-10T12:00:01Z', pgid: 4001, head: 'a', outbox: '/elsewhere', signin: 's', configDir: '/c', copy: '/c' }), stopAnswer: () => ({ ok: false, reason: 'EPERM' }) });
   await v.pass([launchReq('S-1')]);
   assert.deepEqual([v.read().requests['S-1'].state, v.read().sessions, v.sync().stopSession('S-1')], ['waiting', [], false]);
 });
@@ -357,7 +357,7 @@ test('#358 r1 M1: each write is stamped when it is made, no two writes are furth
   const gaps = [times[0] - t0, ...times.slice(1).map((x, i) => x - times[i])];
   assert.ok(Math.max(...gaps) < 50 * 1.9, `the widest gap is one port wait: ${gaps}`);
   // Step 0: starts that answered wrong are each stopped (a port wait or two), with a write after each.
-  let go = []; const u = world({ startAnswer: (x) => new Promise((r) => go.push(() => r({ ok: true, pid: 4001, pidStart: '2026-11-10T12:00:01Z', pgid: 4001, head: 'x', outbox: '/elsewhere', signin: 's', configDir: '/c', copy: `${COPIES}/${x.product}/${x.card}` }))) });
+  let go = []; const u = world({ startAnswer: (x) => new Promise((r) => go.push(() => r({ ok: true, saveSettingsSha: 'a'.repeat(64), pid: 4001, pidStart: '2026-11-10T12:00:01Z', pgid: 4001, head: 'x', outbox: '/elsewhere', signin: 's', configDir: '/c', copy: `${COPIES}/${x.product}/${x.card}` }))) });
   await u.pass([launchReq('S-1'), launchReq('S-2'), launchReq('S-3')]);
   go.forEach((f) => f()); await new Promise((r) => setImmediate(r));
   const settledAt = [];
@@ -437,7 +437,7 @@ test('#358 r1 m7: a stopGroup whose pgid is not the listed number (a string incl
 
 test('#358 r2 m-a (P7): each port wait is followed by a write, and no write comes before the first port', async () => {
   const ev = [];
-  const a = (x) => ({ ok: true, pid: 4001, pidStart: '2026-11-10T12:00:01Z', pgid: 4001, head: 'a'.repeat(40), outbox: `/o/p1/worker/${x.sessionId}`, signin: 's', configDir: '/c', copy: `/copies/p1/${x.card}` });
+  const a = (x) => ({ ok: true, saveSettingsSha: 'a'.repeat(64), pid: 4001, pidStart: '2026-11-10T12:00:01Z', pgid: 4001, head: 'a'.repeat(40), outbox: `/o/p1/worker/${x.sessionId}`, signin: 's', configDir: '/c', copy: `/copies/p1/${x.card}` });
   const ports = { start: async (x) => a(x), groupGone: async () => { ev.push('port:gg'); return false; }, stopGroup: async () => ({ ok: true }),
     saveWork: async () => { ev.push('port:save'); return { ok: true }; }, pauseLead: async () => ({ ok: true }), outboxDrained: async () => false };
   const base = { uid: 501, outboxRoot: '/o', copiesRoot: '/copies', claimMs: 600000, portMs: 50, ports, pending: new Map(), realpath: (p) => p, keep: () => {}, now: T0 };
@@ -458,7 +458,7 @@ test('#364 r1 m3, m2: a start answered as running stays waiting with its claim; 
   const r = await workerRunnerPass({ ...mk(async () => ({ ok: false, running: true, pgid: 4001, reason: 'may run' })), state: {}, requests: req });
   assert.equal(r.state.requests['S-1'].state, 'waiting', 'not refused, so the claim stays');
   const B = 'c'.repeat(40);
-  const r2 = await workerRunnerPass({ ...mk(async (x) => ({ ok: true, pid: 4001, pidStart: '2026-11-10T12:00:01Z', pgid: 4001, head: 'a'.repeat(40), base: B, outbox: `/o/p1/worker/${x.sessionId}`, signin: 's', configDir: '/c', copy: `/copies/p1/${x.card}` })), state: {}, requests: req });
+  const r2 = await workerRunnerPass({ ...mk(async (x) => ({ ok: true, saveSettingsSha: 'a'.repeat(64), pid: 4001, pidStart: '2026-11-10T12:00:01Z', pgid: 4001, head: 'a'.repeat(40), base: B, outbox: `/o/p1/worker/${x.sessionId}`, signin: 's', configDir: '/c', copy: `/copies/p1/${x.card}` })), state: {}, requests: req });
   assert.equal(r2.state.sessions[0].base, B);
   assert.equal(JSON.stringify(answers.at(-1)).includes(B), true, 'the answer names base');
 });
@@ -489,7 +489,7 @@ test('#364 r2 n2: a start answered as running keeps its process group in the wai
 test('#378 r1 M1, m3: a start is told the other live sessions (listed, and an earlier run\'s waiting starts, marked unstarted); a waiting row names its product; a product setup makes no folder for is refused', async () => {
   let seen; let row;
   const w = world({ startAnswer: (x) => { seen = x.live; row = structuredClone(w.kept.at(-1)?.requests?.[x.sessionId]);
-    w.n += 1; return { ok: true, pid: 4000 + w.n, pidStart: `2026-11-10T12:${String(w.n % 60).padStart(2, '0')}:00Z`, pgid: 4000 + w.n, head: 'a'.repeat(40), outbox: `${ROOT}/${x.product}/worker/${x.sessionId}`, signin: 's', configDir: '/cfg', copy: `${COPIES}/${x.product}/${x.card}` }; } });
+    w.n += 1; return { ok: true, saveSettingsSha: 'a'.repeat(64), pid: 4000 + w.n, pidStart: `2026-11-10T12:${String(w.n % 60).padStart(2, '0')}:00Z`, pgid: 4000 + w.n, head: 'a'.repeat(40), outbox: `${ROOT}/${x.product}/worker/${x.sessionId}`, signin: 's', configDir: '/cfg', copy: `${COPIES}/${x.product}/${x.card}` }; } });
   await w.pass([launchReq('S-1')]);
   assert.deepEqual(seen, [], 'the first start: none');
   w.state = { ...w.state, requests: { ...w.state.requests, 'S-8': { state: 'waiting', at: T0, card: 'C-8', product: 'p2' } } };
@@ -634,4 +634,274 @@ test('L896: a drain check that is late, fails or answers no known cause is held 
     w.now += RUNNER_DRAIN_HELD_MS; await w.pass();
     assert.equal(w.status.sessions.find((x) => x.id === 'S-1').drain_held?.cause, cause, why);
   }
+});
+
+test('#456 runLocked self-review M1: a save still on after portMs is held, answered by a later pass, and a second save of that session meanwhile is refused at once', async () => {
+  const w = world();
+  await w.pass([launchReq('S-1')]);
+  let end; const runs = [];
+  w.ports.saveWork = (s) => { runs.push(s.id); return new Promise((r) => { end = r; }); };
+  const ask = (n) => ({ name: `saveWork-S-1-${n}.json`, body: { saveWork: { id: 'S-1' }, asked_at: new Date(w.now).toISOString() } });
+  const t = Date.now();
+  await w.pass([ask(N1)]);
+  assert.ok(Date.now() - t < 1000, 'the pass does not wait on the save past portMs (the status cadence, L769)');
+  assert.equal(w.read().answers[`saveWork-S-1-${N1}`], undefined, 'not answered while it runs');
+  assert.ok(w.pending.has(saveKey('S-1')));
+  assert.match(w.notes.join('\n'), /the save of S-1 is still on/);
+  await w.pass([ask(N2)]);
+  assert.deepEqual(runs, ['S-1'], 'never two saves in one copy');
+  assert.deepEqual(w.read().answers[`saveWork-S-1-${N2}`], { ok: false, reason: 'a save of S-1 is still running' });
+  end({ ok: true }); await new Promise((r) => setImmediate(r));
+  await w.pass();
+  assert.deepEqual(w.read().answers[`saveWork-S-1-${N1}`], { ok: true }, 'answered by the next pass once it ended');
+  assert.equal(w.pending.has(saveKey('S-1')), false, 'and no longer held');
+  // A held save that fails is answered with its reason; one that answers within portMs is answered in its own pass.
+  w.ports.saveWork = async () => { throw new Error('boom'); };
+  const n3 = '00112233445566ff'; await w.pass([ask(n3)]);
+  assert.deepEqual(w.read().answers[`saveWork-S-1-${n3}`], { ok: false, reason: 'the save failed (boom)' });
+});
+
+test('#463 r1 m1: every save of a pass is started before any is waited for, and all are waited for once', async () => {
+  const w = world();
+  await w.pass([launchReq('S-1'), launchReq('S-2')]);
+  const ev = [];
+  w.ports.saveWork = async (s) => { ev.push(`start ${s.id}`); await new Promise((r) => setTimeout(r, 30)); ev.push(`end ${s.id}`); return { ok: true }; };
+  const ask = (id, n) => ({ name: `saveWork-${id}-${n}.json`, body: { saveWork: { id }, asked_at: new Date(w.now).toISOString() } });
+  const t = Date.now();
+  await w.pass([ask('S-1', N1), ask('S-2', N2)]);
+  assert.deepEqual(ev.slice(0, 2), ['start S-1', 'start S-2'], 'the second starts before the first is waited for');
+  assert.deepEqual(w.read().answers[`saveWork-S-1-${N1}`], { ok: true });
+  assert.deepEqual(w.read().answers[`saveWork-S-2-${N2}`], { ok: true }, 'both answered in their own pass');
+  assert.ok(Date.now() - t < 1000);
+  // Two that outlast the one wait are both held and noted, and both answered by the next pass.
+  const ends = [];
+  w.ports.saveWork = () => new Promise((r) => ends.push(r));
+  const n3 = '00112233445566aa'; const n4 = '00112233445566bb';
+  await w.pass([ask('S-1', n3), ask('S-2', n4)]);
+  assert.equal(ends.length, 2, 'both started');
+  assert.ok(w.pending.has(saveKey('S-1')) && w.pending.has(saveKey('S-2')));
+  assert.equal((w.notes.join('\n').match(/is still on; it is answered when it ends/g) ?? []).length, 2);
+  for (const e of ends) e({ ok: true });
+  await new Promise((r) => setImmediate(r));
+  await w.pass();
+  assert.deepEqual([w.read().answers[`saveWork-S-1-${n3}`], w.read().answers[`saveWork-S-2-${n4}`]], [{ ok: true }, { ok: true }]);
+});
+
+test('#463 r1 m2: a save\'s process group is kept in the memory while it runs, forgotten when it ends, and one left by an earlier run is stopped', async () => {
+  const w = world();
+  await w.pass([launchReq('S-1')]);
+  let end;
+  w.ports.saveWork = (s, { onGroup }) => { onGroup({ pgid: 7001, pid: 7001, pid_start: '2026-11-10T12:00:00Z' }); return new Promise((r) => { end = r; }); };
+  const ask = (n) => ({ name: `saveWork-S-1-${n}.json`, body: { saveWork: { id: 'S-1' }, asked_at: new Date(w.now).toISOString() } });
+  await w.pass([ask(N1)]);
+  assert.deepEqual(w.kept.at(-1).saves['S-1'], { pgid: 7001, pid: 7001, pid_start: '2026-11-10T12:00:00Z', at: w.now }, 'kept in the memory');
+  // Held by this runner: never stopped by a later pass while it runs.
+  w.stops.length = 0;
+  await w.pass();
+  assert.deepEqual(w.stops, []);
+  end({ ok: true }); await new Promise((r) => setImmediate(r));
+  await w.pass();
+  assert.equal(w.kept.at(-1).saves['S-1'], undefined, 'forgotten once it ended');
+  // A runner that restarts (no save held) with one in its memory stops that group, through the stop's leader check.
+  const z = world();
+  z.state = { saves: { 'S-9': { pgid: 7009, pid: 7009, pid_start: '2026-11-10T12:00:00Z', at: T0 } } };
+  const asked = [];
+  z.ports.stopGroup = async (s) => { asked.push(s); return { ok: true, how: 'SIGTERM' }; };
+  await z.pass();
+  assert.deepEqual(asked, [{ id: 'S-9', pgid: 7009, pid: 7009, pid_start: '2026-11-10T12:00:00Z' }]);
+  assert.equal(z.kept.at(-1).saves['S-9'], undefined, 'forgotten once stopped');
+  // One that can't be stopped is told, kept, and tried again next pass.
+  const y = world();
+  y.state = { saves: { 'S-8': { pgid: 7008, pid: 7008, pid_start: '2026-11-10T12:00:00Z', at: T0 } } };
+  y.ports.stopGroup = async () => ({ ok: false, reason: 'the group leader\'s start time can\'t be read' });
+  await y.pass();
+  assert.ok(y.kept.at(-1).saves['S-8']);
+  assert.match(y.notes.join('\n'), /an earlier save of S-8 may still run in process group 7008/);
+});
+
+test('#463 r1 m3, r2 m4: a start\'s save settings hash is kept in the session\'s row (never in the status); a start with none, or one in another form, is refused', async () => {
+  const base = (x) => ({ ok: true, saveSettingsSha: 'a'.repeat(64), pid: 4001, pidStart: '2026-11-10T12:01:00Z', pgid: 4001, head: 'a'.repeat(40), outbox: `${ROOT}/p1/worker/${x.sessionId}`, signin: 's', configDir: '/cfg', copy: `${COPIES}/p1/${x.card}` });
+  const w = world({ startAnswer: (x) => ({ ...base(x), saveSettingsSha: 'b'.repeat(64) }) });
+  await w.pass([launchReq('S-1')]);
+  assert.equal(w.kept.at(-1).sessions[0].save_settings_sha, 'b'.repeat(64));
+  assert.equal('save_settings_sha' in w.read().sessions[0], false, 'not in the status');
+  // r2 m4: a start whose work could never be saved is stopped and refused, never listed.
+  for (const more of [{ saveSettingsSha: 'B'.repeat(64) }, { saveSettingsSha: undefined }, { saveSettingsSha: 7 }]) {
+    const z = world({ startAnswer: (x) => ({ ...base(x), ...more }) });
+    await z.pass([launchReq('S-1')]);
+    assert.deepEqual(z.kept.at(-1).sessions, [], JSON.stringify(more));
+    assert.match(z.read().answers['launch-S-1'].reason, /kept no hash of its save settings, so its work could never be saved.*it was stopped/, JSON.stringify(more));
+  }
+});
+
+test('#463 r1 self-review m1, c2: a save left by an earlier run blocks a new save of that session; a group told after its pass returned is kept by the next pass, not written into the old one', async () => {
+  const w = world();
+  await w.pass([launchReq('S-1')]);
+  const ask = (n) => ({ name: `saveWork-S-1-${n}.json`, body: { saveWork: { id: 'S-1' }, asked_at: new Date(w.now).toISOString() } });
+  // m1: the earlier run's group can't be stopped yet, so no second job runs in the copy.
+  w.state.saves = { 'S-1': { pgid: 7001, pid: 7001, pid_start: '2026-11-10T12:00:00Z', at: T0 } };
+  w.ports.stopGroup = async () => ({ ok: false, reason: 'not yet' });
+  let ran = 0; w.ports.saveWork = async () => { ran += 1; return { ok: true }; };
+  await w.pass([ask(N1)]);
+  assert.equal(ran, 0);
+  assert.deepEqual(w.read().answers[`saveWork-S-1-${N1}`], { ok: false, reason: 'an earlier save of S-1 may still be running' });
+  assert.equal(w.kept.at(-1).saves['S-1'].pgid, 7001, 'still kept, to be stopped');
+  // m3: the note of a group that can't be stopped is made once per RUNNER_NOTE_EVERY_MS.
+  const told = () => w.notes.filter((t) => /an earlier save of S-1 may still run in process group 7001/.test(t)).length;
+  const n0 = told(); await w.pass(); assert.equal(told(), n0, 'not again at once');
+  w.now += RUNNER_NOTE_EVERY_MS; await w.pass(); assert.equal(told(), n0 + 1);
+  // c2: once stopped, a new save runs; its group is told only after the pass returned.
+  w.ports.stopGroup = async () => ({ ok: true, how: 'SIGTERM' });
+  await w.pass();
+  assert.equal(w.kept.at(-1).saves['S-1'], undefined);
+  let onG; let end;
+  w.ports.saveWork = (s, { onGroup }) => { onG = onGroup; return new Promise((r) => { end = r; }); };
+  await w.pass([ask(N2)]);
+  const kept = w.kept.length; const writes = w.writes.length;
+  onG({ pgid: 7002, pid: 7002, pid_start: '2026-11-10T12:02:00Z' });
+  assert.deepEqual([w.kept.length, w.writes.length], [kept, writes], 'nothing written from the old pass');
+  await w.pass();
+  assert.equal(w.kept.at(-1).saves['S-1'].pgid, 7002, 'kept by the next pass');
+  end({ ok: true }); await new Promise((r) => setImmediate(r));
+  await w.pass();
+  assert.equal(w.kept.at(-1).saves['S-1'], undefined);
+  assert.deepEqual(w.read().answers[`saveWork-S-1-${N2}`], { ok: true });
+});
+
+// #463 r2 M1: the job runs in a process group of its own (claude's Bash tool), kept beside claude's; a restart stops
+// both; a refused save's groups stay kept until they are shown gone.
+test('#463 r2 M1: a save\'s job group is kept with claude\'s, both are stopped by a later runner, and a refused save\'s are shown gone before they are forgotten', async () => {
+  const w = world();
+  await w.pass([launchReq('S-1')]);
+  const C = { pgid: 7001, pid: 7001, pid_start: '2026-11-10T12:00:00Z' }; const J = { pgid: 7050, pid: 7050, pid_start: '2026-11-10T12:00:01Z' };
+  let end;
+  w.ports.saveWork = (s, { onGroup }) => { onGroup({ ...C }); onGroup({ ...C, job: { ...J } }); return new Promise((r) => { end = r; }); };
+  const ask = (n) => ({ name: `saveWork-S-1-${n}.json`, body: { saveWork: { id: 'S-1' }, asked_at: new Date(w.now).toISOString() } });
+  await w.pass([ask(N1)]);
+  assert.deepEqual(w.kept.at(-1).saves['S-1'], { ...C, job: J, at: w.now }, 'both groups kept');
+  // Refused: kept until step 0 shows both gone.
+  end({ ok: false, reason: 'the save-work job did not finish inside the lock-down (it did not finish in time)' }); await new Promise((r) => setImmediate(r));
+  const asked = [];
+  w.ports.stopGroup = async (s) => { asked.push([s.id, s.pgid, s.pid_start]); return { ok: true, how: 'already gone' }; };
+  await w.pass();
+  assert.deepEqual(w.read().answers[`saveWork-S-1-${N1}`].ok, false);
+  assert.deepEqual(asked, [['S-1', 7001, C.pid_start], ['S-1', 7050, J.pid_start]], 'claude\'s group, then the job\'s, each by its leader\'s start time');
+  assert.equal(w.kept.at(-1).saves['S-1'], undefined, 'forgotten once both are shown gone');
+  // A later runner with one kept: the job's group that can't be stopped is named, and kept.
+  const z = world();
+  z.state = { saves: { 'S-9': { ...C, job: J, at: T0 } } };
+  z.ports.stopGroup = async (s) => (s.pgid === 7050 ? { ok: false, reason: 'EPERM' } : { ok: true, how: 'SIGTERM' });
+  await z.pass();
+  assert.ok(z.kept.at(-1).saves['S-9']);
+  assert.match(z.notes.join('\n'), /an earlier save of S-9 may still run in process group 7050 \(.*EPERM/);
+  // Self-review m4: claude's group not stopped, the job's is still tried.
+  const tried = [];
+  z.ports.stopGroup = async (s) => { tried.push(s.pgid); return s.pgid === 7001 ? { ok: false, reason: 'EPERM' } : { ok: true, how: 'SIGTERM' }; };
+  z.now += RUNNER_NOTE_EVERY_MS; await z.pass();
+  assert.deepEqual(tried, [7001, 7050]);
+  assert.ok(z.kept.at(-1).saves['S-9'], 'kept while one is not shown stopped');
+});
+
+// #463 r3 m4 (plant B4): told during its own pass, the job's group is written to the memory file before onGroup returns,
+// that is before runLocked writes the job's go-ahead (runner-locked.mjs found → ack). A crash between the go-ahead and the
+// pass's next write must still leave the group on disk, or a restart would allow the next save beside a running job.
+test('#463 r3 m4 B4: the job group told during its pass is on disk before onGroup returns, so before the go-ahead', async () => {
+  const w = world();
+  await w.pass([launchReq('S-1')]);
+  const C = { pgid: 7001, pid: 7001, pid_start: '2026-11-10T12:00:00Z' }; const J = { pgid: 7050, pid: 7050, pid_start: '2026-11-10T12:00:01Z' };
+  const atGoAhead = [];
+  w.ports.saveWork = (s, { onGroup }) => {
+    onGroup({ ...C }); atGoAhead.push(structuredClone(w.kept.at(-1).saves['S-1']));
+    onGroup({ ...C, job: { ...J } }); atGoAhead.push(structuredClone(w.kept.at(-1).saves['S-1']));   // the go-ahead is written here
+    return new Promise(() => {});
+  };
+  await w.pass([{ name: `saveWork-S-1-${N1}.json`, body: { saveWork: { id: 'S-1' }, asked_at: new Date(w.now).toISOString() } }]);
+  assert.deepEqual(atGoAhead, [{ ...C, at: w.now }, { ...C, job: J, at: w.now }], 'each told group was in the kept memory at once');
+});
+
+// #463 r3 m1 (L1047): check 4's install groups are kept in the memory as a save's are: on disk before the go-ahead,
+// forgotten once the start is listed, and stopped at step 0 when no start of this runner holds them.
+test('#463 r3 m1: a start\'s install groups are kept as a save\'s: on disk at once, forgotten once listed, stopped when no start holds them', async () => {
+  const C = { pgid: 7101, pid: 7101, pid_start: '2026-11-10T12:00:00Z' }; const J = { pgid: 7150, pid: 7150, pid_start: '2026-11-10T12:00:01Z' };
+  // Kept before onGroup returns (so before the install's go-ahead), then forgotten once the start is listed.
+  const w = world(); const atGoAhead = []; const real = w.ports.start;
+  w.ports.start = async (x) => {
+    x.onGroup({ ...C }); atGoAhead.push(structuredClone(w.kept.at(-1).installs['S-1']));
+    x.onGroup({ ...C, job: { ...J } }); atGoAhead.push(structuredClone(w.kept.at(-1).installs['S-1']));
+    return real(x);
+  };
+  await w.pass([launchReq('S-1')]);
+  assert.deepEqual(atGoAhead, [{ ...C, at: w.now }, { ...C, job: J, at: w.now }]);
+  assert.equal(w.kept.at(-1).installs['S-1'], undefined, 'forgotten once the start is listed');
+  assert.deepEqual(w.stops, []);
+  // A start refused after its install ran: its groups are stopped at the next step 0 (both), then forgotten.
+  const r = world({ startAnswer: () => ({ ok: false, reason: 'check 5: x' }) }); const realR = r.ports.start;
+  r.ports.start = async (x) => { x.onGroup({ ...C, job: { ...J } }); return realR(x); };
+  await r.pass([launchReq('S-2')]);
+  assert.deepEqual(r.kept.at(-1).installs['S-2'], { ...C, job: J, at: r.now }, 'kept while no stop has shown it gone');
+  await r.pass();
+  assert.deepEqual(r.stops.map((s) => s.id), ['S-2', 'S-2']);
+  assert.equal(r.kept.at(-1).installs['S-2'], undefined, 'forgotten once stopped');
+  // A start still on is not stopped; told after its pass returned, the group is kept by the newest pass's own keeper.
+  const h = {}; const s = world(); let onG; s.ports.start = (x) => { onG = x.onGroup; return new Promise(() => {}); };
+  await s.pass([launchReq('S-3')], { saveHolder: h });
+  await s.pass([], { saveHolder: h });
+  const n = s.kept.length;
+  onG({ ...C });
+  assert.equal(s.kept.length, n + 1, 'kept at once');
+  assert.deepEqual(s.kept.at(-1).installs['S-3'], { ...C, at: s.now });
+  await s.pass([], { saveHolder: h });
+  assert.deepEqual(s.stops, [], 'a start still on keeps its install running');
+  // A restarted runner (no start held) with one in its memory stops it; one that can't be stopped is told and kept.
+  const y = world();
+  y.state = { installs: { 'S-8': { ...C, at: T0 } } };
+  y.ports.stopGroup = async () => ({ ok: false, reason: 'the group leader\'s start time can\'t be read' });
+  await y.pass();
+  assert.ok(y.kept.at(-1).installs['S-8']);
+  assert.match(y.notes.join('\n'), /the install of S-8's start may still run in process group 7101/);
+});
+
+// Self-review M-2: the job's group told after its pass returned is in the memory before onGroup returns (so before the
+// job's go-ahead), kept by the newest pass's own keeper, never written into an older pass's copy.
+test('#463 r2 self-review M-2: a job group told after its pass returned is kept at once by the newest pass', async () => {
+  const w = world(); const saveHolder = {};
+  await w.pass([launchReq('S-1')], { saveHolder });
+  let onG;
+  w.ports.saveWork = (s, { onGroup }) => { onG = onGroup; return new Promise(() => {}); };
+  await w.pass([{ name: `saveWork-S-1-${N1}.json`, body: { saveWork: { id: 'S-1' }, asked_at: new Date(w.now).toISOString() } }], { saveHolder });
+  onG({ pgid: 7001, pid: 7001, pid_start: '2026-11-10T12:00:00Z' });
+  await w.pass([], { saveHolder });
+  const n = w.kept.length;
+  onG({ pgid: 7001, pid: 7001, pid_start: '2026-11-10T12:00:00Z', job: { pgid: 7050, pid: 7050, pid_start: '2026-11-10T12:00:01Z' } });
+  assert.equal(w.kept.length, n + 1, 'kept at once');
+  assert.deepEqual(w.kept.at(-1).saves['S-1'].job, { pgid: 7050, pid: 7050, pid_start: '2026-11-10T12:00:01Z' });
+  assert.ok(w.kept.at(-1).sessions.some((s) => s.id === 'S-1'), 'the newest pass\'s memory, whole');
+  // A keep that fails throws to the teller, so the job never gets its go-ahead.
+  const w2 = world(); const h2 = {};
+  await w2.pass([launchReq('S-1')], { saveHolder: h2 });
+  w2.ports.saveWork = (s, { onGroup }) => { onG = onGroup; return new Promise(() => {}); };
+  await w2.pass([{ name: `saveWork-S-1-${N1}.json`, body: { saveWork: { id: 'S-1' }, asked_at: new Date(w2.now).toISOString() } }], { saveHolder: h2, keep: () => {} });
+  const keep = h2.keep; h2.keep = (...a) => { throw new Error('disk full'); };
+  assert.throws(() => onG({ pgid: 7001, pid: 7001, pid_start: 'x', job: { pgid: 7050, pid: 7050, pid_start: 'y' } }), /disk full/);
+  h2.keep = keep;
+});
+
+// L976: the runner takes an undo launch only with the commit it reverses, hands that commit to its start, and refuses
+// a commit on any other launch; nothing is started for a refused one.
+test('L976: an undo launch hands its reversed commit to the start; a missing or bad one, or one on another kind, is refused unstarted', async () => {
+  const SHA = 'e'.repeat(40);
+  const seen = [];
+  const w = world({ startAnswer: (x) => { seen.push(x); return { ok: false, reason: 'seen' }; } });
+  await w.pass([launchReq('S-1', { kind: 'undo', undo_commit: SHA }), launchReq('S-2')]);
+  assert.deepEqual(seen.map((x) => [x.sessionId, x.kind, x.undoCommit]), [['S-1', 'undo', SHA], ['S-2', 'editing', undefined]]);
+  assert.equal('undoCommit' in seen[1], false, 'an editing start is handed none');
+  const bad = [[{ kind: 'undo' }, /the undo launch names no reversed commit/], [{ kind: 'undo', undo_commit: null }, /names no reversed commit/],
+    [{ kind: 'undo', undo_commit: SHA.toUpperCase() }, /names no reversed commit/], [{ kind: 'undo', undo_commit: SHA.slice(2) }, /names no reversed commit/],
+    [{ kind: 'undo', undo_commit: [SHA] }, /names no reversed commit/],
+    [{ undo_commit: SHA }, /only an undo launch names a reversed commit/], [{ kind: 'script', undo_commit: SHA }, /only an undo launch/], [{ undo_commit: null }, /only an undo launch/]];
+  const z = world();
+  await z.pass(bad.map(([more], i) => launchReq(`S-${i + 1}`, more)));
+  assert.deepEqual(z.started, [], 'nothing started');
+  const s = z.read();
+  bad.forEach(([more, why], i) => { const id = `S-${i + 1}`; assert.equal(s.requests[id].state, 'refused', id); assert.match(s.answers[`launch-${id}`].reason, why, JSON.stringify(more)); });
 });

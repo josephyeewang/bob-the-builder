@@ -48,10 +48,10 @@
 //   stopGroup(session)   → stopGroup-<id>-<nonce>.json; ok once the session is listed stopped (ok: false: it may still run).
 //   saveWork(session)    → saveWork-<id>-<nonce>.json; review, audit and the other kinds with no copy are ok unasked.
 //   pauseLead({product}) → pauseLead-<product>-<nonce>.json; any failure is a throw.
-// On the runner's side three still refuse, each with its reason in the answer (cutover blockers, not this file's): a
-// launch ("not wired: no worker prompt is given to the runner", runner-ports.mjs promptFor), a save (M4 save-work with no
-// lock-down runner, runLocked) and a pause ("not wired: the Lead's wrap-up needs the activity tracker's feed"). Until
-// they are given, no worker starts, no stop is cleared as saved, and every pause throws and is told.
+// On the runner's side two still refuse, each with its reason in the answer (cutover blockers, not this file's): a
+// launch ("not wired: no worker prompt is given to the runner", runner-ports.mjs promptFor) and a pause ("not wired: the
+// Lead's wrap-up needs the activity tracker's feed"). Until they are given, no worker starts, and every pause throws and
+// is told. A save runs through the lock-down runner (runner-locked.mjs, L969) once the config names claude.
 // cleanup.saveWork stays unwired (NOT_WIRED_CLEANUP).
 // The mirror and the seal folder are checked when the wiring starts, so a wrong path stops the start.
 
@@ -321,6 +321,41 @@ export function requestsAclProblem(dir, { run = spawnSync, platform = process.pl
   return null;
 }
 
+// The rights an access-list entry can give that only read (macOS chmod +a names), for the rules snapshot's two readers.
+const ACL_READS = Object.freeze(['read', 'execute', 'list', 'search', 'readattr', 'readextattr', 'readsecurity', 'file_inherit', 'directory_inherit', 'limit_inherit', 'only_inherit']);
+// A user name /usr/bin/id answers that is plain enough to put in an access-list line.
+const USER_NAME = /^[A-Za-z0-9._-]{1,200}$/;
+/**
+ * Why `path`'s access list lets anyone but `readers` (user names) in, or lets them more than read, or null (L1002: the
+ * spec refuses a snapshot others can read; the mode bits alone don't show an access list). Read with /bin/ls -led, as
+ * requestsAclProblem above reads one; a deny entry passes. Off macOS any access list is refused. A list
+ * that can't be read, or an entry that can't be parsed, is a refusal. `run` and `platform` are ports for a test.
+ */
+export function rulesAclProblem(path, readers, { run = spawnSync, platform = process.platform } = {}) {
+  const r = run('/bin/ls', [platform === 'darwin' ? '-led' : '-ld', '--', path], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', LC_ALL: 'C' }, timeout: 30_000 });
+  if (r?.error || r?.status !== 0) return `${path} has an access list that could not be read (${String(r?.error?.message ?? r?.stderr ?? `exit ${r?.status}`).trim().slice(0, 120)})`;
+  const lines = String(r.stdout).split('\n');
+  if (platform !== 'darwin') return /^[-d][-rwxsStT]{9}\+/.test(lines[0] ?? '') ? `${path} has an access list (ACL), which can let others read it` : null;
+  const ok = new Set((readers ?? []).map((n) => `user:${n}`));
+  for (const line of lines) {
+    if (!/^\s+\d+: /.test(line)) continue;
+    const m = /^\s+\d+: ((?:user|group):\S+) (?:inherited )?(allow|deny) (\S+)\s*$/.exec(line);
+    if (!m) return `${path} has an access-list entry that can't be read (${line.trim().slice(0, 80)})`;
+    if (m[2] === 'deny') continue;
+    if (!ok.has(m[1])) return `${path} has an access-list entry letting ${m[1]} in (allow ${m[3]}); only ${[...ok].join(' and ') || 'no one'} may read it`;
+    const more = m[3].split(',').filter((x) => !ACL_READS.includes(x));
+    if (more.length) return `${path} has an access-list entry letting ${m[1]} do more than read it (${more.join(',')})`;
+  }
+  return null;
+}
+
+// The account name of `uid` (/usr/bin/id -nu), for the access list's two readers; null when it can't be told.
+export function userName(uid, { run = spawnSync } = {}) {
+  const r = run('/usr/bin/id', ['-nu', String(uid)], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', LC_ALL: 'C' }, timeout: 30_000 });
+  const n = r?.status === 0 ? String(r.stdout).trim() : '';
+  return USER_NAME.test(n) ? n : null;
+}
+
 /**
  * The one writer of the worker runner's requests (stopSession and the four asks): the folder's owner, mode and access list
  * are checked before each write (L943 m4), and a folder that fails is a throw, with nothing written.
@@ -342,16 +377,28 @@ export function runnerAsyncPorts({ config: c, now = Date.now }, io = {}) {
 }
 
 /**
+ * Every session running Mac-wide that the start caps count, read fresh, the one way (L994): the worker runner's (its
+ * status file) and the review runner's reviewers and auditors (reviewSessions). Both are read before either is used: one
+ * that throws makes the whole list "not known" (L925 rule 1). `c` names workerStatusFile, workerUid, outboxRoot,
+ * reviewStatusFile and reviewUid; runnerSyncPorts' sessions() and M11 budget.mjs (launch check 12) both read it here. The
+ * board is not read, so a config with no `product` (a runner's) names none. `io` as for runnerSyncPorts.
+ */
+export function sessionsNow(c, rec, { now = Date.now, io = {} } = {}) {
+  const sync = ownerSyncPorts({ statusFile: c.workerStatusFile, uid: c.workerUid, outboxRoot: c.outboxRoot, product: c.product ?? '(no board)', clock: now,
+    stat: io.stat, open: io.open, realpath: io.realpath, holds: recordHolds(rec) });
+  const review = io.reviewStatus ?? (() => readReviewStatus({ file: c.reviewStatusFile, now: now(), uid: c.reviewUid }));
+  const own = sync.sessions(); const rv = reviewSessions(review(), { now: now() }); return [...own, ...rv];
+}
+
+/**
  * The worker runner's sync ports for this Dispatcher (L925): `c` its config, `rec` its Record. `io` lets a test stand in
  * for the files (stat, open, realpath, lstat, requestsAcl, writeFile, reviewStatus).
  */
 export function runnerSyncPorts({ config: c, rec, now = Date.now }, io = {}) {
   const sync = ownerSyncPorts({ statusFile: c.workerStatusFile, uid: c.workerUid, outboxRoot: c.outboxRoot, product: c.product, clock: now,
     stat: io.stat, open: io.open, realpath: io.realpath, holds: recordHolds(rec), writeRequest: runnerRequestWriter(c, io) });
-  const review = io.reviewStatus ?? (() => readReviewStatus({ file: c.reviewStatusFile, now: now(), uid: c.reviewUid }));
   return {
-    // Both read before either is used: one that throws makes the whole list "not known" (L925 rule 1).
-    sessions: () => { const own = sync.sessions(); const rv = reviewSessions(review(), { now: now() }); return [...own, ...rv]; },
+    sessions: () => sessionsNow(c, rec, { now, io }),
     board: () => sync.board(),
     outboxSessions: () => sync.outboxSessions().filter((x) => x.product === c.product),
     probe: (session) => {
