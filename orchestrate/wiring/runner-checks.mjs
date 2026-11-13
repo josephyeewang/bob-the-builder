@@ -59,7 +59,8 @@
 //                           sessions themselves). The budget is check12's own inputs, and carries the pass's `filesOf`
 //                           (#369 r2 m4): check12 works out an undo's exact reverse with it (lane 2's #393, gate.mjs;
 //                           until it lands, check12 does not), so an undo is refused here, saying so, when the budget has
-//                           none. No budget source yet (runner-main.mjs budget: null), so no port
+//                           none. The budget is the one main loaded from the config's `budget` (M11 budget.mjs); with
+//                           none named, or one that could not be loaded, no port
 //   13 Bob method folder    reviewChecks' 13 against the pinned file list; no list, no port
 // The inputs come from the start port's `x` and the runner's config (runner-main.mjs workerCheckInputs).
 

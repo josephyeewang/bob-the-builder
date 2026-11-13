@@ -20,7 +20,9 @@
 //
 //   const reader = makeReader({ gh, stateDir, products, verifyApproved?, alert, now? });
 //   await reader.refresh();                   // one pass over every product
-//   reader.state(product) → { status: 'ok'|'last_good'|'deny_all', policy|null, rev|null, commit, blob, reason }
+//   reader.state(product) → { status: 'ok'|'last_good'|'deny_all', policy|null, text, rev|null, commit, blob, fetchedAt, reason }
+//     (text: the rules file in force, and fetchedAt: the last fetch that worked (ms), for the Dispatcher's rules snapshot
+//     the runners read, L995, L1001: their grace counts from that fetch, as this reader's does)
 
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync } from 'node:fs';
@@ -277,7 +279,7 @@ export function makeReader({ gh, stateDir, products, verifyApproved, alert, now 
       if (st.deleted || !st.good || stale) return { status: 'deny_all', policy: null, rev: null, reason: st.reason };
       const g = st.good;
       const status = st.reason === 'adopted' || st.reason === 'unchanged' ? 'ok' : 'last_good';
-      return { status, policy: g.policy, rev: `${g.commit.slice(0, 7)}:${g.blob.slice(0, 7)}`, commit: g.commit, blob: g.blob, reason: st.reason };
+      return { status, policy: g.policy, text: g.text, rev: `${g.commit.slice(0, 7)}:${g.blob.slice(0, 7)}`, commit: g.commit, blob: g.blob, fetchedAt: st.lastFetchOk, reason: st.reason };
     },
   });
 }

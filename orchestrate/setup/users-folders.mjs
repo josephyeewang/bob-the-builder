@@ -15,7 +15,7 @@
 // mac.mjs `secure`. New folders are made while still root's, parents first; owners and modes are set deepest first, so
 // a parent that a robot user will own is handed over last.
 
-import { BASE_MARKER, NO_SHELL, USERS, USER_ID_RANGE, aclText, baseMarkerPath, folderTable, homeOf, oldFlatOutboxPaths, workerCopiesPath } from './layout.mjs';
+import { BASE_MARKER, BOB_NEW, BOB_OLD, NO_SHELL, USERS, USER_ID_RANGE, aclText, baseMarkerPath, folderTable, homeOf, oldFlatOutboxPaths, workerCopiesPath } from './layout.mjs';
 import { baseChainProblem, guardOp } from './guard.mjs';
 
 const DSCL = '/usr/bin/dscl';
@@ -323,7 +323,7 @@ export function check(io, cfg, { alsoKnown = [] } = {}) {
   const tableRows = folderTable(cfg);
   // The runner roles' flat outbox folders (outboxes/worker, outboxes/script) that setup made before L914 are no entry the
   // setup did not make: the check below names them and what they hold, so the outbox root's row does not FAIL on them too.
-  folderChecks(io, tableRows, ids, item, { known: new Set([...tableRows.map((r) => r.path), baseMarkerPath(cfg), ...oldFlatOutboxPaths(cfg), ...alsoKnown]) });
+  folderChecks(io, tableRows, ids, item, { base: cfg.base, known: new Set([...tableRows.map((r) => r.path), baseMarkerPath(cfg), ...oldFlatOutboxPaths(cfg), ...alsoKnown]) });
   // L914: the worker runner's roles have their outboxes in each product's folder (L836), so setup makes their flat folders no
   // more. One left from before is named with what it holds, for the owner to clear by hand: a session's hand-in there may
   // not be taken in yet. Setup deletes nothing. Finder's own .DS_Store is let be.
@@ -357,8 +357,8 @@ export function check(io, cfg, { alsoKnown = [] } = {}) {
   return out;
 }
 
-/** The owner, group, mode and exact access list of each row's folder → item(ok, what, why). Read only. `known`: the paths a root-owned folder may hold. */
-export function folderChecks(io, rows, ids, item, { known = new Set(rows.map((r) => r.path)) } = {}) {
+/** The owner, group, mode and exact access list of each row's folder → item(ok, what, why). Read only. `known`: the paths a root-owned folder may hold; `base`: the base, where a cut-off bob run's leftovers are named. */
+export function folderChecks(io, rows, ids, item, { known = new Set(rows.map((r) => r.path)), base = null } = {}) {
   for (const row of rows) {
     const what = `${row.path} (${row.owner}, ${modeText(row.mode)})`;
     let st; try { st = io.lstat(row.path); } catch { item(false, what, 'missing'); continue; }
@@ -378,6 +378,9 @@ export function folderChecks(io, rows, ids, item, { known = new Set(rows.map((r)
       let names = null; try { names = io.list(row.path); } catch { why.push('its contents could not be listed'); }
       const extra = (names ?? []).filter((n) => !known.has(`${row.path}/${n}`));
       if (extra.length) why.push(`holds ${extra.length === 1 ? 'an entry' : 'entries'} the setup did not make: ${extra.slice(0, 5).join(', ')}`);
+      // A cut-off bob step leaves these in the base; the next bob run puts them right (L1035 c4).
+      const leftover = row.path === base ? extra.filter((n) => n === BOB_NEW || n === BOB_OLD) : [];
+      if (leftover.length) why.push(`${leftover.join(' and ')} ${leftover.length === 1 ? 'was' : 'were'} left by a cut-off bob run: run bob again (README), which puts the Bob folder right first`);
     }
     if ((st.mode & 0o7777) !== row.mode) why.push(`mode is ${modeText(st.mode & 0o7777)}, want ${modeText(row.mode)}`);
     const acl = aclEntries(io, row.path);

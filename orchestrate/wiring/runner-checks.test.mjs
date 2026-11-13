@@ -13,7 +13,7 @@ import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.m
 import { CHECKS } from '../modules/M4-workshop/launcher/launch.mjs';
 import { BASELINE_MS, WALK_DEPTH, baselineCommand, baselineFile, setupFilesProblem, workerChecks } from './runner-checks.mjs';
 import { LOCKED_MS, groupFile, groupRecordCommand } from './runner-locked.mjs';
-import { RECHECK, checkRunnerConfig, lockedOf, lockedWiring, startDeps, workerCheckInputs } from './runner-main.mjs';
+import { RECHECK, checkRunnerConfig, lockedOf, lockedWiring, realRunnerPorts, startDeps, workerCheckInputs } from './runner-main.mjs';
 
 const FIXED = '/Library/Application Support/ClaudeCode/managed-settings.json';
 // #419 r3 m1: near misses of the fixed file, each refused by this layer's own check.
@@ -474,4 +474,49 @@ test('#369 r1 m3: check 2 compares with the main the copy was restored from, not
     mkdirSync(deep, { recursive: true });
     assert.match(await setupFilesProblem({ ...f, mainAt: at }), /more than 64 folders deep/);
   } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('L1001: the config\'s budget and Bob file list reach the checks, which then have ports 12 and 13; with none, neither has', () => {
+  const c = checkRunnerConfig({ installRoot: '/i', requestsDir: '/r', statusFile: '/o/status.json', orchestrateUid: 501, outboxRoot: '/ob', copiesRoot: '/c', home: '/home',
+    path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/rec', recordUid: 502, claimMs: 1, pin: '2.1.300', machineWide: '/Library/Application Support/ClaudeCode/managed-settings.json',
+    budget: '/i/modules/M11-dispatcher/budget.mjs', bobManifest: '/i/bob-manifest.json', dispatcherRules: '/d/rules.json', reviewStatusFile: '/rv/status.json', reviewUid: 503,
+    products: { p1: { repo: 'o/p', mirror: '/m', rules: RULES, render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] }, hooksDir: '/h', snapshot: '/snap/s.json', bobFolder: '/b' } } } } });
+  const budget = { rules: {}, rec: {}, bandsNow: () => ({}), runningNow: () => [] }; const bobManifest = { 'a.md': 'f'.repeat(64) };
+  const i = workerCheckInputs(c, { product: 'p1', sessionId: SID }, { budget, bobManifest });
+  assert.equal(i.budget, budget); assert.equal(i.bobManifest, bobManifest);
+  const wx = { role: 'worker', profile: DESIGN_PROFILES.worker, kind: 'editing', product: 'p1', sessionId: SID, copy: '/c/C-1', settings: { file: '/f', settings: {} } };
+  const ports = (o) => Object.keys(startDeps(c, o).checksFor(wx)).map(Number);
+  assert.deepEqual(ports({ budget, bobManifest }), [1, 2, 3, 5, 6, 7, 8, 9, 10, 12, 13]);
+  assert.deepEqual(ports({}), [1, 2, 3, 5, 6, 7, 8, 9, 10], 'none loaded: no port, so launch refuses');
+});
+
+// #463 r3 m5: the merge with #478 keeps both: one lockedWiring carries the lock-down runner (check 4 and save-work) AND the
+// budget and Bob file list (checks 12 and 13), and realRunnerPorts hands it all four. Taking either side alone would
+// quietly drop check 4 and save-work, or check 12.
+test('#463 r3 m5: check 4, save-work and checks 12 and 13 all stay wired through lockedWiring and realRunnerPorts', async () => {
+  const c = checkRunnerConfig({ installRoot: '/i', requestsDir: '/r', statusFile: '/o/status.json', orchestrateUid: 501, outboxRoot: '/ob', copiesRoot: '/c', home: '/home',
+    path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/rec', recordUid: 502, claimMs: 1, pin: '2.1.300', machineWide: '/Library/Application Support/ClaudeCode/managed-settings.json',
+    budget: '/i/modules/M11-dispatcher/budget.mjs', bobManifest: '/i/bob-manifest.json', dispatcherRules: '/d/rules.json', reviewStatusFile: '/rv/status.json', reviewUid: 503,
+    products: { p1: { repo: 'o/p', mirror: '/m', rules: RULES, render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] }, hooksDir: '/h', snapshot: '/snap/s.json', bobFolder: '/b' }, product: { commands: { install: 'npm ci', test: 'npm test' } }, registryHosts: [] } } } });
+  const budget = { rules: {}, rec: {}, bandsNow: () => ({}), runningNow: () => [] }; const bobManifest = { 'a.md': 'f'.repeat(64) };
+  const seen = [];
+  const runLocked = async (j) => { seen.push(j.job); return j.job === 'install' ? { ok: true } : { ok: false, reason: 'stand-in' }; };
+  const wx = { role: 'worker', profile: DESIGN_PROFILES.worker, kind: 'editing', product: 'p1', sessionId: SID, copy: '/c/C-1', settings: { file: '/f', settings: {} }, renderPhase: () => ({ ok: true, settings: {} }), writeSettings: () => ({ ok: true }) };
+  const w = lockedWiring(c, { runLocked, budget, bobManifest });
+  const k = w.startDeps.checksFor(wx);
+  assert.deepEqual(Object.keys(k).map(Number), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13], 'check 4 and checks 12 and 13 together');
+  assert.deepEqual(await k[4](), { ok: true }); assert.deepEqual(seen, ['install'], 'check 4 runs the install through the one runLocked');
+  const real = tempDir('orch-'); mkdirSync(join(real, '.git'));
+  try { assert.deepEqual(await w.saveWork({ id: SID, product: 'p1', kind: 'editing', card: 'C-1', copy: real, outbox: '/ob/p1/worker/x', save_settings_sha: 'a'.repeat(64) }), { ok: false, reason: 'stand-in' }); }
+  finally { rmSync(real, { recursive: true, force: true }); }
+  assert.deepEqual(seen, ['install', 'save-work'], 'save-work through the same runLocked');
+  // realRunnerPorts hands lockedWiring the runner, the budget and the Bob file list, and uses its save-work and start deps.
+  let got; let made;
+  const p = realRunnerPorts(c, {}, { runLocked, budget, bobManifest, wire: (cc, o) => { got = o; made = lockedWiring(cc, o); return made; } });
+  assert.equal(got.runLocked, runLocked); assert.equal(got.budget, budget); assert.equal(got.bobManifest, bobManifest);
+  assert.equal(p.saveWork, made.saveWork, 'the runner\'s save-work is lockedWiring\'s');
+  // Left out, the budget and Bob list are null (checks 12 and 13 have no port), and check 4 stays on.
+  realRunnerPorts(c, {}, { runLocked, wire: (cc, o) => { got = o; return lockedWiring(cc, o); } });
+  assert.deepEqual([got.budget, got.bobManifest, got.runLocked], [null, null, runLocked]);
+  assert.deepEqual(Object.keys(lockedWiring(c, { runLocked }).startDeps.checksFor(wx)).map(Number), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
 });
