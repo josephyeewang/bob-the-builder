@@ -11,7 +11,7 @@ import { tempDir } from '../shared/test-tmp.mjs';
 import { SETTINGS as S } from '../modules/M4-workshop/launcher/settings-names.mjs';
 import { gitOk, initMirror } from '../modules/M4-workshop/git/safe-git.mjs';
 import { launch } from '../modules/M4-workshop/launcher/launch.mjs';
-import { INTAKE_DONE, chmodTree, removeAll, cardStartCommit, undoCommitProblem, drainedPort, groupThere, pauseLeadPort, liveWallProblem, productWallGap, projectFolderName, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath, workerPromptText } from './runner-ports.mjs';
+import { INTAKE_DONE, chmodTree, removeAll, cardStartCommit, undoCommitProblem, drainedPort, groupThere, pauseLeadPort, liveWallProblem, productWallGap, projectFolderName, TRANSCRIPT_PLACE_CHECKED_AGAINST, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath, workerPromptText } from './runner-ports.mjs';
 import { walledLaunchSettings } from './runner-launch.mjs';
 import { leaderStart } from './runner-loop.mjs';
 import { FLAGS, namesIn } from '../modules/M4-workshop/launcher/settings-names.mjs';
@@ -29,6 +29,12 @@ test('step 5: size reads the session\'s conversation file and its last write; a 
     const s = { id: SID, config_dir: join(d, 'cfg'), copy: '/copies/C-1' };
     assert.equal(projectFolderName('/copies/C-1'), '-copies-C-1');
     assert.equal(projectFolderName('/copies/a.b_c d'), '-copies-a-b-c-d', 'every character but a letter or digit');
+    // L1098: 2.1.316 cuts a name over 200 characters and adds the path's string hash in base 36 (values worked by hand from its code).
+    const at200 = '/' + 'a'.repeat(199);
+    assert.equal(projectFolderName(at200), '-' + 'a'.repeat(199), 'exactly 200: kept whole');
+    assert.equal(projectFolderName(at200 + 'b'), '-' + 'a'.repeat(199) + '-' + 'b6ymvk');   // b6ymvk: worked in Python from the rule, not by this code
+    assert.notEqual(projectFolderName('/' + 'x'.repeat(250)), projectFolderName('/' + 'x'.repeat(251)), 'two long paths sharing 200 characters still differ');
+    assert.equal(TRANSCRIPT_PLACE_CHECKED_AGAINST, '2.1.316');
     const f = transcriptPath({ configDir: s.config_dir, copy: s.copy, sessionId: SID });
     assert.equal(f, join(d, 'cfg', 'projects', '-copies-C-1', `${SID}.jsonl`));
     const size = sizePort();

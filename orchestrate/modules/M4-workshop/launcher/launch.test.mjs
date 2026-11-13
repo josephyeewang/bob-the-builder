@@ -321,6 +321,10 @@ const LEAKED = ['CLAUDECODE', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_CHILD_SESSI
   'CLAUDE_EFFORT', 'CODEX_THREAD_ID'];
 test('R-0b-156: a role\'s environment is an allow-list: no session variable of the launcher reaches it, and any name off the list in extra refuses', () => {
   assert.deepEqual([...ROLE_ENV_ALLOWED].sort(), [...PASS_ENV, 'PATH', ...LAUNCHER_ENV].sort());
+  // L1098: 2.1.316 names a session's conversation folder from CLAUDE_CODE_PROJECT_DIR_NAME when CLAUDE_CONFIG_DIR is set;
+  // runner-ports' transcript place holds only while that name never reaches a session.
+  assert.ok(!ROLE_ENV_ALLOWED.includes('CLAUDE_CODE_PROJECT_DIR_NAME'));
+  const r = checkRoleEnv({ PATH: '/usr/bin', CLAUDE_CODE_PROJECT_DIR_NAME: 'x' }); assert.equal(r.ok, false); assert.match(r.reason, /not on the role's allow-list.*CLAUDE_CODE_PROJECT_DIR_NAME/);
   assert.deepEqual([...LAUNCHER_ENV], ['CLAUDE_CONFIG_DIR']);
   const base = { HOME: '/h', LANG: 'C' };
   for (const k of LEAKED) base[k] = 'leaked';

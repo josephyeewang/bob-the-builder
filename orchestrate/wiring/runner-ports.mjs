@@ -55,9 +55,12 @@
 //   size(session): the session's conversation file, read by M11 transcript.mjs, and its last write time. The activity
 //     state is left out (the tracker is not fed in the runner), so the Dispatcher's probe reads "can't tell" and the
 //     stop step waits for its late hard stop, never a guess of "safe".
-// Capability note (Principle 9): where Claude Code keeps a conversation (<config dir>/projects/<the working folder with
-// each character but a letter or digit made "-">/<session id>.jsonl) is CHECKED AGAINST NOTHING YET, as transcript.mjs's
-// line shapes are; void at the next pin. TRANSCRIPT_PLACE_CHECKED_AGAINST names the version once the live proof runs.
+// Capability note (Principle 9): where Claude Code keeps a conversation is <config dir>/projects/<folder>/<session id>.jsonl,
+// <folder> being the working folder with each character but a letter or digit made "-", cut at 200 characters with "-" and
+// the folder's 32-bit string hash in base 36 added when longer. CHECKED AGAINST 2.1.316 by reading its code (EL, Zhe, qw,
+// Lm; not a live run; L1098): void at the next pin. 2.1.316 takes the folder from CLAUDE_CODE_PROJECT_DIR_NAME instead when
+// CLAUDE_CONFIG_DIR is set; the environment allow-list (env-check.mjs ROLE_ENV_ALLOWED, R-0b-156) keeps that name out of
+// every session, so the rule above is the one that applies. transcript.mjs's line shapes are a separate note.
 
 import { fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeSync, closeSync, constants } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -86,13 +89,18 @@ import { PUSH_FACT, bundleName } from '../modules/M4-workshop/git/push.mjs';
 import { PRODUCT_OUTBOX_ROLES } from '../shared/product-paths.mjs';
 import { workerPrompt } from '../modules/M5-review-audit/worker-prompt.mjs';
 
-export const TRANSCRIPT_PLACE_CHECKED_AGAINST = null;
+export const TRANSCRIPT_PLACE_CHECKED_AGAINST = '2.1.316';   // read from its code, not a live run (see the note above)
 const refuse = (reason) => ({ ok: false, reason });
 const notWired = (what) => refuse(`not wired: ${what}`);
 const SHA = /^[0-9a-f]{40}$/;
 
-/** Claude Code's folder for a working folder's conversations (unchecked: see the capability note above). */
-export const projectFolderName = (cwd) => String(cwd).replace(/[^A-Za-z0-9]/g, '-');
+/** Claude Code's folder for a working folder's conversations (2.1.316's rule: see the capability note above). */
+export const PROJECT_FOLDER_MAX = 200;
+const stringHash = (t) => { let h = 0; for (let i = 0; i < t.length; i++) h = ((h << 5) - h + t.charCodeAt(i)) | 0; return h; };
+export const projectFolderName = (cwd) => {
+  const s = String(cwd); const name = s.replace(/[^A-Za-z0-9]/g, '-');
+  return name.length <= PROJECT_FOLDER_MAX ? name : `${name.slice(0, PROJECT_FOLDER_MAX)}-${Math.abs(stringHash(s)).toString(36)}`;
+};
 export const transcriptPath = ({ configDir, copy, sessionId }) => join(configDir, 'projects', projectFolderName(copy), `${sessionId}.jsonl`);
 
 /** size(session) → { size, lastWriteAt }, or a throw (the pass then lists no size). */
