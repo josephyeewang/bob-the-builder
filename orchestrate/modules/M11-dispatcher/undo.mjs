@@ -7,10 +7,13 @@
 // draft and moved to ready (go-free). The Record lets one exact_reverse card per ask, so asking again is harmless; the
 // ask itself is approvals' to close (answered → consumed is approvals' move, and M2 has no consume call yet: told to
 // the lead). The exact reverse pull request is M6's (lane 1, 0b-9), not M11's.
-// Not clean (D8): when M6 records that an exact reverse is impossible (fact `reverse-<undo card>`, merge_gate's own,
-// with state not_clean), M11 writes a fix card for the failed undo card (M9: a fix card fixes a failed card, its plan the
-// root's; it stays a draft, so the start loop never picks it up) and alerts Joe, once. While the undo card has not
-// failed, the Lead is told instead.
+// Not clean (D8, L980): when the Merge Gate finds an exact reverse impossible, it writes its own fact
+// `reverse-<undo card>` (state not_clean, with the card head it was found at) and fails the undo card on it (M6
+// gate.mjs settleNotClean). M11 then writes a fix card for the failed undo card (M9: a fix card fixes a failed card,
+// its plan the root's; it stays a draft, so the start loop never picks it up) and alerts Joe, once. While the card is
+// still verified or approved at the fact's head, the gate's move into failed has not gone through yet, and the Lead
+// is told instead; a fact for a head the card has left is old news and says nothing (L1008). A fact on a failed card
+// that is not the gate's own not_clean finding is told, once a day, since no fix card can follow from it (L1008).
 
 import { move } from './moves.mjs';
 import { tellThen } from './alerts.mjs';
@@ -18,10 +21,12 @@ import { holdAlert } from './pass.mjs';
 import { undoneBy } from '../M6-merge-gate/undo.mjs';
 import { factFrom, PLAN_INPUTS } from '../M9-record/permissions.mjs';
 import { answerCounts } from '../../shared/approval.mjs';
+import { NOT_CLEAN, REVERSE_FACT } from '../../shared/record-names.mjs';
 
 export const UNDO_CARD = (askId) => `undo-${askId}`;
 export const FIX_CARD = (undoId) => `fix-${undoId}`;
-export const REVERSE_FACT = (undoId) => `reverse-${undoId}`;
+// The gate's fact name has one home, shared with M6 and M9 (L1008); re-exported for this module's tests.
+export { REVERSE_FACT };
 /** The note that Joe was told of an undo's fix card (D8), the mark of that alert (L127). */
 export const UNDO_NOTE_FACT = (undoId) => `undo-note-${undoId}`;
 const MERGED = ['merged', 'audited_ok', 'audit_flagged'];
@@ -111,15 +116,31 @@ function fixCards({ rec, now, alert, out }) {
     if (doc.kind !== 'exact_reverse') continue;
     const fid = REVERSE_FACT(id);
     const f = rec.read('fact', fid);
-    if (f?.doc?.state !== 'not_clean' || !factFrom('merge_gate', { id: fid, createdBy: rec.meta?.('fact', fid)?.createdBy ?? null }, 'reverse-')) continue;
+    if (!f) continue;
     // Told once the fix card exists and its alert was delivered (the note is the alert's mark, L127): a fix card
     // whose alert the queue refused is told again next pass.
     const fix = rec.read('card', FIX_CARD(id));
     if (fix && rec.read('fact', UNDO_NOTE_FACT(id))) continue;
-    const why = `the undo (card ${id}) could not be an exact reverse: ${f.doc.reason ?? 'no reason given'}`;
+    const own = !f.corrupt && f.doc?.state === NOT_CLEAN && factFrom('merge_gate', { id: fid, createdBy: rec.meta?.('fact', fid)?.createdBy ?? null }, 'reverse-');
+    if (!own && !fix) {
+      // L1008: the gate writes this fact only as its own not_clean finding. Anything else there on a failed undo card
+      // (unreadable, another state, another writer) is never proof, so no fix card follows: told once a day, not
+      // passed over in silence. Before the card has failed it is the gate's to tell (gate.mjs settleNotClean, once).
+      if (doc.state === 'failed') {
+        const what = f.corrupt ? `can't be read (${f.reason ?? 'corrupt'})` : `is not the Merge Gate's own ${NOT_CLEAN} finding`;
+        holdAlert({ rec, cause: `undo-fact-damaged-${id}`, text: `undo card ${id} has failed, but its fact ${fid} ${what}, so no fix card is written; the Lead looks at ${fid} and makes the fix card by hand`, alert, now });
+      }
+      continue;
+    }
+    // A fix card already written on the gate's fact is still told, whatever has become of the fact since.
+    const why = `the undo (card ${id}) could not be an exact reverse: ${(own && f.doc.reason) || 'no reason given'}`;
     if (!fix && doc.state !== 'failed') {
-      // The Record gives a fix card only to a failed card: until this one fails, the Lead is told, once a day.
-      holdAlert({ rec, cause: `undo-not-clean-${id}`, text: `${why}; the Lead plans the fix once the undo card has failed`, alert, now });
+      // The Record gives a fix card only to a failed card, and the gate fails it on this fact only while the card is
+      // verified or approved at the fact's head (M9 writer, L980). Until then the Lead is told, once a day. A card that
+      // has left that head (pushed again, merged, cancelled) is judged anew by the gate: the old fact says nothing
+      // (#466 r1 self-review m-2: it re-alerted every day after the card had merged clean).
+      const failing = ['verified', 'approved'].includes(doc.state) && typeof doc.head === 'string' && f.doc.head === doc.head;
+      if (failing) holdAlert({ rec, cause: `undo-not-clean-${id}`, text: `${why}; the Merge Gate has not yet failed the undo card, and the Lead plans the fix once it has`, alert, now });
       continue;
     }
     if (!fix) {

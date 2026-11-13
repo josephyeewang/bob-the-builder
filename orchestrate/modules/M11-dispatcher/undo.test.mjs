@@ -199,33 +199,120 @@ test('L130: a fix card whose alert was not queued is told on the next pass, once
   assert.equal(w.rec.list('card').filter((c) => c.id === FIX_CARD(U)).length, 1, 'one fix card');
 });
 
+const H1 = '1'.repeat(40);
+const H2 = '2'.repeat(40);
+
 test('D8: not clean while the undo card has not failed -> no fix card yet; the Lead is told once a day', async () => {
   const U = UNDO_CARD('A-1');
-  const rec = recWith([target(), merge(), ['ask', 'A-1', ask()], ['card', U, undoCard()], reverseFact({ state: 'not_clean', reason: 'x' })]);
-  const alerts = [];
-  const step = (at) => undoStep({ rec, rules: R, now: at, filesOf: () => [], alert: (t) => alerts.push(t) });
-  await step(T0);
-  await step(T0 + 60_000);
-  assert.equal(rec.read('card', FIX_CARD(U)), null);
-  assert.equal(alerts.length, 1, alerts.join(' | '));
-  assert.match(alerts[0], /the Lead plans the fix once the undo card has failed/);
-  await step(T0 + 25 * 3_600_000);
-  assert.equal(alerts.length, 2, 'again a day later');
+  for (const state of ['verified', 'approved']) {
+    const rec = recWith([target(), merge(), ['ask', 'A-1', ask()], ['card', U, undoCard({ state, head: H1 })], reverseFact({ state: 'not_clean', reason: 'x', head: H1 })]);
+    const alerts = [];
+    const step = (at) => undoStep({ rec, rules: R, now: at, filesOf: () => [], alert: (t) => alerts.push(t) });
+    await step(T0);
+    await step(T0 + 60_000);
+    assert.equal(rec.read('card', FIX_CARD(U)), null, state);
+    assert.equal(alerts.length, 1, `${state}: ${alerts.join(' | ')}`);
+    assert.match(alerts[0], /could not be an exact reverse: x; the Merge Gate has not yet failed the undo card, and the Lead plans the fix once it has/);
+    await step(T0 + 25 * 3_600_000);
+    assert.equal(alerts.length, 2, `${state}: again a day later`);
+  }
 });
 
-test('D8 / L74 addendum: a clean reverse, no word from M6, or a look-alike not_clean fact not written by the gate writes nothing', async () => {
+// #466 r1 self-review m-2 (L1008): the gate fails the card on its fact only while the card is verified or approved at
+// the fact's head. A card that has left that head is judged anew, so the old fact is told to no one, on no day.
+test('L1008 m-2: a not_clean fact for a head the undo card has left says nothing, on any day', async () => {
+  const U = UNDO_CARD('A-1');
+  for (const [label, over, factHead = { head: H1 }] of [
+    ['merged clean since', { state: 'merged', head: H2, merge_commit: OTHER }],
+    ['pushed again, verified at the new head', { state: 'verified', head: H2 }],
+    ['pushed again, approved at the new head', { state: 'approved', head: H2 }],
+    ['pushed again, in review', { state: 'in_review', head: H2 }],
+    ['cancelled at the same head', { state: 'cancelled', head: H1 }],
+    ['verified with no head', { state: 'verified' }],
+    ['verified, neither it nor the fact with a head', { state: 'verified' }, {}],
+  ]) {
+    const rec = recWith([target(), merge(), ['ask', 'A-1', ask()], ['card', U, undoCard(over)], reverseFact({ state: 'not_clean', reason: 'x', ...factHead })]);
+    const alerts = [];
+    const step = (at) => undoStep({ rec, rules: R, now: at, filesOf: () => [], alert: (t) => alerts.push(t) });
+    for (const at of [T0, T0 + 25 * 3_600_000, T0 + 50 * 3_600_000]) assert.deepEqual(await step(at), [], label);
+    assert.deepEqual(alerts, [], label);
+    assert.equal(rec.read('card', FIX_CARD(U)), null, label);
+  }
+});
+
+// L1008: on a failed undo card, a reverse- fact that is not the gate's own not_clean finding is never proof, so no fix
+// card follows; it is told once a day rather than passed over in silence.
+test('L1008: a failed undo card whose reverse fact is damaged, of another state or another writer\'s -> no fix card, told once a day', async () => {
+  const U = UNDO_CARD('A-1');
+  const fid = REVERSE_FACT(U);
+  const base = [target(), merge(), ['ask', 'A-1', ask()], failedUndo()];
+  const lookAlike = (r) => ({ ...proxy(r), meta: (e, id) => (e === 'fact' && id === fid ? { ...r.meta(e, id), createdBy: 'sensors' } : r.meta(e, id)) });
+  const corrupt = (r) => ({ ...proxy(r), read: (e, id) => (e === 'fact' && id === fid ? { id, entity: e, corrupt: true, reason: 'document changed outside the Store Writer' } : r.read(e, id)) });
+  for (const [label, fact, wrap, said] of [
+    ['clean', { state: 'clean' }, null, /is not the Merge Gate's own not_clean finding/],
+    ['no state', { reason: 'x' }, null, /is not the Merge Gate's own not_clean finding/],
+    ['another writer', { state: 'not_clean', reason: 'x' }, lookAlike, /is not the Merge Gate's own not_clean finding/],
+    ['unreadable', { state: 'not_clean', reason: 'x' }, corrupt, /can't be read \(document changed outside the Store Writer\)/],
+  ]) {
+    const base0 = recWith([...base, reverseFact(fact)]);
+    const rec = wrap ? wrap(base0) : base0;
+    const alerts = [];
+    const step = (at) => undoStep({ rec, rules: R, now: at, filesOf: () => [], alert: (t) => alerts.push(t) });
+    assert.deepEqual(await step(T0), [], label);
+    await step(T0 + 60_000);
+    assert.equal(base0.read('card', FIX_CARD(U)), null, label);
+    assert.equal(alerts.length, 1, `${label}: ${alerts.join(' | ')}`);
+    assert.match(alerts[0], new RegExp(`undo card ${U} has failed, but its fact ${fid} `), label);
+    assert.match(alerts[0], said, label);
+    assert.match(alerts[0], /so no fix card is written; the Lead looks at/, label);
+    await step(T0 + 25 * 3_600_000);
+    assert.equal(alerts.length, 2, `${label}: again a day later`);
+  }
+  // Before the card fails, a damaged fact is the gate's to tell (gate.mjs settleNotClean): M11 says nothing.
+  for (const state of ['verified', 'approved']) {
+    const rec = recWith([target(), merge(), ['ask', 'A-1', ask()], ['card', U, undoCard({ state, head: H1 })], reverseFact({ state: 'clean', head: H1 })]);
+    const alerts = [];
+    assert.deepEqual(await undoStep({ rec, rules: R, now: T0, filesOf: () => [], alert: (t) => alerts.push(t) }), [], state);
+    assert.deepEqual(alerts, [], state);
+  }
+});
+
+test('L1008: a fix card written on the gate\'s fact is still told once, though the fact has since become damaged; its words are not used', async () => {
+  const U = UNDO_CARD('A-1');
+  const fid = REVERSE_FACT(U);
+  for (const [label, bad] of [
+    ['unreadable', (id, e) => ({ id, entity: e, corrupt: true, reason: 'gone bad' })],
+    ['another state', (id, e) => ({ id, entity: e, rev: 2, doc: { state: 'clean', reason: 'words from a fact that is no proof' } })],
+  ]) {
+    const w = world([target(), merge(), ['ask', 'A-1', ask()], failedUndo(), reverseFact({ state: 'not_clean', reason: 'a later change touched src/a.js' })]);
+    assert.deepEqual(await undoStep0({ rec: w.rec, rules: R, now: T0, filesOf: () => [], alert: () => false }), [[U, 'fix card written']], label);
+    const rec = { ...proxy(w.rec), read: (e, id) => (e === 'fact' && id === fid ? bad(id, e) : w.rec.read(e, id)) };
+    const alerts = [];
+    const step = (at) => undoStep({ rec, rules: R, now: at, filesOf: () => [], alert: (t) => alerts.push(t) });
+    await step(T0);
+    await step(T0 + 25 * 3_600_000);
+    assert.equal(alerts.length, 1, `${label}: ${alerts.join(' | ')}`);
+    assert.match(alerts[0], /could not be an exact reverse: no reason given; a fix card waits for the Lead/, label);
+    assert.ok(w.rec.read('fact', UNDO_NOTE_FACT(U)), `${label}: noted once told`);
+  }
+});
+
+test('D8 / L74 addendum: a clean reverse, no word from M6, or a look-alike not_clean fact not written by the gate writes no fix card', async () => {
   const U = UNDO_CARD('A-1');
   const base = [target(), merge(), ['ask', 'A-1', ask()], failedUndo()];
   for (const [label, extra] of [
     ['no word', []],
-    ['clean', [reverseFact({ state: 'clean' })]],
     ['another card\'s', [reverseFact({ state: 'not_clean' }, REVERSE_FACT('C-2'))]],
   ]) {
     const w = world([...base, ...extra]);
     assert.deepEqual((await w.step()), [], label);
     assert.equal(w.calls.alerts.length, 0, label);
   }
-  // The look-alike: a not_clean fact under the gate's id that another role wrote (a record that says so) is ignored.
+  // 'clean', and the look-alike (a not_clean fact under the gate's id that another role wrote, a record that says so):
+  // never proof, so no fix card; told as a damaged fact (L1008, the test above).
+  const w0 = world([...base, reverseFact({ state: 'clean' })]);
+  assert.deepEqual((await w0.step()), [], 'clean');
+  assert.equal(w0.rec.read('card', FIX_CARD(U)), null, 'clean');
   const w = world([...base, reverseFact({ state: 'not_clean', reason: 'x' })], { rec: (r) => ({ ...proxy(r), meta: (e, id) => (e === 'fact' && id === REVERSE_FACT(U) ? { ...r.meta(e, id), createdBy: 'sensors' } : r.meta(e, id)) }) });
   assert.deepEqual((await w.step()), [], 'a look-alike is not proof');
   assert.equal(w.rec.read('card', FIX_CARD(U)), null);
