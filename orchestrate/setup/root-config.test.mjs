@@ -7,7 +7,8 @@ import { chmodSync, existsSync, mkdirSync, renameSync, rmSync, statSync, symlink
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { tempDir } from '../shared/test-tmp.mjs';
-import { BASE_MARKER, ORCHESTRATE_READ_ACL, ROOT_CONFIG_PATH, USERS, WORKER_ROLES, baseMarkerPath, folderTable, parseConfig } from './layout.mjs';
+import { BASE_MARKER, ORCHESTRATE_READ_ACL, ROOT_CONFIG_PATH, RULES_READ_ACL, USERS, WORKER_ROLES, baseMarkerPath, dispatcherRulesDir, folderTable, parseConfig } from './layout.mjs';
+import { rulesSnapshotFolderProblem } from '../modules/M11-dispatcher/budget.mjs';
 import { nodeProblemOf, readConfigFile, realIo } from './mac.mjs';
 import { apply, check, plan } from './users-folders.mjs';
 import { proofList } from './proofs.mjs';
@@ -170,6 +171,20 @@ test('m2: every table row\'s parent is root\'s, or the row is a direct child of 
     const parent = by.get(r.path.slice(0, r.path.lastIndexOf('/')));
     assert.ok(parent, `${r.path} has no parent row`);
     assert.ok(parent.owner === 'root' || parent.owner === r.owner, `${r.path} (${r.owner}) sits in ${parent.path} (${parent.owner})`);
+  }
+});
+
+test('L1042 m2 (A16): each product\'s rules folder is orchestrate\'s 0700, read by the review user and the owner only, as the runners demand', () => {
+  const c2 = parseConfig({ ...RAW, products: ['alpha', 'beta'] });
+  for (const prod of c2.products) {
+    const row = folderTable(c2).find((r) => r.path === dispatcherRulesDir(c2, prod));
+    assert.ok(row, prod);
+    assert.equal(row.owner, 'orchestrate', prod);
+    assert.equal(row.mode, 0o700, `${prod}: mode ${row.mode.toString(8)}`);
+    assert.deepEqual(row.acl, [RULES_READ_ACL('user:review'), RULES_READ_ACL(`user:${c2.owner}`)], prod);
+    // The runners' own check (M11 budget.mjs) takes a folder made at that mode, so cutover's first read is not refused.
+    const d = join(tempDir('setup-rules-dir-'), 'rules'); mkdirSync(d); chmodSync(d, row.mode);
+    assert.equal(rulesSnapshotFolderProblem(d, process.getuid()), null, prod);
   }
 });
 

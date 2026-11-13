@@ -181,3 +181,19 @@ test('L998: the view writes nothing, and a Record not made yet is an answer, not
   assert.match(readMeta({ ...v, entity: 'card', id: 'C-1' }).reason, /diary can't be read \(ENOENT\)/);
   assert.throws(() => listDocFiles({ ...v, entity: 'card' }) && readFileSync(join(root, 'docs', 'card')), /ENOENT/);
 });
+
+test('L1042 m3: a name in other case is no such document, found by the folder\'s listing before anything opens it', () => {
+  const env = filled();
+  const v = { recordRoot: env.root, recordUid: UID };
+  // A ruined file under a real card's name: on a disk that ignores case, `c-9` would open it and refuse the read, not
+  // answer "no such card" (review-told-once.test.mjs Q3 is the runner's side of this).
+  writeFileSync(join(env.root, 'docs', 'card', 'C-9.json'), '{}', { mode: 0o644 });
+  for (const id of ['c-1', 'c-2', 'c-9']) {
+    assert.deepEqual(readDocFile({ ...v, entity: 'card', id }), { ok: false, missing: true, reason: 'no such card' }, id);
+    assert.equal(recordView(v).read('card', id), null, id);
+  }
+  assert.deepEqual(readProductFile({ ...v, product: PRODUCT.toUpperCase() }), { ok: false, missing: true, reason: 'no such product' });
+  // The exact names still read.
+  assert.equal(readDocFile({ ...v, entity: 'card', id: 'C-1' }).ok, true);
+  assert.match(readDocFile({ ...v, entity: 'card', id: 'C-9' }).reason, /not a card document/);
+});
