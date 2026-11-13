@@ -77,7 +77,7 @@ test('the go is recorded as an owner-command go, and the Dispatcher\'s own pass 
 
 test('refused, with nothing written: another product, no card, Tier 1, a pass test not yet its rows\', rows that can\'t be read', async () => {
   const cases = [
-    [{}, { onlyProduct: GO_CARD_PRODUCT }, new RegExp(`${GO_CARD_PRODUCT} only`)],
+    [{}, { onlyProduct: undefined }, new RegExp(`${GO_CARD_PRODUCT} only`)],
     [{}, { cardId: 'C-2' }, /no card C-2; a Lead writes it first/],
     [{}, { cardId: '../x' }, /card id must be/],
     [{ card: { tier: 1 } }, {}, /Tier 1; this command gives a go on a Tier-2 card only/],
