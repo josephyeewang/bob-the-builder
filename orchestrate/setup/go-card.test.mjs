@@ -169,6 +169,75 @@ test('plants (L1100): M9 itself holds the owner_command actor to one Tier-2 ordi
   assert.equal(outboxFolders({ outboxRoot: '/x', tag: { role: 'owner_command', sessionId: 'S-1' } }).ok, false);
 });
 
+// L1111 1: a refused write is never read as success. The Record is wrapped so one kind of write is refused (or throws);
+// the command fails, says which step, and never reports a go that isn't recorded.
+const refusing = (w, when, how = 'refuse') => ({ ...w.t.record, write: (x) => {
+  if (!when(x)) return w.t.record.write(x);
+  if (how === 'throw') throw new Error('the disk is full');
+  return { ok: false, reason: 'the disk is full' };
+} });
+const withRecord = (w, record) => ({ ...w.t.ctx, record });
+const isAnswer = (x) => x.entity === 'ask' && x.doc?.state === 'answered';
+const isGo = (x) => x.entity === 'go';
+const isConsumed = (x) => x.entity === 'ask' && x.doc?.state === 'consumed';
+
+test('L1111 1: a refused card write, answer write or go write is a failure that names its step, and no go is reported', async () => {
+  for (const [when, want, after] of [
+    [(x) => x.entity === 'card', /the Record refused the card: the disk is full/, { card: false, asks: 0 }],
+    [isAnswer, /refused the answer: the disk is full/, { card: true, asks: 1, state: 'pushed' }],
+    [isGo, /the answer is recorded, but the go is not: the record refused the go: the disk is full/, { card: true, asks: 1, state: 'answered' }],
+    [isConsumed, /the answer is recorded, but the go is not: the go is recorded, but the ask could not be closed/, { card: true, asks: 1, state: 'answered', go: true }],
+  ]) {
+    const w = world();
+    const r = await run(w, { ctx: withRecord(w, refusing(w, when)) });
+    assert.equal(r.ok, false, String(want));
+    assert.match(r.reason, want);
+    assert.equal(r.go, undefined);
+    assert.equal(!!w.t.record.read('card', 'C-1'), after.card);
+    assert.equal(asks(w).length, after.asks);
+    if (after.state) assert.equal(asks(w)[0].doc.state, after.state);
+    assert.equal(!!askStore(w.t.record).go('go-C-1'), !!after.go);
+  }
+  // A write that throws is not caught as a success either: the command's main reports it and exits 1.
+  const w = world();
+  await assert.rejects(run(w, { ctx: withRecord(w, refusing(w, isGo, 'throw')) }), /the disk is full/);
+  assert.equal(askStore(w.t.record).go('go-C-1'), null);
+});
+
+test('L1111 2: a rerun after the answer was written but the go was not records the go, behind the same retype; only this owner\'s command answer', async () => {
+  // Stopped between the answer and the go (and, second, between the go and closing the ask): a rerun finishes it.
+  for (const when of [isGo, isConsumed]) {
+    const w = world();
+    assert.equal((await run(w, { ctx: withRecord(w, refusing(w, when)) })).ok, false);
+    const shownBefore = w.shown.length;
+    const r = await run(w);
+    assert.equal(r.ok, true, r.reason);
+    assert.equal(w.shown.length, shownBefore + 1, 'the rerun is shown and retyped again');
+    assert.equal(asks(w).length, 1, 'the same ask');
+    assert.equal(asks(w)[0].doc.state, 'consumed');
+    const go = askStore(w.t.record).go('go-C-1').doc;
+    assert.equal(go.binding.kind, OWNER_COMMAND);
+    assert.equal(go.plan_fingerprint, r.fingerprint);
+  }
+  // Not confirmed on the rerun: still no go.
+  const n = world();
+  await run(n, { ctx: withRecord(n, refusing(n, isGo)) });
+  assert.match((await run(n, { confirm: () => ({ ok: false, reason: 'the id typed was not C-1; no go was given' }) })).reason, /no go was given/);
+  assert.equal(askStore(n.t.record).go('go-C-1'), null);
+  // Plant: an answer by another owner id is not this command's to finish.
+  const o = world();
+  await run(o, { ctx: withRecord(o, refusing(o, isGo)) });
+  assert.match((await run(o, { sudoUid: 777 })).reason, /already answered, and not by your owner command/);
+  assert.equal(askStore(o.t.record).go('go-C-1'), null);
+  // A rerun after it all went through, before the Dispatcher's pass: nothing new, the same go.
+  const d = world();
+  const first = await run(d);
+  const again = await run(d);
+  assert.equal(again.ok, true, again.reason);
+  assert.equal(again.go, first.go);
+  assert.equal(asks(d).length, 1);
+});
+
 test('a rerun after a stop takes up only a draft the command made, with the same plan', async () => {
   // Its own draft, same plan (a stop after the card was written): taken up, one card, one ask.
   const w = world();

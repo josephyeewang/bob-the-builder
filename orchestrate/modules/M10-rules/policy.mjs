@@ -10,7 +10,7 @@
 // tabs and duplicate keys. It returns every value as a string, so numbers and versions are converted here.
 
 import { parseYaml } from '../../../scripts/blueprint/yaml-lite.mjs';
-import { RISKY_CLASSES, WHOLE_TEXT, DECIMAL_TEXT } from '../../shared/rules.mjs';
+import { RISKY_CLASSES, WHOLE_TEXT, DECIMAL_TEXT, exactFlag } from '../../shared/rules.mjs';
 import { STATES, FINAL_STATES, timeoutFor } from '../../shared/record.mjs';
 import { compile } from './paths.mjs';
 import { EFFECT_KEYS } from './classify.mjs';
@@ -146,7 +146,7 @@ function check(raw) {
   if (stage !== undefined && !CUTOVER_STAGES.includes(stage)) bad('product.cutover_stage must be first or second');
   // Exactly true or false (shared/rules.mjs exactFlag); missing reads as not the test product.
   const testProduct = raw.product?.test_product;
-  if (testProduct !== undefined && testProduct !== 'true' && testProduct !== 'false') bad('product.test_product must be true or false');
+  if (testProduct !== undefined && exactFlag(testProduct) === undefined) bad('product.test_product must be true or false');
   const p = structuredClone(raw);
   p.product = { ...(raw.product ?? {}), cutover_stage: stage ?? 'first' };
 

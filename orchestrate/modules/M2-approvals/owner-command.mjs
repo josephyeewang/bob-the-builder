@@ -10,8 +10,8 @@
 //     counts this one, and refuses it for a Tier-1 go or a risky class just as it would refuse a tap;
 //   - the answer carries `binding: { kind: 'owner_command', sudo_uid, at, card_json_sha256 }`, which M2 recordGo copies onto
 //     the go record. Anywhere a go is shown to the owner it must show binding.kind, so a command go is never presented as a
-//     phone tap (L1096). Today no code shows a go to the owner; owner-command.test.mjs fails when a new reader of go
-//     records appears, so that reader is made to show it.
+//     phone tap (L1096). Today no code shows a go to the owner; setup/go-card.test.mjs (the L1096 readers test) fails
+//     when a new reader of go records appears, so that reader is made to show it.
 // Who may run the command (the owner, through sudo, retyping the card id at a real terminal) is the command's to check;
 // this file checks only the ask.
 //
@@ -49,6 +49,7 @@ export function answerByOwnerCommand(ctx, askId, { sudoUid, cardJsonSha256 } = {
   const answer = { channel: 'tap', choice, approves: true, at, binding: { kind: OWNER_COMMAND, sudo_uid: sudoUid, at, card_json_sha256: cardJsonSha256 } };
   const counted = answerCounts(ctx.rules, { ...a.doc, answer }, { product: ctx.product, approves: true });
   if (!counted.ok) return fail(`the rules do not count this go: ${counted.reason}`);
+  // Backstop: the ask is a Tier-2 go M2 made, so the rules count it at Tier 2 unless M10 is wrong (L1111).
   if (counted.tier !== 2) return fail('the rules count this go only at Tier 1');
   if (a.doc.state === 'open') {
     const w = writeDoc(ctx.record, 'ask', a, { ...structuredClone(a.doc), state: 'pushed', shown_by: OWNER_COMMAND, shown_at: at });

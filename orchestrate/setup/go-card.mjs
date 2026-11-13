@@ -17,8 +17,10 @@
 //      test is set to theirs (M2 doneBar), so the Dispatcher's pass has nothing to change and the go binds what was shown.
 //   4. The card, its files, its pass test and the plan's fingerprint are shown, and the owner retypes the card id at the
 //      terminal. It is read from /dev/tty only, never stdin (L1096 Q11): with no terminal, or another id, nothing is
-//      written. A Claude session's shell has no terminal, so a session can't do this even while sudo's password is
-//      still cached.
+//      written. That stops a pipe, not a determined program: a shell running as the owner can make a terminal of its
+//      own (`script`, or any pseudo-terminal) and type into it. What stops a session there is sudo's password, which
+//      sudo asks for on each terminal (its per-terminal timestamp), so a new pseudo-terminal needs the password again.
+//      The retype is a check that the owner read the card, not a lock (L1111).
 //   5. The card is written under the Record actor `owner_command` (L1100), which M9 lets create only an ordinary Tier-2
 //      draft on a test product (permissions CARD_CREATORS, writer checkNewCard), so the diary names who made it.
 //   6. M2 raiseGo asks for the go exactly as the Dispatcher would; its fingerprint must be the one shown. M2
@@ -26,8 +28,9 @@
 //      card_json_sha256 the sha256 of the card file's bytes; M10's count_approval counts it as it counts a tap. M2
 //      recordGo writes the go record, whose binding says it came from this command.
 // The Dispatcher's own pass then moves the card to ready (M11 plan-go.mjs), as it does for any covered draft card.
-// A stop after step 5 leaves the card in draft (and its ask open). Running the command again with the same file takes
-// that card up again: only a draft this command made, with the same plan; any other card of that id is refused.
+// A stop after step 5 leaves the card in draft (and its ask open or answered). Running the command again with the same
+// file takes that card up again: only a draft this command made, with the same plan; any other card of that id is
+// refused. If the ask already holds this owner's command answer, only the go record is tried again (L1111).
 //
 // Exit: 0 the go is recorded; 1 refused or failed (one line saying why on stderr).
 
@@ -162,10 +165,19 @@ export async function goCard({ ctx, cardText, sudoUid, readRows, view, mainSha, 
   if (!g.ok) return fail(`the card is written, but the go could not be asked: ${g.reason}`);
   const ask = askStore(ctx.record).ask(g.id);
   if (!ask) return fail(`ask ${g.id} could not be read back`);
+  // Backstop: raiseGo fingerprints the same card the same way, so this can't fail while M2 is correct (L1111).
   if (ask.doc.fingerprint !== fp.sha256) return fail(`the go asked is on fingerprint ${ask.doc.fingerprint}, not the ${fp.sha256} shown; no go was given`);
   if (Array.isArray(ask.doc.risky) && ask.doc.risky.length) return fail(`the go is for a risky class (${ask.doc.risky.join(', ')}), which needs your own Approve on GitHub`);
-  const a = answerByOwnerCommand(ctx, g.id, { sudoUid, cardJsonSha256: sha256(text) });
-  if (!a.ok) return a;
+  // A rerun after a stop between the answer and the go record (L1111 2): the ask already holds this owner's command
+  // answer, so only recordGo is tried again (it is idempotent on a consumed ask). An answer given any other way is not
+  // this command's to finish.
+  if (['answered', 'consumed'].includes(ask.doc.state)) {
+    const b = ask.doc.answer?.binding;
+    if (b?.kind !== OWNER_COMMAND || b.sudo_uid !== sudoUid) return fail(`ask ${g.id} is already ${ask.doc.state}, and not by your owner command; this command can't finish it`);
+  } else {
+    const a = answerByOwnerCommand(ctx, g.id, { sudoUid, cardJsonSha256: sha256(text) });
+    if (!a.ok) return a;
+  }
   const go = recordGo(ctx, g.id);
   if (!go.ok) return fail(`the answer is recorded, but the go is not: ${go.reason}`);
   return { ok: true, card: cardId, ask: g.id, go: go.go, fingerprint: fp.sha256 };

@@ -191,7 +191,7 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
     if (name === 'owner_command') {
       if (doc.tier !== 2) return no('an owner command makes Tier-2 cards only');
       // The key is written out (not TEST_PRODUCT_KEY) so required-keys.test can name every rules read here.
-        if (rules.flag('product.test_product', { product }) !== true) return no('an owner command makes cards only on a product whose rules mark it the test product (product.test_product)');
+      if (rules.flag('product.test_product', { product }) !== true) return no('an owner command makes cards only on a product whose rules mark it the test product (product.test_product)');
     }
     if (doc.depends_on !== undefined && (!Array.isArray(doc.depends_on) || doc.depends_on.some((d) => typeof d !== 'string'))) return no('depends_on must be a list of card ids');
     if (doc.claim !== undefined || doc.wait !== undefined) return no('a new card has no claim or wait');

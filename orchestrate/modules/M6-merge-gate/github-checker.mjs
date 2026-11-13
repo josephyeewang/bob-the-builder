@@ -734,9 +734,9 @@ function compileList(patterns) {
 
 // ---- orchestrate/modules/M10-rules/policy.mjs ----
 __bob_def('orchestrate/modules/M10-rules/policy.mjs', ['scripts/blueprint/yaml-lite.mjs', 'orchestrate/shared/rules.mjs', 'orchestrate/shared/record.mjs', 'orchestrate/modules/M10-rules/paths.mjs', 'orchestrate/modules/M10-rules/classify.mjs'], function (__bob_e, __bob_i) {
-let parseYaml, RISKY_CLASSES, WHOLE_TEXT, DECIMAL_TEXT, STATES, FINAL_STATES, timeoutFor, compile, EFFECT_KEYS;
+let parseYaml, RISKY_CLASSES, WHOLE_TEXT, DECIMAL_TEXT, exactFlag, STATES, FINAL_STATES, timeoutFor, compile, EFFECT_KEYS;
 __bob_i('scripts/blueprint/yaml-lite.mjs', (m) => { parseYaml = m.parseYaml; });
-__bob_i('orchestrate/shared/rules.mjs', (m) => { RISKY_CLASSES = m.RISKY_CLASSES; WHOLE_TEXT = m.WHOLE_TEXT; DECIMAL_TEXT = m.DECIMAL_TEXT; });
+__bob_i('orchestrate/shared/rules.mjs', (m) => { RISKY_CLASSES = m.RISKY_CLASSES; WHOLE_TEXT = m.WHOLE_TEXT; DECIMAL_TEXT = m.DECIMAL_TEXT; exactFlag = m.exactFlag; });
 __bob_i('orchestrate/shared/record.mjs', (m) => { STATES = m.STATES; FINAL_STATES = m.FINAL_STATES; timeoutFor = m.timeoutFor; });
 __bob_i('orchestrate/modules/M10-rules/paths.mjs', (m) => { compile = m.compile; });
 __bob_i('orchestrate/modules/M10-rules/classify.mjs', (m) => { EFFECT_KEYS = m.EFFECT_KEYS; });
@@ -899,7 +899,7 @@ function check(raw) {
   if (stage !== undefined && !CUTOVER_STAGES.includes(stage)) bad('product.cutover_stage must be first or second');
   // Exactly true or false (shared/rules.mjs exactFlag); missing reads as not the test product.
   const testProduct = raw.product?.test_product;
-  if (testProduct !== undefined && testProduct !== 'true' && testProduct !== 'false') bad('product.test_product must be true or false');
+  if (testProduct !== undefined && exactFlag(testProduct) === undefined) bad('product.test_product must be true or false');
   const p = structuredClone(raw);
   p.product = { ...(raw.product ?? {}), cutover_stage: stage ?? 'first' };
 
