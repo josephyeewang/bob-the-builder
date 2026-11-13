@@ -1214,6 +1214,8 @@ echo "upkeep fixes: grep -q under pipefail · spec-audit joined headings · poin
 CL="$TMP/bigdlog"; mkdir -p "$CL"
 for n in $(seq 1 300); do printf '### D-%03d: entry\n' "$n"; done > "$CL/decision-log.md"
 expect "coherence: a 300-entry log with no gaps -> no ID reported missing" 0 "contiguous, no gaps" -- bash "$HERE/coherence-check.sh" "$CL"
+grep -v '^### D-150:' "$CL/decision-log.md" > "$CL/gap.md"; mv "$CL/gap.md" "$CL/decision-log.md"
+expect "coherence: ...and a real gap is still reported, exactly" 1 "MISSING: D-150$" -- bash "$HERE/coherence-check.sh" "$CL"
 # The class guard, deterministic: no script that sets pipefail may pipe into grep -q. Text inside
 # bash -c "..." or a hook's "command": string runs in a shell without pipefail, so it is skipped.
 early_grep_q() {
