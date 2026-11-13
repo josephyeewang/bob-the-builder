@@ -1,6 +1,6 @@
 // The production-write guard (design v4 §14.1.5, launch check 10, R-0b-36). Registered on every
-// tool in every role file and in the machine-wide file as a fallback. It reads ONLY the rules
-// snapshot, never GitHub or the network.
+// tool in every role file and in the machine-wide file as a fallback (there as `--machine-wide --snapshot <root's copy>`,
+// L1031). It reads ONLY the rules snapshot, never GitHub or the network.
 //
 // Snapshot shape M4 reads (lane 1 publishes it; assumed until the shared reader lands):
 //   rules.production = { env_files: [absolute paths], programs: [hosting / database program names],
@@ -10,7 +10,7 @@
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { readdirSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
-import { isMain, runHook, block, pass, toolPaths, shellCommands, bothWords, programOf, landingPath, realFolder, inside, joinLines, unreadable, heredocs, expandBraces, fold, globRe } from './lib.mjs';
+import { isMain, runHook, MACHINE_WIDE_WAY_OUT, block, pass, toolPaths, shellCommands, bothWords, programOf, landingPath, realFolder, inside, joinLines, unreadable, heredocs, expandBraces, fold, globRe } from './lib.mjs';
 import { readSnapshot } from './snapshot.mjs';
 
 // ---- whole-folder writes (LEAD-CALLS L41 G2: deny by default) ----
@@ -333,11 +333,15 @@ function judge(t, abs, deletes, protectedFiles, shielded, how = 'written') {
 }
 
 export function decide(input, args) {
-  const snap = readSnapshot(args.snapshot);
-  if (!snap.ok) return block(snap.reason);
+  // The machine-wide form (L1031) reads root's copy, written once by setup.mjs managed-settings and never refreshed: no age
+  // limit, but root's alone. `ownerUid` is a test's stand-in for root; parseArgs never sets it. A copy that can't be used
+  // blocks, saying how to switch the machine-wide guard off (guard b).
+  const snap = args.machineWide ? readSnapshot(args.snapshot, { maxAgeMs: Infinity, ownerUid: args.ownerUid ?? 0 }) : readSnapshot(args.snapshot);
+  const broken = (why) => block(args.machineWide ? `${why}; ${MACHINE_WIDE_WAY_OUT}` : why);
+  if (!snap.ok) return broken(snap.reason);
   const prod = snap.rules.production;
   if (!prod || !Array.isArray(prod.env_files) || !Array.isArray(prod.programs) || !Array.isArray(prod.hosts)) {
-    return block('the rules snapshot has no production block');
+    return broken('the rules snapshot has no production block');
   }
   // A Mac disk does not care about letter case, so names are compared folded (audit R-0b-44 round 2 MAT-2).
   const envFiles = prod.env_files.map((f) => fold(f));
@@ -395,4 +399,5 @@ export function decide(input, args) {
   return pass();
 }
 
-if (isMain(import.meta.url)) runHook(decide);
+// The one hook with a machine-wide form (L1031): `--machine-wide --snapshot <root's copy>`, from managed-settings.json.
+if (isMain(import.meta.url)) runHook(decide, {}, { machineWide: true });

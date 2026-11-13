@@ -288,3 +288,6 @@ export function folderTable(cfg) {
 /** The rules draft the watch-only week judges by (R-0b-122): root's copy, in orchestrate's watch folder; the config holds its hash. */
 export const watchRulesPath = (cfg) => join(cfg.base, 'watch', 'rules-draft.yaml');
 export const watchNotesPath = (cfg) => join(cfg.base, 'watch-notes');
+// The machine-wide guard's rules copy (L1031, setup.mjs managed-settings): root's 0644 file in the base, which is root's, so
+// no one else can change it or rename it away; written once, never refreshed (the hook reads it with no age limit).
+export const managedRulesPath = (cfg) => join(cfg.base, 'machine-wide-rules.json');

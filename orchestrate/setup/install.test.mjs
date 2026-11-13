@@ -2092,3 +2092,29 @@ test('add-to-install: the next real update carries claude-code and hooks across,
   assert.equal(readFileSync(pinnedBinary(w.root, PIN), 'utf8'), PROGRAM);
   assert.deepEqual(readdirSync(join(w.root, 'hooks')), ['guard.mjs']);
 });
+
+// L1031: managed-settings through setup.mjs's own main, after add-to-install: the way out is said first, a dry run changes
+// nothing, the real run places the copy and the file, and its after-check passes. The guard trial is the in-process guard with
+// this test's uid as root (the `managed` port); managed-settings.test.mjs has the rest.
+test('L1031: managed-settings after add-to-install, through main: dry run, real run, the way out said, again nothing to do', async () => {
+  const MW = '/Library/Application Support/ClaudeCode/managed-settings.json';
+  const rules = { production: { env_files: ['/srv/app/prod-settings.conf'], programs: ['vercel'], hosts: ['prod.example.com'] }, secrets: { paths: [] } };
+  const w = await readyToAdd({ machineWide: MW, rules });
+  assert.equal(w.run(ADD).code, 0);
+  // The copy's hooks folder holds the stand-in origin's scripts: the real guard and its two modules go in beside them, root's.
+  const hooksDir = join(w.root, 'hooks'); const src = join(dirname(fileURLToPath(import.meta.url)), '../modules/M4-workshop/hooks');
+  for (const n of ['production-write-guard.mjs', 'lib.mjs', 'snapshot.mjs']) { writeFileSync(join(hooksDir, n), readFileSync(join(src, n))); chmodSync(join(hooksDir, n), 0o644); }
+  mkdirSync(w.mac.at('/Library/Application Support'), { recursive: true });
+  const { decide } = await import('../modules/M4-workshop/hooks/production-write-guard.mjs');
+  const managed = { nodeBin: join(w.ext, 'node'), guard: ({ copy, input }) => { const r = decide(input, { machineWide: true, snapshot: copy, ownerUid: w.mac.rootUid }); return { code: r.block ? 2 : 0, stderr: r.reason ?? '' }; } };
+  const way = `sudo rm "${MW}"`;
+  const dry = w.run(['managed-settings', '--dry-run'], { managed });
+  assert.equal(dry.code, 0, dry.text); assert.ok(dry.text.includes(way), dry.text); assert.match(dry.text, /would run: read back .*would run: run the guard .*would run: rename .*managed-settings\.json\.writing →/s);
+  assert.equal(existsSync(w.mac.at(MW)), false, 'a dry run places nothing');
+  const r = w.run(['managed-settings'], { managed });
+  assert.equal(r.code, 0, r.text); assert.ok(r.text.includes(way)); assert.match(r.text, /done: all 3 items PASS/);
+  assert.match(readFileSync(w.mac.at(MW), 'utf8'), /production-write-guard\.mjs --machine-wide --snapshot \S+machine-wide-rules\.json \|\| exit 2/);
+  assert.match(w.run(['managed-settings'], { managed }).text, /nothing to do: already installed/);
+  // check knows the copy: it is no stranger in the base.
+  assert.equal(check(w.mac, w.cfg, { alsoKnown: rootMadeEntries(w.cfg) }).filter((x) => !x.ok && /machine-wide-rules/.test(`${x.what} ${x.why}`)).length, 0);
+});

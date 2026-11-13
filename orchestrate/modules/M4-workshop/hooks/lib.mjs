@@ -20,8 +20,30 @@ export const pass = () => ({ block: false });
 // name with no dash, so it can never be read as a kind's file (`<kind>-<id>.<ext>`) and stays one shell word.
 export const OUTBOX_FILE = /^[a-z]+\.(md|json|txt)$/;
 
-/** --role R --outbox O --snapshot S [--copy C] [--kinds a,b] [--files f.txt] [--kind K] [--event E] */
-export function parseArgs(argv) {
+// The machine-wide settings file claude reads for every Mac user (L909; launcher env-check.mjs CLAUDE_FILE is this one).
+export const MANAGED_FILE = '/Library/Application Support/ClaudeCode/managed-settings.json';
+// The way out when the machine-wide guard itself can't run (L1031 guard b): every session on the Mac is blocked, Claude
+// included, so the owner removes the file by hand, as root, from a Terminal window (not from a Claude session).
+export const MACHINE_WIDE_WAY_OUT = `this is the machine-wide guard (${MANAGED_FILE}), so every Claude session on this Mac is blocked until it is put right. `
+  + `To switch it off, open the Terminal app (not Claude) and run: sudo rm "${MANAGED_FILE}" (then start Claude again); setup.mjs managed-settings puts it back`;
+
+/**
+ * The machine-wide form (L1031): exactly `--machine-wide --snapshot S`, S absolute. → { machineWide: true, snapshot }.
+ * Only a hook that opts in (`machineWide: true`; the production-write guard) takes it; for any other it is a bad argument.
+ */
+export function parseMachineWideArgs(argv) {
+  if (!(argv.length === 3 && argv[0] === '--machine-wide' && argv[1] === '--snapshot')) throw new Error('the machine-wide form is exactly --machine-wide --snapshot <file>');
+  if (typeof argv[2] !== 'string' || !isAbsolute(argv[2]) || argv[2].includes('\0')) throw new Error('paths must be absolute');
+  return { machineWide: true, snapshot: argv[2] };
+}
+
+/** --role R --outbox O --snapshot S [--copy C] [--kinds a,b] [--files f.txt] [--kind K] [--event E]; or, for a hook that
+ * takes it, the machine-wide form above. */
+export function parseArgs(argv, { machineWide = false } = {}) {
+  if (argv[0] === '--machine-wide') {
+    if (!machineWide) throw new Error('bad argument --machine-wide (this hook has no machine-wide form)');
+    return parseMachineWideArgs(argv);
+  }
   const out = {};
   for (let i = 0; i < argv.length; i += 2) {
     const k = argv[i];
@@ -59,23 +81,25 @@ export function isMain(moduleUrl, argv1 = process.argv[1]) {
 
 /**
  * Runs one hook body: `decide(input, args)` returns pass() or block(reason). Exits 0 or 2.
- * `io` is for tests: { argv, stdin, exit, stderr, stdout }.
+ * `io` is for tests: { argv, stdin, exit, stderr, stdout }. `machineWide: true` lets the hook take the machine-wide form.
  */
-export async function runHook(decide, io = {}) {
+export async function runHook(decide, io = {}, { machineWide = false } = {}) {
   const argv = io.argv ?? process.argv.slice(2);
+  // Decided before anything can throw, so even a hook error in the machine-wide form names the way out (L1031 guard b).
+  const wide = machineWide && argv[0] === '--machine-wide';
   const stdin = io.stdin ?? process.stdin;
   const exit = io.exit ?? ((c) => process.exit(c));
   const stderr = io.stderr ?? ((t) => process.stderr.write(t));
   let r;
   try {
-    const args = parseArgs(argv);
+    const args = parseArgs(argv, { machineWide });
     const text = await readStdin(stdin);
     const input = JSON.parse(text);
     if (!input || typeof input !== 'object') throw new Error('hook input is not an object');
     r = await decide(input, args, io);
     if (!r || typeof r.block !== 'boolean') throw new Error('hook gave no decision');
   } catch (e) {
-    r = block(`hook error, refusing: ${e?.message ?? e}`);
+    r = block(`hook error, refusing: ${e?.message ?? e}${wide ? `; ${MACHINE_WIDE_WAY_OUT}` : ''}`);
   }
   if (r.block) { stderr(`[orchestrate] blocked: ${r.reason}\n`); return exit(BLOCK); }
   return exit(0);

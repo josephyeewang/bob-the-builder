@@ -311,7 +311,7 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
   const deny = denyPaths.flatMap(denyPair);
   // Outbox: no dot-names, no sub-folders' dot-names.
   const ob = abs(paths.outbox);
-  // The Write(...) rules here and below are unmatched on claude 2.1.322: it warns that only Edit(path) rules meet
+  // The Write(...) rules here and below are unmatched on claude 2.1.316 (the pin) and 2.1.322: it warns that only Edit(path) rules meet
   // file permission checks, and Edit(...) covers every file-writing tool. Kept in case a later version matches them
   // (a capability note: recheck on each pinned upgrade).
   deny.push(`Write(/${ob}/.*)`, `Edit(/${ob}/.*)`, `Write(/${ob}/**/.*)`, `Edit(/${ob}/**/.*)`);
@@ -454,7 +454,7 @@ const ROLE_SANDBOX_KEYS = Object.freeze({
 });
 // The machine-wide (managed) file's sandbox block: an allow-list of keys, each with its one safe value (#410 r2 M1,
 // L894). Every other key is refused, at the top level, under network and under filesystem. A capability note, checked
-// against claude 2.1.322's own code: it reads managed sandbox keys that widen the sandbox or turn it off
+// against the bundled code of claude 2.1.316 (the pin) and 2.1.322: it reads managed sandbox keys that widen the sandbox or turn it off
 // (enabledPlatforms, read from the managed tier only, where a list without this platform switches the sandbox off and
 // cancels the role's failIfUnavailable; allowAppleEvents, network.allowMachLookup, the proxy ports,
 // autoAllowBashIfSandboxed, enableWeakerNetworkIsolation, failIfUnavailable: false, filesystem.allowWrite and more).
@@ -595,6 +595,19 @@ export function checkSettings(obj, { machineWide = false, profile = null } = {})
     }
   }
   return { ok: true };
+}
+
+// The paths a machine-wide hook command may carry: plain path letters only, since claude runs the command in a shell (L1031).
+const PLAIN_ABS = /^\/[A-Za-z0-9._/-]+$/;
+/**
+ * The machine-wide settings (L1031): one PreToolUse hook on every tool, the production-write guard in its machine-wide
+ * form, failing closed like a role file's. Nothing else: check 10 refuses allow rules, modes, folders and variables there.
+ * `node`, `hooksDir` and `snapshot` must be plain absolute paths (the command runs in a shell); else this throws.
+ */
+export function machineWideSettings({ node, hooksDir, snapshot }) {
+  for (const [k, v] of Object.entries({ node, hooksDir, snapshot })) if (!(typeof v === 'string' && PLAIN_ABS.test(v) && !v.split('/').includes('..'))) throw new Error(`machineWideSettings: ${k} must be a plain absolute path (letters, digits, . _ - /)`);
+  const command = `${node} ${join(hooksDir, 'production-write-guard.mjs')} --machine-wide --snapshot ${snapshot}${HOOK_FAILS_CLOSED}`;
+  return { [S.hooks]: { [E.preToolUse]: [{ [H.matcher]: '*', [H.hooks]: [{ [H.type]: 'command', [H.command]: command, [H.timeout]: HOOK_TIMEOUT, [H.onFailure]: 'block' }] }] } };
 }
 
 /** Writes the role file (atomically), reads it back from disk and checks it. */
