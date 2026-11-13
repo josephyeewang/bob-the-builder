@@ -34,7 +34,7 @@ export const Answer = Object.freeze({ FREE: 'free', WAITING: 'waiting', UNKNOWN:
 const HOOK_WAITING = new Set(['waiting_input', 'blocked']);
 const HOOK_OK = new Set(['idle', 'active']); // active: an Esc mid-turn fires no Stop hook, so the screen decides
 
-const say = (answer, why) => ({ answer, why });
+const answerWith = (answer, why) => ({ answer, why });
 
 /**
  * hook:     the tracker's state for the session ('idle' | 'active' | 'waiting_input' | 'blocked' | 'exited'), or { state }.
@@ -44,30 +44,30 @@ const say = (answer, why) => ({ answer, why });
  */
 export function decideWaiting({ hook, readings, version, now, rules } = {}) {
   const hookState = typeof hook === 'string' ? hook : hook?.state;
-  if (HOOK_WAITING.has(hookState)) return say(Answer.WAITING, `the hooks say ${hookState}`);
+  if (HOOK_WAITING.has(hookState)) return answerWith(Answer.WAITING, `the hooks say ${hookState}`);
   const list = Array.isArray(readings) ? readings : [];
   const read = list.map((r) => (r && typeof r === 'object' && !r.error ? matchScreen(r, rules ? { rules } : undefined) : null));
   // Any blocked reading answers waiting at once (herdr: a visible blocker is never held back).
   const blocked = read.findIndex((m) => m?.state === 'blocked');
-  if (blocked >= 0) return say(Answer.WAITING, `the screen shows a question (${read[blocked].rule})`);
-  if (!HOOK_OK.has(hookState)) return say(Answer.UNKNOWN, hookState ? `the hooks say ${hookState}` : 'no hook state');
-  if (typeof version !== 'string' || !version) return say(Answer.UNKNOWN, 'no Claude Code version');
-  if (version !== SCREEN_RULES_CHECKED_ON) return say(Answer.UNKNOWN, `Claude Code ${version}, rules checked on ${SCREEN_RULES_CHECKED_ON}`);
-  if (!Number.isFinite(now)) return say(Answer.UNKNOWN, 'no clock');
-  if (read.length < CONFIRMATIONS) return say(Answer.UNKNOWN, `${read.length} of ${CONFIRMATIONS} readings`);
-  if (read.some((m) => m === null)) return say(Answer.UNKNOWN, 'a screen read failed');
+  if (blocked >= 0) return answerWith(Answer.WAITING, `the screen shows a question (${read[blocked].rule})`);
+  if (!HOOK_OK.has(hookState)) return answerWith(Answer.UNKNOWN, hookState ? `the hooks say ${hookState}` : 'no hook state');
+  if (typeof version !== 'string' || !version) return answerWith(Answer.UNKNOWN, 'no Claude Code version');
+  if (version !== SCREEN_RULES_CHECKED_ON) return answerWith(Answer.UNKNOWN, `Claude Code ${version}, rules checked on ${SCREEN_RULES_CHECKED_ON}`);
+  if (!Number.isFinite(now)) return answerWith(Answer.UNKNOWN, 'no clock');
+  if (read.length < CONFIRMATIONS) return answerWith(Answer.UNKNOWN, `${read.length} of ${CONFIRMATIONS} readings`);
+  if (read.some((m) => m === null)) return answerWith(Answer.UNKNOWN, 'a screen read failed');
   for (const [i, m] of read.entries()) {
-    if (m.state !== 'idle' || m.rule !== IDLE_RULE) return say(Answer.UNKNOWN, `reading ${i + 1} reads ${m.state}${m.rule ? ` (${m.rule})` : ''}`);
+    if (m.state !== 'idle' || m.rule !== IDLE_RULE) return answerWith(Answer.UNKNOWN, `reading ${i + 1} reads ${m.state}${m.rule ? ` (${m.rule})` : ''}`);
   }
   const at = list.map((r) => r.at);
-  if (!at.every(Number.isFinite)) return say(Answer.UNKNOWN, 'a reading has no time');
+  if (!at.every(Number.isFinite)) return answerWith(Answer.UNKNOWN, 'a reading has no time');
   for (let i = 1; i < at.length; i++) {
-    if (at[i] - at[i - 1] < MIN_GAP_MS) return say(Answer.UNKNOWN, 'readings taken too close together');
+    if (at[i] - at[i - 1] < MIN_GAP_MS) return answerWith(Answer.UNKNOWN, 'readings taken too close together');
   }
   const newest = at[at.length - 1];
-  if (newest > now) return say(Answer.UNKNOWN, 'a reading from the future');
-  if (now - newest > MAX_AGE_MS) return say(Answer.UNKNOWN, `the newest reading is ${now - newest} ms old`);
-  return say(Answer.FREE, `${read.length} idle readings and the hooks say ${hookState}`);
+  if (newest > now) return answerWith(Answer.UNKNOWN, 'a reading from the future');
+  if (now - newest > MAX_AGE_MS) return answerWith(Answer.UNKNOWN, `the newest reading is ${now - newest} ms old`);
+  return answerWith(Answer.FREE, `${read.length} idle readings and the hooks say ${hookState}`);
 }
 
 /** The bare answer: 'free' | 'waiting' | 'unknown'. */
