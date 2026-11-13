@@ -116,7 +116,7 @@ export function planManagedSettings(io, cfg, { readSource = (p) => io.readSource
   const claudeDir = dirname(CLAUDE_FILE);
   const hooksDir = join(io.at(P.installRoot), COPY_HOOKS);
 
-  // The rules: the prepared runner config's (the one add-to-install put in the installed copy), its one source.
+  // The rules: the runner config's at cfg.runnerConfig, as root put it in place (the full review.json add-to-install reads), its one source.
   let rc;
   try { rc = JSON.parse(readSource(cfg.runnerConfig)); } catch (e) { problems.push(e instanceof SyntaxError ? `the runner config ${cfg.runnerConfig} is not valid JSON` : `${e.message} (${cfg.runnerConfig})`); }   // never the parser's message: it quotes the file
   if (rc !== undefined && (rc === null || typeof rc !== 'object' || Array.isArray(rc))) { problems.push(`the runner config ${cfg.runnerConfig} must be one JSON object`); rc = undefined; }
