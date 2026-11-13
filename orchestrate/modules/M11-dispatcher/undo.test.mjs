@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { undoStep as undoStep0, exactReverse, UNDO_CARD, FIX_CARD, REVERSE_FACT, UNDO_NOTE_FACT } from './undo.mjs';
 import { rulesWith, recWith, T0, iso, withAlerts } from './fixtures.test-helper.mjs';
 import { outbox, ALERT_QUEUE_FACT } from './alerts.mjs';
+import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 
 // Each step runs as the tick runs it: its alerts are queued, then sent once it is done (alerts.mjs, L47).
 const undoStep = (a) => withAlerts(a.rec, a.now, a.alert ?? (() => {}), (alert) => undoStep0({ ...a, alert }));
@@ -206,15 +207,15 @@ test('D8: not clean while the undo card has not failed -> no fix card yet; the L
   const U = UNDO_CARD('A-1');
   for (const state of ['verified', 'approved']) {
     const rec = recWith([target(), merge(), ['ask', 'A-1', ask()], ['card', U, undoCard({ state, head: H1 })], reverseFact({ state: 'not_clean', reason: 'x', head: H1 })]);
-    const alerts = [];
-    const step = (at) => undoStep({ rec, rules: R, now: at, filesOf: () => [], alert: (t) => alerts.push(t) });
+    const alerts = fakeAlert();
+    const step = (at) => undoStep({ rec, rules: R, now: at, filesOf: () => [], alert: alerts });
     await step(T0);
     await step(T0 + 60_000);
     assert.equal(rec.read('card', FIX_CARD(U)), null, state);
-    assert.equal(alerts.length, 1, `${state}: ${alerts.join(' | ')}`);
-    assert.match(alerts[0], /could not be an exact reverse: x; the Merge Gate has not yet failed the undo card, and the Lead plans the fix once it has/);
+    assert.equal(alerts.texts.length, 1, `${state}: ${alerts.texts.join(' | ')}`);
+    assert.match(alerts.texts[0], /could not be an exact reverse: x; the Merge Gate has not yet failed the undo card, and the Lead plans the fix once it has/);
     await step(T0 + 25 * 3_600_000);
-    assert.equal(alerts.length, 2, `${state}: again a day later`);
+    assert.equal(alerts.texts.length, 2, `${state}: again a day later`);
   }
 });
 
@@ -232,10 +233,10 @@ test('L1008 m-2: a not_clean fact for a head the undo card has left says nothing
     ['verified, neither it nor the fact with a head', { state: 'verified' }, {}],
   ]) {
     const rec = recWith([target(), merge(), ['ask', 'A-1', ask()], ['card', U, undoCard(over)], reverseFact({ state: 'not_clean', reason: 'x', ...factHead })]);
-    const alerts = [];
-    const step = (at) => undoStep({ rec, rules: R, now: at, filesOf: () => [], alert: (t) => alerts.push(t) });
+    const alerts = fakeAlert();
+    const step = (at) => undoStep({ rec, rules: R, now: at, filesOf: () => [], alert: alerts });
     for (const at of [T0, T0 + 25 * 3_600_000, T0 + 50 * 3_600_000]) assert.deepEqual(await step(at), [], label);
-    assert.deepEqual(alerts, [], label);
+    assert.deepEqual(alerts.texts, [], label);
     assert.equal(rec.read('card', FIX_CARD(U)), null, label);
   }
 });
@@ -256,24 +257,24 @@ test('L1008: a failed undo card whose reverse fact is damaged, of another state 
   ]) {
     const base0 = recWith([...base, reverseFact(fact)]);
     const rec = wrap ? wrap(base0) : base0;
-    const alerts = [];
-    const step = (at) => undoStep({ rec, rules: R, now: at, filesOf: () => [], alert: (t) => alerts.push(t) });
+    const alerts = fakeAlert();
+    const step = (at) => undoStep({ rec, rules: R, now: at, filesOf: () => [], alert: alerts });
     assert.deepEqual(await step(T0), [], label);
     await step(T0 + 60_000);
     assert.equal(base0.read('card', FIX_CARD(U)), null, label);
-    assert.equal(alerts.length, 1, `${label}: ${alerts.join(' | ')}`);
-    assert.match(alerts[0], new RegExp(`undo card ${U} has failed, but its fact ${fid} `), label);
-    assert.match(alerts[0], said, label);
-    assert.match(alerts[0], /so no fix card is written; the Lead looks at/, label);
+    assert.equal(alerts.texts.length, 1, `${label}: ${alerts.texts.join(' | ')}`);
+    assert.match(alerts.texts[0], new RegExp(`undo card ${U} has failed, but its fact ${fid} `), label);
+    assert.match(alerts.texts[0], said, label);
+    assert.match(alerts.texts[0], /so no fix card is written; the Lead looks at/, label);
     await step(T0 + 25 * 3_600_000);
-    assert.equal(alerts.length, 2, `${label}: again a day later`);
+    assert.equal(alerts.texts.length, 2, `${label}: again a day later`);
   }
   // Before the card fails, a damaged fact is the gate's to tell (gate.mjs settleNotClean): M11 says nothing.
   for (const state of ['verified', 'approved']) {
     const rec = recWith([target(), merge(), ['ask', 'A-1', ask()], ['card', U, undoCard({ state, head: H1 })], reverseFact({ state: 'clean', head: H1 })]);
-    const alerts = [];
-    assert.deepEqual(await undoStep({ rec, rules: R, now: T0, filesOf: () => [], alert: (t) => alerts.push(t) }), [], state);
-    assert.deepEqual(alerts, [], state);
+    const alerts = fakeAlert();
+    assert.deepEqual(await undoStep({ rec, rules: R, now: T0, filesOf: () => [], alert: alerts }), [], state);
+    assert.deepEqual(alerts.texts, [], state);
   }
 });
 
@@ -287,12 +288,12 @@ test('L1008: a fix card written on the gate\'s fact is still told once, though t
     const w = world([target(), merge(), ['ask', 'A-1', ask()], failedUndo(), reverseFact({ state: 'not_clean', reason: 'a later change touched src/a.js' })]);
     assert.deepEqual(await undoStep0({ rec: w.rec, rules: R, now: T0, filesOf: () => [], alert: () => false }), [[U, 'fix card written']], label);
     const rec = { ...proxy(w.rec), read: (e, id) => (e === 'fact' && id === fid ? bad(id, e) : w.rec.read(e, id)) };
-    const alerts = [];
-    const step = (at) => undoStep({ rec, rules: R, now: at, filesOf: () => [], alert: (t) => alerts.push(t) });
+    const alerts = fakeAlert();
+    const step = (at) => undoStep({ rec, rules: R, now: at, filesOf: () => [], alert: alerts });
     await step(T0);
     await step(T0 + 25 * 3_600_000);
-    assert.equal(alerts.length, 1, `${label}: ${alerts.join(' | ')}`);
-    assert.match(alerts[0], /could not be an exact reverse: no reason given; a fix card waits for the Lead/, label);
+    assert.equal(alerts.texts.length, 1, `${label}: ${alerts.texts.join(' | ')}`);
+    assert.match(alerts.texts[0], /could not be an exact reverse: no reason given; a fix card waits for the Lead/, label);
     assert.ok(w.rec.read('fact', UNDO_NOTE_FACT(U)), `${label}: noted once told`);
   }
 });

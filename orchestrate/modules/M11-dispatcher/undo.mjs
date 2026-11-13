@@ -138,7 +138,7 @@ function fixCards({ rec, now, alert, out }) {
       // The Record gives a fix card only to a failed card, and the gate fails it on this fact only while the card is
       // verified or approved at the fact's head (M9 writer, L980). Until then the Lead is told, once a day. A card that
       // has left that head (pushed again, merged, cancelled) is judged anew by the gate: the old fact says nothing
-      // (#466 r1 self-review m-2: it re-alerted every day after the card had merged clean).
+      // (#466 r1 self-review m-2: it was told again every day after the card had merged clean).
       const failing = ['verified', 'approved'].includes(doc.state) && typeof doc.head === 'string' && f.doc.head === doc.head;
       if (failing) holdAlert({ rec, cause: `undo-not-clean-${id}`, text: `${why}; the Merge Gate has not yet failed the undo card, and the Lead plans the fix once it has`, alert, now });
       continue;
