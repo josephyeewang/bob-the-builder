@@ -66,6 +66,7 @@ const CONFIG_IMPORTS = Object.freeze([
   ['wiring/robot-main.mjs', 'import(pathToFileURL(config.wiring).href)'],
   ['modules/M4-workshop/launcher/review-runner-main.mjs', 'import(pathToFileURL(c.wiring).href)'],
   ['modules/M4-workshop/launcher/review-runner-main.mjs', 'import(pathToFileURL(c.budget).href)'],
+  ['wiring/runner-main.mjs', 'import(pathToFileURL(file).href)'], // L1001: the worker runner's budget module, as the review runner's
 ]);
 // Every program a job file starts from the installed copy (L132 M-2), taken from the job files themselves (L136 m1):
 // each module of the copy that builds a launchd job file is called here with a sample config, and the script each job

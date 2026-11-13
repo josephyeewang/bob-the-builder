@@ -7,7 +7,10 @@
 //   hostLock()           → the text of Joe's host.lock (config hostLockPath, a file of config hostLockUid's), or null when there is no such file in a
 //                          folder that is there. A file or folder that can't be read throws: pass.mjs reads a throw as
 //                          "not known" and tells it, never as "no host". The read runs through limitedSync (a Dropbox
-//                          file may hang while it downloads).
+//                          file may hang while it downloads). With config hostLockStamp (only when the owner's copier
+//                          keeps hostLockPath as a copy of the synced file, L1041), the copier's stamp must show a run
+//                          within HOST_LOCK_STAMP_MAX_MS too (hostLockStampProblem); a stale or unreadable copy throws
+//                          marked HOST_COPY_FAIL, which pass.mjs takes as "starts off", told once (L1040).
 //   reviewEnded(session) → M9 runnerEnded on the runner's ended records (<reviewRoot>/ended), for the session's own
 //                          role, card and head. A runner folder that is gone, or not the review user's, is a refusal
 //                          with its reason, never "not ended yet".
@@ -48,14 +51,14 @@
 //   stopGroup(session)   → stopGroup-<id>-<nonce>.json; ok once the session is listed stopped (ok: false: it may still run).
 //   saveWork(session)    → saveWork-<id>-<nonce>.json; review, audit and the other kinds with no copy are ok unasked.
 //   pauseLead({product}) → pauseLead-<product>-<nonce>.json; any failure is a throw.
-// On the runner's side three still refuse, each with its reason in the answer (cutover blockers, not this file's): a
-// launch ("not wired: no worker prompt is given to the runner", runner-ports.mjs promptFor), a save (M4 save-work with no
-// lock-down runner, runLocked) and a pause ("not wired: the Lead's wrap-up needs the activity tracker's feed"). Until
-// they are given, no worker starts, no stop is cleared as saved, and every pause throws and is told.
+// On the runner's side two still refuse, each with its reason in the answer (cutover blockers, not this file's): a
+// launch ("not wired: no worker prompt is given to the runner", runner-ports.mjs promptFor) and a pause ("not wired: the
+// Lead's wrap-up needs the activity tracker's feed"). Until they are given, no worker starts, and every pause throws and
+// is told. A save runs through the lock-down runner (runner-locked.mjs, L969) once the config names claude.
 // cleanup.saveWork stays unwired (NOT_WIRED_CLEANUP).
 // The mirror and the seal folder are checked when the wiring starts, so a wrong path stops the start.
 
-import { lstatSync, statSync } from 'node:fs';
+import { closeSync, constants as FS, fstatSync, lstatSync, openSync, readSync, statSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { isRefusing, refusing } from './not-wired.mjs';
@@ -67,6 +70,8 @@ import { CLOCK_SKEW_MS, RUNNER_KINDS, ownerSyncPorts, requestWriter } from './ow
 import { ownerAsyncPorts } from './owner-asks.mjs';
 import { PLAN_REVIEW_ROLE } from '../shared/review-roles.mjs';
 import { WORKER_REQUESTS_ACL, aclText } from '../setup/layout.mjs';
+import { READING_FUTURE_MS } from '../modules/M12-sensors/facts.mjs';
+import { HOST_COPY_FAIL } from '../modules/M11-dispatcher/pass.mjs';
 
 const RUNNER_LAUNCHES = RUNNER_FOLDERS.launches;
 
@@ -157,6 +162,47 @@ export function cleanupPorts({ config: c, selfUid }, { run = safeGit } = {}) {
 // reads got another file's text). The owner check is on the file that was opened, so none of those gets a file that is
 // not the owner's own into the Record, and the owner can read their own files anyway (L739 self-review M1, L763).
 export const HOST_LOCK_MAX = 4096;
+/** The copier (setup host-lock-copy.mjs) runs every 60 s; a stamp older than five runs is a copier that stopped (L1041:
+ * the one limit, which the copier and check-dispatcher take from here). It must stay at least twice the copier's
+ * interval, or a copier on time would read as stale between two of its runs (L1048; #486 checks it). */
+export const HOST_LOCK_STAMP_MAX_MS = 5 * 60_000;
+const STAMP_MAX_BYTES = 4096;
+
+/**
+ * Why the copier's stamp at `stamp` (config hostLockStamp) does not show a good run within HOST_LOCK_STAMP_MAX_MS, or null
+ * (L1040, L1041; lane 3's stampProblem, moved here). It must be a plain file of the owner's (`ownerUid`, config
+ * hostLockUid; the copier runs as the owner), opened without following a link, holding `{ "at": <ISO time> }`, not more
+ * than READING_FUTURE_MS ahead of `now`. `io` lets a test stand in for open, fstat, read and close.
+ */
+export function hostLockStampProblem(stamp, { now, ownerUid }, io = {}) {
+  const { open = openSync, fstat = fstatSync, read = readSync, close = closeSync } = io;
+  const way = 'restart the owner\'s host.lock copier (setup.mjs host-lock-copier) and read its log';
+  let fd;
+  try { fd = open(stamp, FS.O_RDONLY | FS.O_NOFOLLOW | FS.O_NONBLOCK); } catch (e) {
+    if (e?.code === 'ENOENT') return `the host.lock copier has never finished a run (its stamp ${stamp} is not there): ${way}`;
+    if (e?.code === 'ELOOP') return `the host.lock copier's stamp ${stamp} is a link, not the copier's own file: ${way}`;
+    return `the host.lock copier's stamp ${stamp} can't be read (${e?.code ?? e}): ${way}`;
+  }
+  let text;
+  try {
+    const st = fstat(fd);
+    if (!st.isFile()) return `the host.lock copier's stamp ${stamp} is not a plain file: ${way}`;
+    if (st.uid !== ownerUid) return `the host.lock copier's stamp ${stamp} is not the owner's (its owner is uid ${st.uid}, not ${ownerUid}), so the owner's copier did not write it: ${way}`;
+    const b = Buffer.alloc(STAMP_MAX_BYTES + 1); let n = 0;
+    for (;;) { const k = read(fd, b, n, b.length - n, null); if (k === 0) break; n += k; if (n === b.length) break; }
+    if (n > STAMP_MAX_BYTES) return `the host.lock copier's stamp ${stamp} is over ${STAMP_MAX_BYTES} bytes: ${way}`;
+    text = b.subarray(0, n).toString('utf8');
+  } catch (e) {
+    return `the host.lock copier's stamp ${stamp} can't be read (${e?.code ?? e?.message ?? e}): ${way}`;
+  } finally { try { close(fd); } catch { /* the answer stands */ } }
+  let at;
+  try { const d = JSON.parse(text); at = typeof d?.at === 'string' ? Date.parse(d.at) : NaN; } catch { at = NaN; }
+  if (!Number.isFinite(at)) return `the host.lock copier's stamp ${stamp} can't be read as the copier's stamp: ${way}`;
+  const when = new Date(at).toISOString();
+  if (at - now > READING_FUTURE_MS) return `the host.lock copier's stamp ${stamp} says it ran at ${when}, ahead of this Mac's clock, so the copy's age is not known: ${way}`;
+  if (now - at > HOST_LOCK_STAMP_MAX_MS) return `the host.lock copier last ran well at ${when}, ${Math.floor((now - at) / 60_000)} minutes ago (the limit is ${HOST_LOCK_STAMP_MAX_MS / 60_000}), so the copy of host.lock may be old: ${way}`;
+  return null;
+}
 /** Why the config's workerUid can't be the worker runner's user, or null: it must be a Mac user id and host.lock's owner's
  * (hostLockUid). The runner is a LaunchAgent of the owner's own user (runner-job.mjs, L896), so one check on hostLockUid
  * covers it (not root, not the Dispatcher's, not the review user's), and a config naming two owners stops at the config
@@ -190,7 +236,22 @@ else { const b = Buffer.alloc(Number(max) + 1); let n = 0; for (;;) { const k = 
  * user `selfUid`. Missing file in a folder that is there → null (no host claimed). Anything else that stops the read
  * throws, so the pass reads it as "not known". Read by `run` (limitedSync's), in a child of this Node.
  */
-export function hostLockPort({ path, run, ownerUid, selfUid, stat = statSync, node = process.execPath }) {
+export function hostLockPort({ path, run, ownerUid, selfUid, stat = statSync, node = process.execPath, stamp, now = Date.now, stampIo }) {
+  if (stamp === undefined) return hostLockRead({ path, run, ownerUid, selfUid, stat, node });
+  // Under a copier (L1040, L1041): any refusal is a copy that can't be trusted, so it is marked for the pass to hold starts.
+  const read = hostLockRead({ path, run, ownerUid, selfUid, stat, node });
+  const failClosed = (why) => Object.assign(new Error(why), { code: HOST_COPY_FAIL });
+  return () => {
+    let text;
+    try { text = read(); } catch (e) { throw failClosed(`the copy of host.lock can't be read: ${e?.message ?? e}`); }
+    let bad;
+    try { bad = hostLockStampProblem(stamp, { now: now(), ownerUid }, stampIo); } catch (e) { bad = `the host.lock copier's stamp ${stamp} can't be checked (${e?.message ?? e})`; }
+    if (bad) throw failClosed(bad);
+    return text;
+  };
+}
+
+function hostLockRead({ path, run, ownerUid, selfUid, stat, node }) {
   return () => {
     if (typeof run !== 'function') throw new Error('host.lock: the wiring was given no limitedSync to read it with');
     if (!Number.isSafeInteger(selfUid)) throw new Error("host.lock: the wiring was given no Dispatcher uid to check it against");
@@ -321,6 +382,41 @@ export function requestsAclProblem(dir, { run = spawnSync, platform = process.pl
   return null;
 }
 
+// The rights an access-list entry can give that only read (macOS chmod +a names), for the rules snapshot's two readers.
+const ACL_READS = Object.freeze(['read', 'execute', 'list', 'search', 'readattr', 'readextattr', 'readsecurity', 'file_inherit', 'directory_inherit', 'limit_inherit', 'only_inherit']);
+// A user name /usr/bin/id answers that is plain enough to put in an access-list line.
+const USER_NAME = /^[A-Za-z0-9._-]{1,200}$/;
+/**
+ * Why `path`'s access list lets anyone but `readers` (user names) in, or lets them more than read, or null (L1002: the
+ * spec refuses a snapshot others can read; the mode bits alone don't show an access list). Read with /bin/ls -led, as
+ * requestsAclProblem above reads one; a deny entry passes. Off macOS any access list is refused. A list
+ * that can't be read, or an entry that can't be parsed, is a refusal. `run` and `platform` are ports for a test.
+ */
+export function rulesAclProblem(path, readers, { run = spawnSync, platform = process.platform } = {}) {
+  const r = run('/bin/ls', [platform === 'darwin' ? '-led' : '-ld', '--', path], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', LC_ALL: 'C' }, timeout: 30_000 });
+  if (r?.error || r?.status !== 0) return `${path} has an access list that could not be read (${String(r?.error?.message ?? r?.stderr ?? `exit ${r?.status}`).trim().slice(0, 120)})`;
+  const lines = String(r.stdout).split('\n');
+  if (platform !== 'darwin') return /^[-d][-rwxsStT]{9}\+/.test(lines[0] ?? '') ? `${path} has an access list (ACL), which can let others read it` : null;
+  const ok = new Set((readers ?? []).map((n) => `user:${n}`));
+  for (const line of lines) {
+    if (!/^\s+\d+: /.test(line)) continue;
+    const m = /^\s+\d+: ((?:user|group):\S+) (?:inherited )?(allow|deny) (\S+)\s*$/.exec(line);
+    if (!m) return `${path} has an access-list entry that can't be read (${line.trim().slice(0, 80)})`;
+    if (m[2] === 'deny') continue;
+    if (!ok.has(m[1])) return `${path} has an access-list entry letting ${m[1]} in (allow ${m[3]}); only ${[...ok].join(' and ') || 'no one'} may read it`;
+    const more = m[3].split(',').filter((x) => !ACL_READS.includes(x));
+    if (more.length) return `${path} has an access-list entry letting ${m[1]} do more than read it (${more.join(',')})`;
+  }
+  return null;
+}
+
+// The account name of `uid` (/usr/bin/id -nu), for the access list's two readers; null when it can't be told.
+export function userName(uid, { run = spawnSync } = {}) {
+  const r = run('/usr/bin/id', ['-nu', String(uid)], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', LC_ALL: 'C' }, timeout: 30_000 });
+  const n = r?.status === 0 ? String(r.stdout).trim() : '';
+  return USER_NAME.test(n) ? n : null;
+}
+
 /**
  * The one writer of the worker runner's requests (stopSession and the four asks): the folder's owner, mode and access list
  * are checked before each write (L943 m4), and a folder that fails is a throw, with nothing written.
@@ -342,16 +438,28 @@ export function runnerAsyncPorts({ config: c, now = Date.now }, io = {}) {
 }
 
 /**
+ * Every session running Mac-wide that the start caps count, read fresh, the one way (L994): the worker runner's (its
+ * status file) and the review runner's reviewers and auditors (reviewSessions). Both are read before either is used: one
+ * that throws makes the whole list "not known" (L925 rule 1). `c` names workerStatusFile, workerUid, outboxRoot,
+ * reviewStatusFile and reviewUid; runnerSyncPorts' sessions() and M11 budget.mjs (launch check 12) both read it here. The
+ * board is not read, so a config with no `product` (a runner's) names none. `io` as for runnerSyncPorts.
+ */
+export function sessionsNow(c, rec, { now = Date.now, io = {} } = {}) {
+  const sync = ownerSyncPorts({ statusFile: c.workerStatusFile, uid: c.workerUid, outboxRoot: c.outboxRoot, product: c.product ?? '(no board)', clock: now,
+    stat: io.stat, open: io.open, realpath: io.realpath, holds: recordHolds(rec) });
+  const review = io.reviewStatus ?? (() => readReviewStatus({ file: c.reviewStatusFile, now: now(), uid: c.reviewUid }));
+  const own = sync.sessions(); const rv = reviewSessions(review(), { now: now() }); return [...own, ...rv];
+}
+
+/**
  * The worker runner's sync ports for this Dispatcher (L925): `c` its config, `rec` its Record. `io` lets a test stand in
  * for the files (stat, open, realpath, lstat, requestsAcl, writeFile, reviewStatus).
  */
 export function runnerSyncPorts({ config: c, rec, now = Date.now }, io = {}) {
   const sync = ownerSyncPorts({ statusFile: c.workerStatusFile, uid: c.workerUid, outboxRoot: c.outboxRoot, product: c.product, clock: now,
     stat: io.stat, open: io.open, realpath: io.realpath, holds: recordHolds(rec), writeRequest: runnerRequestWriter(c, io) });
-  const review = io.reviewStatus ?? (() => readReviewStatus({ file: c.reviewStatusFile, now: now(), uid: c.reviewUid }));
   return {
-    // Both read before either is used: one that throws makes the whole list "not known" (L925 rule 1).
-    sessions: () => { const own = sync.sessions(); const rv = reviewSessions(review(), { now: now() }); return [...own, ...rv]; },
+    sessions: () => sessionsNow(c, rec, { now, io }),
     board: () => sync.board(),
     outboxSessions: () => sync.outboxSessions().filter((x) => x.product === c.product),
     probe: (session) => {
@@ -395,7 +503,8 @@ export function workerPorts(ctx, io = {}) {
     cleanup,
     // A value the tick hands the pass (L887): the TOP outboxes folder, checked a real folder at start.
     outboxRoot: realFolder(c.outboxRoot, 'the outboxes folder (outboxRoot)'),
-    hostLock: hostLockPort({ path: c.hostLockPath, run: ctx.limitedSync, ownerUid: c.hostLockUid, selfUid: ctx.selfUid }),
+    hostLock: hostLockPort({ path: c.hostLockPath, run: ctx.limitedSync, ownerUid: c.hostLockUid, selfUid: ctx.selfUid,
+      ...(c.hostLockStamp !== undefined ? { stamp: c.hostLockStamp } : {}), ...(ctx.now ? { now: ctx.now } : {}) }),
     reviewEnded: reviewEndedPort({ root: c.reviewRoot, uid: c.reviewUid }),
     product: c.product,
     ...runnerSyncPorts({ config: c, rec: ctx.rec, ...(ctx.now ? { now: ctx.now } : {}) }, io),

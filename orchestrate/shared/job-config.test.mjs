@@ -165,7 +165,12 @@ export const LOADERS = {
     ['  const bad = programs(c, { self, config: realpathSync.native(argv[0]) });', 1],
     ['  const swapped = readConfigFn === readConfig || readByDescriptor(c) ? readChangedProblem(argv[0], c, lstat ? { lstat } : {}) : null;', 1],
     [`  try { wiring = await ${IMPORT}(pathToFileURL(c.wiring).href); } catch (e) {`, 1],
-    [`    try { budget = await (await ${IMPORT}(pathToFileURL(c.budget).href)).budget(c); } catch (e) {`, 1]] },
+    [`    try { budget = await (await ${IMPORT}(pathToFileURL(c.budget).href)).budget({ ...c, reviewStatusFile: typeof c.root === 'string' ? join(c.root, FOLDERS.status) : undefined, reviewUid: c.uids?.reviewer }); } catch (e) {`, 1]] },
+  // Check 12 (L1042): the worker runner loads the budget module named by its config, read through the checked reader.
+  'wiring/runner-main.mjs': { imports: 1, pins: [
+    ["export async function main(argv, { readConfig = (f) => { const self = selfPath(); if (!self) throw new Error('its own script\\'s path can\\'t be read, so it can\\'t be checked'); return readJobConfig(f, { code: [], optionalCode: ['budget'], self }); }, lock = (dir) => makeLock({ dir, timeoutMs: 2_000 }),", 1],
+    ['  try { c = checkRunnerConfig(readConfig(argv[0])); } catch (e) {', 1],
+    [`export async function importBudget(file, config) { return (await ${IMPORT}(pathToFileURL(file).href)).budget(config); }`, 1]] },
 };
 const CALL_ANY = /(?<![\w$.])import\s*\(/g;
 const CALL_LIT = /(?<![\w$.])import\s*\(\s*(['"`])[^'"`$]+\1\s*\)/g;

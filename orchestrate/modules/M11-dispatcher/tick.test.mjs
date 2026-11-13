@@ -5,7 +5,7 @@ import { mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync, readdirSyn
 import { takePassLock } from './pass-lock.mjs';
 import { RESTART_FACT, HANDOFF_NAME } from './lead-restart.mjs';
 import { leadLaunchHead } from '../../shared/record.mjs';
-import { RULES_MISSING_FACT, STOP_FACT, PAUSE_FACT, UNDO_HELD_FACT, HOLD_FACT } from './pass.mjs';
+import { RULES_MISSING_FACT, STOP_FACT, PAUSE_FACT, UNDO_HELD_FACT, HOLD_FACT, HOST_COPY_FAIL } from './pass.mjs';
 import { factFamilyOf } from '../M9-record/permissions.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { installedLayout } from '../../shared/job-config.test-helper.mjs';
@@ -23,7 +23,7 @@ import { USAGE_FACT } from './usage.mjs';
 import { KEYS as K } from './keys.mjs';
 import { rulesWith, recWith, seed, change, setClock, usageFact, undoEntries, filesOfCommits, T0, MIN, iso } from './fixtures.test-helper.mjs';
 import { writeLog, queueFor, assertDropFirst, lateMark } from './fixtures.test-helper.mjs';
-import { FACTS, FD_RESTART_FACT } from './phone-link.mjs';
+import { FACTS, FD_RESTART_FACT, LINK_FACT } from './phone-link.mjs';
 import { goFingerprint } from '../M2-approvals/go.mjs';
 
 // The wiring module is loaded by its computed path; one shared call keeps the M2 reach scan's count at 1 (consume-ask ALLOWED).
@@ -1102,6 +1102,22 @@ test('L38: with the main pass failing (its session list unreadable), a cancel st
   assert.ok(w.calls.launched.includes('U-1'));
 });
 
+// L1045: the tick's undo-starts step runs before the pass, so it is handed the host.lock port too: a copy that can't be
+// trusted starts no undo card in either step.
+test('L1045: under a host.lock copy that can\'t be trusted, the tick starts no undo card, in its own step or the pass', async () => {
+  const w = world([account(), usage(), ...undoEntries('U-1')], { over: {
+    hostLock: () => { throw Object.assign(new Error('the host.lock copier\'s stamp is not the owner\'s'), { code: HOST_COPY_FAIL }); } } });
+  const r = await w.pass();
+  assert.equal(r.steps['undo-starts'].ok, true);
+  assert.deepEqual(r.steps['undo-starts'].result.started, []);
+  assert.ok(r.steps['undo-starts'].result.notes.some((n) => /no undo card starts: host\.lock's copy can't be trusted/.test(n)), JSON.stringify(r.steps['undo-starts'].result));
+  assert.deepEqual(w.calls.launched, []);
+  // Control: a good read, and the undo starts in its own step.
+  const g = world([account(), usage(), ...undoEntries('U-1')]);
+  const rg = await g.pass();
+  assert.deepEqual(rg.steps['undo-starts'].result.started, ['U-1']);
+});
+
 test('L38: the account-age rule missing is told even when every step that reads the bands fails', async () => {
   const w = world([account(), usage()], { rules: rulesWith({ [K.staleAfterMin]: undefined }, allow), over: { sessions: () => { throw new Error('session list unreadable'); } } });
   const r = await w.pass();
@@ -1935,4 +1951,177 @@ test('L946: the stops step gets p.stopReview and asks by card, role and head', a
   assert.equal(r.steps.stops.ok, true, r.steps.stops.error);
   // L1000: with the stop's reason word for the runner (a cancelled card: 'cancel', ended quietly).
   assert.deepEqual(asked, [{ card: 'C-7', role: 'reviewer', head: hd, reason: 'cancel' }]);
+});
+
+// ---- L1048: nothing starts while home is unknown ----
+// Under the owner's copier, a host.lock copy that can't be trusted means this Mac can't tell which Mac is home. Then no
+// start path runs: a merge or review started from a Mac that isn't home is the double action the single-host rule stops.
+// Each path has its own test, with a control on a good read. Stops and Joe's own answers still run.
+const COPY_WHY = 'the host.lock copier\'s stamp is 9 minutes old';
+const copyFail = () => { throw Object.assign(new Error(COPY_WHY), { code: HOST_COPY_FAIL }); };
+const HOME_UNKNOWN = /host\.lock's copy can't be trusted, so which Mac is home is not known/;
+const leadOutbox = (name) => { const dir = join(tempDir(`m11-home-${name}-`), 'lead'); mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'think-q1.md'), 'Is A safe?'); return dir; };
+
+test('L1048 c1: host.lock is read once a tick, and the undo-starts step and the main pass get that one answer', async () => {
+  for (const [what, read] of [['good', () => 'mini'], ['copy fails', copyFail]]) {
+    let reads = 0;
+    const w = world([account(), usage()], { over: { hostLock: () => { reads += 1; return read(); } } });
+    const r = await w.pass();
+    assert.equal(reads, 1, what);
+    assert.equal(r.steps.pass.ok, true, `${what}: ${r.steps.pass.error}`);
+  }
+});
+
+test('L1048: a Lead\'s read-only helper (intake) does not start while home is unknown', async () => {
+  for (const held of [true, false]) {
+    const started = [];
+    const w = world([account(), usage()], { over: { outboxSessions: () => [{ sessionId: 'L-1', role: 'lead', outbox: leadOutbox('ro'), uid: process.getuid(), product: 'p1' }],
+      startReadonly: async (x) => { started.push(x.kind); return { ok: true }; }, ...(held && { hostLock: copyFail }) } });
+    await w.pass();
+    if (!held) { assert.deepEqual(started, ['think'], `control: ${w.calls.alerts.join(' | ')}`); continue; }
+    assert.deepEqual(started, []);
+    assert.match(String(w.rec.read('fact', 'intake-applied-L-1-think-q1.md')?.doc?.reason), HOME_UNKNOWN);
+  }
+});
+
+test('L1048: a plan reviewer (plan-go) does not start while home is unknown', async () => {
+  const plan = { product: 'p2', state: 'draft', tier: 1, plan_sha256: 'e'.repeat(64), main_commit: 'a'.repeat(40), files: ['src/a.mjs'], done_when: 'tests pass' };
+  const rules = rulesWith({ ...M2_RULES, 'onboarding.state': 'active' }, allow);
+  for (const held of [true, false]) {
+    const started = [];
+    const ports = { approvals: () => [{ product: 'p2', stateDir: join(tempDir('m11-approvals-'), 'm2') }], planRows: PLAN_ROWS, planReviewAnswer: async () => ({ ok: true }),
+      startPlanReview: async (x) => { started.push(x); return { ok: true, session: 'S-review' }; }, ...(held && { hostLock: copyFail }) };
+    const w = world([account(), usage(), card('C-3', plan)]);
+    const r = await w.pass(0, { rules, ports });
+    assert.equal(r.steps['plan-go'].ok, true, r.steps['plan-go'].error);
+    if (!held) { assert.equal(started.length, 1, `control: ${w.calls.alerts.join(' | ')}`); continue; }
+    assert.equal(started.length, 0);
+    assert.ok(w.calls.alerts.some((t) => /no plan reviewer could start for card C-3/.test(t) && HOME_UNKNOWN.test(t)), w.calls.alerts.join(' | '));
+  }
+});
+
+test('L1048: the Lead step sends no WRAP and restarts no Lead while home is unknown', async () => {
+  for (const held of [true, false]) {
+    const sent = [];
+    const starts = [];
+    const outbox = join(tempDir('m11-home-lead-'), 'lead', 'L-1');
+    mkdirSync(outbox, { recursive: true });
+    const w = world([account(), usage()], { over: { mainSha: async () => 'a'.repeat(40),
+      leads: () => [{ lead: { sessionId: 'L-1', product: 'p1' }, outboxNames: [], questionOpen: false,
+        size: { tokens: 300_000, turnEnded: true, endedAt: T0, openTools: [], compactions: 0 },
+        send: async (t) => { sent.push(t); return { outcome: 'sent' }; },
+        stopSession: async () => ({ ok: true }), startLead: async (x) => { starts.push(x); return { ok: true, sessionId: 'L-2' }; } }],
+      ...(held && { hostLock: copyFail }) } });
+    const r = await w.pass();
+    assert.equal(r.steps.leads.ok, true, r.steps.leads.error);
+    if (!held) { assert.deepEqual(r.steps.leads.result, [['L-1', 'WRAP sent']], 'control'); continue; }
+    assert.match(String(r.steps.leads.result), /the Lead step waits: host\.lock's copy can't be trusted/);
+    assert.deepEqual([sent, starts], [[], []]);
+  }
+});
+
+test('L1048: no review is requested (limits) while home is unknown', async () => {
+  for (const held of [true, false]) {
+    const w = world([account(), usage(), card('R-1', { state: 'in_review', changed_at: iso(T0 - 60 * MIN) })], { over: held ? { hostLock: copyFail } : {} });
+    const r = await w.pass();
+    assert.equal(r.steps.limits.ok, true, r.steps.limits.error);
+    if (!held) { assert.deepEqual(w.calls.reviewers, ['R-1'], 'control'); continue; }
+    assert.deepEqual(w.calls.reviewers, []);
+    assert.ok(r.steps.limits.result.some(([id, why]) => id === 'R-1' && HOME_UNKNOWN.test(why)), JSON.stringify(r.steps.limits.result));
+  }
+});
+
+test('L1048: no merge is requested while home is unknown, an undo\'s merge too', async () => {
+  for (const held of [true, false]) {
+    const w = world([account(), usage(), ...mergeReady('V-1', 7), ...undoReady('U-1', 8)], { over: held ? { hostLock: copyFail } : {} });
+    const r = await w.pass();
+    assert.equal(r.steps.merges.ok, true, r.steps.merges.error);
+    const merges = ['V-1', 'U-1'].filter((id) => requested(w.rec, id));
+    if (!held) { assert.deepEqual(merges, ['V-1', 'U-1'], 'control'); continue; }
+    assert.deepEqual(merges, []);
+    for (const id of ['V-1', 'U-1']) assert.ok(r.steps.merges.result.some(([c, why]) => c === id && HOME_UNKNOWN.test(why)), `${id}: ${JSON.stringify(r.steps.merges.result)}`);
+  }
+});
+
+test('L1048: the Front Door and Mini Base are not restarted while home is unknown; the phone step still runs', async () => {
+  for (const held of [true, false]) {
+    const calls = [];
+    const w = world([account(), usage()], { over: { frontDoorAlive: () => false,
+      restartFrontDoor: async () => { calls.push('front door'); return { ok: true }; }, startMinibase: async () => { calls.push('mini base'); return { ok: true }; },
+      ...(held && { hostLock: copyFail }) } });
+    for (const id of [FACTS.network, FACTS.reachable]) assert.equal(w.rec.write({ actor: factFamilyOf(id), entity: 'fact', id, expectRev: 0, doc: { value: true, observed_at: iso(T0) } }).ok, true);
+    assert.equal(w.rec.write({ actor: factFamilyOf(FACTS.minibase), entity: 'fact', id: FACTS.minibase, expectRev: 0, doc: { value: false, observed_at: iso(T0) } }).ok, true);
+    const r = await w.pass();
+    assert.equal(r.steps.phone.ok, true, r.steps.phone.error);
+    if (!held) { assert.deepEqual(calls, ['front door'], 'control: the Front Door missing is restarted'); continue; }
+    assert.deepEqual(calls, []);
+    assert.match(String(r.steps.phone.result), /Front Door missing; restart held: host\.lock's copy/);
+    // The Front Door back: Mini Base waits too.
+    const r2 = await w.pass(1, { ports: { frontDoorAlive: () => true } });
+    assert.deepEqual(calls, []);
+    assert.match(String(r2.steps.phone.result), /Mini Base not running; start held: host\.lock's copy/);
+  }
+});
+
+test('L1048 m2: while home is unknown, the account and band holds are not told (they say undo cards run); the copy hold is', async () => {
+  const red = ['fact', USAGE_FACT(ACCT), usageFact({ week: 90, h5: 20, account: ACCT, now: T0 })];
+  for (const [what, entries] of [['no account', [usage()]], ['red', [account(), red]]]) {
+    for (const held of [true, false]) {
+      const w = world(entries, { over: held ? { hostLock: copyFail } : {} });
+      await w.pass();
+      const undoRuns = w.calls.alerts.filter((a) => /but undo cards|undo still run/.test(a));
+      if (!held) { assert.equal(undoRuns.length, 1, `${what} control: ${w.calls.alerts.join(' | ')}`); continue; }
+      assert.deepEqual(undoRuns, [], what);
+      assert.equal(w.calls.alerts.filter((a) => /holds every start, undo cards too/.test(a)).length, 1, `${what}: ${w.calls.alerts.join(' | ')}`);
+    }
+  }
+});
+
+test('L1061 M1: while home is unknown, a cancelled card\'s session is still stopped and the approvals step still runs', async () => {
+  const stops = [];
+  const running = [{ id: 'S-X', product: 'p1', kind: 'editing', card: 'X-1', pgid: 99 }];
+  const w = world([account(), usage(), card('X-1', { state: 'cancelled' })], { over: { hostLock: copyFail, sessions: () => running,
+    stopGroup: async (s) => { stops.push(s.id); return { ok: true, how: 'SIGTERM' }; } } });
+  const rules = rulesWith({ ...M2_RULES, 'onboarding.state': 'active' }, allow);
+  const stateDir = join(tempDir('m11-approvals-'), 'm2');
+  const r = await w.pass(0, { rules, ports: { approvals: () => [{ product: 'p2', stateDir }] } });
+  assert.match(String(r.steps.leads.result), HOME_UNKNOWN, 'the hold is on');
+  assert.equal(r.steps.stops.ok, true, r.steps.stops.error);
+  assert.deepEqual(stops, ['S-X'], 'the stop is made during the hold');
+  assert.equal(r.steps.approvals.ok, true, r.steps.approvals.error);
+  assert.deepEqual(r.steps.approvals.result, [{ product: 'p2', ok: true, events: r.steps.approvals.result[0].events }]);
+  assert.equal(w.rec.read('product', 'p2').doc.state, 'active', 'Joe\'s approvals pass ran and wrote its answer');
+});
+
+test('L1061 m1: the phone step marks nothing as tried while home is unknown, and the first pass after the hold restarts and starts', async () => {
+  const calls = [];
+  let lock = copyFail;
+  const w = world([account(), usage()], { over: { frontDoorAlive: () => false, hostLock: () => lock(),
+    restartFrontDoor: async () => { calls.push('front door'); return { ok: true }; }, startMinibase: async () => { calls.push('mini base'); return { ok: true }; } } });
+  for (const id of [FACTS.network, FACTS.reachable]) assert.equal(w.rec.write({ actor: factFamilyOf(id), entity: 'fact', id, expectRev: 0, doc: { value: true, observed_at: iso(T0) } }).ok, true);
+  assert.equal(w.rec.write({ actor: factFamilyOf(FACTS.minibase), entity: 'fact', id: FACTS.minibase, expectRev: 0, doc: { value: false, observed_at: iso(T0) } }).ok, true);
+  const tried = () => { const d = w.rec.read('fact', LINK_FACT)?.doc ?? {}; return { fd: d.fd_restarted_at ?? null, mb: d.minibase_started_at ?? null }; };
+  await w.pass();
+  await w.pass(1, { ports: { frontDoorAlive: () => true } });
+  assert.deepEqual(calls, []);
+  assert.deepEqual(tried(), { fd: null, mb: null }, 'nothing is marked as tried during the hold');
+  // The hold ends: the very next pass restarts the missing Front Door, and once it is back starts Mini Base.
+  lock = () => 'mini';
+  await w.pass(2);
+  assert.deepEqual(calls, ['front door']);
+  await w.pass(3, { ports: { frontDoorAlive: () => true } });
+  assert.deepEqual(calls, ['front door', 'mini base']);
+});
+
+test('L1061 m2: while home is unknown and the main pass fails, the tick still tells the copy hold, once', async () => {
+  let calls = 0;
+  const w = world([account(), usage()], { over: { hostLock: copyFail,
+    sessions: () => { calls += 1; if (calls > 1) throw new Error('session list unreadable'); return []; } } });
+  const r = await w.pass();
+  assert.equal(r.steps.pass.ok, false, 'control: the main pass failed');
+  assert.equal(w.calls.alerts.filter((a) => /holds every start, undo cards too/.test(a) && a.includes(COPY_WHY)).length, 1, w.calls.alerts.join(' | '));
+  // With the pass working too, it is still told once (one copy per cause).
+  const ok = world([account(), usage()], { over: { hostLock: copyFail } });
+  await ok.pass();
+  assert.equal(ok.calls.alerts.filter((a) => /holds every start, undo cards too/.test(a)).length, 1, ok.calls.alerts.join(' | '));
 });

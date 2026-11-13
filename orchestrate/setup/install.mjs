@@ -113,6 +113,25 @@ export function updaterConfigFor(io, cfg) {
 }
 
 /**
+ * The names this setup's updater config keeps (updaterConfigFor) that the installed copy's updater does not: [] when it keeps
+ * them all, null when there is no copy or its updater.json can't be read. The keep list is fixed when the copy is first
+ * installed, so a file set up later (dispatcher.json, robot.json, another extra) is never carried into the copy, and the
+ * next update would drop one put there by hand (L1029; the 12 Nov rehearsal's bug B).
+ */
+export function keepsNot(io, cfg) {
+  const P = installPaths(cfg);
+  const cur = currentCopy(io.at(P.installRoot), { owner: io.rootUid });
+  if (cur.missing || cur.problem || !cur.link) return null;
+  let keep; try { keep = JSON.parse(io.readText(join(P.installRoot, UPDATER_CONFIG)))?.keep; } catch { return null; }
+  if (!Array.isArray(keep)) return null;
+  return updaterConfigFor(io, cfg).keep.filter((n) => !keep.includes(n));
+}
+/** How a copy whose keep list lacks a name is put right: the one statement, said by install and dispatcher-config (L1029). */
+export const reinstallSteps = (cfg) => `install again, before the pinned Claude Code and add-to-install (a new install throws both away): unload the jobs (sudo node setup.mjs daemons unload), remove ${installPaths(cfg).install}, put the --for-install review.json at runnerConfig, run install, then put the full review.json back and run add-to-install (README, part 6)`;
+/** The warning for a copy that does not keep `names`. */
+export const keepsNotWarning = (cfg, names) => `the installed copy's updater does not keep ${names.join(', ')} (its keep list is fixed at the first install), so the copy never gets ${names.length > 1 ? 'them' : 'it'} and an update would drop ${names.length > 1 ? 'them' : 'it'}: ${reinstallSteps(cfg)}`;
+
+/**
  * The runner config, read and checked: it must name this copy, the copy's own code by its place from main, and every other path
  * inside one of the `carried` top-level items. Adds to `problems`; never quotes the file. → { rc, rcText }.
  */
@@ -202,7 +221,10 @@ export function planInstall(io, cfg, { readSource, runUpdater }) {
   if (!cur.missing) {
     const why = cur.problem ?? (cur.link ? null : 'is a plain folder, not the link the updater flips');
     if (why) problems.push(`${P.installRoot}: ${why}. Nothing was changed`);
-    return { ops, problems, installed: !why };
+    // A copy made before something this setup now carries (the Dispatcher's config, the robot's, another extra): install does
+    // nothing, so say what it would take (L1029).
+    const missing = why ? null : keepsNot(io, cfg);
+    return { ops, problems, installed: !why, warnings: missing?.length ? [keepsNotWarning(cfg, missing)] : [] };
   }
   const { rcText } = readRunnerConfig(io, cfg, { readSource, carried: cfg.extras.map((e) => posix.basename(e)), problems });
   // Everything root would copy in is checked NOW, before any root step (L149 m4, m6): a linked program or a node root may not run
@@ -277,7 +299,8 @@ export function planAddToInstall(io, cfg, { pin, sha256, readSource }) {
   try { keep = readUpdaterConfig(io.at(join(copy, UPDATER_CONFIG))); } catch (e) { problems.push(`the copy's ${UPDATER_CONFIG} was refused: ${e.message}`); }
   try { scripts = io.list(hookSource); } catch { /* reported below */ }
   if (!scripts.length) problems.push(`the copy has no hook scripts at ${hookSource}`);
-  const { rc, rcText } = readRunnerConfig(io, cfg, { readSource, carried: [CLAUDE_CODE, HOOKS], problems });
+  // What the updater already carries counts too: the bob step's list (bobManifest, L1035 m1) is one of keep once it ran.
+  const { rc, rcText } = readRunnerConfig(io, cfg, { readSource, carried: [CLAUDE_CODE, HOOKS, ...(Array.isArray(keep?.keep) ? keep.keep : [])], problems });
   if (rc && typeof rc === 'object') {
     const want = { pin, claudeBin: pinnedBinary(inCopy, pin), hooksDir: join(inCopy, HOOKS) };
     for (const [k, v] of Object.entries(want)) if (rc[k] !== v) problems.push(`the runner config's ${k} must be ${v}`);
@@ -340,8 +363,13 @@ function folderList(io, cfg) {
   return out;
 }
 
-/** Read only → [{ ok, what, why? }]. `main` is a commit the stamp must equal, when the caller knows it. */
-export function checkInstall(io, cfg, { main = null } = {}) {
+/**
+ * Read only → [{ ok, what, why? }]. `main` is a commit the stamp must equal, when the caller knows it. `watchOnly` checks only
+ * what the hourly watch job uses (L1026): the copy whole and root's, its stamp, no access lists, review.json readable and
+ * naming this copy. It leaves out the review runner's role-to-user map (L726) and the runner's files (RUNNER_NAMES), which
+ * the full review.json brings on cutover night; the watch job never starts the runner. Every other caller keeps the full check.
+ */
+export function checkInstall(io, cfg, { main = null, watchOnly = false } = {}) {
   const P = installPaths(cfg); const out = [];
   const item = (ok, what, why) => out.push({ ok, what, ...(ok ? {} : { why }) });
   const top = io.prefix || '/';
@@ -360,6 +388,7 @@ export function checkInstall(io, cfg, { main = null } = {}) {
   item(acl === null, `none of the ${dirs.length} install folders has an access list`, acl);
   let rc = null; try { rc = JSON.parse(io.readText(join(P.installRoot, RUNNER_CONFIG))); } catch { /* reported below */ }
   item(rc !== null && rc.installRoot === root, 'the copy\'s review.json is JSON and names this copy', 'unreadable or names another installRoot');
+  if (watchOnly) return out;
   if (rc !== null) {
     const what = 'review.json names a Mac user for every role, and every role the runner starts (the plan reviewer too) names review';
     const old = planReviewerOnlyMissing(io, rc.uids, P.installRoot);
