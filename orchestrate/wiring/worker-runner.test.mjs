@@ -802,6 +802,23 @@ test('#463 r2 M1: a save\'s job group is kept with claude\'s, both are stopped b
   assert.ok(z.kept.at(-1).saves['S-9'], 'kept while one is not shown stopped');
 });
 
+// #463 r3 m4 (plant B4): told during its own pass, the job's group is written to the memory file before onGroup returns,
+// that is before runLocked writes the job's go-ahead (runner-locked.mjs found → ack). A crash between the go-ahead and the
+// pass's next write must still leave the group on disk, or a restart would allow the next save beside a running job.
+test('#463 r3 m4 B4: the job group told during its pass is on disk before onGroup returns, so before the go-ahead', async () => {
+  const w = world();
+  await w.pass([launchReq('S-1')]);
+  const C = { pgid: 7001, pid: 7001, pid_start: '2026-11-10T12:00:00Z' }; const J = { pgid: 7050, pid: 7050, pid_start: '2026-11-10T12:00:01Z' };
+  const atGoAhead = [];
+  w.ports.saveWork = (s, { onGroup }) => {
+    onGroup({ ...C }); atGoAhead.push(structuredClone(w.kept.at(-1).saves['S-1']));
+    onGroup({ ...C, job: { ...J } }); atGoAhead.push(structuredClone(w.kept.at(-1).saves['S-1']));   // the go-ahead is written here
+    return new Promise(() => {});
+  };
+  await w.pass([{ name: `saveWork-S-1-${N1}.json`, body: { saveWork: { id: 'S-1' }, asked_at: new Date(w.now).toISOString() } }]);
+  assert.deepEqual(atGoAhead, [{ ...C, at: w.now }, { ...C, job: J, at: w.now }], 'each told group was in the kept memory at once');
+});
+
 // Self-review M-2: the job's group told after its pass returned is in the memory before onGroup returns (so before the
 // job's go-ahead), kept by the newest pass's own keeper, never written into an older pass's copy.
 test('#463 r2 self-review M-2: a job group told after its pass returned is kept at once by the newest pass', async () => {

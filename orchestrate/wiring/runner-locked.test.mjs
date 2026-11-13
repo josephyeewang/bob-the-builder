@@ -12,7 +12,7 @@ import { tempDir } from '../shared/test-tmp.mjs';
 import { pushWorld } from '../modules/M4-workshop/git/push-world.test-helper.mjs';
 import { createSaveWork } from '../modules/M4-workshop/git/save-work.mjs';
 import { bundleName } from '../modules/M4-workshop/git/push.mjs';
-import { JOBS_DIR, JOB_ACK_WAIT_MS, LOCKED_JOBS, LOCKED_MS, LOCKED_SAVE_MS, RESULT_MAX_BYTES, SAVE_DELAYS_MS, ackFile, groupFile, groupRecordCommand, jobFile, lockedRunner, readGroupRecord, runToEnd, settingsSha } from './runner-locked.mjs';
+import { JOBS_DIR, JOB_ACK_WAIT_MS, LOCKED_JOBS, LOCKED_MS, LOCKED_SAVE_MS, RESULT_MAX_BYTES, SAVE_DELAYS_MS, ackFile, groupFile, groupRecordCommand, guardedRun, jobFile, lockedRunner, readGroupRecord, runToEnd, settingsSha } from './runner-locked.mjs';
 import { EventEmitter } from 'node:events';
 import { SAVE_DEADLINE_MS } from '../modules/M11-dispatcher/pass.mjs';
 import { partialName } from '../modules/M4-workshop/git/save-work.mjs';
@@ -462,5 +462,40 @@ test('#463 r2 M1: the time limit kills the job\'s own group at once, before clau
     assert.match(err?.message ?? '', /it did not finish in time/);
     assert.deepEqual(killed, kills, 'the stop kills claude\'s group, then the job\'s when it is still there');
     assert.equal(/its job's own process group may still run/.test(err.message), said, err.message);
+  }
+});
+
+// #463 r3 m4 (A4): a record first read at a stop or at claude's close is kept (found) but never answered: the job's shell
+// is never told to go once the runner has stopped waiting for it.
+test('#463 r3 m4 A4: a record first read at the time limit or at claude\'s close is found but never given its go-ahead', async () => {
+  for (const end of ['close', 'time limit']) {
+    const child = Object.assign(new EventEmitter(), { pid: 4242 });
+    const calls = [];
+    // The poll never fires before the end (everyMs far past the limit), so the record is first read by the end itself.
+    const job = { everyMs: 3_600_000, read: () => ({ pgid: 5151, pid: 5151, pid_start: '2026-11-12T00:00:00Z' }), gone: () => true,
+      found: (g) => calls.push(['found', g.pgid]), ack: () => calls.push(['ack']) };
+    const p = runToEnd(() => child, '/x/claude', [], {}, end === 'close' ? 3_600_000 : 30, () => {}, () => false, undefined, job);
+    if (end === 'close') setTimeout(() => child.emit('close', 0), 10);
+    await p.then(() => null, (e) => e);
+    assert.deepEqual(calls, [['found', 5151]], `${end}: found, never acked`);
+  }
+});
+
+// #463 r3 m4 (A10): a save-work answer is refused when its job's group was never recorded, as the install's exit code is.
+test('#463 r3 m4 A10: a save-work run that left a valid answer but no group record is refused', async () => {
+  const { cwd, settingsFile, sha } = world();
+  const f = jobFile({ cwd, job: 'save-work', sessionId: 'S-1' });
+  const run = runner({ spawn: (bin, args, opts) => childSpawn('/bin/sh', ['-c', `echo '{"ok":true}' > '${f}'`], opts) });
+  await assert.rejects(run({ job: 'save-work', args: {}, sessionId: 'S-1', role: 'worker', settingsFile, settingsSha: sha, cwd }),
+    /the save-work job's process group was not recorded/);
+});
+
+// #463 r3 m4 (A8): guardedRun itself refuses a limit past the Bash tool wait it sets (not only lockedRunner's install limit).
+test('#463 r3 m4 A8: guardedRun refuses a limit past LOCKED_MS, a zero and a non-integer before anything runs', async () => {
+  for (const ms of [LOCKED_MS + 1, 0, 1.5]) {
+    let spawned = false;
+    await assert.rejects(guardedRun({ spawn: () => { spawned = true; }, claudeBin: '/x/claude', settingsFile: '/x/s.json', inner: 'true', cwd: '/x', env: {}, ms, gfile: '/x/g', label: 'the x job' }),
+      /the x job's limit is not a time limit/);
+    assert.equal(spawned, false, String(ms));
   }
 });
