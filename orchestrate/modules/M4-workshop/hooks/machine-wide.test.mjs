@@ -118,7 +118,9 @@ test('L1044 M1: the machine-wide form blocks production names only; everyday she
     assert.deepEqual(bash(c), { block: false }, c);
     assert.equal(decide({ tool_name: 'Bash', cwd: d, tool_input: { command: c } }, { snapshot: join(d, 'role.json') }).block, true, `the role form still refuses or has no snapshot: ${c}`);
   }
-  assert.deepEqual(bash('ls', undefined), { block: false }, 'a call with no working folder is no reason to block every session');
+  // No cwd key at all (a default parameter would fill one in: lane 2 plant 20 missed it that way).
+  assert.deepEqual(decide({ tool_name: 'Bash', tool_input: { command: 'ls' } }, wide(f)), { block: false }, 'a call with no working folder is no reason to block every session');
+  assert.equal(decide({ tool_name: 'Bash', tool_input: { command: 'vercel deploy' } }, wide(f)).block, true, 'with no working folder, a production name still blocks');
   for (const c of ['cat /srv/app/prod-settings.conf', 'vercel deploy --prod', 'npx vercel deploy', 'pnpm dlx vercel', 'curl https://prod.example.com/x', 'echo $(cat /srv/app/prod-settings.conf)',
     'for f in a; do vercel deploy; done', 'cp prod-settings.conf /tmp/x', 'X=/srv/app/prod-settings.conf; cat $X', 'cat /srv/app/{prod-settings,x}.conf', 'VERCEL=1 bash -c "vercel deploy"', 'sh -lc "cd x && npx vercel"', 'eval vercel deploy', '/bin/bash -c "bash -c \\"vercel\\""']) {
     assert.equal(bash(c).block, true, c); assert.ok(!bash(c).reason.includes('sudo rm'), 'a block by rule is no lock-out: no way out said');
