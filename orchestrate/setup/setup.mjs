@@ -21,6 +21,9 @@
 //                                       an existing dispatcher.json without outboxRoot and copiesRoot won't start the Dispatcher until this is run again
 //   host-lock-copier     prints the owner's host.lock copier job file (a LaunchAgent of the owner's, L1029 E) on stdout and how to load it on
 //                        stderr; needs hostLockSource (read only; refused under sudo)
+//   scanner --from <the gitleaks program> [--dry-run]   the push step's secret scanner: the pinned program (hash checked) and the
+//                                       Do-plane's config and empty ignore file, in <base>/scanner (L1083; scanner-setup.mjs)  (root)
+//   check-scanner        those files exactly, then the push step's own check, which runs the program's `version` (read only; refused under sudo)
 //   dispatcher-keys      prints the Dispatcher config's reviewRoot, mirror, sealRoot, outboxRoot, copiesRoot, hostLockPath and hostLockUid as JSON (read only)
 //   daemons place|load|unload  [--dry-run]   the three background jobs' files; load; unload                    (root)
 //                                       (place and load refuse on the same checks: a placed job starts at boot without load)
@@ -66,6 +69,7 @@ import { NODE } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { checkDaemons, jobLive, list, onlyJobs, planLoad, planPlace, planReloadAccount, planUnload } from './daemons.mjs';
 import { checkRulesCopy, checkWatchAppConfig, checkWatchRules, planWatchApp, planWatchRules, proveWatchAppChecks, watchConfigLine } from './watch-setup.mjs';
 import { reviewConfigCommand } from './review-config.mjs';
+import { checkScannerFiles, checkScannerSetup, planScanner } from './scanner-setup.mjs';
 import { bobGit, checkBob, planBob } from './bob-manifest.mjs';
 import { readUser } from './users-folders.mjs';
 import { proveToken, checkProposals, checkSafeDirectory, checkToken, planProposals, planSafeDirectory, planToken } from './extras.mjs';
@@ -77,11 +81,11 @@ const TOKEN_PAGE_NOTE = [
   '  - Repository access: only the one repository named in the config;',
   '  - Permissions: Metadata = Read-only (GitHub adds it by itself; fine if absent), Contents = Read-only (GitHub may call it "code"), Pull requests = Read-only, Commit statuses = Read-only (the watch job reads it to judge a merge), and nothing else. (Not Checks: the job reads check runs with the watcher App, which holds Checks: read.)',
 ];
-const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install [--watch-only]|check-dispatcher|dispatcher-config|dispatcher-keys|host-lock-copier|review-config --pin <x.y.z> --input <file> --out <file> [--for-install]|add-to-install --pin <x.y.z> --sha256 <hex>|bob --from <Bob checkout> --commit <sha>|daemons place|load|unload|list|check [--only <job>]|daemons reload-account|prove-token|proposals|check-proposals|safe-directory|check-safe-directory|token|check-token|watch-rules|check-watch-rules|watch-app> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
+const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install [--watch-only]|check-dispatcher|dispatcher-config|dispatcher-keys|host-lock-copier|scanner --from <the gitleaks program>|check-scanner (without sudo)|review-config --pin <x.y.z> --input <file> --out <file> [--for-install]|add-to-install --pin <x.y.z> --sha256 <hex>|bob --from <Bob checkout> --commit <sha>|daemons place|load|unload|list|check [--only <job>]|daemons reload-account|prove-token|proposals|check-proposals|safe-directory|check-safe-directory|token|check-token|watch-rules|check-watch-rules|watch-app> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
 const DAEMON_SUBS = ['place', 'load', 'unload', 'list', 'check', 'reload-account'];
-const COMMANDS = ['users-folders', 'check', 'proofs', 'install', 'check-install', 'check-dispatcher', 'dispatcher-config', 'dispatcher-keys', 'host-lock-copier', 'review-config', 'add-to-install', 'bob', 'daemons', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app'];
-const READ_ONLY = ['check', 'check-install', 'check-dispatcher', 'dispatcher-keys', 'check-proposals', 'check-safe-directory', 'check-token', 'prove-token', 'check-watch-rules'];
-const PLAIN_CONFIG = ['users-folders', 'check', 'check-dispatcher', 'dispatcher-keys', 'proofs', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app', 'review-config'];
+const COMMANDS = ['users-folders', 'check', 'proofs', 'install', 'check-install', 'check-dispatcher', 'dispatcher-config', 'dispatcher-keys', 'host-lock-copier', 'scanner', 'check-scanner', 'review-config', 'add-to-install', 'bob', 'daemons', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app'];
+const READ_ONLY = ['check', 'check-scanner', 'check-install', 'check-dispatcher', 'dispatcher-keys', 'check-proposals', 'check-safe-directory', 'check-token', 'prove-token', 'check-watch-rules'];
+const PLAIN_CONFIG = ['users-folders', 'scanner', 'check-scanner', 'check', 'check-dispatcher', 'dispatcher-keys', 'proofs', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app', 'review-config'];
 
 export function parseArgs(argv) {
   const cmd = argv[0];
@@ -134,7 +138,9 @@ export function parseArgs(argv) {
   if (o.sha256 !== null && cmd !== 'add-to-install') throw new Error('--sha256 is only for add-to-install');
   if (o.forInstall && cmd !== 'review-config') throw new Error('--for-install is only for review-config');
   if (cmd === 'review-config' && (o.claudePin === null || o.input === null || o.out === null)) throw new Error('review-config needs --pin <x.y.z>, --input <your file of the owner\'s fields> and --out <the file to write>');
-  if ((o.from !== null || o.commit !== null) && cmd !== 'bob') throw new Error('--from and --commit are only for bob');
+  if (o.commit !== null && cmd !== 'bob') throw new Error('--commit is only for bob');
+  if (o.from !== null && cmd !== 'bob' && cmd !== 'scanner') throw new Error('--from is only for bob and scanner');
+  if (cmd === 'scanner' && o.from === null) throw new Error('scanner needs --from <the full path of the gitleaks program taken out of the checked download>');
   if (cmd === 'bob' && (o.from === null || o.commit === null)) throw new Error('bob needs --from <the full path of a Bob checkout> and --commit <its 40-hex commit>');
   if (cmd === 'add-to-install' && (o.claudePin === null || o.sha256 === null)) throw new Error('add-to-install needs --pin <x.y.z> and --sha256 <hex>');
   return o;
@@ -159,7 +165,8 @@ export function planCommand(io, cfg, o, { readSource = (p) => io.readSource(p), 
   if (o.cmd === 'proposals') return guarded(io, cfg, planProposals(io, cfg));   // the base wall first (L150 m3), then its own wall for the parent (extras.mjs)
   if (o.cmd === 'watch-app') return guarded(io, cfg, planWatchApp(io, cfg, { raw: o.raw, text: o.text, app: o.app, rulesSha256: o.pin, dry: o.dry }));
   if (o.cmd === 'watch-rules') return guarded(io, cfg, planWatchRules(io, cfg, { source: o.rulesSource, readSource: (p) => io.readRules(p) }));
-  if (o.cmd === 'safe-directory') return planSafeDirectory(io, cfg);   // root writes nothing: git runs as the owner
+  if (o.cmd === 'safe-directory') return planSafeDirectory(io, cfg);
+  if (o.cmd === 'scanner') return guarded(io, cfg, planScanner(io, cfg, { from: o.from }));
   const res = o.cmd === 'install' ? planInstall(io, cfg, { readSource, runUpdater })
     : o.cmd === 'add-to-install' ? planAddToInstall(io, cfg, { pin: o.claudePin, sha256: o.sha256, readSource })
     : o.cmd === 'bob' ? planBob(io, cfg, { from: o.from, commit: o.commit, git: bobGitOf(o.from) })
@@ -226,6 +233,11 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, bobGitOf, out
     return 0;
   }
   if (o.cmd === 'dispatcher-keys') { let k; try { k = dispatcherKeysOn(io, cfg); } catch (e) { err(`PROBLEM  ${e.message}`); return 1; } out(JSON.stringify(k, null, 2)); return 0; }
+  if (o.cmd === 'check-scanner') {
+    // It runs the downloaded program once (`version`), so never as root (L1083).
+    if (asRoot) { err('refused: check-scanner runs the gitleaks program, which never runs as root; run it without sudo'); return 2; }
+    return checkScannerSetup(io, cfg).then((res) => report(res, out));
+  }
   if (o.cmd === 'check-proposals') return report(checkProposals(io, cfg), out);
   if (o.cmd === 'check-safe-directory') return report(checkSafeDirectory(io, cfg), out);
   if (o.cmd === 'check-token') return report(checkToken(io, cfg), out);
@@ -269,7 +281,7 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, bobGitOf, out
     err(/run: daemons load/i.test(e.message) ? `stopped: ${why}.` : `stopped: ${why}. Run it again after fixing that; it picks up where it stopped.`); return 1; }
   const after = o.cmd === 'users-folders' ? check(io, cfg, { alsoKnown: rootMadeEntries(cfg, { dispatcher: o.dispatcherOn }) }) : o.cmd === 'install' || o.cmd === 'add-to-install' ? checkInstall(io, cfg)
     : o.cmd === 'dispatcher-config' ? checkDispatcherConfig(io, cfg) : o.cmd === 'bob' ? checkBob(io, cfg, { commit: o.commit })
-    : o.cmd === 'proposals' ? checkProposals(io, cfg) : o.cmd === 'safe-directory' ? checkSafeDirectory(io, cfg) : o.cmd === 'token' ? checkToken(io, cfg) : o.cmd === 'watch-rules' ? checkRulesCopy(io, cfg) : o.cmd === 'watch-app' ? checkWatchAppConfig(io, cfg, o.app, o.pin)
+    : o.cmd === 'proposals' ? checkProposals(io, cfg) : o.cmd === 'safe-directory' ? checkSafeDirectory(io, cfg) : o.cmd === 'token' ? checkToken(io, cfg) : o.cmd === 'watch-rules' ? checkRulesCopy(io, cfg) : o.cmd === 'scanner' ? checkScannerFiles(io, cfg) : o.cmd === 'watch-app' ? checkWatchAppConfig(io, cfg, o.app, o.pin)
     : o.sub === 'place' ? checkDaemons(io, cfg, o.jobs).filter((r) => /exactly the built job file$|under another label/.test(r.what)) : o.sub === 'load' ? checkDaemons(io, cfg, o.jobs).filter((r) => /is loaded$|loaded from the job file as it is now$/.test(r.what))
     : o.sub === 'reload-account' ? checkDaemons(io, cfg).filter((r) => /review-account (is loaded|was loaded from the job file as it is now)$/.test(r.what)) : null;
   if (!after) { out('done.'); return 0; }

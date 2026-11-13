@@ -320,3 +320,8 @@ export function folderTable(cfg) {
 /** The rules draft the watch-only week judges by (R-0b-122): root's copy, in orchestrate's watch folder; the config holds its hash. */
 export const watchRulesPath = (cfg) => join(cfg.base, 'watch', 'rules-draft.yaml');
 export const watchNotesPath = (cfg) => join(cfg.base, 'watch-notes');
+
+/** The secret scanner the push step runs (L1083): root's folder, made by `scanner` (scanner-setup.mjs), not by users-folders. */
+export const scannerDir = (cfg) => join(cfg.base, 'scanner');
+/** Its three files, as the push step's `scanner` setting takes them (gitleaks.mjs checkScanner adds the version): the one place they are named (I7). */
+export const scannerPaths = (cfg) => Object.freeze({ bin: join(scannerDir(cfg), 'gitleaks'), config: join(scannerDir(cfg), 'gitleaks.toml'), ignoreFile: join(scannerDir(cfg), 'gitleaksignore') });
