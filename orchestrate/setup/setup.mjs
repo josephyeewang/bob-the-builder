@@ -7,7 +7,8 @@
 //   proofs               [--dry-run]    the owner's own Mac user cannot write the record, hooks,
 //                                       settings, launcher... or read the keys                                 (root, read only)
 //   install              [--dry-run]    the link layout, then the updater's first run                          (root)
-//   check-install        [--main <sha>] the copy, its link, every install folder, access lists                 (read only)
+//   check-install        [--main <sha>] [--watch-only] the copy, its link, every install folder, access lists; --watch-only
+//                        leaves out the review runner's lines (its role map), as the watch job's start gate does (L1026)  (read only)
 //   review-config --pin <x.y.z> --input <file> --out <file> [--for-install] [--dry-run]   the review runner's review.json,
 //                                       built: setup's values, the pin, and the owner's few from --input; read back with
 //                                       the runner's own check; --for-install for a first install (review-config.mjs) (NOT root)
@@ -71,7 +72,7 @@ const TOKEN_PAGE_NOTE = [
   '  - Repository access: only the one repository named in the config;',
   '  - Permissions: Metadata = Read-only (GitHub adds it by itself; fine if absent), Contents = Read-only (GitHub may call it "code"), Pull requests = Read-only, Commit statuses = Read-only (the watch job reads it to judge a merge), and nothing else. (Not Checks: the job reads check runs with the watcher App, which holds Checks: read.)',
 ];
-const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install|check-dispatcher|dispatcher-config|dispatcher-keys|review-config --pin <x.y.z> --input <file> --out <file> [--for-install]|add-to-install --pin <x.y.z> --sha256 <hex>|bob --from <Bob checkout> --commit <sha>|daemons place|load|unload|list|check [--only <job>]|daemons reload-account|prove-token|proposals|check-proposals|safe-directory|check-safe-directory|token|check-token|watch-rules|check-watch-rules|watch-app> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
+const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install [--watch-only]|check-dispatcher|dispatcher-config|dispatcher-keys|review-config --pin <x.y.z> --input <file> --out <file> [--for-install]|add-to-install --pin <x.y.z> --sha256 <hex>|bob --from <Bob checkout> --commit <sha>|daemons place|load|unload|list|check [--only <job>]|daemons reload-account|prove-token|proposals|check-proposals|safe-directory|check-safe-directory|token|check-token|watch-rules|check-watch-rules|watch-app> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
 const DAEMON_SUBS = ['place', 'load', 'unload', 'list', 'check', 'reload-account'];
 const COMMANDS = ['users-folders', 'check', 'proofs', 'install', 'check-install', 'check-dispatcher', 'dispatcher-config', 'dispatcher-keys', 'review-config', 'add-to-install', 'bob', 'daemons', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app'];
 const READ_ONLY = ['check', 'check-install', 'check-dispatcher', 'dispatcher-keys', 'check-proposals', 'check-safe-directory', 'check-token', 'prove-token', 'check-watch-rules'];
@@ -82,12 +83,13 @@ export function parseArgs(argv) {
   if (!COMMANDS.includes(cmd)) throw new Error(`first word must be ${COMMANDS.join(', ')}`);
   let rest = argv.slice(1); let sub = null;
   if (cmd === 'daemons') { sub = rest[0]; rest = rest.slice(1); if (!DAEMON_SUBS.includes(sub)) throw new Error(`daemons needs one of ${DAEMON_SUBS.join(', ')}`); }
-  const o = { cmd, sub, config: null, dry: false, prefix: '', main: null, repo: null, rulesSource: null, printLine: false, only: null, app: {}, pin: null, claudePin: null, sha256: null, input: null, out: null, forInstall: false, from: null, commit: null };
+  const o = { cmd, sub, config: null, dry: false, prefix: '', main: null, repo: null, rulesSource: null, printLine: false, watchOnly: false, only: null, app: {}, pin: null, claudePin: null, sha256: null, input: null, out: null, forInstall: false, from: null, commit: null };
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (a === '--dry-run') o.dry = true;
     else if (a === '--print-config-line') o.printLine = true;
     else if (a === '--for-install') o.forInstall = true;
+    else if (a === '--watch-only') o.watchOnly = true;
     else if (a === '--rules-sha256') {
       const v = rest[++i];
       if (typeof v !== 'string' || !/^[0-9a-f]{64}$/.test(v)) throw new Error('--rules-sha256 needs the rules file\'s 64-hex fingerprint');
@@ -121,6 +123,7 @@ export function parseArgs(argv) {
   if (o.pin !== null && cmd !== 'watch-app') throw new Error('--rules-sha256 is only for watch-app');
   if (cmd === 'watch-app' && Object.keys(o.app).length !== 3) throw new Error('watch-app needs all three: --app-id <id> --app-installation <id> --app-key-name <the key file\'s name in the keys folder>');
   if (o.main && cmd !== 'check-install') throw new Error('--main is only for check-install');
+  if (o.watchOnly && cmd !== 'check-install') throw new Error('--watch-only is only for check-install');
   if ((o.input !== null || o.out !== null) && cmd !== 'review-config') throw new Error('--input and --out are only for review-config');
   if (o.claudePin !== null && cmd !== 'review-config' && cmd !== 'add-to-install') throw new Error('--pin is only for review-config and add-to-install');
   if (o.sha256 !== null && cmd !== 'add-to-install') throw new Error('--sha256 is only for add-to-install');
@@ -190,7 +193,7 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, bobGitOf, out
   if (o.cmd === 'review-config') return reviewConfigCommand(cfg, { pin: o.claudePin, input: o.input, out: o.out, dry: o.dry, forInstall: o.forInstall }, { euid: io.euid(), userOf: (n) => readUser(io, n), out, err });
   if (o.cmd === 'check') return report(check(io, cfg, { alsoKnown: rootMadeEntries(cfg, { dispatcher: o.dispatcherOn }) }), out);
   if (o.cmd === 'check-install') {
-    const code = report(checkInstall(io, cfg, { main: o.main }), out);
+    const code = report(checkInstall(io, cfg, { main: o.main, watchOnly: o.watchOnly }), out);
     // The Dispatcher's lines are their own command (L748 r1 M1): `daemons load` and the watch cutover wait on check-install,
     // and a host.lock the Dispatcher can't read must not stop the review or watch jobs. Once the config names it, say where to look.
     if (cfg.hostLockPath !== undefined) out('the Dispatcher\'s folders and host.lock: run check-dispatcher (sudo to read host.lock as orchestrate)');
@@ -223,6 +226,7 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, bobGitOf, out
   if (!o.dry) { const p = rootProblem(io); if (p) { err(`refused: ${p}`); return 2; } }
   const planned = planCommand(io, cfg, o, { runUpdater, ...(bobGitOf ? { bobGitOf } : {}) });
   for (const n of planned.notes ?? []) out(`uses ${n}`);
+  for (const w of planned.warnings ?? []) out(`WARNING  ${w}`);
   for (const p of planned.problems) err(`PROBLEM  ${p}`);
   if (planned.problems.length) { err('nothing was changed.'); return 1; }
   if (!planned.ops.length) out(planned.installed ? 'nothing to do: already installed.' : 'nothing to do: already as needed.');
