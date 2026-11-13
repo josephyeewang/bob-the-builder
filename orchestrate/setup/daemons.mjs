@@ -182,7 +182,9 @@ export function planPlace(io, cfg, jobs = jobsFor(cfg)) {
   // Only a job whose own checks fail: a healthy job starting at boot is fine, and taking the review runner out would stop
   // the very run check-dispatcher waits on (r1 M1). The per-job lists together equal the whole-set gate (startProblems
   // checks each job on its own, plus the install, which every job's list carries), so a broken install names every placed job, as the gate refuses them all (r2 c-1).
-  const left = jobs.filter((j) => startProblems(io, cfg, [j]).length && live(j) !== null).map((j) => `${j}'s job file ${plistPath(cfg, j)} is still in place and launchd starts it at boot: sudo node setup.mjs daemons unload --only ${j}, then delete it`);
+  // A job whose only lines are "can't tell without root" is not known to be broken: the gate's own line already says to run
+  // with sudo, and telling Joe to unload a healthy job would take it out for nothing (L1043, #479 r1 m2).
+  const left = jobs.filter((j) => startChecks(io, cfg, [j]).known.length && live(j) !== null).map((j) => `${j}'s job file ${plistPath(cfg, j)} is still in place and launchd starts it at boot: sudo node setup.mjs daemons unload --only ${j}, then delete it`);
   return { ops: [], problems: [...gate, ...left] };
 }
 
@@ -229,13 +231,21 @@ function installProblem(io, cfg, { watchOnly = false } = {}) {
  * the list brings the full check.
  */
 export function startProblems(io, cfg, jobs) {
-  const problems = [];
+  return startChecks(io, cfg, jobs).problems;
+}
+
+/** startProblems, and the ones of them that are known: `known` leaves out each line that only says this run could not look without root (L1043). */
+function startChecks(io, cfg, jobs) {
+  const problems = []; const unknown = new Set();
   const watchOnly = jobs.length > 0 && jobs.every((j) => j === 'watch-only');
   const bad = installProblem(io, cfg, { watchOnly }); if (bad) problems.push(bad);
   if (jobs.includes('watch-only')) {
-    let r = null; let denied = false; try { r = io.lstat(watchRulesPath(cfg)); } catch (e) { denied = e?.code === 'EACCES' || e?.code === 'EPERM'; }
-    // L1029: a dry run without root can't look into the folder; that is not the file missing.
-    if (!r) problems.push(denied ? `${watchRulesPath(cfg)} is unreadable without root (run with sudo to check it), so whether the hourly watch job has its rules is not known` : `${watchRulesPath(cfg)} is not there (run watch-rules first), so the hourly watch job would have no rules to judge by`);
+    let r = null; let denied = null; try { r = io.lstat(watchRulesPath(cfg)); } catch (e) { denied = e?.code === 'EACCES' || e?.code === 'EPERM' ? e.code : null; }
+    // L1029: a dry run without root can't look into the folder; that is not the file missing. It is an lstat, so what was
+    // refused is the folder, not the file's text (L1043 c1); as root, sudo would not help, so it does not say to use it.
+    const asRoot = io.euid?.() === 0;
+    if (r) { /* there */ } else if (denied && !asRoot) { const t = `${watchRulesPath(cfg)} can't be looked into without root (run with sudo to check it), so whether the hourly watch job has its rules is not known`; problems.push(t); unknown.add(t); }
+    else problems.push(denied ? `${watchRulesPath(cfg)} can't be looked into, even as root (${denied}), so whether the hourly watch job has its rules is not known` : `${watchRulesPath(cfg)} is not there (run watch-rules first), so the hourly watch job would have no rules to judge by`);
   }
   if (jobs.includes(ROBOT_JOB)) {
     const why = robotConfigProblem(io, cfg); if (why) problems.push(`${why}, so the robot job would not start`);
@@ -246,7 +256,7 @@ export function startProblems(io, cfg, jobs) {
   }
   // The Dispatcher: its config in the copy, then check-dispatcher (L757), before it may start.
   if (jobs.includes(DISPATCHER_JOB)) { const why = dispatcherLoadProblem(io, cfg); if (why) problems.push(why); }
-  return problems;
+  return { problems, known: problems.filter((p) => !unknown.has(p)) };
 }
 
 /**
