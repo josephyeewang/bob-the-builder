@@ -18,11 +18,11 @@ import { fakeRules } from '../shared/rules.mjs';
 import { makeRecord, memoryRecord } from '../shared/record.mjs';
 import { openRecord } from '../modules/M9-record/writer.mjs';
 import { FIRST, ENTRY } from '../modules/M10-rules/first-cutover.test-helper.mjs';
-import { ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
-import { HOLD_FACT } from '../modules/M11-dispatcher/pass.mjs';
+import { ALERT_QUEUE_FACT, dropCause, outbox } from '../modules/M11-dispatcher/alerts.mjs';
+import { HOLD_FACT, holdAlert as holdAlertReal } from '../modules/M11-dispatcher/pass.mjs';
 import { LAST_PASS_FACT } from '../modules/M11-dispatcher/tick.mjs';
 import { USAGE_FACT } from '../modules/M11-dispatcher/usage.mjs';
-import { wire as wireOwn, checkUser, lastReturn, dispatcherLate, dropLateAlerts, lockHolder, LIVE_PASS_MAX_MS, NOT_WIRED_PASSES, ROBOT_PASSES, APP_KEYS, robotToken, robotChannel, markToldByBeat, SWEEP_CAUSES, SWEEP_MARGIN_MS, LATE_CAUSE } from './robot-wiring.mjs';
+import { wire as wireOwn, checkUser, lastReturn, dispatcherLate, dropLateAlerts, lockHolder, LIVE_PASS_MAX_MS, NOT_WIRED_PASSES, ROBOT_PASSES, APP_KEYS, robotToken, robotChannel, markToldByBeat, SENSORS_CAUSE, dropSensorsAlerts, SWEEP_CAUSES, SWEEP_MARGIN_MS, LATE_CAUSE } from './robot-wiring.mjs';
 import { generateKeyPairSync } from 'node:crypto';
 import { pidDead, takePassLock } from '../modules/M11-dispatcher/pass-lock.mjs';
 import { tick } from '../modules/M11-dispatcher/tick.mjs';
@@ -1699,4 +1699,152 @@ test('L969: the robot heartbeat tells a stopped Sensors job by name: green while
   sensed(rec, 'signed-in-account', { account: 'a', signed_in: true, observed_at: isoAt(t) });
   await passes.heartbeat();
   assert.equal(al.state, 'closed', 'cleared once it writes again');
+});
+
+// #464 deviation 3 part b (L1024): the Sensors hold, as the Dispatcher's. One robot round is one process, so each round
+// wires afresh (the rules reader's own grace, as in L969 above), on one Record and one stand-in GitHub. upMs is fixed
+// past the restart grace (m-C), so the test does not lean on this Mac's own uptime. The heartbeat's answers come from
+// the real alerts on that GitHub: Joe closing the alert issue is what makes the next raise 'suppressed'.
+function sensorsRounds({ wireOpts = {} } = {}) {
+  const w = withKey(world({ extra: APP }));
+  const gh = appGitHub(w);
+  let lose = false;   // GitHub answers 500 to every issue call: the heartbeat's alerts are lost
+  const fetchFn = async (url, init = {}) => (lose && /\/issues/.test(String(url)) ? new Response('{}', { status: 500 }) : gh.fetchFn(url, init));
+  const round = async (t) => {
+    const { rec, passes } = await wire(w.config, { fetchFn, now: () => t, log: () => {}, upMs: () => 3_600_000, ...wireOpts });
+    let r = null; let err = null;
+    try { r = await passes.heartbeat(); } catch (e) { err = e; }
+    return { rec, r, err };
+  };
+  const sensorsIssue = () => [...gh.issues.values()].filter((i) => /heartbeat red: sensors/.test(i.title)).at(-1);   // the newest
+  const closeByJoe = () => Object.assign(sensorsIssue(), { state: 'closed', closed_by: { login: 'owner-login', type: 'User' } });
+  const reopen = () => Object.assign(sensorsIssue(), { state: 'open', closed_by: null });
+  return { w, gh, round, issue: sensorsIssue, closeByJoe, reopen, loseGitHub: (v) => { lose = v; } };
+}
+const T464 = Date.parse('2026-11-03T10:00:00Z');
+const stopAt = (rec, ms) => { sensed(rec, 'network-up', { value: true, observed_at: isoAt(ms) }); sensed(rec, 'signed-in-account', { account: 'a', signed_in: true, observed_at: isoAt(ms) }); };
+const sensorsHolds = (rec) => (rec.read('fact', ALERT_QUEUE_FACT)?.doc?.entries ?? []).filter((e) => String(e?.mark?.fact).startsWith('hold-robot-sensors-'));
+// The job stops (newest reading 18 minutes before T464); the first round opens the heartbeat's alert and Joe closes it.
+async function stoppedAndClosed(s) {
+  const { rec } = await s.round(T464);
+  stopAt(rec, T464 - 18 * MIN);
+  const opened = await s.round(T464);
+  assert.ok(s.issue(), 'the heartbeat opened its Sensors alert');
+  assert.deepEqual(sensorsHolds(opened.rec), [], 'opened by the heartbeat itself: no hold');
+  s.closeByJoe();
+  return opened.rec;
+}
+
+test('#464 dev 3 (b): Joe closed the Sensors alert while the stop lasts: its hold is queued once a day for that stop, with the alert\'s text', async () => {
+  const s = sensorsRounds();
+  await stoppedAndClosed(s);
+  const one = await s.round(T464 + MIN);
+  assert.equal(one.err, null, String(one.err?.message));
+  const q = sensorsHolds(one.rec);
+  assert.deepEqual(q.map((e) => e.mark.fact), ['hold-robot-sensors-2026-11-03T09-42-00.000Z'], 'one cause per stop, named by its status');
+  assert.equal(SENSORS_CAUSE('red:sensors:2026-11-03T09:42:00.000Z'), 'robot-sensors-2026-11-03T09-42-00.000Z');
+  assert.match(q[0].text, /^The Sensors job has written no reading for 19 minutes \(red after 15\)/, 'the heartbeat alert\'s own text');
+  assert.equal(s.issue().state, 'closed', 'Joe\'s close stands');
+  // Delivered (deliver marks the hold told and the copy leaves the queue): not again that day, again the next.
+  assert.ok(markToldByBeat(one.rec, { cause: 'robot-sensors-2026-11-03T09-42-00.000Z', text: q[0].text, now: T464 + MIN }));
+  assert.ok(dropCause(one.rec, q[0].mark.fact));
+  const later = await s.round(T464 + 60 * MIN);
+  assert.equal(later.err, null, String(later.err?.message));
+  assert.deepEqual(sensorsHolds(later.rec), [], 'told today already: not queued again');
+  const nextDay = await s.round(T464 + 25 * 60 * MIN);
+  assert.deepEqual(sensorsHolds(nextDay.rec).map((e) => e.mark.fact), ['hold-robot-sensors-2026-11-03T09-42-00.000Z'], 'still stopped a day on: told again');
+});
+
+test('#464 dev 3 (b): a new stop is a new cause, told the same day, and the ended stop\'s queued hold leaves unsent', async () => {
+  const s = sensorsRounds();
+  await stoppedAndClosed(s);
+  const one = await s.round(T464 + MIN);
+  const first = sensorsHolds(one.rec);
+  assert.equal(first.length, 1);
+  // The first stop's hold was told today, and its copy is still waiting when the job stops again.
+  assert.ok(markToldByBeat(one.rec, { cause: 'robot-sensors-2026-11-03T09-42-00.000Z', text: first[0].text, now: T464 + MIN }));
+  stopAt(one.rec, T464 + 10 * MIN);
+  const changed = await s.round(T464 + 30 * MIN);   // the alert's status changed: the heartbeat tells the new stop itself
+  assert.equal(changed.err, null, String(changed.err?.message));
+  assert.deepEqual(sensorsHolds(changed.rec), [], 'the old stop\'s copy leaves; the new stop was told by the heartbeat');
+  s.closeByJoe();
+  const two = await s.round(T464 + 31 * MIN);
+  assert.equal(two.err, null, String(two.err?.message));
+  assert.deepEqual(sensorsHolds(two.rec).map((e) => e.mark.fact), ['hold-robot-sensors-2026-11-03T10-10-00.000Z'], 'Joe closed the new stop\'s alert too: its hold is told the same day');
+});
+
+test('#464 dev 3 (b): once the Sensors line is green, every queued Sensors hold leaves unsent', async () => {
+  const s = sensorsRounds();
+  await stoppedAndClosed(s);
+  const one = await s.round(T464 + MIN);
+  assert.equal(sensorsHolds(one.rec).length, 1);
+  // Another kind's hold waits too (a sweep's trouble): it is not the Sensors line's to drop.
+  assert.notEqual(holdAlertReal({ rec: one.rec, cause: SWEEP_CAUSES.list, text: 'the list failed', alert: outbox(one.rec, T464), now: T464 }), false);
+  stopAt(one.rec, T464 + 7 * MIN);
+  const green = await s.round(T464 + 8 * MIN);
+  assert.equal(green.err, null, String(green.err?.message));
+  assert.deepEqual(sensorsHolds(green.rec), [], 'green again: the hold leaves unsent');
+  assert.ok((green.rec.read('fact', ALERT_QUEUE_FACT)?.doc?.entries ?? []).some((e) => e?.mark?.fact === HOLD_FACT(SWEEP_CAUSES.list)), 'only Sensors holds leave');
+});
+
+test('#464 dev 3 (b): a failed beat drops no Sensors hold', async () => {
+  let broken = false;
+  const s = sensorsRounds();
+  await stoppedAndClosed(s);
+  const one = await s.round(T464 + MIN);
+  assert.equal(sensorsHolds(one.rec).length, 1);
+  stopAt(one.rec, T464 + 7 * MIN);
+  const { passes } = await wire(s.w.config, { fetchFn: s.gh.fetchFn, now: () => T464 + 8 * MIN, log: () => {}, upMs: () => 3_600_000,
+    alertsOf: (o) => ({ ...makeAlerts(o), clear: async () => { broken = true; throw new Error('GitHub broke'); } }) });
+  await assert.rejects(passes.heartbeat());
+  assert.ok(broken);
+  assert.equal(sensorsHolds(one.rec).length, 1, 'not known to be green: kept');
+});
+
+test('#464 dev 3 (b): the heartbeat\'s own tell is the tell: no hold while its alert is open, and a waiting copy leaves once Joe reopens it', async () => {
+  const s = sensorsRounds();
+  const { rec } = await s.round(T464);
+  stopAt(rec, T464 - 18 * MIN);
+  for (const t of [T464, T464 + MIN, T464 + 2 * MIN]) assert.deepEqual(sensorsHolds((await s.round(t)).rec), [], 'opened, then updated: no hold');
+  s.closeByJoe();
+  assert.equal(sensorsHolds((await s.round(T464 + 3 * MIN)).rec).length, 1);
+  s.reopen();
+  const back = await s.round(T464 + 4 * MIN);
+  assert.equal(back.err, null, String(back.err?.message));
+  assert.deepEqual(sensorsHolds(back.rec), [], 'the open alert tells it: the queued copy leaves');
+});
+
+test('#464 dev 3 (b): GitHub losing the Sensors alert queues no hold and drops none', async () => {
+  const fresh = sensorsRounds();
+  const { rec } = await fresh.round(T464);
+  stopAt(rec, T464 - 18 * MIN);
+  fresh.loseGitHub(true);
+  const lost = await fresh.round(T464);
+  assert.deepEqual(sensorsHolds(lost.rec), [], 'lost, never closed by Joe: no hold');
+  const s = sensorsRounds();
+  await stoppedAndClosed(s);
+  assert.equal(sensorsHolds((await s.round(T464 + MIN)).rec).length, 1);
+  s.loseGitHub(true);
+  const still = await s.round(T464 + 2 * MIN);
+  assert.equal(sensorsHolds(still.rec).length, 1, 'lost this round: the waiting copy stays');
+});
+
+test('#464 dev 3 (b): a Sensors hold the queue refused fails the pass, with its tell', async () => {
+  const s = sensorsRounds({ wireOpts: { hold: (o) => (o.cause.startsWith('robot-sensors-') ? false : holdAlertReal(o)) } });
+  await stoppedAndClosed(s);
+  const one = await s.round(T464 + MIN);
+  assert.ok(one.err, 'the pass failed');
+  assert.match(String(one.err.tell), /the Sensors hold alert could not be queued/);
+});
+
+test('#464 m-C: wire passes upMs to the heartbeat probes: just after a restart a stale reading is not red', async () => {
+  for (const [up, red] of [[0, false], [3_600_000, true]]) {
+    const w = withKey(world({ extra: APP }));
+    const gh = appGitHub(w);
+    const o = { fetchFn: gh.fetchFn, now: () => T464, log: () => {}, upMs: () => up };
+    const { rec } = await wire(w.config, o);
+    stopAt(rec, T464 - 18 * MIN);
+    await (await wire(w.config, o)).passes.heartbeat();
+    assert.equal([...gh.issues.values()].some((i) => /heartbeat red: sensors/.test(i.title)), red, `up ${up} ms`);
+  }
 });

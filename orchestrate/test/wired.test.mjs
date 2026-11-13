@@ -75,7 +75,6 @@ export const CONFIG = Object.freeze({
 export const UNWIRED = Object.freeze({
   gatePass: 'L221: R-0b-162 wiring, lane 4',
   watchOnce: 'L221: R-0b-162 wiring, lane 4',
-  installStep: 'L221: R-0b-162 wiring (a worker launch with an install phase), lane 4',
   researchCopyPass: 'L286: R-0b-162 wiring beside researchPass, with the push script\'s pushResearch, lane 4',
   proposalRoutePass: 'L549: R-0b-162 wiring beside proposalsPass, with the push script\'s pushProposal and createToReview as its toReview; a toReview wired without this pass leaves cards claimed, lane 4',
 });
