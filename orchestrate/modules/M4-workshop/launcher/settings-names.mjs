@@ -136,8 +136,9 @@ export const isNamesCheckRefusal = (reason) => Object.values(NAMES_CHECK_REFUSAL
 
 // ---- which names are confirmed (audit R-0b-44 M-1) ----
 //
-// One entry per name the launcher writes: how it was proven (`readback:<start-message field>` or
-// `break-it:<test>`) and the Claude Code version it was proven on. An entry counts only for that
+// One entry per name the launcher writes: how it was proven (`readback:<start-message field>`, `break-it:<test>`, or
+// `spelling:<test>`, a pair showing the CLI reads that name: L1114, for the names whose behaviour proof is R-0b-178)
+// and the Claude Code version it was proven on. An entry counts only for that
 // exact version, so a pin change makes every name unconfirmed until live proof L2 runs again.
 // Three names are proven, by the sandbox setting's break-it test (review-walls-proof.test.mjs, L91 (1)): with
 // `sandbox.enabled` and `allowUnsandboxedCommands: false` a call asking to leave the sandbox was refused, and with
@@ -148,6 +149,9 @@ export const CONFIRMED = Object.freeze({
   [SETTINGS.sandboxEnabled]: SANDBOX_BREAK_IT,
   [SETTINGS.allowUnsandboxedCommands]: SANDBOX_BREAK_IT,
 });
+
+/** The ways a CONFIRMED entry may say a name was proven. */
+export const PROOF_KIND = /^(readback|break-it|spelling):./;
 
 // Keys whose children are data (plugin ids, variable names and values), not setting names.
 const DATA_KEYS = new Set([SETTINGS.enabledPlugins]);
@@ -177,6 +181,6 @@ export function unconfirmedNames({ settings, flags = [], version, confirmed = CO
   if (typeof version !== 'string' || !version) return ['(no Claude Code version given)'];
   return [...new Set([...namesIn(settings), ...flags])].filter((n) => {
     const c = Object.hasOwn(confirmed, n) ? confirmed[n] : null;
-    return !(c && typeof c.by === 'string' && /^(readback|break-it):./.test(c.by) && c.version === version);
+    return !(c && typeof c.by === 'string' && PROOF_KIND.test(c.by) && c.version === version);
   });
 }

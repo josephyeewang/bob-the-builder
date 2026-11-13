@@ -8,8 +8,8 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync, chmodSync
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { tempDir } from '../../shared/test-tmp.mjs';
-import { BACKUP_SUFFIX, NOT_TRIED, READBACK_NAMES, TESTS, allNames, guardProblem, judgeNames, main, report, roleReadback, runAll, runArgs, withUserSettings } from './settings-names.mjs';
-import { CONFIRMED, FLAGS as F, REFUSED_SETTINGS, sourcesArgs } from '../../modules/M4-workshop/launcher/settings-names.mjs';
+import { BACKUP_SUFFIX, CONNECTORS_FALLBACK, NOT_TRIED, NOT_USED, SPELLING_LABEL, misspell, READBACK_NAMES, TESTS, allNames, guardProblem, judgeNames, main, report, roleReadback, runAll, runArgs, withUserSettings } from './settings-names.mjs';
+import { CONFIRMED, FLAGS as F, PROOF_KIND, REFUSED_SETTINGS, sourcesArgs } from '../../modules/M4-workshop/launcher/settings-names.mjs';
 import { sourcesProblem } from '../../modules/M4-workshop/launcher/readback.mjs';
 import { DESIGN_PROFILES } from '../../modules/M4-workshop/launcher/role-profiles.mjs';
 
@@ -70,8 +70,13 @@ test('each test is a pair that differs in one thing, and every run limits the se
   assert.ok(!runArgs({ ...byId('settingSources').run('off', d), settingsFile: '/f' }).includes(F.settingSources));
 });
 
+// A judge's "no": a reason why it failed, or (L1114) why the pair could not show the name.
+const isNo = (v) => typeof v === 'string' || (v !== null && typeof v === 'object' && typeof v.notTried === 'string' && v.notTried.length > 20);
+
 test('every judge passes only what the setting does: nothing happening on both sides, or both sides alike, is a FAIL', () => {
-  const samples = { disableBundledSkills: [[3, 9], [9, 9], [9, 3], [null, 9]], disableClaudeAiConnectors: [[0, 2], [0, 0], [2, 2], [null, 2]], strictMcp: [[0, 1], [0, 0], [1, 1], [0, null]],
+  const sp = [['skipped|-', 'loaded|-'], ['loaded|-', 'loaded|-'], ['skipped|named', 'skipped|named'], ['loaded|named', 'loaded|named']];
+  const samples = { disableBundledSkills: [[3, 9], [9, 9], [9, 3], [null, 9]], disableClaudeAiConnectors: [[0, 2], [0, 0], [2, 2], [null, 2]], strictMcp: [[false, true], [false, false], [true, true], [null, true], [true, false]],
+    'spelling-failIfUnavailable': sp, 'spelling-strictAllowlist': sp, 'spelling-crossSessionInbound': sp,
     model: [['claude-haiku-4', 'claude-sonnet-4'], ['claude-sonnet-4', 'claude-sonnet-4'], ['', ''], ['claude-sonnet', 'claude-haiku']] };
   for (const t of TESTS.filter((x) => !x.byGuard)) {
     const [good, ...bad] = samples[t.id] ?? (() => {
@@ -82,8 +87,44 @@ test('every judge passes only what the setting does: nothing happening on both s
       return [[on, off], [off, off], [on, on], [off, on]];
     })();
     assert.equal(t.judge(...good), null, `${t.id}: the good outcome fails`);
-    for (const b of bad) assert.equal(typeof t.judge(...b), 'string', `${t.id}: ${JSON.stringify(b)} passed`);
+    for (const b of bad) assert.ok(isNo(t.judge(...b)), `${t.id}: ${JSON.stringify(b)} passed`);
   }
+});
+
+test('L1114: a spelling pair with no difference, or an account with no connector, is NOT TRIED with its reason, never PASS or FAIL', () => {
+  for (const id of ['spelling-failIfUnavailable', 'spelling-strictAllowlist', 'spelling-crossSessionInbound']) {
+    const t = byId(id);
+    assert.equal(t.kind, 'spelling');
+    assert.equal(t.judge('loaded|-', 'loaded|-')?.notTried?.includes('no difference'), true, id);
+    // The two sides hold the same value, one under the name and one under a spelling the CLI can't know.
+    const d = '/x'; const on = JSON.stringify(t.run('on', d).settings); const off = JSON.stringify(t.run('off', d).settings);
+    const [name] = t.names;
+    assert.ok(on.includes(`"${name}"`) && !off.includes(`"${name}"`) && off.includes(`"${misspell(name)}"`), id);
+    assert.notEqual(misspell(name), name); assert.equal(misspell(name).length, name.length);
+    assert.equal(on.replace(name, misspell(name)), off, `${id}: the sides differ only in the spelling`);
+  }
+  assert.deepEqual(byId('disableClaudeAiConnectors').judge(0, 0), { notTried: CONNECTORS_FALLBACK, fallback: 'b' });
+  assert.match(byId('strictMcp').judge(false, false).notTried, /nothing to hold out/);
+  // judgeNames: the reason reaches the line; the fallback too.
+  const all = Object.fromEntries(TESTS.map((t) => [t.id, { ok: true }]));
+  const lines = judgeNames({ outcomes: { ...all, disableClaudeAiConnectors: { ok: null, notTried: CONNECTORS_FALLBACK, fallback: 'b' },
+    'spelling-crossSessionInbound': { ok: null, notTried: 'the spelling pair showed no difference (loaded|- both ways), so the name is not proven' } }, readback: { ok: true }, version: PIN, confirmed: {} });
+  const conn = lines.find((l) => l.name === 'disableClaudeAiConnectors');
+  assert.equal(conn.result, 'NOT TRIED'); assert.equal(conn.why, CONNECTORS_FALLBACK); assert.equal(conn.fallback, 'b');
+  assert.equal(lines.find((l) => l.name === 'crossSessionInbound').result, 'NOT TRIED');
+  // A not-tried outcome never borrows an older CONFIRMED entry.
+  const c = { crossSessionInbound: { by: 'spelling:settings-names.mjs "x"', version: PIN } };
+  assert.equal(judgeNames({ outcomes: { 'spelling-crossSessionInbound': { ok: null, notTried: 'the spelling pair showed no difference here' } }, version: PIN, confirmed: c })
+    .find((l) => l.name === 'crossSessionInbound').result, 'NOT TRIED');
+  // A spelling PASS is labelled as a name confirmed, never as behaviour, in the line and the printed report.
+  const sp = lines.find((l) => l.name === 'failIfUnavailable');
+  assert.equal(sp.result, 'PASS'); assert.equal(sp.proof, SPELLING_LABEL); assert.match(sp.by, /^spelling:settings-names\.mjs "/);
+  assert.equal(lines.find((l) => l.name === 'deny').proof, undefined);
+  assert.ok(report(lines, PIN).text.split('\n').some((l) => l.startsWith('PASS') && l.includes('failIfUnavailable') && l.includes(SPELLING_LABEL)));
+  // enabledPlugins: NOT USED, not counted.
+  assert.equal(lines.find((l) => l.name === 'enabledPlugins').result, 'NOT USED');
+  // Every pair passing and the read-back passing leaves only allowUnsandboxedCommands (proven by the walls proof).
+  assert.deepEqual(judgeNames({ outcomes: all, readback: { ok: true }, version: PIN, confirmed: {} }).filter((l) => l.result === 'NOT TRIED').map((l) => l.name), Object.keys(NOT_TRIED));
 });
 
 // ---- every name is accounted for ----
@@ -91,7 +132,7 @@ test('every judge passes only what the setting does: nothing happening on both s
 test('every name the launcher uses has a test, the role read-back, or a reason it is not tried yet', () => {
   const tested = new Set([...TESTS.flatMap((t) => t.names), ...READBACK_NAMES]);
   for (const n of allNames()) {
-    if (REFUSED_SETTINGS.includes(n)) continue;
+    if (REFUSED_SETTINGS.includes(n) || NOT_USED[n]) continue;
     assert.ok(tested.has(n) || NOT_TRIED[n], `${n}: no test and no reason`);
     if (NOT_TRIED[n] && !tested.has(n)) assert.ok(NOT_TRIED[n].length > 20, n);
   }
@@ -102,7 +143,8 @@ test('every name the launcher uses has a test, the role read-back, or a reason i
 
 test('a name is PASS only when a test of it ran and passed; skipped is NOT TRIED, a failure is FAIL', () => {
   const none = judgeNames({ outcomes: {}, readback: undefined, version: PIN, confirmed: {} });
-  assert.ok(none.every((l) => l.result === 'NOT TRIED' || l.result === 'REFUSED'), 'nothing ran, yet a name passed');
+  assert.ok(none.every((l) => ['NOT TRIED', 'REFUSED', 'NOT USED'].includes(l.result)), 'nothing ran, yet a name passed');
+  assert.deepEqual(none.filter((l) => l.result === 'NOT USED').map((l) => l.name), Object.keys(NOT_USED));
   assert.deepEqual(none.filter((l) => l.result === 'REFUSED').map((l) => l.name).sort(), [...REFUSED_SETTINGS].sort());
   const r = report(none, PIN);
   assert.equal(r.ok, false); assert.match(r.verdict, /^NOT DONE/);
@@ -111,7 +153,7 @@ test('a name is PASS only when a test of it ran and passed; skipped is NOT TRIED
   const ok = judgeNames({ outcomes: all, readback: { ok: true }, version: PIN, confirmed: {} });
   const left = ok.filter((l) => l.result === 'NOT TRIED').map((l) => l.name);
   assert.deepEqual(left.sort(), Object.keys(NOT_TRIED).filter((n) => !TESTS.some((t) => t.names.includes(n))).sort(), 'only the listed names are left');
-  for (const l of ok.filter((x) => x.result === 'PASS')) { assert.equal(l.version, PIN); assert.match(l.by, /^(readback|break-it):settings-names\.mjs "/); }
+  for (const l of ok.filter((x) => x.result === 'PASS')) { assert.equal(l.version, PIN); assert.match(l.by, /^(readback|break-it|spelling):settings-names\.mjs "/); }
 
   // One test failing fails every name it proves, even one another test passed.
   const oneBad = judgeNames({ outcomes: { ...all, deny: { ok: false, why: 'it ran' } }, readback: { ok: true }, version: PIN, confirmed: {} });
@@ -129,7 +171,7 @@ test('a name is PASS only when a test of it ran and passed; skipped is NOT TRIED
   assert.equal(judgeNames({ outcomes: {}, version: PIN, confirmed: { allowUnsandboxedCommands: { by: '', version: PIN } } }).find((l) => l.name === 'allowUnsandboxedCommands').result, 'NOT TRIED', 'an empty by');
   // The table on main is read by default.
   assert.equal(judgeNames({ outcomes: {}, version: PIN }).filter((l) => l.result === 'PASS').length,
-    allNames().filter((n) => CONFIRMED[n]?.version === PIN && /^(readback|break-it):./.test(CONFIRMED[n].by)).length);
+    allNames().filter((n) => CONFIRMED[n]?.version === PIN && PROOF_KIND.test(CONFIRMED[n].by)).length);
 });
 
 test('the report: the verdict is PASS only when every counted name passed', () => {
@@ -170,7 +212,9 @@ test('plants: each way claude could ignore a name turns its test red', async () 
   }
   // A claude that does nothing at all: every break-it and read-back test fails, none passes.
   const { outcomes } = await fakeRun({ tests: TESTS.filter((t) => !t.byGuard && !['sessionStart', 'restricted', 'settingSources', 'model', 'sessionId'].includes(t.id)) });
-  for (const [id, o] of Object.entries(outcomes)) assert.equal(o.ok, false, `${id} passed with a claude that does nothing`);
+  for (const [id, o] of Object.entries(outcomes)) assert.ok(o.ok === false || (o.ok === null && o.notTried), `${id} passed with a claude that does nothing`);
+  // ...and the three spelling pairs, seeing no difference, are NOT TRIED, not PASS (L1114).
+  for (const id of ['spelling-failIfUnavailable', 'spelling-strictAllowlist', 'spelling-crossSessionInbound']) assert.equal(outcomes[id].ok, null, id);
   // --version is proven only by the guard having passed.
   assert.equal((await fakeRun({ guardPassed: false, tests: [byId('version')] })).outcomes.version, undefined);
 });
@@ -251,7 +295,7 @@ test('a config that can\'t be read: every name NOT TRIED, the last line NOT DONE
   const lines = out.trimEnd().split('\n');
   assert.match(lines.at(-1), /^NOT DONE/);
   assert.ok(!lines.some((l) => l.startsWith('PASS ')), 'a name passed with nothing run');
-  assert.equal(lines.filter((l) => l.startsWith('NOT TRIED')).length, allNames().length - REFUSED_SETTINGS.length);
+  assert.equal(lines.filter((l) => l.startsWith('NOT TRIED')).length, allNames().length - REFUSED_SETTINGS.length - Object.keys(NOT_USED).length);
 });
 
 test('the run sheet command and the receipt path are the ones the harness says', () => {

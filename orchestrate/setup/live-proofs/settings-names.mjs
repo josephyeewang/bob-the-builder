@@ -33,7 +33,10 @@
 // earlier backup is left over.
 //
 // Names that no test can prove live yet stay NOT TRIED (L1109): a role file that writes one keeps failing launch check 0.
-// The role files write four of them (NOT_TRIED), so until each has a proof of its own the run ends NOT DONE.
+// A test that could not show its name (a spelling pair with no difference, an account with no claude.ai connector) makes
+// it NOT TRIED with the reason, never PASS. failIfUnavailable, strictAllowlist and crossSessionInbound are proven by a
+// spelling pair (L1114): the output says "name confirmed (spelling pair)", never their behaviour, which is R-0b-178.
+// enabledPlugins is no longer written (L1114) and shows NOT USED, not counted.
 // apiKeyHelper and disableAllHooks (REFUSED_SETTINGS) are not proven: the launcher refuses them in every role file, and
 // the run says so.
 
@@ -48,7 +51,7 @@ import { makeLock } from '../../modules/M9-record/lock.mjs';
 import { checkRunnerConfig } from '../../wiring/runner-main.mjs';
 import { sessionEnv } from '../../wiring/runner-ports.mjs';
 import { accountInUse } from '../../modules/M4-workshop/launcher/accounts.mjs';
-import { FLAGS as F, SETTINGS as S, HOOK_FIELDS as H, HOOK_EVENTS as E, ENV, REFUSED_SETTINGS, CONFIRMED, sourcesArgs } from '../../modules/M4-workshop/launcher/settings-names.mjs';
+import { FLAGS as F, SETTINGS as S, HOOK_FIELDS as H, HOOK_EVENTS as E, ENV, REFUSED_SETTINGS, CONFIRMED, PROOF_KIND, sourcesArgs } from '../../modules/M4-workshop/launcher/settings-names.mjs';
 import { roleArgs, findInit, checkInit } from '../../modules/M4-workshop/launcher/readback.mjs';
 import { renderRoleSettings } from '../../modules/M4-workshop/launcher/render-settings.mjs';
 import { DESIGN_PROFILES } from '../../modules/M4-workshop/launcher/role-profiles.mjs';
@@ -100,6 +103,26 @@ const touchIn = (dir, name = 'mark') => `touch ${mark(dir, name)}`;
 const hook = (command, extra = {}) => ({ [H.type]: 'command', [H.command]: command, ...extra });
 const markerHook = (event, file) => ({ [S.hooks]: { [event]: [{ [H.hooks]: [hook(`touch ${q(file)}`)] }] } });
 const init = (out) => findInit(out);
+
+const PROBE_SERVER = 'orch-names-probe';
+export const CONNECTORS_FALLBACK = 'the account has no claude.ai connector, so the pair can\'t show it. Fallback (b), L1114: '
+  + 'take it out of the role files; --strict-mcp-config with an empty list keeps connectors out, and launch check 6 refuses a '
+  + 'start whose start message lists any tool server';
+/** The name with two letters near its end swapped: a spelling the CLI can't know, holding none of the real one. */
+export const misspell = (n) => `${n.slice(0, -3)}${n.at(-2)}${n.at(-3)}${n.at(-1)}`;
+export const SPELLING_LABEL = 'name confirmed (spelling pair)';
+/**
+ * A spelling pair (L1114): the same wrong-typed value under the name (on) and under a misspelling (off), in a --settings
+ * file that also holds a SessionStart marker hook. The CLI reads a known key's bad value (it skips the file, reads the
+ * value restrictively, or names the key in what it prints); it passes an unknown key by. Any difference proves the CLI
+ * reads the name; none leaves it NOT TRIED.
+ */
+function spelling(name, place) {
+  return { id: `spelling-${name}`, title: `${name}: a bad value under its name changes the run; under a misspelling it does not`, kind: 'spelling', names: [name],
+    run: (side, dir) => ({ settings: { ...place(side === 'on' ? name : misspell(name), 'sometimes-7c'), ...markerHook(E.sessionStart, mark(dir, 'start')) } }),
+    see: (side, dir, out) => `${there(mark(dir, 'start')) ? 'loaded' : 'skipped'}|${String(out).includes(name) ? 'named' : '-'}`,
+    judge: (on, off) => (on !== off ? null : { notTried: `the spelling pair showed no difference (${on} both ways), so the name is not proven` }) };
+}
 
 export const TESTS = Object.freeze([
   // permissions: the mode leaves a command alone unless a rule lets it run.
@@ -187,11 +210,21 @@ export const TESTS = Object.freeze([
   { id: 'disableClaudeAiConnectors', title: 'no claude.ai connector is in the start message with them off (no tool-server lock)', kind: 'readback', names: [S.disableClaudeAiConnectors],
     run: (side) => ({ mcp: false, settings: side === 'on' ? { [S.disableClaudeAiConnectors]: true } : {} }),
     see: (side, dir, out) => { const i = init(out); return Array.isArray(i?.mcp_servers) ? i.mcp_servers.filter((s) => /^claude\.ai\b/i.test(String(s?.name ?? ''))).length : null; },
-    judge: (on, off) => (on === 0 && Number.isInteger(off) && off > 0 ? null : `claude.ai connectors listed: ${on} with them off, ${off} without; want none and some (an account with no connector can't show this)`) },
-  { id: 'strictMcp', title: 'no tool server is in the start message with the tool-server lock; some are without it', kind: 'readback', names: [F.strictMcpConfig, F.mcpConfig],
-    run: (side) => ({ mcp: side === 'on' }),
-    see: (side, dir, out) => { const i = init(out); return Array.isArray(i?.mcp_servers) ? i.mcp_servers.length : null; },
-    judge: (on, off) => (on === 0 && Number.isInteger(off) && off > 0 ? null : `tool servers listed: ${on} with the lock, ${off} without; want none and some`) },
+    // An account with no connector can't show it (L1114): NOT TRIED, with the fallback, (b), in the receipt.
+    judge: (on, off) => (off === 0 ? { notTried: CONNECTORS_FALLBACK, fallback: 'b' }
+      : on === 0 && Number.isInteger(off) && off > 0 ? null : `claude.ai connectors listed: ${on} with them off, ${off} without; want none and some`) },
+  { id: 'mcpConfig', title: 'a tool server given by --mcp-config is in the start message; with none given, it is not', kind: 'readback', names: [F.mcpConfig],
+    run: (side) => ({ mcp: false, extra: [F.strictMcpConfig, F.mcpConfig, JSON.stringify({ mcpServers: side === 'on' ? { [PROBE_SERVER]: { command: '/usr/bin/true' } } : {} })] }),
+    see: (side, dir, out) => { const i = init(out); return Array.isArray(i?.mcp_servers) ? i.mcp_servers.some((s) => s?.name === PROBE_SERVER) : null; },
+    judge: sameBut({ on: true, off: false }) },
+  { id: 'strictMcp', title: 'with the tool-server lock, a project\'s own tool server is not in the start message; without it, it is', kind: 'readback', names: [F.strictMcpConfig],
+    run: (side) => ({ mcp: false, settings: { enableAllProjectMcpServers: true }, extra: [...(side === 'on' ? [F.strictMcpConfig] : []), F.mcpConfig, '{"mcpServers":{}}'] }),
+    files: (side, dir) => ({ [join(dir, 'work', '.mcp.json')]: JSON.stringify({ mcpServers: { [PROBE_SERVER]: { command: '/usr/bin/true' } } }) }),
+    see: (side, dir, out) => { const i = init(out); return Array.isArray(i?.mcp_servers) ? i.mcp_servers.some((s) => s?.name === PROBE_SERVER) : null; },
+    // If the project's server reaches neither run (the sources limit may keep the project's servers out), the lock had
+    // nothing to hold out: NOT TRIED, never PASS.
+    judge: (on, off) => (on === false && off === false ? { notTried: 'the project\'s tool server reached neither run, so the lock had nothing to hold out' }
+      : sameBut({ on: false, off: true })(on, off)) },
   // flags
   { id: 'settingSources', title: 'with --setting-sources "", no user, project or local settings file loads; without it, each does', kind: 'break-it', names: [F.settingSources],
     run: (side) => ({ sources: side === 'on' }),
@@ -215,6 +248,15 @@ export const TESTS = Object.freeze([
   // --version: the guard runs `claude --version` before anything else and refuses unless it prints the pin, so a run
   // that gets this far has proven it (no pair: the guard's own read is the proof).
   { id: 'version', title: 'claude --version printed the pin before the run', kind: 'readback', names: [F.version], byGuard: true },
+  // --effort (L1114): a value pair. Nothing a run shows reports the effort, so this proves the flag is read (a made-up
+  // level is refused at the start; an unknown flag would be refused both ways), not the review depth.
+  { id: 'effort', title: '--effort takes a level and refuses a made-up one', kind: 'readback', names: [F.effort],
+    run: (side) => ({ extra: [F.effort, side === 'on' ? 'high' : 'not-a-level-7c'] }),
+    see: (side, dir, out) => init(out) !== null, judge: sameBut({ on: true, off: false }) },
+  // Spelling pairs (L1114): the name confirmed, never its behaviour (R-0b-178).
+  spelling(S.failIfUnavailable, (k, v) => ({ [S.sandbox]: { [k]: v } })),
+  spelling(S.strictAllowlist, (k, v) => ({ [S.sandbox]: { [S.network]: { [k]: v } } })),
+  spelling(S.crossSessionInbound, (k, v) => ({ [k]: v })),
   { id: 'maxTurns', title: '--max-turns 1 stops before a second command; 4 lets it run', kind: 'break-it', names: [F.maxTurns],
     run: (side, dir) => ({ maxTurns: side === 'on' ? 1 : 4, settings: { [S.permissions]: { [S.allow]: [...ALLOW_TOUCH(mark(dir, 'a')), ...ALLOW_TOUCH(mark(dir, 'b'))] } },
       prompt: `Use the Bash tool to run ${touchIn(dir, 'a')}. After it has finished, use the Bash tool again, in a separate call, to run ${touchIn(dir, 'b')}. Then reply with the word done.` }),
@@ -223,12 +265,12 @@ export const TESTS = Object.freeze([
 
 // Names with no live test yet, and why (L1109: left failing check 0, never assumed).
 export const NOT_TRIED = Object.freeze({
-  [F.effort]: 'nothing in the start message or on the disk shows the effort a session runs at',
-  [S.failIfUnavailable]: 'it acts only when the sandbox can\'t start, which this Mac can\'t be made to do in a run',
-  [S.strictAllowlist]: 'it changes a prompt for an unlisted host into a refusal, and a headless run refuses such a host either way',
-  [S.crossSessionInbound]: 'it acts only on a message from another session, which a headless run can\'t be sent',
-  [S.enabledPlugins]: 'the user has no plugin to turn on or off, so no pair shows it',
   [S.allowUnsandboxedCommands]: 'no pair here: a command asking to leave the sandbox is a model\'s choice (its break-it test is the review walls proof)',
+});
+
+// Names the launcher no longer writes (L1114), shown and not counted. Each comes back only after its proof (R-0b-178).
+export const NOT_USED = Object.freeze({
+  [S.enabledPlugins]: 'not in the role files (L1114): nothing to turn on; check 6 refuses a start listing a plugin; its proof is R-0b-178',
 });
 
 // The role read-back's names: what launch check 6 itself reads (L6): the start message comes at all, and shows each role's
@@ -250,12 +292,15 @@ export function judgeNames({ outcomes, readback, version, confirmed = CONFIRMED,
   const out = [];
   for (const name of allNames()) {
     if (REFUSED_SETTINGS.includes(name)) { out.push({ name, result: 'REFUSED', why: 'not proven: the launcher refuses it in every role file (REFUSED_SETTINGS)' }); continue; }
-    const by = []; const bad = []; let ran = false;
+    if (Object.hasOwn(NOT_USED, name)) { out.push({ name, result: 'NOT USED', why: NOT_USED[name] }); continue; }
+    const by = []; const bad = []; const open = []; let ran = false; let spelt = false; let fallback;
     for (const t of tests.filter((x) => x.names.includes(name))) {
       const o = outcomes?.[t.id];
       if (!o) continue;
+      // A pair that could not show the name (L1114) is as if not run, with its reason.
+      if (o.ok === null && typeof o.notTried === 'string') { open.push(o.notTried); fallback ??= o.fallback; continue; }
       ran = true;
-      if (o.ok === true) by.push(`${t.kind}:${PROOF} "${t.title}"`); else bad.push(`"${t.title}": ${o.why ?? 'no answer'}`);
+      if (o.ok === true) { by.push(`${t.kind}:${PROOF} "${t.title}"`); spelt ||= t.kind === 'spelling'; } else bad.push(`"${t.title}": ${o.why ?? 'no answer'}`);
     }
     if (READBACK_NAMES.includes(name) && readback) {
       ran = true;
@@ -263,21 +308,22 @@ export function judgeNames({ outcomes, readback, version, confirmed = CONFIRMED,
     }
     const c = Object.hasOwn(confirmed, name) ? confirmed[name] : null;
     if (bad.length) out.push(failN(name, bad.join('; ')));
-    else if (by.length) out.push(pass(name, by[0], version));
-    else if (!ran && c && c.version === version && /^(readback|break-it):./.test(String(c.by))) out.push({ ...pass(name, c.by, version), already: true });
-    else out.push(notTried(name, ran ? 'no test that ran proves it' : NOT_TRIED[name] ?? 'no test ran it'));
+    else if (by.length) out.push({ ...pass(name, by[0], version), ...(spelt && by.every((b) => b.startsWith('spelling:')) ? { proof: SPELLING_LABEL } : {}) });
+    else if (!ran && !open.length && c && c.version === version && PROOF_KIND.test(String(c.by))) out.push({ ...pass(name, c.by, version), already: true });
+    else out.push({ ...notTried(name, open.length ? open.join('; ') : ran ? 'no test that ran proves it' : NOT_TRIED[name] ?? 'no test ran it'), ...(fallback ? { fallback } : {}) });
   }
   return out;
 }
 
-const LABEL = { PASS: 'PASS     ', FAIL: 'FAIL     ', 'NOT TRIED': 'NOT TRIED', REFUSED: 'REFUSED  ' };
+const LABEL = { PASS: 'PASS     ', FAIL: 'FAIL     ', 'NOT TRIED': 'NOT TRIED', REFUSED: 'REFUSED  ', 'NOT USED': 'NOT USED ' };
+const UNCOUNTED = ['REFUSED', 'NOT USED'];
 /** The printed report: one line per name, then the verdict line, which is last. → { ok, text, lines } */
 export function report(lines, version) {
-  const counted = lines.filter((l) => l.result !== 'REFUSED');
+  const counted = lines.filter((l) => !UNCOUNTED.includes(l.result));
   const failed = counted.filter((l) => l.result === 'FAIL').map((l) => l.name);
   const tried = counted.filter((l) => l.result === 'NOT TRIED').map((l) => l.name);
   const ok = counted.length > 0 && failed.length === 0 && tried.length === 0;
-  const body = lines.map((l) => `${LABEL[l.result]} ${l.name}${l.result === 'PASS' ? `  ${l.already ? 'already confirmed: ' : ''}${l.by}` : `  ${l.why}`}`);
+  const body = lines.map((l) => `${LABEL[l.result]} ${l.name}${l.result === 'PASS' ? `  ${l.already ? 'already confirmed: ' : ''}${l.proof ? `${l.proof}: ` : ''}${l.by}` : `  ${l.why}`}`);
   const verdict = ok ? `PASS: all ${counted.length} names confirmed on Claude Code ${version}`
     : `NOT DONE on Claude Code ${version ?? '(no version)'}: ${failed.length} failed${failed.length ? ` (${failed.join(', ')})` : ''}, ${tried.length} not tried${tried.length ? ` (${tried.join(', ')})` : ''}`;
   return { ok, verdict, text: `${body.join('\n')}\n` };
@@ -349,7 +395,8 @@ export async function runAll({ base, io, tests = TESTS }) {
         seen[side] = t.see(side, d, r?.out ?? '', x);
       }
       const why = t.judge(seen.on, seen.off);
-      outcomes[t.id] = why ? { ok: false, why, seen } : { ok: true, seen };
+      outcomes[t.id] = why && typeof why === 'object' ? { ok: null, notTried: why.notTried, ...(why.fallback ? { fallback: why.fallback } : {}), seen }
+        : why ? { ok: false, why, seen } : { ok: true, seen };
     } catch (e) {
       outcomes[t.id] = { ok: false, why: `the test could not run: ${e?.message ?? e}` };
     }
@@ -433,7 +480,7 @@ function runToInit(bin, args, { cwd, env, timeoutMs = 60_000 }) {
 export async function main(argv, { print = (t) => process.stdout.write(t), uid = process.getuid?.(), now = () => Date.now() } = {}) {
   const names = allNames();
   const stop = (why, version) => {
-    const r = report(names.map((n) => (REFUSED_SETTINGS.includes(n) ? { name: n, result: 'REFUSED', why: 'not proven: the launcher refuses it' } : notTried(n, why))), version);
+    const r = report(names.map((n) => (REFUSED_SETTINGS.includes(n) ? { name: n, result: 'REFUSED', why: 'not proven: the launcher refuses it' } : Object.hasOwn(NOT_USED, n) ? { name: n, result: 'NOT USED', why: NOT_USED[n] } : notTried(n, why))), version);
     print(r.text); print(`${r.verdict}\n`); return 1;
   };
   let c; try { c = checkRunnerConfig(readJobConfig(arg(argv, '--config'), { code: [], optionalCode: ['budget'], self: selfPath() })); } catch (e) { return stop(`the worker runner's config can't be read (${e?.message ?? e})`); }
@@ -468,7 +515,7 @@ export async function main(argv, { print = (t) => process.stdout.write(t), uid =
   print(`The runs' folders are kept in ${base}.\n`);
   const receipt = join(homedir(), `settings-names-proof-${new Date(now()).toISOString().replace(/[:.]/g, '-')}.jsonl`);
   // Readable by the owner's own session (L1108): it holds names and results, no secret.
-  try { writeFileSync(receipt, `${[{ pin: c.pin, at: new Date(now()).toISOString(), runs: base, ok: r.ok }, ...lines, ...Object.entries(res.outcomes).map(([test, o]) => ({ test, ok: o.ok, why: o.why ?? null, seen: o.seen ?? null })), { test: 'role read-back', ...res.readback }].map((x) => JSON.stringify(x)).join('\n')}\n`, { mode: 0o644 }); print(`Written to ${receipt}\n`); } catch (e) { print(`The record of this run could not be written (${e?.code ?? e?.message})\n`); }
+  try { writeFileSync(receipt, `${[{ pin: c.pin, at: new Date(now()).toISOString(), runs: base, ok: r.ok }, ...lines, ...Object.entries(res.outcomes).map(([test, o]) => ({ test, ok: o.ok, why: o.why ?? o.notTried ?? null, ...(o.fallback ? { fallback: o.fallback } : {}), seen: o.seen ?? null })), { test: 'role read-back', ...res.readback }].map((x) => JSON.stringify(x)).join('\n')}\n`, { mode: 0o644 }); print(`Written to ${receipt}\n`); } catch (e) { print(`The record of this run could not be written (${e?.code ?? e?.message})\n`); }
   print(`${r.verdict}\n`);
   return r.ok ? 0 : 1;
 }

@@ -139,7 +139,7 @@ test('a worker settings file carries every lock-down field and passes the check'
   assert.equal(s[S.env][ENV.disableUpdates], '1');
   assert.equal(s[S.env][ENV.autoCompactWindow], '300000');
   assert.equal(s[S.disableClaudeAiConnectors], true);
-  assert.deepEqual(s[S.enabledPlugins], {});
+  assert.equal(Object.hasOwn(s, S.enabledPlugins), false, 'no enabledPlugins (L1114): nothing to turn on, and its name is not proven');
   assert.equal(s[S.crossSessionInbound], 'refuse');
   assert.equal(s[S.disableSkillShellExecution], true);
   assert.equal(s[S.disableBundledSkills], true);
