@@ -23,7 +23,18 @@ export const FLAGS = Object.freeze({
   version: '--version',
   maxTurns: '--max-turns',
   sessionId: '--session-id',
+  settingSources: '--setting-sources',
 });
+
+// Which settings files a start may load (L1093, R-0b-177). An allowed list of one: the empty list, so no user, project or
+// local file loads. Claude Code then loads only the machine-wide (managed) file and --settings, which it always loads.
+// A capability note, read in the pin's own code on 13 Nov 2026 (checked: claude-code 2.1.316): `--setting-sources ""`
+// parses to [] and the loaded sources are that list plus flagSettings and policySettings; the start message no longer
+// names its sources, so the read-back (readback.mjs checkInit) checks the start command instead, and the live proof
+// (setup/live-proofs/settings-names.mjs) shows a project and a local file are not loaded with it and are without it.
+export const NO_FILE_SOURCES = '';
+/** The start-command words that limit the settings sources: the only form the read-back accepts. */
+export const sourcesArgs = () => [FLAGS.settingSources, NO_FILE_SOURCES];
 
 export const SETTINGS = Object.freeze({
   permissions: 'permissions',
@@ -91,8 +102,9 @@ export const REFUSED_ENV = Object.freeze([
 // A settings key that does the same from inside a settings file.
 export const REFUSED_SETTINGS = Object.freeze([SETTINGS.apiKeyHelper, SETTINGS.disableAllHooks]);
 
-// Fields of the headless start message the read-back needs (review 0b-3 M6). Which ones the
-// pinned version really carries is NOT VERIFIED; a missing one refuses.
+// Fields of the headless start message the read-back reads (review 0b-3 M6). Every one but settingSources is required,
+// and a missing one refuses. settingSources is read only when a version sends it: 2.1.316 does not (L1093; checked:
+// claude-code 2.1.316), so without it the read-back checks the start command's sourcesArgs instead.
 export const INIT_FIELDS = Object.freeze({
   type: 'type',
   subtype: 'subtype',
@@ -111,6 +123,16 @@ export const INIT_FIELDS = Object.freeze({
 export const ALLOWED_SETTING_SOURCES = Object.freeze(['managed', 'flag']);
 
 export const MIN_CLAUDE_CODE = '2.1.295';
+
+// Launch check 0's two refusals begin with these words (launch.mjs). Another program that must tell "blocked at
+// check 0" apart from a failure (setup/live-proofs/runlocked.mjs blockedBy, L1108 I7) uses isNamesCheckRefusal, never
+// its own copy of the words.
+export const NAMES_CHECK_REFUSALS = Object.freeze({
+  unconfirmed: 'setting names not confirmed',
+  notLocked: 'the role file given to the names check',
+});
+/** Whether a launch's refusal reason is one of check 0's. */
+export const isNamesCheckRefusal = (reason) => Object.values(NAMES_CHECK_REFUSALS).some((p) => String(reason ?? '').startsWith(p));
 
 // ---- which names are confirmed (audit R-0b-44 M-1) ----
 //

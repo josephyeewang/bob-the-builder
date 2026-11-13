@@ -3,10 +3,12 @@
 // field means no start.
 //
 // Capability note: NOT VERIFIED against the pinned Claude Code (live proofs L2, L6). The fields the
-// start message carries are named in settings-names.mjs (INIT_FIELDS); a missing one refuses.
+// start message carries are named in settings-names.mjs (INIT_FIELDS); a missing one refuses. The settings sources are
+// the exception (L1093): 2.1.316's start message does not name them (checked: claude-code 2.1.316), so when it is
+// silent the start command must hold the one allowed sources limit (settings-names.mjs sourcesArgs), or no start.
 
 import { spawn } from 'node:child_process';
-import { FLAGS as F, INIT_FIELDS as I, ALLOWED_SETTING_SOURCES, MIN_CLAUDE_CODE } from './settings-names.mjs';
+import { FLAGS as F, INIT_FIELDS as I, ALLOWED_SETTING_SOURCES, MIN_CLAUDE_CODE, NO_FILE_SOURCES, sourcesArgs } from './settings-names.mjs';
 import { compareVersions } from './hooks-check.mjs';
 import { NEVER_TOOLS, ALWAYS_TOLERATED } from './role-profiles.mjs';
 
@@ -14,7 +16,7 @@ const refuse = (reason) => ({ ok: false, reason });
 
 /** The headless start command for a role. No tool server config but an empty one. */
 export function roleArgs({ profile, settingsFile, model, prompt = 'Reply with the word ready.' }) {
-  const a = [F.print, F.outputFormat, F.streamJson, F.verbose, F.tools, profile.tools.join(','), F.settings, settingsFile,
+  const a = [F.print, F.outputFormat, F.streamJson, F.verbose, F.tools, profile.tools.join(','), F.settings, settingsFile, ...sourcesArgs(),
     F.strictMcpConfig, F.mcpConfig, '{"mcpServers":{}}', F.permissionMode, profile.mode];
   if (profile.restricted) a.push(F.restricted);
   if (model) a.push(F.model, model);
@@ -34,10 +36,34 @@ export function findInit(text) {
 
 const names = (list) => (Array.isArray(list) ? list.map((x) => (typeof x === 'string' ? x : x?.name)).filter((x) => typeof x === 'string') : null);
 
-/** Compares a start message with the role. */
-export function checkInit(init, { role, profile, pin }) {
+/**
+ * Whether a start command limits the settings sources to the one allowed form (L1093): exactly one `--setting-sources`,
+ * followed by the empty list, and no `--setting-sources=…` word. → null when it does, else why not. Only the words
+ * before a `--` are options (a later word is the prompt), as Claude Code reads them.
+ */
+export function sourcesProblem(args) {
+  if (!Array.isArray(args)) return 'the start command was not given to the read-back';
+  const end = args.indexOf('--');
+  const opts = end === -1 ? args : args.slice(0, end);
+  const at = [];
+  for (let i = 0; i < opts.length; i++) {
+    const a = opts[i];
+    if (typeof a === 'string' && a.startsWith(`${F.settingSources}=`)) return `the start command sets the settings sources as ${JSON.stringify(a)}, not as its own two words`;
+    if (a === F.settingSources) at.push(i);
+  }
+  if (at.length === 0) return 'the start command does not limit the settings sources';
+  if (at.length > 1) return 'the start command sets the settings sources more than once';
+  if (at[0] + 1 >= opts.length || opts[at[0] + 1] !== NO_FILE_SOURCES) return `the start command's settings sources are ${JSON.stringify(opts[at[0] + 1] ?? null)}, want none but managed and --settings`;
+  return null;
+}
+
+/**
+ * Compares a start message with the role. `args` is the start command it came from: when the message names no settings
+ * sources (2.1.316 names none), the command's own limit is what is checked (sourcesProblem); no args refuses.
+ */
+export function checkInit(init, { role, profile, pin, args }) {
   if (!init) return refuse('no start message');
-  for (const k of [I.tools, I.mcpServers, I.plugins, I.skills, I.settingSources, I.permissionMode]) {
+  for (const k of [I.tools, I.mcpServers, I.plugins, I.skills, I.permissionMode]) {
     if (!Object.hasOwn(init, k)) return refuse(`start message has no ${k}`);
   }
   const tools = names(init[I.tools]);
@@ -52,8 +78,13 @@ export function checkInit(init, { role, profile, pin }) {
   const skills = names(init[I.skills]);
   const wantSkills = [...(profile.skills ?? [])].sort();
   if (!skills || JSON.stringify([...skills].sort()) !== JSON.stringify(wantSkills)) return refuse(`skills differ: ${skills?.join(',') ?? '?'}`);
-  const sources = names(init[I.settingSources]);
-  if (!sources || !sources.includes('flag') || sources.some((s) => !ALLOWED_SETTING_SOURCES.includes(s))) return refuse(`settings sources are ${sources?.join(',') ?? '?'}, want managed and --settings only`);
+  if (Object.hasOwn(init, I.settingSources)) {
+    const sources = names(init[I.settingSources]);
+    if (!sources || !sources.includes('flag') || sources.some((s) => !ALLOWED_SETTING_SOURCES.includes(s))) return refuse(`settings sources are ${sources?.join(',') ?? '?'}, want managed and --settings only`);
+  } else {
+    const why = sourcesProblem(args);
+    if (why) return refuse(`start message has no ${I.settingSources}, and ${why}`);
+  }
   if (init[I.permissionMode] !== profile.mode) return refuse(`permission mode is ${init[I.permissionMode]}, role has ${profile.mode}`);
   // The version the session itself reports: at least the floor, and the pin when one is given
   // (audit R-0b-44 round 1, minor).
@@ -80,8 +111,8 @@ export function readBack({ claudeBin, args, env, cwd, role, profile, pin, spawnF
     child.stdout.on('data', (d) => {
       out += d;
       const init = findInit(out);
-      if (init) finish(checkInit(init, { role, profile, pin }));
+      if (init) finish(checkInit(init, { role, profile, pin, args }));
     });
-    child.on('close', () => finish(checkInit(findInit(out), { role, profile, pin })));
+    child.on('close', () => finish(checkInit(findInit(out), { role, profile, pin, args })));
   });
 }

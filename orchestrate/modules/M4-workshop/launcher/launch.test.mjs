@@ -9,12 +9,13 @@ import { spawn, spawnSync } from 'node:child_process';
 import { DESIGN_PROFILES } from './role-profiles.mjs';
 import { REFUSED_ENV, SETTINGS as S, HOOK_FIELDS as H, HOOK_EVENTS as E } from './settings-names.mjs';
 import { renderRoleSettings, POLICY_HOOKS, bobFolderDeny, bobFolderShell } from './render-settings.mjs';
-import { roleArgs, checkInit, readBack } from './readback.mjs';
+import { roleArgs, checkInit, readBack, sourcesProblem } from './readback.mjs';
+import { sessionArgs } from './review-launch.mjs';
 import { roleEnv, checkRoleEnv, checkMachineWide, listDropIns, readPlist, MANAGED_READERS, CLAUDE_FILE } from './env-check.mjs';
 import { userInfo } from 'node:os';
 import { HOOKS_SOURCE, installHooks, checkHooks, checkVersion, pinnedBinary, productionProbe, checkSnapshot } from './hooks-check.mjs';
 import { emptyOutbox, readOutboxFile } from './outbox.mjs';
-import { namesIn, unconfirmedNames, FLAGS } from './settings-names.mjs';
+import { namesIn, unconfirmedNames, FLAGS, sourcesArgs, NAMES_CHECK_REFUSALS, isNamesCheckRefusal } from './settings-names.mjs';
 import { CHECKS, launch, installStep, needsInstall, checkBobFolder, lockedRunCommand, smokeTest, baselineTest } from './launch.mjs';
 import { removeProtected } from './worker-copy.mjs';
 import { makeSnapshot } from '../hooks/snapshot.mjs';
@@ -254,6 +255,54 @@ test('read-back: every mismatch or missing field means no start', async () => {
   assert.equal((await readBack({ claudeBin: 'claude', args: [], env: {}, cwd: dir, role: 'worker', profile: worker, spawnFn: fake('none'), timeoutMs: 300 })).reason, 'no start message in time');
   assert.equal((await readBack({ claudeBin: 'claude', args: [], env: {}, cwd: dir, role: 'worker', profile: worker, spawnFn: fake('none', { FAKE_EXIT: '1' }) })).ok, false);
   assert.equal((await readBack({ claudeBin: join(dir, 'no-such-claude'), args: [], env: {}, cwd: dir, role: 'worker', profile: worker })).ok, false);
+});
+
+test('read-back (L1093, R-0b-177): a start message with no setting_sources passes only when the command limits the sources', async () => {
+  const worker = DESIGN_PROFILES.worker;
+  const silent = () => { const i = goodInit('worker'); delete i.setting_sources; return i; };
+  const args = roleArgs({ profile: worker, settingsFile: '/w/role.json' });
+  // roleArgs and sessionArgs both carry the one allowed form, right after --settings.
+  assert.deepEqual(args.slice(args.indexOf('--settings') + 2, args.indexOf('--settings') + 4), sourcesArgs());
+  assert.deepEqual(sourcesArgs(), ['--setting-sources', '']);
+  assert.equal(sourcesProblem(sessionArgs({ profile: worker, settingsFile: '/w/s.json', sessionId: 'x', prompt: 'p' })), null);
+  assert.equal(checkInit(silent(), { role: 'worker', profile: worker, args }).ok, true);
+  // Every other command refuses: none, the limit missing, another value, twice, the = form, the value cut off, the limit
+  // only after a --.
+  const cut = (a) => a.filter((x, i) => !(x === '--setting-sources' || (i > 0 && a[i - 1] === '--setting-sources')));
+  const bad = [
+    ['no command', undefined],
+    ['the command not a list', '--setting-sources'],
+    ['no limit', cut(args)],
+    ['the user source', [...cut(args).slice(0, -1), '--setting-sources', 'user', args.at(-1)]],
+    ['project and local', [...cut(args).slice(0, -1), '--setting-sources', 'project,local', args.at(-1)]],
+    ['a space, not empty', [...cut(args).slice(0, -1), '--setting-sources', ' ', args.at(-1)]],
+    ['twice', [...args.slice(0, -1), '--setting-sources', '', args.at(-1)]],
+    ['the = form, empty', [...cut(args).slice(0, -1), '--setting-sources=', args.at(-1)]],
+    ['the = form beside the pair', [...args.slice(0, -1), '--setting-sources=user', args.at(-1)]],
+    ['the value cut off', [...cut(args), '--setting-sources']],
+    ['only after --', [...cut(args).slice(0, -1), '--', '--setting-sources', '', args.at(-1)]],
+  ];
+  for (const [what, a] of bad) {
+    const c = checkInit(silent(), { role: 'worker', profile: worker, args: a });
+    assert.equal(c.ok, false, what);
+    assert.match(c.reason, /^start message has no setting_sources, and /, what);
+  }
+  // A version that does send setting_sources is still checked on it, whatever the command says.
+  assert.equal(checkInit({ ...goodInit('worker'), setting_sources: ['user', 'flag'] }, { role: 'worker', profile: worker, args }).ok, false);
+  // readBack hands its own command to the check.
+  const fake = fakeClaude(tmp());
+  assert.equal((await readBack({ claudeBin: 'claude', args, env: {}, cwd: tmp(), role: 'worker', profile: worker, spawnFn: fake(silent()) })).ok, true);
+  assert.equal((await readBack({ claudeBin: 'claude', args: cut(args), env: {}, cwd: tmp(), role: 'worker', profile: worker, spawnFn: fake(silent()) })).ok, false);
+});
+
+test('check 0 (L1108 I7): both refusals begin with a NAMES_CHECK_REFUSALS prefix, and isNamesCheckRefusal tells them from any other', async () => {
+  const none = await launch({ role: 'worker', profile: DESIGN_PROFILES.worker, checks: {}, start: async () => assert.fail('started'), names: { ...NAMES('worker'), confirmed: {} } });
+  const loose = await launch({ role: 'worker', profile: DESIGN_PROFILES.worker, checks: {}, start: async () => assert.fail('started'), names: { ...NAMES('worker'), settings: {} } });
+  const missing = await launch({ role: 'worker', profile: DESIGN_PROFILES.worker, checks: {}, start: async () => assert.fail('started') });
+  assert.ok(none.reason.startsWith(NAMES_CHECK_REFUSALS.unconfirmed), none.reason);
+  assert.ok(loose.reason.startsWith(NAMES_CHECK_REFUSALS.notLocked), loose.reason);
+  for (const r of [none, loose, missing]) { assert.equal(r.failedAt, 0); assert.equal(isNamesCheckRefusal(r.reason), true, r.reason); }
+  for (const r of ['launch check 6 (headless read-back): no start message', '', undefined, 'x setting names not confirmed']) assert.equal(isNamesCheckRefusal(r), false, String(r));
 });
 
 test('read-back: the Lead has exactly Read, Glob, Grep, Write and AskUserQuestion; the Front Door only the orchestrate skill (R-0b-34, 39)', () => {
@@ -956,7 +1005,7 @@ test('check 3 and intake: a missing outbox, and an outbox entry that is a folder
 test('check 6 and 10: a start message missing a field, and a machine-wide file that is not JSON, refuse with their own reason', () => {
   for (const k of ['tools', 'mcp_servers', 'plugins', 'skills', 'setting_sources', 'permissionMode']) {
     const i = goodInit('worker'); delete i[k];
-    assert.equal(checkInit(i, { role: 'worker', profile: DESIGN_PROFILES.worker }).reason, `start message has no ${k}`);
+    assert.match(checkInit(i, { role: 'worker', profile: DESIGN_PROFILES.worker }).reason, new RegExp(`^start message has no ${k}`));
   }
   assert.equal(checkMachineWide({ readFile: () => '{', path: '/w/managed.json', claudeFile: '/w/managed.json' }).reason, 'machine-wide settings are missing or not JSON');
 });
