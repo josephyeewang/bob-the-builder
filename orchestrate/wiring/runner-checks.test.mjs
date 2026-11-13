@@ -221,7 +221,7 @@ test('step 6, check 11 (#369 M2): the smoke runs first; a worker\'s baseline run
       assert.equal(existsSync(spare), false, 'the throwaway copy, its exit file with it, is removed');
     } finally { rmSync(d, { recursive: true, force: true }); }
   }
-  // #463 r2 M3: the baseline's limit is the Bash tool's longest wait, 10 minutes, not 15.
+  // #463 r2 M3, r3 m2: the baseline's limit is the lock-down's own cap, 10 minutes, not 15.
   assert.equal(BASELINE_MS, LOCKED_MS); assert.equal(BASELINE_MS, 10 * 60_000);
   // Only guardedRun's reading ports are taken from jobPorts (self-review c1): a spawn there is not used.
   {
@@ -233,7 +233,7 @@ test('step 6, check 11 (#369 M2): the smoke runs first; a worker\'s baseline run
   {
     const calls = [];
     const { d, x } = inputs({ spawn: standIn(calls, { sandbox: true }), baselineMs: LOCKED_MS + 1 });
-    try { assert.match((await workerChecks(x)[11]()).reason, /the baseline's limit is not a time limit within the Bash tool's longest wait \(600000 ms\)/); assert.equal(calls.length, 1, 'the smoke only'); } finally { rmSync(d, { recursive: true, force: true }); }
+    try { assert.match((await workerChecks(x)[11]()).reason, /the baseline's limit is not a time limit within the lock-down's cap \(600000 ms\)/); assert.equal(calls.length, 1, 'the smoke only'); } finally { rmSync(d, { recursive: true, force: true }); }
   }
   // A claude that never ran the command (no record of its group) is no baseline.
   {
@@ -499,13 +499,18 @@ test('#463 r3 m5: check 4, save-work and checks 12 and 13 all stay wired through
     budget: '/i/modules/M11-dispatcher/budget.mjs', bobManifest: '/i/bob-manifest.json', dispatcherRules: '/d/rules.json', reviewStatusFile: '/rv/status.json', reviewUid: 503,
     products: { p1: { repo: 'o/p', mirror: '/m', rules: RULES, render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] }, hooksDir: '/h', snapshot: '/snap/s.json', bobFolder: '/b' }, product: { commands: { install: 'npm ci', test: 'npm test' } }, registryHosts: [] } } } });
   const budget = { rules: {}, rec: {}, bandsNow: () => ({}), runningNow: () => [] }; const bobManifest = { 'a.md': 'f'.repeat(64) };
-  const seen = [];
-  const runLocked = async (j) => { seen.push(j.job); return j.job === 'install' ? { ok: true } : { ok: false, reason: 'stand-in' }; };
+  const seen = []; const jobs = [];
+  const runLocked = async (j) => { seen.push(j.job); jobs.push(j); return j.job === 'install' ? { ok: true } : { ok: false, reason: 'stand-in' }; };
   const wx = { role: 'worker', profile: DESIGN_PROFILES.worker, kind: 'editing', product: 'p1', sessionId: SID, copy: '/c/C-1', settings: { file: '/f', settings: {} }, renderPhase: () => ({ ok: true, settings: {} }), writeSettings: () => ({ ok: true }) };
   const w = lockedWiring(c, { runLocked, budget, bobManifest });
   const k = w.startDeps.checksFor(wx);
   assert.deepEqual(Object.keys(k).map(Number), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13], 'check 4 and checks 12 and 13 together');
   assert.deepEqual(await k[4](), { ok: true }); assert.deepEqual(seen, ['install'], 'check 4 runs the install through the one runLocked');
+  assert.equal(Object.hasOwn(jobs[0], 'onGroup'), false, 'no onGroup given, none passed');
+  // #463 r3 m1: the runner's onGroup (the start's) reaches the install, so its groups are kept as a save's are.
+  const og = () => {};
+  assert.deepEqual(await w.startDeps.checksFor({ ...wx, onGroup: og })[4](), { ok: true });
+  assert.equal(jobs.at(-1).onGroup, og); seen.length = 0; seen.push('install');
   const real = tempDir('orch-'); mkdirSync(join(real, '.git'));
   try { assert.deepEqual(await w.saveWork({ id: SID, product: 'p1', kind: 'editing', card: 'C-1', copy: real, outbox: '/ob/p1/worker/x', save_settings_sha: 'a'.repeat(64) }), { ok: false, reason: 'stand-in' }); }
   finally { rmSync(real, { recursive: true, force: true }); }

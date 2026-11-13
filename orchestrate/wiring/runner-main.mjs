@@ -77,7 +77,7 @@ export function checkRunnerConfig(c) {
   for (const k of UIDS) if (!Number.isInteger(c[k]) || c[k] < 0) fail(`${k} must be a uid`);
   if (typeof c.path !== 'string' || !c.path || !c.path.split(':').every(fullPath)) fail('path must be full folders in their simplest form joined by ":"');
   if (!Number.isFinite(c.claimMs) || c.claimMs <= 0) fail('claimMs must be the claim timeout in ms');
-  if (c.lockedMs !== undefined && (!Number.isInteger(c.lockedMs) || c.lockedMs <= 0 || c.lockedMs > LOCKED_MS)) fail('lockedMs must be the install job\'s time limit in ms, at most 10 minutes, the Bash tool\'s own longest wait (left out: 10 minutes)');
+  if (c.lockedMs !== undefined && (!Number.isInteger(c.lockedMs) || c.lockedMs <= 0 || c.lockedMs > LOCKED_MS)) fail('lockedMs must be the install job\'s time limit in ms, at most 10 minutes, the lock-down\'s own cap (left out: 10 minutes)');
   if (!c.products || typeof c.products !== 'object' || Array.isArray(c.products) || !Object.keys(c.products).length) fail('products must name at least one product');
   for (const [name, p] of Object.entries(c.products)) {
     if (!productName(name)) fail(`product ${JSON.stringify(name)} is not a product name`);

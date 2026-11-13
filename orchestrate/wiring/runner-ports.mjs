@@ -224,7 +224,8 @@ export function saveWorkPort({ mirrorOf, runLocked, settingsDir, make = createSa
         if (st.uid !== uid) throw new Error('the copy\'s .git is not the runner\'s own');
         let cwd; try { cwd = realpath(git); } catch (e) { throw new Error(`the copy's .git can't be read (${e?.code ?? e?.message})`); }
         return runLocked({ ...j, sessionId: s.id, role: RUNNER_ROLE_OF[s.kind], settingsFile: typeof settingsDir === 'string' ? join(settingsDir, saveSettingsName(s.id)) : undefined,
-          // cwd .git: see runner-locked.mjs's capability note (claude 2.1.322 denies <cwd>/.git/config and hooks).
+          // cwd .git: see runner-locked.mjs's capability note (read in claude 2.1.322, which denies <cwd>/.git/config and
+          // hooks; not yet checked on the pin, 2.1.316: Mini proof 9).
           settingsSha: s.save_settings_sha, cwd, ...(typeof onGroup === 'function' ? { onGroup } : {}) });
       }
       : undefined;
@@ -393,8 +394,8 @@ export function liveWallProblem(live, product, places, read) {
  * #364 self-review M1), log (what is told, such as a throwaway that can't be removed), productHeld(product) → null or why
  * the product starts no session (runner-main.mjs keepSnapshots, #369 r2 m2; asked at the start and again before claude),
  * readSettings(id) → a live session's settings (#378 r1 M1).
- * The request: { card, kind, product, sessionId, live, undoCommit? } (live: the runner's other live sessions, liveWallProblem;
- * undoCommit: the reversed commit, 40 hex, an undo's only, L976).
+ * The request: { card, kind, product, sessionId, live, undoCommit?, onGroup? } (live: the runner's other live sessions, liveWallProblem;
+ * undoCommit: the reversed commit, 40 hex, an undo's only, L976; onGroup: told check 4's install process groups, #463 r3 m1).
  */
 /** The start's default prompt (L970): the worker prompt's text, or null (and the start is refused) when it gives none. */
 export const workerPromptText = (x) => { const p = workerPrompt(x); return p.ok ? p.text : { ok: false, reason: p.reason }; };
@@ -409,7 +410,7 @@ export function startPort(c, deps = {}) {
   } = deps;
   const fs = { mkdir: mkdirSync, rm: rmSync, writeNew, list: readdirSync, lstat: lstatSync, chmodTree, rename: renameSync, ...(deps.fs ?? {}) };
   const log = deps.log ?? (() => {});
-  return async ({ card, kind, product, sessionId, live = [], undoCommit } = {}) => {
+  return async ({ card, kind, product, sessionId, live = [], undoCommit, onGroup } = {}) => {
     if (stopped()) return refuse('the worker runner is stopping');
     if (typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) return refuse('the session id is not one the Dispatcher makes');
     if (typeof card !== 'string' || !CARD_ID.test(card) || card.startsWith('.')) return refuse('not a card id');
@@ -538,7 +539,9 @@ export function startPort(c, deps = {}) {
       let back; try { back = readSettings(sessionId); } catch (e) { return refuse(`not read back (${e?.code ?? e?.message})`); }
       return `${JSON.stringify(back, null, 2)}\n` === text ? { ok: true } : refuse('not read back as written');
     };
-    const x = { role, profile, kind, sessionId, card, cardDoc: cd.doc, product, ...(kind === 'undo' ? { undoCommit } : {}), copy, outbox, env, head: made.head, mainAt, claudeBin: c.claudeBin, settings: { file: settingsFile, settings: w.settings }, ownUid, throwaway, renderPhase, writeSettings };
+    const x = { role, profile, kind, sessionId, card, cardDoc: cd.doc, product, ...(kind === 'undo' ? { undoCommit } : {}), copy, outbox, env, head: made.head, mainAt, claudeBin: c.claudeBin, settings: { file: settingsFile, settings: w.settings }, ownUid, throwaway, renderPhase, writeSettings,
+      // Told the install's process groups (check 4, #463 r3 m1), kept by the runner as a save's are (worker-runner.mjs `installs`).
+      ...(typeof onGroup === 'function' ? { onGroup } : {}) };
     let l;
     try {
       // Launch check 0 sees the very flags claude is started with (#364 self-review m5), as review-wiring.mjs does.

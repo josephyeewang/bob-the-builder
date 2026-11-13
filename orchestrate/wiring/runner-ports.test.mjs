@@ -528,6 +528,19 @@ test('#369 r1 m3, r2 m3: main moving during a launch is said as such, and never 
   }
 });
 
+// #463 r3 m1: the runner's onGroup reaches the checks' inputs (check 4's install), and is left out when none is given.
+test('#463 r3 m1: the start hands the runner\'s onGroup to the checks, so check 4\'s install groups are kept', async () => {
+  for (const og of [() => {}, undefined]) {
+    let x0;
+    const w = world({ checksFor: (x) => { x0 = x; return {}; }, launchFn: async (x) => ({ ok: true, started: await x.start() }) });
+    try {
+      const a = await w.start(og ? { onGroup: og } : {});
+      assert.equal(a.ok, true, a.reason);
+      if (og) assert.equal(x0.onGroup, og); else assert.equal(Object.hasOwn(x0, 'onGroup'), false);
+    } finally { rmSync(w.d, { recursive: true, force: true }); }
+  }
+});
+
 test('#369 r1 M1: the baseline\'s throwaway copy is the same commit, walled apart from the session\'s copy and outbox, and removed', async () => {
   let t; let x0;
   const w = world({ checksFor: (x) => { x0 = x; return {}; }, launchFn: async (x) => { t = await x0.throwaway(); return { ok: true, started: await x.start() }; } });

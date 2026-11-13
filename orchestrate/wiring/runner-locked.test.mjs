@@ -428,8 +428,8 @@ test('#463 r2 M1: no job runs without the runner\'s go-ahead, and a record that 
   assert.throws(() => readGroupRecord(rec, { since: '2026-01-01T00:00:00Z', info: () => null }), /can't be read/);
 });
 
-test('#463 r2 m1: the Bash tool waits as long as the job may run; the install\'s limit is at most its longest wait', () => {
-  assert.equal(LOCKED_MS, 600_000, 'claude 2.1.322\'s BASH_MAX_TIMEOUT_MS ceiling');
+test('#463 r2 m1: the Bash tool waits as long as the job may run; the install\'s limit is at most the lock-down\'s cap', () => {
+  assert.equal(LOCKED_MS, 600_000, 'our own cap (#463 r3 m2): the Bash tool\'s wait is set to each run\'s limit, not a tool ceiling');
   assert.throws(() => runner({ ms: LOCKED_MS + 1 }), /the install's limit can't pass 600000 ms/);
 });
 

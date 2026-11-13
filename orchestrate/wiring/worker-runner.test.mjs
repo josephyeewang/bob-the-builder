@@ -819,6 +819,48 @@ test('#463 r3 m4 B4: the job group told during its pass is on disk before onGrou
   assert.deepEqual(atGoAhead, [{ ...C, at: w.now }, { ...C, job: J, at: w.now }], 'each told group was in the kept memory at once');
 });
 
+// #463 r3 m1 (L1047): check 4's install groups are kept in the memory as a save's are: on disk before the go-ahead,
+// forgotten once the start is listed, and stopped at step 0 when no start of this runner holds them.
+test('#463 r3 m1: a start\'s install groups are kept as a save\'s: on disk at once, forgotten once listed, stopped when no start holds them', async () => {
+  const C = { pgid: 7101, pid: 7101, pid_start: '2026-11-10T12:00:00Z' }; const J = { pgid: 7150, pid: 7150, pid_start: '2026-11-10T12:00:01Z' };
+  // Kept before onGroup returns (so before the install's go-ahead), then forgotten once the start is listed.
+  const w = world(); const atGoAhead = []; const real = w.ports.start;
+  w.ports.start = async (x) => {
+    x.onGroup({ ...C }); atGoAhead.push(structuredClone(w.kept.at(-1).installs['S-1']));
+    x.onGroup({ ...C, job: { ...J } }); atGoAhead.push(structuredClone(w.kept.at(-1).installs['S-1']));
+    return real(x);
+  };
+  await w.pass([launchReq('S-1')]);
+  assert.deepEqual(atGoAhead, [{ ...C, at: w.now }, { ...C, job: J, at: w.now }]);
+  assert.equal(w.kept.at(-1).installs['S-1'], undefined, 'forgotten once the start is listed');
+  assert.deepEqual(w.stops, []);
+  // A start refused after its install ran: its groups are stopped at the next step 0 (both), then forgotten.
+  const r = world({ startAnswer: () => ({ ok: false, reason: 'check 5: x' }) }); const realR = r.ports.start;
+  r.ports.start = async (x) => { x.onGroup({ ...C, job: { ...J } }); return realR(x); };
+  await r.pass([launchReq('S-2')]);
+  assert.deepEqual(r.kept.at(-1).installs['S-2'], { ...C, job: J, at: r.now }, 'kept while no stop has shown it gone');
+  await r.pass();
+  assert.deepEqual(r.stops.map((s) => s.id), ['S-2', 'S-2']);
+  assert.equal(r.kept.at(-1).installs['S-2'], undefined, 'forgotten once stopped');
+  // A start still on is not stopped; told after its pass returned, the group is kept by the newest pass's own keeper.
+  const h = {}; const s = world(); let onG; s.ports.start = (x) => { onG = x.onGroup; return new Promise(() => {}); };
+  await s.pass([launchReq('S-3')], { saveHolder: h });
+  await s.pass([], { saveHolder: h });
+  const n = s.kept.length;
+  onG({ ...C });
+  assert.equal(s.kept.length, n + 1, 'kept at once');
+  assert.deepEqual(s.kept.at(-1).installs['S-3'], { ...C, at: s.now });
+  await s.pass([], { saveHolder: h });
+  assert.deepEqual(s.stops, [], 'a start still on keeps its install running');
+  // A restarted runner (no start held) with one in its memory stops it; one that can't be stopped is told and kept.
+  const y = world();
+  y.state = { installs: { 'S-8': { ...C, at: T0 } } };
+  y.ports.stopGroup = async () => ({ ok: false, reason: 'the group leader\'s start time can\'t be read' });
+  await y.pass();
+  assert.ok(y.kept.at(-1).installs['S-8']);
+  assert.match(y.notes.join('\n'), /the install of S-8's start may still run in process group 7101/);
+});
+
 // Self-review M-2: the job's group told after its pass returned is in the memory before onGroup returns (so before the
 // job's go-ahead), kept by the newest pass's own keeper, never written into an older pass's copy.
 test('#463 r2 self-review M-2: a job group told after its pass returned is kept at once by the newest pass', async () => {
