@@ -939,6 +939,71 @@ test('L980 (#466 r2 m2): a card pushed away and back to the same head is not fai
   assert.equal(E.record.read('card', 'U-1').doc.state, 'verified', 'not failed on the finding from before the push');
 });
 
+// #466 r2 m2, plant n8: a not-clean undo that also touches a path needing the owner's Approve. refuse() writes needs_joe
+// on the card first; the finding stands for the card after that write, so the card is still failed.
+test('L980 (#466 r2 m2): a not-clean undo that also needs the Approve is failed after its needs_joe write', async () => {
+  const w = world({ values: { 'product.cutover_stage': 'second' } });
+  verifiedCard(w);
+  await gatePass(w.ctx);
+  const flagged = mergeOf(w).doc.merge_commit;
+  must(put(w.env.record, 'dispatcher', 'card', 'C-1', { state: 'closed' }), 'closed');
+  realRules(w, { deep: true });
+  verifiedCard(w, 'U-1', { pr: 9, files: { 'src/a.mjs': 'one', 'db/migrations/001.sql': 'drop table users;' }, undo: flagged });
+  await gatePass(w.ctx);
+  const u = mergeOf(w, 'U-1');
+  assert.equal(u.doc.state, 'refused', JSON.stringify(u.doc));
+  assert.ok(u.doc.reasons.some((x) => x.startsWith('8:')), u.doc.reasons.join(' | '));
+  assert.ok(Array.isArray(u.doc.not_clean) && u.doc.not_clean.length, JSON.stringify(u.doc));
+  assert.equal(w.env.record.read('card', 'U-1').doc.needs_joe, true);
+  assert.equal(w.env.record.read('card', 'U-1').doc.state, 'failed');
+});
+
+// #466 r2 m2, plants n6 and a18: another writer moves the card (here the owner approves it) after the gate wrote its
+// fact and before it fails the card. The last look before failing sees a card that is not the one judged: not failed.
+test('L980 (#466 r2 m2): a card written by someone else between the fact and the fail is not failed', async () => {
+  const w = world();
+  await notCleanUndo(w);
+  const real = w.ctx.record;
+  let done = false;
+  w.ctx.record = Object.create(real, { write: { value: (x) => {
+    const r = real.write(x);
+    if (!done && r.ok && x.entity === 'fact' && x.id === REVERSE_FACT('U-1')) { done = true; must(put(w.env.review, 'approvals', 'card', 'U-1', { state: 'approved' }), 'approved'); }
+    return r;
+  } } });
+  await gatePass(w.ctx);
+  w.ctx.record = real;
+  assert.ok(done, 'the fact was written');
+  assert.equal(w.env.record.read('card', 'U-1').doc.state, 'approved');
+});
+
+// #466 r2 m-3, plant n9: a finding whose card move was lost, then a newer request for the same card that is still
+// being judged (its reverse unread, so it waits). The older finding is not settled over the newer request.
+test('L980 (#466 r2 m-3): an older finding is not settled while a newer merge of the card waits', async () => {
+  const w = world();
+  const flagged = await notCleanUndo(w);
+  const real = w.ctx.record;
+  w.ctx.record = Object.create(real, { write: { value: (x) => (x.entity === 'card' && x.id === 'U-1' && x.doc?.state === 'failed' ? { ok: false, reason: 'the Record was in use' } : real.write(x)) } });
+  await gatePass(w.ctx);
+  const first = mergeOf(w, 'U-1');
+  assert.equal(first.doc.state, 'refused');
+  // The newer request, judged while the reverse cannot be read: it waits.
+  w.env.clock.t += 60_000;
+  const E = w.env;
+  must(E.record.write({ actor: 'dispatcher', entity: 'merge_request', id: 'mr-U-1-2', expectRev: 0, doc: { card: 'U-1', pr: 9, session_id: 'S-1', head: E.record.read('card', 'U-1').doc.head, rev: E.record.read('card', 'U-1').rev, requested_at: new Date(E.clock.t).toISOString() } }), 'request again');
+  const rv = w.ctx.view;
+  const view = {};
+  for (const k of Object.keys(rv)) view[k] = typeof rv[k] === 'function' ? rv[k].bind(rv) : rv[k];
+  view.commit = async (sha) => { if (sha === flagged) throw Object.assign(new Error('HTTP 502 for the commit'), { unreadable: true }); return rv.commit(sha); };
+  w.ctx.view = view;
+  await gatePass(w.ctx);
+  const merges = E.record.list('merge').filter((m) => m.doc.card === 'U-1');
+  assert.equal(merges.length, 2, JSON.stringify(merges.map((m) => m.doc.state)));
+  w.ctx.record = real;
+  w.env.clock.t += 60_000;
+  await gatePass(w.ctx);
+  assert.equal(E.record.read('card', 'U-1').doc.state, 'verified', 'not failed on the older finding');
+});
+
 // #466 r2 m3: the "yes, an exact reverse" answer counts only on GitHub's current test merge too. A clean undo whose
 // test merge is of an old main waits (it is not merged as an undo on it); once the test merge is current, it merges.
 test('L980 (#466 r2 m3): a clean undo waits on a stale test merge, then merges on the current one', async () => {
