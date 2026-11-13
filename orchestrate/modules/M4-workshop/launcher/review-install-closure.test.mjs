@@ -45,6 +45,7 @@ import { robotPlist, ROBOT_MAIN } from '../../../setup/robot-setup.mjs';
 import { dispatcherPlist } from '../../../setup/dispatcher-setup.mjs';
 import { sensorsJobPlist } from '../../M12-sensors/sensors-job.mjs';
 import { workerRunnerPlist } from '../../../wiring/runner-job.mjs';
+import { copierAgentPlist } from '../../M13-ledger/handoff-copier.mjs';
 import { updateOnce, MAIN } from './review-updater.mjs';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
@@ -81,6 +82,8 @@ const DISPATCHER_MAIN = 'modules/M11-dispatcher/main.mjs';
 // is not written yet either, so the script it starts is named here (L734 self-review c2).
 const SENSORS_LOOP = 'modules/M12-sensors/loop.mjs';
 const RUNNER_MAIN = 'wiring/runner-main.mjs';
+// R-1-32: the read-only handoff copier's own LaunchAgent (the owner's user, every 15 minutes) starts the copier itself.
+const HANDOFF_COPIER = 'modules/M13-ledger/handoff-copier.mjs';
 const JOB_BUILDERS = Object.freeze({
   'modules/M4-workshop/launcher/review-daemons.mjs': () => [
     ...Object.values(reviewDaemonPlists({ label: LABEL, installRoot: SAMPLE_ROOT, config: join(SAMPLE_ROOT, RUNNER_CONFIG), reviewRoot: join(SAMPLE_BASE, 'review'),
@@ -101,6 +104,8 @@ const JOB_BUILDERS = Object.freeze({
   // L874: the worker runner's LaunchAgent is built the same way, through loginJobPlist (#364, #378).
   'wiring/runner-job.mjs': () => [workerRunnerPlist({ label: LABEL, node: join(SAMPLE_ROOT, NODE), script: join(SAMPLE_ROOT, RUNNER_MAIN),
     config: join(SAMPLE_BASE, 'runner.json'), path: '/usr/bin:/bin', logDir: join(SAMPLE_BASE, 'logs'), workDir: SAMPLE_BASE, home: join(SAMPLE_BASE, 'owner-home') })],
+  'modules/M13-ledger/handoff-copier.mjs': () => [copierAgentPlist({ label: LABEL, node: join(SAMPLE_ROOT, NODE), script: join(SAMPLE_ROOT, HANDOFF_COPIER),
+    from: join(SAMPLE_BASE, 'ledger-handoffs'), to: join(SAMPLE_BASE, 'dropbox-handoffs'), stateDir: join(SAMPLE_BASE, 'copier'), products: ['p1'] })],
 });
 /** The one script of the copy a job file starts: the .mjs file under the copy's link in its start command. */
 function startedScript(text) {
@@ -135,7 +140,8 @@ const BUILT_THROUGH = Object.freeze({ 'setup/robot-setup.mjs': 'modules/M11-disp
 //   when node ships import defer).
 const JOB_FILE_FNS = Object.freeze({ loginJobPlist: 'modules/M11-dispatcher/login-job.mjs', watchPlist: 'setup/watch-setup.mjs',
   reviewDaemonPlists: 'modules/M4-workshop/launcher/review-daemons.mjs', updaterPlist: 'modules/M4-workshop/launcher/review-daemons.mjs',
-  sensorsJobPlist: 'modules/M12-sensors/sensors-job.mjs', robotPlist: 'setup/robot-setup.mjs', dispatcherPlist: 'setup/dispatcher-setup.mjs', workerRunnerPlist: 'wiring/runner-job.mjs' });
+  sensorsJobPlist: 'modules/M12-sensors/sensors-job.mjs', robotPlist: 'setup/robot-setup.mjs', dispatcherPlist: 'setup/dispatcher-setup.mjs', workerRunnerPlist: 'wiring/runner-job.mjs',
+  copierAgentPlist: 'modules/M13-ledger/handoff-copier.mjs' });
 const USES_JOB_FILES = Object.freeze({ 'setup/daemons.mjs': 'places the job files the listed builders make; it builds none of its own' });
 /**
  * The job-file functions module `r`'s real imports bring in, each with the module (copy-relative) it imports them
@@ -521,7 +527,7 @@ test('L92 item 4, L106 M-1: every module of the installed copy loads from the co
 // static imports do not, and on the same module without it.
 test('L136 m1: the programs to start come from every job-file builder of the copy, and a new builder must be listed', () => {
   // Every launchd job file of today, read from its builder: the three LaunchDaemons, the watch-only week, the Dispatcher, the robot job and the Sensors loop.
-  assert.deepEqual(ENTRY_POINTS, [...new Set([...Object.values(SCRIPTS), DISPATCHER_MAIN, 'modules/M6-merge-gate/watch-run.mjs', ROBOT_MAIN, SENSORS_LOOP, RUNNER_MAIN])].sort());
+  assert.deepEqual(ENTRY_POINTS, [...new Set([...Object.values(SCRIPTS), DISPATCHER_MAIN, 'modules/M6-merge-gate/watch-run.mjs', ROBOT_MAIN, SENSORS_LOOP, RUNNER_MAIN, HANDOFF_COPIER])].sort());
   // The tripwire: a module of the copy (test code aside) that writes a launchd start command is a job-file builder, and
   // each one must be on JOB_BUILDERS, so the script its jobs start is started through the link above. A listed
   // builder that no longer writes one is stale.
