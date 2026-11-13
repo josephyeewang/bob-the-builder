@@ -346,6 +346,27 @@ test('L1029 E: host-lock-copier prints the owner\'s job file on stdout and the s
   const r2 = w2.run(['host-lock-copier']); assert.equal(r2.code, 1); assert.match(r2.text, /names no hostLockSource/);
 });
 
+test('L1041: with hostLockCopierNode, host-lock-copier names that node in the job, only when it is the owner\'s alone (0700)', () => {
+  const INSTALL = { address: 'https://example.invalid/org/repo.git', label: 'com.example.orch-test', runnerConfig: '/nowhere/review.json' };
+  const SRC = '/Users/sam/Library/CloudStorage/Dropbox/host.lock';
+  const NODE_AT = '/Users/sam/.orchestrate/bin/node';
+  const w = world({ raw: { ...RAW, ...INSTALL, hostLockSource: SRC, hostLockCopierNode: NODE_AT } }); w.mac.as = 65001;
+  const missing = w.run(['host-lock-copier']); assert.equal(missing.code, 1); assert.match(missing.text, /hostLockCopierNode \/Users\/sam\/\.orchestrate\/bin\/node can't be looked at \(ENOENT\)/);
+  assert.doesNotMatch(missing.text, /<plist/);
+  mkdirSync(w.mac.at('/Users/sam/.orchestrate/bin'), { recursive: true }); writeFileSync(w.mac.at(NODE_AT), 'node'); chmodSync(w.mac.at(NODE_AT), 0o700);
+  const notOwners = w.run(['host-lock-copier']); assert.equal(notOwners.code, 1, 'not the owner\'s'); assert.match(notOwners.text, /must be this user's \(the owner's\), mode 0700 \(it is uid -?\d+, mode 700\)/);
+  w.mac.owners.set(NODE_AT, { uid: 65001, gid: 20 });
+  const r = w.run(['host-lock-copier']); assert.equal(r.code, 0, r.text);
+  assert.match(r.text, /<array><string>\/Users\/sam\/\.orchestrate\/bin\/node<\/string><string>\/Library\/orch-test\/install\/orchestrate\/setup\/host-lock-copy\.mjs<\/string>/);
+  assert.doesNotMatch(r.text, /install\/orchestrate\/bin\/node/, 'never the installed copy\'s node');
+  for (const mode of [0o750, 0o705, 0o600, 0o4700]) {
+    chmodSync(w.mac.at(NODE_AT), mode);
+    const bad = w.run(['host-lock-copier']); assert.equal(bad.code, 1, mode.toString(8)); assert.match(bad.text, /mode 0700/);
+  }
+  chmodSync(w.mac.at(NODE_AT), 0o700); rmSync(w.mac.at(NODE_AT)); symlinkSync('/bin/sh', w.mac.at(NODE_AT));
+  const link = w.run(['host-lock-copier']); assert.equal(link.code, 1); assert.match(link.text, /hostLockCopierNode \/Users\/sam\/\.orchestrate\/bin\/node is not a plain file \(a link is not taken/);
+});
+
 test('foldersAbove lists every folder above a file, top first', () => {
   assert.deepEqual(foldersAbove('/Users/sam/Sync Folder/host.lock'), ['/', '/Users', '/Users/sam', '/Users/sam/Sync Folder']);
   assert.deepEqual(foldersAbove('/host.lock'), ['/']);

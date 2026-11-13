@@ -47,7 +47,7 @@ function readSource(fs, from, uid) {
     if (e?.code === 'ELOOP') throw new Error(`the synced host.lock ${from} is a link; it must be the file itself`);
     // Never "give node Full Disk Access" (L1029 E review M1): the Dispatcher, robot and watch jobs run the installed copy's
     // same node as orchestrate, so that grant would open the guarded folders to all of them. A refused read stops here.
-    if (e?.code === 'EPERM' || e?.code === 'EACCES') throw new Error(`the synced host.lock ${from} can't be read (${e.code}). If macOS's privacy protection is refusing this job too, stop and tell the lead: do not give the installed copy's node Full Disk Access, since the Dispatcher's, robot's and watch jobs run that same node (README, Part 6 step 5)`);
+    if (e?.code === 'EPERM' || e?.code === 'EACCES') throw new Error(`the synced host.lock ${from} can't be read (${e.code}). If macOS's privacy protection is refusing this job too, give the copier a node of its own (hostLockCopierNode) and grant Full Disk Access to that node only. Never to the installed copy's node: the Dispatcher's, robot's and watch jobs run that same node (README, Part 6 step 5)`);
     throw new Error(`the synced host.lock ${from} can't be read (${e?.code ?? e})`);
   }
   try {
@@ -129,11 +129,12 @@ export function stampProblem(io, copy, { now, ownerUid }) {
 /**
  * The copier's LaunchAgent text: the owner's own job (no UserName), from the installed copy's node and this script, with the
  * setup config as its one argument. Its logs and working folder are the copy's folder, the owner's own (the install's log
- * folder is root's). `installRoot` is installPaths(cfg).installRoot; `node` its NODE.
+ * folder is root's). `installRoot` is installPaths(cfg).installRoot; `node` its NODE. `copierNode` (the config's hostLockCopierNode,
+ * L1041) is the full path of a node only this job runs, the one given Full Disk Access instead of the installed copy's.
  */
-export function copierPlist({ label, installRoot, node, configPath, copy, home }) {
+export function copierPlist({ label, installRoot, node, configPath, copy, home, copierNode }) {
   return loginJobPlist({
-    label: `${label}.${COPIER_JOB}`, node: join(installRoot, node), script: join(installRoot, COPIER_SCRIPT), config: configPath,
+    label: `${label}.${COPIER_JOB}`, node: copierNode ?? join(installRoot, node), script: join(installRoot, COPIER_SCRIPT), config: configPath,
     path: '/usr/bin:/bin', logDir: dirname(copy), workDir: dirname(copy), logName: COPIER_JOB, home, umask: 0o022,
   });
 }

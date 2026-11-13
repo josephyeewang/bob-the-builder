@@ -83,7 +83,7 @@ test('L1029 E: macOS refusing the read (privacy protection) is told with the way
   const denied = { ...fs, openSync: (p, ...a) => { if (p === w.from) throw Object.assign(new Error('nope'), { code: 'EPERM' }); return fs.openSync(p, ...a); } };
   const r = w.run({ fs: denied, now: T0 + 60_000 });
   assert.equal(r.ok, false);
-  assert.match(r.why, /can't be read \(EPERM\)\. If macOS's privacy protection is refusing this job too, stop and tell the lead: do not give the installed copy's node Full Disk Access/);
+  assert.match(r.why, /can't be read \(EPERM\)\. If macOS's privacy protection is refusing this job too, give the copier a node of its own \(hostLockCopierNode\) and grant Full Disk Access to that node only\. Never to the installed copy's node/);
   assert.doesNotMatch(r.why, /give this job's node Full Disk Access/);
   assert.equal(readFileSync(stampPath(w.to), 'utf8'), before);
   assert.equal(readFileSync(w.to, 'utf8'), 'host=mini\n');
@@ -155,6 +155,18 @@ test('L1029 E: the config takes hostLockSource only with hostLockPath, as a diff
   assert.throws(() => parseConfig({ ...raw, hostLockPath: undefined, hostLockSource: '/Users/sam/Dropbox/host.lock' }), /hostLockSource needs hostLockPath/);
   assert.throws(() => parseConfig({ ...raw, hostLockSource: '/Users/sam/.orchestrate/HOST.lock' }), /two different files/);
   for (const bad of ['/Users/other/host.lock', '/Users/sam/../x/host.lock', '/Users/sam/d/', 'rel/host.lock', 7]) assert.throws(() => parseConfig({ ...raw, hostLockSource: bad }), /hostLockSource must be the full path/, String(bad));
+});
+
+test('L1041: hostLockCopierNode is the copier\'s own node in the owner\'s home, only with hostLockSource; the job runs it', () => {
+  const raw = { base: '/Library/orch-test', owner: 'sam', products: ['alpha'], hostLockPath: '/Users/sam/.orchestrate/host.lock', hostLockSource: '/Users/sam/Dropbox/host.lock' };
+  assert.equal(parseConfig({ ...raw, hostLockCopierNode: '/Users/sam/.orchestrate/bin/node' }).hostLockCopierNode, '/Users/sam/.orchestrate/bin/node');
+  assert.equal(Object.hasOwn(parseConfig(raw), 'hostLockCopierNode'), false);
+  assert.throws(() => parseConfig({ ...raw, hostLockSource: undefined, hostLockCopierNode: '/Users/sam/.orchestrate/bin/node' }), /hostLockCopierNode needs hostLockSource/);
+  for (const bad of ['/Library/orch-test/install/orchestrate/bin/node', '/Users/other/node', '/Users/sam/../x/node', '/Users/sam/bin/', 'bin/node', '/Users/sam/b\nin', 7]) {
+    assert.throws(() => parseConfig({ ...raw, hostLockCopierNode: bad }), /hostLockCopierNode must be the full path/, String(bad));
+  }
+  const text = copierPlist({ label: 'com.example.orch', installRoot: '/Library/o/install/orchestrate', node: 'bin/node', configPath: '/Library/orchestrate-setup.json', copy: '/Users/sam/.orchestrate/host.lock', home: '/Users/sam', copierNode: '/Users/sam/.orchestrate/bin/node' });
+  assert.match(text, /<array><string>\/Users\/sam\/\.orchestrate\/bin\/node<\/string><string>\/Library\/o\/install\/orchestrate\/setup\/host-lock-copy\.mjs<\/string>/);
 });
 
 test('L1029 E review: the copy is the synced file byte for byte, text or not', () => {

@@ -207,7 +207,16 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, bobGitOf, out
     if (asRoot) { err('refused: the host.lock copier is the owner\'s own job; run this without sudo'); return 2; }
     if (cfg.hostLockSource === undefined) { err('PROBLEM  the setup config names no hostLockSource (the synced host.lock the copier copies to hostLockPath)'); return 1; }
     const home = `/Users/${cfg.owner}`;
-    let text; try { text = copierPlist({ label: cfg.label, installRoot: installPaths(cfg).installRoot, node: NODE, configPath: o.config ?? ROOT_CONFIG_PATH, copy: cfg.hostLockPath, home }); } catch (e) { err(`PROBLEM  ${e.message}`); return 1; }
+    if (cfg.hostLockCopierNode !== undefined) {
+      // L1041: the node macOS lets read the synced folder must be the owner's alone, so nothing else can run through it.
+      const n = cfg.hostLockCopierNode; let st, uid;
+      try { st = io.lstat(n); uid = io.euid(); } catch (e) { err(`PROBLEM  hostLockCopierNode ${n} can't be looked at (${e?.code ?? e.message}): copy node there first (README, Part 6 step 5)`); return 1; }
+      if (!st.isFile()) { err(`PROBLEM  hostLockCopierNode ${n} is not a plain file (a link is not taken: name the node itself)`); return 1; }
+      if (st.uid !== uid || (st.mode & 0o7077) !== 0 || (st.mode & 0o100) === 0) {
+        err(`PROBLEM  hostLockCopierNode ${n} must be this user's (the owner's), mode 0700 (it is uid ${st.uid}, mode ${(st.mode & 0o7777).toString(8)}): README, Part 6 step 5`); return 1;
+      }
+    }
+    let text; try { text = copierPlist({ label: cfg.label, installRoot: installPaths(cfg).installRoot, node: NODE, configPath: o.config ?? ROOT_CONFIG_PATH, copy: cfg.hostLockPath, home, copierNode: cfg.hostLockCopierNode }); } catch (e) { err(`PROBLEM  ${e.message}`); return 1; }
     const file = `${home}/Library/LaunchAgents/${cfg.label}.${COPIER_JOB}.plist`;
     out(text);
     err(`Save the text above as ${file} (owner's own, 0644), make the copy's folder ${dirname(cfg.hostLockPath)} (the owner's, 0755), then: launchctl bootstrap gui/$(id -u) ${file}. Run dispatcher-config again so the Dispatcher's dispatcher.json names the copy too (with the Dispatcher's job in place, unload it first: README, Part 6 step 6). A minute later, sudo node setup.mjs check-dispatcher (README, Part 6 step 5).`);

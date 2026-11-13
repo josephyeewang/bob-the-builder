@@ -304,11 +304,25 @@ A copy installed before the entry existed has an updater that does not keep `dis
    a stamp beside the copy (`host.lock.copied`). A run that can't read the synced file writes nothing and says why in
    `host-lock-copy.err.log`, beside the copy. **check-dispatcher FAILs when the stamp is older than 5 minutes** (or missing,
    or not the owner's), so a copier that stopped is told, never read as a current copy; while it FAILs, `daemons place`
-   and `load` wait too. If the log says EPERM, macOS is guarding the synced folder from the owner's job too: **stop and
-   tell the lead. Never give the installed copy's `bin/node` Full Disk Access**: the Dispatcher, robot and watch jobs run
-   that same node as orchestrate, so the grant would open Dropbox, the Desktop and Documents to all of them. The
-   Dispatcher itself does not judge the copy's age: host.lock only adds a diary line and a note ("Air is home" never stops
-   orchestrated products), so an old copy changes no decision.
+   and `load` wait too. **If the log says EPERM**, macOS is guarding the synced folder from the owner's job too. **Never give
+   the installed copy's `bin/node` Full Disk Access**: the Dispatcher, robot and watch jobs run that same node as orchestrate,
+   so the grant would open Dropbox, the Desktop and Documents to all of them. Instead give the copier a node of its own (L1041):
+   1. As the owner, without sudo: `mkdir -m 0700 ~/.orchestrate/bin` and `cp <installRoot>/bin/node ~/.orchestrate/bin/node`,
+      then `chmod 0700 ~/.orchestrate/bin/node` (the owner's alone: nothing that runs as orchestrate can run it).
+   2. Add `"hostLockCopierNode": "/Users/<owner>/.orchestrate/bin/node"` to the setup config (a full path in the owner's
+      home; the config refuses it without `hostLockSource`). Print the job file again with `host-lock-copier`: it refuses
+      unless that node is a plain file of the owner's, mode 0700, and the job file then names that node, not the installed one.
+   3. Reload the job: `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/<label>.host-lock-copy.plist`, save the new
+      text over it, and `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<label>.host-lock-copy.plist`.
+   4. System Settings → Privacy & Security → Full Disk Access → + → press Cmd-Shift-G, paste
+      `/Users/<owner>/.orchestrate/bin/node`, add it and turn it on. Grant that path only.
+   5. Prove both sides on the Mac: a minute later the copier's err log has no new EPERM and check-dispatcher's stamp row
+      passes; and the orchestrate jobs' node is still refused the synced file:
+      `sudo -u orchestrate <installRoot>/bin/node -e "require('fs').readFileSync(process.argv[1])" "<hostLockSource>"`
+      must fail with EPERM. If it reads the file, the grant reached the shared node: remove it and stop.
+   When an update changes the installed node, the copier keeps its own until you copy it again (steps 1, 3 and 4; macOS
+   may ask again for the new file). The Dispatcher's own refusal of an old or missing copy (no starts, one alert) comes
+   with the Dispatcher's change that reads the stamp (L1041); until that lands, check-dispatcher's stamp row is the guard.
 6. To change a path the Dispatcher and the robot share while both jobs are in place: `dispatcher-config` refuses, since the
    copy's `robot.json` still names the old one. So: `sudo node setup.mjs daemons unload --only dispatcher`, delete the
    Dispatcher's job file (and a `.<label>.dispatcher.plist.new` beside it, if a cut-off write left one; `daemons check` names
