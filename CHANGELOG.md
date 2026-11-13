@@ -6,6 +6,12 @@ Until 2026-10-29 the history sat in four places that disagreed (the core's foote
 
 ## 1. v2.28 onward (v2.28 – v2.40 moved from the footer of `build-protocol-core.md`)
 
+v2.76 — 2026-11-13 — Evidence must match the claim (D-039)
+
+- Specification audits cannot pass with unavailable requested spec inputs or with an explicitly requested source that is unavailable or yields no candidates; lexical checks no longer claim complete semantic preservation.
+- Coverage records can validate a fresh task report for the expected run and subject, refusing failed, stale or unfinished results even when the process succeeded.
+- Existing templates/lenses gain workload applicability, useful-output controls, field authority, semantic round trips, compatibility-aware recovery, completion reserves, independent fallback-source checks and validated confidence claims.
+
 v2.75 — 2026-11-13 — Field learning reaches the next builder (D-038)
 
 - Existing audit ledgers can retain incident classes, prevention checks, independent evidence and adoption; a read-only checker refuses incomplete recurring-class closure and unresolved Material.
