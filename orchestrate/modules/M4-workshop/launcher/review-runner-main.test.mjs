@@ -952,3 +952,36 @@ test('L946 m3: the wired stop checks the pid is still claude under that session,
     await ended;
   } finally { try { process.kill(-leader.pid, 'SIGKILL'); } catch { /* gone */ } }
 });
+
+test('L1001: with budget the config must name the Dispatcher\'s rules snapshot and the worker runner\'s status file and user', () => {
+  const d = tempDir('m4-cfg-');
+  const good = withR163({ installRoot: '/i', root: '/r', outboxRoot: '/o', reviewHome: '/h', uids: {}, recordRoot: '/x', recordUid: 5, mirror: '/m', claudeBin: '/c', hooksDir: '/i/hooks', ownerHome: '/w', ownerUid: 5, wiring: '/i/w.mjs',
+    budget: '/i/modules/M11-dispatcher/budget.mjs', dispatcherRules: '/b/products/p/rules/dispatcher-rules.json', workerStatusFile: '/b/worker-runner/runner/status.json', workerUid: 6 });
+  const cfg = (c) => { writeFileSync(join(d, 'c.json'), JSON.stringify(c)); return () => readConfig(join(d, 'c.json'), OPEN_WALLS); };
+  assert.equal(cfg(good)().workerUid, 6);
+  for (const k of ['dispatcherRules', 'workerStatusFile', 'workerUid']) {
+    const { [k]: _, ...less } = good;
+    assert.throws(cfg(less), new RegExp(`config: ${k} must be set with budget \\(launch check 12 reads it\\)`), k);
+  }
+  assert.throws(cfg({ ...good, dispatcherRules: 'rules.json' }), /config: dispatcherRules must be an absolute path/);
+  assert.throws(cfg({ ...good, workerUid: '6' }), /config: workerUid must be a uid/);
+  const { budget, dispatcherRules, workerStatusFile, workerUid, ...none } = good;
+  assert.equal(cfg(none)().budget, undefined, 'no budget: none of the three is needed');
+});
+
+test('L1001: main hands the budget module the config with this runner\'s own status file and user, for the running count', async () => {
+  const d = realpathSync(tempDir('m4-main-'));
+  const config = join(d, 'c.json'); writeFileSync(config, '{}');
+  const one = join(d, 'one.mjs'); writeFileSync(one, 'export function start() { return { ok: false, reason: "x" }; }\n');
+  const seen = join(d, 'seen.mjs');
+  writeFileSync(seen, 'export const budget = (c) => { globalThis.__budgetSeen = c; return { rules: {}, rec: {}, bandsNow: () => ({}), runningNow: () => [] }; };\n');
+  const c = { wiring: one, root: join(d, 'review'), snapshot: join(d, 'rules.json'), rules: { production: { env_files: [], programs: [], hosts: [] } }, uids: { reviewer: ME }, budget: seen, dispatcherRules: '/b/r.json' };
+  const logs = []; let got;
+  const code = await main([config], { log: (s) => logs.push(s), ports: { readConfigFn: () => c, programs: () => null, write: () => {}, pass: async (p) => { got = p; return { ok: true, started: [], refused: [] }; } } });
+  assert.equal(code, 0, logs.join('\n'));
+  assert.equal(globalThis.__budgetSeen.reviewStatusFile, join(d, 'review', 'status.json'));
+  assert.equal(globalThis.__budgetSeen.reviewUid, ME);
+  assert.equal(globalThis.__budgetSeen.dispatcherRules, '/b/r.json');
+  assert.ok(got, 'the pass ran');
+  delete globalThis.__budgetSeen;
+});
