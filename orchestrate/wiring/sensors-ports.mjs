@@ -98,26 +98,50 @@ export function shapeProblem(a) {
   return null;
 }
 
+// The answer's rules, one definition for the Sensors (readOwnerAnswer) and for setup's check (answerRows, #502 r1 m3): the
+// folder, the file and the time. Each takes what its reader already has (a stat, the parsed answer) and gives the reason
+// to refuse, or null.
+/** The answer's folder: a plain folder of the owner's that others can't write. */
+export function answerFolderProblem(ds, ownerUid, dir) {
+  if (ds.isSymbolicLink() || !ds.isDirectory()) return `${dir} is not a plain folder`;
+  if (ds.uid !== ownerUid) return `${dir} is not the owner's`;
+  if (ds.mode & 0o022) return `${dir} can be written by others`;
+  return null;
+}
+/** The answer file: the owner's plain file with one name, that others can't write, and small. */
+export function answerFileProblem(st, ownerUid, file) {
+  if (st.uid !== ownerUid) return `${file} is not the owner's`;
+  if (!st.isFile() || st.nlink !== 1) return `${file} is not a plain file with one name`;
+  if (st.mode & 0o022) return `${file} can be written by others`;
+  if (st.size > MAX_BYTES) return `${file} is too big`;
+  return null;
+}
+/** The answer, parsed: its shape, then its time, neither ahead of this clock nor older than staleMs. */
+export function answerProblem(a, nowMs, staleMs = ANSWER_STALE_MS) {
+  const bad = shapeProblem(a);
+  if (bad) return bad;
+  const age = nowMs - Date.parse(a.observed_at);
+  if (age < -ANSWER_AHEAD_MS) return 'the owner\'s answer is dated in the future';
+  if (age > staleMs) return `the owner's answer is ${Math.round(age / 60_000)} min old (the owner's job may be failing to write; see its log)`;
+  return null;
+}
+
 export function readOwnerAnswer({ file, ownerUid, now = () => new Date(), staleMs = ANSWER_STALE_MS, acl = aclProblem }) {
   if (typeof file !== 'string' || !file.startsWith('/')) return refuse('no answer file is configured');
   if (!Number.isSafeInteger(ownerUid) || ownerUid <= 0) return refuse('no owner uid is configured');
   const dir = dirname(file);
   let ds;
   try { ds = lstatSync(dir); } catch { return refuse(`${dir} is missing`); }
-  if (ds.isSymbolicLink() || !ds.isDirectory()) return refuse(`${dir} is not a plain folder`);
-  if (ds.uid !== ownerUid) return refuse(`${dir} is not the owner's`);
-  if (ds.mode & 0o022) return refuse(`${dir} can be written by others`);
+  const dirBad = answerFolderProblem(ds, ownerUid, dir);
+  if (dirBad) return refuse(dirBad);
   let fd;
   try { fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) {
     return refuse(e?.code === 'ENOENT' ? 'the owner\'s answer is missing (is the owner\'s job running?)' : e?.code === 'ELOOP' ? `${file} is a link` : `${file} can't be read (${e?.code ?? e})`);
   }
   let text;
   try {
-    const st = fstatSync(fd);
-    if (st.uid !== ownerUid) return refuse(`${file} is not the owner's`);
-    if (!st.isFile() || st.nlink !== 1) return refuse(`${file} is not a plain file with one name`);
-    if (st.mode & 0o022) return refuse(`${file} can be written by others`);
-    if (st.size > MAX_BYTES) return refuse(`${file} is too big`);
+    const fileBad = answerFileProblem(fstatSync(fd), ownerUid, file);
+    if (fileBad) return refuse(fileBad);
     const buf = Buffer.alloc(MAX_BYTES + 1);
     const n = readSync(fd, buf, 0, buf.length, 0);
     if (n > MAX_BYTES) return refuse(`${file} is too big`);
@@ -127,11 +151,8 @@ export function readOwnerAnswer({ file, ownerUid, now = () => new Date(), staleM
   if (listed) return refuse(listed);
   let a;
   try { a = JSON.parse(text); } catch { return refuse(`${file} is not JSON`); }
-  const bad = shapeProblem(a);
+  const bad = answerProblem(a, now().getTime(), staleMs);
   if (bad) return refuse(bad);
-  const age = now().getTime() - Date.parse(a.observed_at);
-  if (age < -ANSWER_AHEAD_MS) return refuse('the owner\'s answer is dated in the future');
-  if (age > staleMs) return refuse(`the owner's answer is ${Math.round(age / 60_000)} min old (the owner's job may be failing to write; see its log)`);
   return { ok: true, answer: a };
 }
 

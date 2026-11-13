@@ -354,8 +354,8 @@ test('audit #144 r2 n1: a config that names no installRoot is refused by main, w
 test('L1049: one time limit covers the wiring too: a wire() that never answers ends the run with exit 2, and so does a pass that runs past what the wiring left', async () => {
   const L = installedLayout('m12-late-', { files: {
     'wiring/never.mjs': 'export function wire() { return new Promise(() => {}); }\n',
-    // Answers after 150 ms; a real record (M9's test fixture), so only the never-answering account read holds the pass.
-    'wiring/slow.mjs': `import { setup } from ${JSON.stringify(new URL('../M9-record/fixtures.test-helper.mjs', import.meta.url).href)};\nexport async function wire() { await new Promise((ok) => setTimeout(ok, 150)); return { rec: setup({ prefix: 'm12-late-' }).record, ports: { whoIsSignedIn: () => new Promise(() => {}), probes: {} } }; }\n`,
+    // Answers after 1200 ms; a real record (M9's test fixture), so only the never-answering account read holds the pass.
+    'wiring/slow.mjs': `import { setup } from ${JSON.stringify(new URL('../M9-record/fixtures.test-helper.mjs', import.meta.url).href)};\nexport async function wire() { await new Promise((ok) => setTimeout(ok, 1200)); return { rec: setup({ prefix: 'm12-late-' }).record, ports: { whoIsSignedIn: () => new Promise(() => {}), probes: {} } }; }\n`,
   } });
   const self = L.write('modules/M12-sensors/loop.mjs', 'export {};\n');
   const lines = [];
@@ -365,8 +365,11 @@ test('L1049: one time limit covers the wiring too: a wire() that never answers e
   assert.match(lines.pop(), /the wiring did not finish within 300 ms/);
   assert.ok(Date.now() - t < 2000, 'it ends at the limit, not later');
   const slow = L.write('slow.json', { installRoot: L.installRoot, wiring: L.path('wiring/slow.mjs') });
+  // One limit ends this run at about 2000 ms; a fresh limit for the pass would end it at about 3200 ms. The bound sits between,
+  // 800 ms clear of the first, so a loaded Mac does not fail it (#502 r1 m4: 450 ms against 300 measured 484 under load).
   t = Date.now();
-  const code = await main([slow], { self, runDeadlineMs: 300, log: (s) => lines.push(s) });
+  const code = await main([slow], { self, runDeadlineMs: 2000, log: (s) => lines.push(s) });
   assert.equal(code, 2, lines.join('\n'));
-  assert.ok(Date.now() - t < 450, `one limit for the whole run: ${Date.now() - t} ms`);
+  assert.match(lines.at(-1), /the pass did not finish within 2000 ms/);
+  assert.ok(Date.now() - t < 2800, `one limit for the whole run: ${Date.now() - t} ms`);
 });

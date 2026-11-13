@@ -22,8 +22,8 @@
 
 import { dirname, join, posix } from 'node:path';
 import { loginJobPlist } from '../modules/M11-dispatcher/login-job.mjs';
-import { NODE, currentCopy } from '../modules/M4-workshop/launcher/install-check.mjs';
-import { ANSWER_AHEAD_MS, ANSWER_STALE_MS, shapeProblem } from '../wiring/sensors-ports.mjs';
+import { NODE, aclProblem, currentCopy } from '../modules/M4-workshop/launcher/install-check.mjs';
+import { ANSWER_STALE_MS, answerFileProblem, answerFolderProblem, answerProblem } from '../wiring/sensors-ports.mjs';
 import { installPaths } from './install.mjs';
 import { readUser } from './users-folders.mjs';
 import { DISPATCHER_OFF } from './dispatcher-setup.mjs';
@@ -78,9 +78,10 @@ function fileProblem(io, f, text, uid) {
   return t === text ? null : `${f} is not the job file this setup builds now (run owner-job place)`;
 }
 
-/** The common start: on, run as the owner (never root), the owner's user and home known. → { uid, home, file, text } or { problems }. */
-function start(io, cfg) {
-  if (!cfg.dispatcher) return { problems: [DISPATCHER_OFF] };
+/** The common start: on, run as the owner (never root), the owner's user and home known. → { uid, home, file, text } or { problems }.
+ *  Unload alone runs with the Dispatcher off: it is the way out after the Dispatcher's entry is gone (#502 r1 m1). */
+function start(io, cfg, { off = false } = {}) {
+  if (!cfg.dispatcher && !off) return { problems: [DISPATCHER_OFF] };
   const o = ownerOf(io, cfg); if (o.problem) return { problems: [o.problem] };
   const me = io.euid();
   if (me === 0) return { problems: [`the owner's answer job is the owner's own: run owner-job as ${cfg.owner}, without sudo (root never writes in the owner's home)`] };
@@ -138,7 +139,7 @@ export function planOwnerLoad(io, cfg) {
 
 /** `owner-job unload`: take the job out of the owner's session, if loaded. The file stays (it loads again at the next login). */
 export function planOwnerUnload(io, cfg) {
-  const s = start(io, cfg); if (s.problems) return { ops: [], problems: s.problems };
+  const s = start(io, cfg, { off: true }); if (s.problems) return { ops: [], problems: s.problems };
   const state = ownerJobState(io, cfg, s.uid);
   if (state.error) return { ops: [], problems: [`could not ask launchd about ${ownerLabel(cfg)}: ${state.error}`] };
   return { ops: state.loaded ? [bootout(io, cfg, s)] : [], problems: [] };
@@ -153,15 +154,16 @@ export function answerRows(io, cfg, { now = Date.now() } = {}) {
   const file = answerFileOf(cfg); const what = `the owner's answer ${file} is fresh (the owner's job wrote it within ${ANSWER_STALE_MS / 60_000} minutes)`;
   const fail = (why) => [{ ok: false, what, why }];
   const o = ownerOf(io, cfg); if (o.problem) return fail(o.problem);
+  // The Sensors' own rules (wiring/sensors-ports.mjs), so this check passes only where the Sensors believe the answer (#502 r1 m3).
+  const dir = dirname(file);
+  let ds; try { ds = io.lstat(dir); } catch (e) { return fail(`${dir} can't be read (${e?.code ?? e})`); }
+  const dirBad = answerFolderProblem(ds, o.uid, dir); if (dirBad) return fail(dirBad);
   let st; try { st = io.lstat(file); } catch (e) { return fail(e?.code === 'ENOENT' ? 'it is not there: is the owner\'s job loaded (node setup.mjs owner-job check, as the owner)?' : `it can't be read (${e?.code ?? e})`); }
-  if (st.isSymbolicLink() || !st.isFile() || st.nlink !== 1) return fail('it is not a plain file with one name');
-  if (st.uid !== o.uid) return fail(`it is owned by uid ${st.uid}, not the owner's (${o.uid})`);
-  if (st.mode & 0o022) return fail('it can be written by others');
-  let a; try { a = JSON.parse(io.readText(file)); } catch { return fail('it is not JSON'); }
-  const bad = shapeProblem(a); if (bad) return fail(bad);
-  const age = now - Date.parse(a.observed_at);
-  if (age < -ANSWER_AHEAD_MS) return fail(`it is dated ${a.observed_at}, ahead of this Mac's clock`);
-  if (age > ANSWER_STALE_MS) return fail(`it is ${Math.round(age / 60_000)} minutes old: the owner's job is not writing (look in ~${cfg.owner}/Library/Logs/${LOG_NAME}.err.log)`);
+  if (st.isSymbolicLink()) return fail(`${file} is a link`);
+  const fileBad = answerFileProblem(st, o.uid, file); if (fileBad) return fail(fileBad);
+  const listed = aclProblem([io.at(dir), io.at(file)]); if (listed) return fail(listed);
+  let a; try { a = JSON.parse(io.readText(file)); } catch { return fail(`${file} is not JSON`); }
+  const bad = answerProblem(a, now); if (bad) return fail(`${bad}${/min old/.test(bad) ? ` (look in ~${cfg.owner}/Library/Logs/${LOG_NAME}.err.log)` : ''}`);
   const rows = [{ ok: true, what }];
   if (a.signed_in !== true) rows.push({ ok: true, warn: true, what: 'the owner\'s answer says who is signed in', why: `${a.signed_in === false ? 'it says no one is signed in' : 'it says who is signed in is not known'}${a.usage_reason ? ` (${String(a.usage_reason).slice(0, 120)})` : ''}, so the Dispatcher starts nothing until it is` });
   return rows;

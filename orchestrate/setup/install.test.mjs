@@ -2294,11 +2294,17 @@ test('L1049 Sensors config: dispatcher-config writes sensors.json beside dispatc
   { const c0 = w.run(['check']); assert.equal(c0.code, 0, `the base file is no stranger to check: ${c0.text.split('\n').filter((l) => /FAIL/.test(l)).join(' / ')}`); }
 });
 
-test('L1049 Sensors job: place, load and check take it with the Dispatcher; load comes before the robot; unload stops it', async () => {
+test('L1049 Sensors job: place, load and check take it with the Dispatcher; load comes after the Dispatcher and before the robot; unload stops it', async () => {
   const w = await dWorld();
   const p = w.run(['daemons', 'place']); assert.equal(p.code, 0, p.text);
   assert.equal(readFileSync(plistFile(w, 'sensors'), 'utf8'), sensorsPlist(w.cfg));
+  const at = w.mac.log.length;
   const ld = w.run(['daemons', 'load']); assert.equal(ld.code, 0, ld.text); assert.ok(w.mac.loaded.has(S_LABEL));
+  // The order (#502 r1 c1): the Dispatcher, then the Sensors, then the robot when it is on.
+  const boots = w.mac.log.slice(at).filter((l) => l.startsWith('launchctl bootstrap system ')).map((l) => l.split('/').at(-1));
+  assert.ok(boots.indexOf(`${D_LABEL}.plist`) >= 0 && boots.indexOf(`${D_LABEL}.plist`) < boots.indexOf(`${S_LABEL}.plist`), boots.join(' / '));
+  const order = jobsFor({ ...w.cfg, robot: true });
+  assert.deepEqual(order.slice(-3), ['dispatcher', SENSORS_JOB, 'robot'], order.join(' / '));
   const ck = w.run(['daemons', 'check']); assert.equal(ck.code, 0, ck.text);
   assert.match(ck.text, /PASS {2}the Sensors' config in the copy \(sensors\.json\) is the one this setup writes/);
   assert.match(ck.text, /PASS {2}the owner's answer .*owner-answer\.json is fresh/);
@@ -2313,14 +2319,27 @@ test('L1051 PLANT the owner\'s answer: missing, stale, ahead of the clock, not t
   assert.match(row().line, /^PASS/);
   const cases = [
     [() => rmSync(w.mac.at(ANSWER)), /FAIL .*it is not there: is the owner's job loaded/],
-    [() => writeAnswer(w.mac, { ageMs: ANSWER_STALE_MS + 60_000 }), /FAIL .*it is 11 minutes old: the owner's job is not writing/],
-    [() => writeAnswer(w.mac, { ageMs: -10 * 60_000 }), /FAIL .*ahead of this Mac's clock/],
-    [() => { writeAnswer(w.mac); w.mac.owners.set(ANSWER, { uid: Number(w.mac.users.get('orchestrate').UniqueID), gid: 20 }); }, /FAIL .*not the owner's \(65001\)/],
-    [() => { writeAnswer(w.mac); chmodSync(w.mac.at(ANSWER), 0o666); }, /FAIL .*it can be written by others/],
-    [() => { writeAnswer(w.mac); writeFileSync(w.mac.at(ANSWER), '{not json'); }, /FAIL .*it is not JSON/],
+    [() => writeAnswer(w.mac, { ageMs: ANSWER_STALE_MS + 60_000 }), /FAIL .*the owner's answer is 11 min old .*look in ~sam\/Library\/Logs\//],
+    [() => writeAnswer(w.mac, { ageMs: -10 * 60_000 }), /FAIL .*the owner's answer is dated in the future/],
+    [() => { writeAnswer(w.mac); w.mac.owners.set(ANSWER, { uid: Number(w.mac.users.get('orchestrate').UniqueID), gid: 20 }); }, /FAIL .*owner-answer\.json is not the owner's/],
+    [() => { writeAnswer(w.mac); chmodSync(w.mac.at(ANSWER), 0o666); }, /FAIL .*owner-answer\.json can be written by others/],
+    [() => { writeAnswer(w.mac); writeFileSync(w.mac.at(ANSWER), '{not json'); }, /FAIL .*owner-answer\.json is not JSON/],
     [() => writeAnswer(w.mac, { over: { v: 2 } }), /FAIL /],
   ];
   for (const [plant, re] of cases) { plant(); const r = row(); assert.equal(r.code, 1, r.line); assert.match(r.line, re); }
+  // The answer's folder, as the Sensors read it (#502 r1 m3): writable by others, or not the owner's → FAIL here too.
+  const dir = dirname(ANSWER); writeAnswer(w.mac); assert.match(row().line, /^PASS/);
+  const dMode = statSync(w.mac.at(dir)).mode & 0o7777; const dOwner = w.mac.owners.get(dir);
+  chmodSync(w.mac.at(dir), 0o777);
+  { const r = row(); assert.equal(r.code, 1, r.line); assert.match(r.line, /FAIL .*owner-answer can be written by others/); }
+  chmodSync(w.mac.at(dir), dMode); w.mac.owners.set(dir, { uid: Number(w.mac.users.get('orchestrate').UniqueID), gid: 20 });
+  { const r = row(); assert.equal(r.code, 1, r.line); assert.match(r.line, /FAIL .*owner-answer is not the owner's/); }
+  w.mac.owners.set(dir, dOwner); assert.match(row().line, /^PASS/);
+  if (isDarwin) {   // an access list on the file: the Sensors refuse it, so check FAILs
+    assert.equal(spawnSync('/bin/chmod', ['+a', 'everyone allow write', w.mac.at(ANSWER)]).status, 0);
+    const r = row(); assert.equal(r.code, 1, r.line); assert.match(r.line, /FAIL .*has an access list \(ACL\)/);
+    writeAnswer(w.mac);
+  }
   writeAnswer(w.mac, { over: { signed_in: false, account: null } });
   const r = w.run(['daemons', 'check', '--only', 'sensors']);
   assert.equal(r.code, 0, r.text);
@@ -2328,6 +2347,13 @@ test('L1051 PLANT the owner\'s answer: missing, stale, ahead of the clock, not t
   // The row is there only with the Sensors in the list.
   writeAnswer(w.mac, { ageMs: ANSWER_STALE_MS + 60_000 });
   const d = w.run(['daemons', 'check', '--only', 'dispatcher']); assert.doesNotMatch(d.text, /owner's answer/);
+});
+
+test('#502 r1 m7: daemons load --only sensors refuses while check-dispatcher FAILs, and loads nothing', async () => {
+  const w = await dPlaced();
+  rmSync(w.mac.at(`${BASE}/review/launches`), { recursive: true });
+  const ld = w.run(['daemons', 'load', '--only', 'sensors']); assert.equal(ld.code, 1, ld.text); assert.match(ld.text, /check-dispatcher FAILs .*launches/);
+  assert.equal(w.mac.loaded.size, 0, 'nothing was loaded');
 });
 
 test('L1049 PLANT the copy\'s sensors.json changed by hand, or gone → check FAILs by name and load refuses the Sensors ("would not start"); dispatcher-config puts it right', async () => {
@@ -2385,6 +2411,15 @@ test('L1051 owner-job as the owner: place writes the owner\'s 0644 job file in ~
   assert.ok(existsSync(w.mac.at(O_FILE)), 'the file stays (it loads again at the next login)');
 });
 
+test('#502 r1 m1: owner-job unload still works once the Dispatcher\'s entry is gone; place and load still need it', async () => {
+  const w = asSam(await dWorld());
+  assert.equal(w.run(['owner-job', 'place']).code, 0); assert.equal(w.run(['owner-job', 'load']).code, 0);
+  const { dispatcher, ...rest } = w.raw; assert.ok(dispatcher); writeFileSync(w.cfgFile, JSON.stringify(rest));
+  for (const sub of ['place', 'load']) { const r = w.run(['owner-job', sub]); assert.notEqual(r.code, 0, r.text); assert.match(r.text, /does not turn the Dispatcher job on/); }
+  assert.ok(w.mac.guiLoaded.has(`${SAM}/${ownerLabel(w.cfg)}`), 'still loaded before unload');
+  const un = w.run(['owner-job', 'unload']); assert.equal(un.code, 0, un.text); assert.equal(w.mac.guiLoaded.size, 0);
+});
+
 test('L1051 PLANT owner-job: a job file changed by hand → check FAILs, place rewrites it and loads it again from the new file; a closed login session → load says so; before the install → refused', async () => {
   const w = asSam(await dWorld());
   assert.equal(w.run(['owner-job', 'place']).code, 0); assert.equal(w.run(['owner-job', 'load']).code, 0);
@@ -2399,7 +2434,18 @@ test('L1051 PLANT owner-job: a job file changed by hand → check FAILs, place r
   // A file anyone may write, or one not the owner's: check FAILs, load refuses.
   chmodSync(w.mac.at(O_FILE), 0o666);
   const ck2 = w.run(['owner-job', 'check']); assert.match(ck2.text, /FAIL .*has mode 666, want 644/);
-  assert.equal(w.run(['owner-job', 'place']).code, 0);
+  // load refuses it, and leaves launchd as it was (#502 r1 m5).
+  assert.equal(w.run(['owner-job', 'unload']).code, 0);
+  const lb = w.mac.log.length;
+  const ld666 = w.run(['owner-job', 'load']); assert.notEqual(ld666.code, 0, ld666.text); assert.match(ld666.text, /mode 666, want 644/);
+  assert.ok(!w.mac.log.slice(lb).some((l) => /^launchctl bootstrap/.test(l)), 'nothing was loaded');
+  assert.equal(w.mac.guiLoaded.size, 0);
+  assert.equal(w.run(['owner-job', 'place']).code, 0); assert.equal(w.run(['owner-job', 'load']).code, 0);
+  // A last run that ended badly: check FAILs and names the log (#502 r1 m6).
+  w.mac.guiLoaded.get(`${SAM}/${ownerLabel(w.cfg)}`).lastExit = '1';
+  const ck3 = w.run(['owner-job', 'check']); assert.equal(ck3.code, 1, ck3.text); assert.match(ck3.text, /FAIL .*last run ended with exit 0 — its last exit code is 1; look in .*Library\/Logs\//);
+  w.mac.guiLoaded.get(`${SAM}/${ownerLabel(w.cfg)}`).lastExit = '0';
+  assert.equal(w.run(['owner-job', 'check']).code, 0);
   // No login session (the owner not logged in): load says what to do.
   assert.equal(w.run(['owner-job', 'unload']).code, 0);
   w.mac.guiClosed.add(SAM);
