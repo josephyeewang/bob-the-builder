@@ -1,9 +1,12 @@
 import { test } from 'node:test';
+import { READING_FUTURE_MS } from '../M12-sensors/facts.mjs';
 import assert from 'node:assert/strict';
 import { mkdirSync, realpathSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from '../../shared/test-tmp.mjs';
-import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts, stopProcessGroup, guarded, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RUN, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0, UNKNOWN_FACT, REVIEW_STOP_FACT, REVIEW_STOP_AGAIN_MS, REVIEW_STOP_TELL_FACT, REVIEW_STOP_MAX_ASKS } from './pass.mjs';
+import { STATES, FINAL_STATES } from '../../shared/record.mjs';
+import { STOP_QUIET_REASONS } from '../M4-workshop/launcher/review-runner.mjs';
+import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts, stopProcessGroup, guarded, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RUN, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0, UNKNOWN_FACT, REVIEW_STOP_FACT, REVIEW_STOP_RUNNER_REASON, REVIEW_STOP_AGAIN_MS, REVIEW_STOP_TELL_FACT, REVIEW_STOP_MAX_ASKS } from './pass.mjs';
 import { USAGE_FACT, BAND_FACT } from './usage.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { retellWaits, WAIT_TELL_FACT } from './joe-waits.mjs';
@@ -297,8 +300,9 @@ test('audit #125 r2 m-1, c-2: the far reset is judged against the hit, not now: 
 
 test('audit #125 r2 m-2, m-3: a card that has waited on a limit longer than the bound waits on Joe, told once, though each new hit moves the reset ahead', async () => {
   const DAY = 24 * H;
-  // A hit dated 3 days after the park, its reset a week later: each reading is in bounds, yet the card never resumes.
-  const w = world([['fact', LIMIT_FACT('acct-h'), { resets_at: iso(T0 + 10 * DAY), observed_at: iso(T0 + 3 * DAY) }]]);
+  // A hit 12 hours after the park, its reset a week after the hit: each reading is in bounds and in the past at every
+  // pass (L1032: a hit ahead of the pass is no hit), yet the card never resumes.
+  const w = world([['fact', LIMIT_FACT('acct-h'), { resets_at: iso(T0 + 12 * H + 7 * DAY), observed_at: iso(T0 + 12 * H) }]]);
   parkOnLimit(w.rec, 'H', { ranAt: T0, account: 'acct-h' });
   await w.pass(LIMIT_RESET_MAX_MS / MIN);
   assert.deepEqual([w.rec.read('card', 'H').doc.wait.who], ['usage'], 'exactly the bound is not over it');
@@ -309,6 +313,28 @@ test('audit #125 r2 m-2, m-3: a card that has waited on a limit longer than the 
   assert.equal(told().length, 1);
   await w.pass(LIMIT_RESET_MAX_MS / MIN + 2);
   assert.equal(told().length, 1, 'told once');
+});
+
+// L1032: a limit hit stamped more than READING_FUTURE_MS ahead of the pass is the clock, not a hit: the card takes the
+// no-hit path and waits on Joe after usage_unknown_max_min, not up to LIMIT_RESET_MAX_MS on a reset that never comes.
+// One exactly READING_FUTURE_MS ahead is still a hit (the same edge as every other reader, L1021).
+test('L1032: a limit hit stamped ahead of the pass is no hit: Joe is told after a day; one exactly READING_FUTURE_MS ahead counts', async () => {
+  const DAY = 24 * H;
+  const at = T0 + (24 * 60 + 1) * MIN;   // the pass that ends the no-hit wait
+  const w = world([['fact', LIMIT_FACT('acct-f'), { resets_at: iso(T0 + 4 * DAY), observed_at: iso(T0 + 3 * DAY) }],
+    ['fact', LIMIT_FACT('acct-e'), { resets_at: iso(at + 2 * H), observed_at: iso(at + READING_FUTURE_MS) }],
+    ['fact', LIMIT_FACT('acct-g'), { resets_at: iso(at + 2 * H), observed_at: iso(at + READING_FUTURE_MS + 1) }]]);
+  parkOnLimit(w.rec, 'F', { ranAt: T0, account: 'acct-f' });
+  parkOnLimit(w.rec, 'E', { ranAt: T0, account: 'acct-e' });
+  parkOnLimit(w.rec, 'G', { ranAt: T0, account: 'acct-g' });
+  await w.pass(24 * 60);
+  assert.equal(w.rec.read('card', 'F').doc.wait.who, 'usage', 'exactly the no-hit cap is not over it');
+  await w.pass(24 * 60 + 1);
+  const f = w.rec.read('card', 'F').doc;
+  assert.deepEqual([f.wait.who, f.wait.what], ['joe', LIMIT_NO_HIT], 'a hit 2 days ahead of the pass is no hit');
+  assert.equal(w.calls.alerts.filter((x) => /^card F: it has waited on account acct-f's usage limit with no limit hit recorded/.test(x)).length, 1);
+  assert.equal(w.rec.read('card', 'E').doc.wait.who, 'usage', 'exactly READING_FUTURE_MS ahead is a hit: it waits for its reset');
+  assert.deepEqual([w.rec.read('card', 'G').doc.wait.who, w.rec.read('card', 'G').doc.wait.what], ['joe', LIMIT_NO_HIT], 'a millisecond further is not');
 });
 
 // A hand-edited Record (L285): the M9 writer always stamps a readable since. The stand-in keeps a re-checked wait's
@@ -325,7 +351,7 @@ const garbleSince = (rec, id, since = 'not a time') => {
 
 test('L285: a limit wait whose since can\'t be read still ends: both caps count from the run\'s start, never from a hit that moves', async () => {
   const DAY = 24 * H;
-  const w = world([['fact', LIMIT_FACT('acct-s'), { resets_at: iso(T0 + 10 * DAY), observed_at: iso(T0 + 3 * DAY) }]]);
+  const w = world([['fact', LIMIT_FACT('acct-s'), { resets_at: iso(T0 + 12 * H + 7 * DAY), observed_at: iso(T0 + 12 * H) }]]);
   parkOnLimit(w.rec, 'S', { ranAt: T0, account: 'acct-s' });
   parkOnLimit(w.rec, 'U', { ranAt: T0, account: 'acct-u' });   // no hit is ever recorded for acct-u
   garbleSince(w.rec, 'S'); garbleSince(w.rec, 'U');
@@ -333,8 +359,9 @@ test('L285: a limit wait whose since can\'t be read still ends: both caps count 
   assert.equal(w.rec.read('card', 'U').doc.wait.who, 'usage', 'exactly the no-hit cap from the run\'s start is not over it');
   await w.pass(24 * 60 + 1);
   assert.deepEqual([w.rec.read('card', 'U').doc.wait.who, w.rec.read('card', 'U').doc.wait.what], ['joe', LIMIT_NO_HIT]);
-  // The hit (3 days in) and its reset (10 days in) are each in bounds; counted from the hit the card would wait past
-  // its reset with every new hit. Counted from the run's start, a minute past the bound waits on Joe.
+  // The hit (12 hours in, in the past at every pass, L1032) and its reset (a week after it) are each in bounds; counted
+  // from the hit the card would wait past its reset with every new hit. Counted from the run's start, a minute past the
+  // bound waits on Joe.
   await w.pass(LIMIT_RESET_MAX_MS / MIN);
   assert.equal(w.rec.read('card', 'S').doc.wait.who, 'usage', 'exactly the cap from the run\'s start is not over it');
   await w.pass(LIMIT_RESET_MAX_MS / MIN + 1);
@@ -1531,7 +1558,7 @@ test('L138 m4: a card put on Joe for unread usage is told after usage is back, e
 // at zero by a time that has not come.
 test('audit #153 MAT-1: a limit wait whose since is in the future still ends: both caps count from the run\'s start', async () => {
   const DAY = 24 * H;
-  const w = world([['fact', LIMIT_FACT('acct-s'), { resets_at: iso(T0 + 10 * DAY), observed_at: iso(T0 + 3 * DAY) }]]);
+  const w = world([['fact', LIMIT_FACT('acct-s'), { resets_at: iso(T0 + 12 * H + 7 * DAY), observed_at: iso(T0 + 12 * H) }]]);
   parkOnLimit(w.rec, 'S', { ranAt: T0, account: 'acct-s' });
   parkOnLimit(w.rec, 'U', { ranAt: T0, account: 'acct-u' });
   const future = iso(T0 + 365 * DAY);
@@ -1573,7 +1600,7 @@ test('audit #153 MAT-1: the stand-in does not keep a stored since in the future 
 // the L285 test above), and a run_started an hour ahead (an unreadable one can't be stored: the Record drops it).
 test('audit #153 MAT-1, L329: a since an hour ahead of the pass still lets each cap fire, and a run_started an hour ahead waits on Joe', async () => {
   const DAY = 24 * H;
-  const w = world([['fact', LIMIT_FACT('acct-s'), { resets_at: iso(T0 + 10 * DAY), observed_at: iso(T0 + 3 * DAY) }]]);
+  const w = world([['fact', LIMIT_FACT('acct-s'), { resets_at: iso(T0 + 12 * H + 7 * DAY), observed_at: iso(T0 + 12 * H) }]]);
   parkOnLimit(w.rec, 'S', { ranAt: T0, account: 'acct-s' });
   parkOnLimit(w.rec, 'U', { ranAt: T0, account: 'acct-u' });
   garbleSince(w.rec, 'U', iso(T0 + (24 * 60 + 1) * MIN + H));
@@ -2171,7 +2198,7 @@ test('L946: a reviewer or auditor of this Record\'s cancelled or ended card at i
   const asked = [];
   const r = await stopPass({ rec, rules: rulesWith(), now: T0, account: ACCT, product: 'p1', sessions, probe: () => idle, alert: fakeAlert(),
     stopGroup: async () => { throw new Error('no worker here'); }, saveWork: async () => ({ ok: true }), stopReview: (x) => { asked.push(x); return { ok: true, name: 'stop-1.json' }; } });
-  assert.deepEqual(asked, [{ card: 'C-7', role: 'reviewer', head: HD }, { card: 'C-7', role: 'auditor', head: HD }, { card: 'C-8', role: 'reviewer', head: HD }],
+  assert.deepEqual(asked, [{ card: 'C-7', role: 'reviewer', head: HD, reason: 'cancel' }, { card: 'C-7', role: 'auditor', head: HD, reason: 'cancel' }, { card: 'C-8', role: 'reviewer', head: HD, reason: 'card_final' }],
     'exactly the three, each by card, role and head: not an older head, a live card (its product paused: no matter), another product\'s card, a card not here, one waiting on Joe, a row with no head, nor a non-review row');
   assert.deepEqual(r.reviewStops, [['R-1', 'cancel', 'asked'], ['A-1', 'cancel', 'asked'], ['R-2', 'card_ended', 'asked']]);
   assert.deepEqual(r.stopped, [], 'the review runner\'s sessions are not stopGroup\'s');
@@ -2253,7 +2280,7 @@ test('L946: with no product named, no reviewer is asked to stop either (L943 m2)
   assert.deepEqual(asked, []);
   await dispatcherPass({ rec, rules: rulesWith(), now: T0, account: ACCT, product: 'p1', sessions: [rv('R-1', 'reviewer', 'C-7')], probe: () => idle, alert: fakeAlert(),
     launch: async () => ({ ok: false, reason: 'no' }), filesOf: () => [], stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), stopReview });
-  assert.deepEqual(asked, [{ card: 'C-7', role: 'reviewer', head: HD }]);
+  assert.deepEqual(asked, [{ card: 'C-7', role: 'reviewer', head: HD, reason: 'cancel' }]);
 });
 
 test('L946: asks are made at once (a hung one is a failure, never an ask, and holds no other); one tell names every failure', async () => {
@@ -2438,4 +2465,43 @@ test('L962 m1: a queued tell is dropped on the first pass with no failing stop',
   assert.equal(isQueued(rec, REVIEW_STOP_TELL_FACT), true, 'the port lost it, so it waits in the queue');
   await run(1, { ok: true }, fakeAlert({ answer: false }));
   assert.equal(isQueued(rec, REVIEW_STOP_TELL_FACT), false, 'dropped once none fails');
+});
+
+// L976: an undo's launch names the commit it reverses, found from the card's source (M6 undoneBy, via exactReverse),
+// never from a field on the card; no other launch names one.
+test('L976: the undo launch carries the reversed commit from its source; an editing launch carries none', async () => {
+  const SHA = 'a'.repeat(40);
+  const w = world([
+    ['card', 'T-1', { state: 'merged', module: 'M-test', product: 'p1', tier: 2, files: ['src/a.js'], merge_commit: SHA }],
+    ['merge', 'MG-1', { state: 'audited_ok', card: 'T-1', pr: 7, merge_commit: SHA, product: 'p1' }],
+    ['ask', 'A-1', { state: 'answered', kind: 'undo', product: 'p1', card: 'T-1' }],
+    // A look-alike field on the card is never read: the commit comes from the source.
+    card('U-1', { kind: 'exact_reverse', source: { ask: 'A-1' }, files: ['src/a.js'], merge_commit: 'b'.repeat(40) }),
+    card('C-1')]);
+  const asked = [];
+  w.refuseLaunch((x) => { asked.push(x); return { ok: true }; });
+  await w.pass(0, { filesOf: () => ['src/a.js'] });
+  const by = Object.fromEntries(asked.map((x) => [x.card.id, x]));
+  assert.ok(by['U-1'] && by['C-1'], `both started: ${Object.keys(by)}`);
+  assert.equal(by['U-1'].kind, 'undo');
+  assert.equal(by['U-1'].undoCommit, SHA, 'the source\'s merge commit');
+  assert.equal(by['C-1'].kind, 'editing');
+  assert.equal('undoCommit' in by['C-1'], false, 'an editing launch names no reversed commit');
+});
+
+// L1000: each card state pinned to the reason its reviewer's stop carries. Only a cancel and a state no move leads out of
+// may be quiet (the runner's STOP_QUIET_REASONS); every other state asks no stop at all.
+test('L1000: every card state is pinned to its review stop reason: cancelled is cancel, failed, closed_no_answer and reverted are card_final, and no other state is stopped', async () => {
+  const want = { cancelled: 'cancel', failed: 'card_final', closed_no_answer: 'card_final', reverted: 'card_final' };
+  assert.deepEqual(Object.values(REVIEW_STOP_RUNNER_REASON).every((x) => STOP_QUIET_REASONS.includes(x)), true, 'each word is one the runner keeps quiet');
+  for (const state of STATES.card) {
+    const extra = state === 'waiting' ? { wait: { who: 'joe', what: 'x', since: iso(T0) } } : {};
+    const rec = recWith([['product', 'p1', { state: 'active' }], card('C-7', { state, head: HD, ...extra })]);
+    usageInto(rec);
+    const asked = [];
+    await stopPass({ rec, rules: rulesWith(), now: T0, account: ACCT, product: 'p1', sessions: [rv('R-1', 'reviewer', 'C-7')], probe: () => idle, alert: fakeAlert(),
+      stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), stopReview: (x) => { asked.push(x.reason); return { ok: true, name: 'stop-1.json' }; } });
+    assert.deepEqual(asked, want[state] ? [want[state]] : [], state);
+    if (want[state] === 'card_final') assert.equal(FINAL_STATES.card.includes(state), true, `${state} is final`);
+  }
 });

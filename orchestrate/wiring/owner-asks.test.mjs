@@ -212,3 +212,27 @@ test('#378 m4: launchAnswerWrong itself refuses a flat, another product\'s or a 
   assert.match(launchAnswerWrong(good, { ...ask, copiesRoot: undefined }), /another copy/);
   assert.match(launchAnswerWrong(good, { ...ask, outboxRoot: undefined }), /another outbox/);
 });
+
+// L976: an undo's launch names the commit it reverses, as undo_commit in the request; no other launch names one. A
+// launch that breaks that throws before any request is written.
+test('L976: an undo launch writes its reversed commit; a missing or bad one, or one on another kind, throws before any request', async () => {
+  const SHA = 'd'.repeat(40);
+  const UNDO = { ...LAUNCH, kind: 'undo', undoCommit: SHA };
+  const w = world((i, x) => { if (i === 0) x.doc = { sessions: [session('S-1', { pgid: 4242, kind: 'undo' })], requests: { 'S-1': { state: 'started' } }, answers: { 'launch-S-1': { ...LAUNCHED } } }; });
+  const r = await w.ports.launch(UNDO);
+  assert.equal(r.ok, true, r.reason);
+  assert.deepEqual(w.writes[0][1].launch, { card: 'C-1', kind: 'undo', product: 'p1', sessionId: 'S-1', undo_commit: SHA });
+  for (const undoCommit of [undefined, null, '', 'main', SHA.slice(1), SHA.toUpperCase(), `${SHA}0`, [SHA], 7]) {
+    const x = world();
+    await assert.rejects(x.ports.launch({ ...UNDO, undoCommit }), /the undo launch names no reversed commit/, String(undoCommit));
+    assert.deepEqual(x.writes, [], 'nothing written');
+  }
+  for (const kind of ['editing', 'script']) for (const undoCommit of [SHA, null, '']) {
+    const x = world();
+    await assert.rejects(x.ports.launch({ ...LAUNCH, kind, undoCommit }), /only an undo launch names a reversed commit/, `${kind} ${undoCommit}`);
+    assert.deepEqual(x.writes, [], 'nothing written');
+  }
+  const plain = world(startedAt(0));
+  assert.equal((await plain.ports.launch(LAUNCH)).ok, true);
+  assert.equal('undo_commit' in plain.writes[0][1].launch, false, 'an editing request names none');
+});

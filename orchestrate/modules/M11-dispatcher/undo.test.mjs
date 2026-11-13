@@ -296,7 +296,7 @@ test('r4 MAT-5: exactReverse refuses a card that differs from the merge in any o
   const rec = recOf();
   const card = (over = {}) => ({ id: 'U-1', ...undoCard(over) });
   const files = () => ['src/b.js', 'src/a.js'];
-  assert.deepEqual(exactReverse({ rec, card: card(), filesOf: files }), { ok: true }, 'control');
+  assert.deepEqual(exactReverse({ rec, card: card(), filesOf: files }), { ok: true, commit: SHA }, 'control: the reversed commit, from the card\'s source, goes with it (L976)');
   const notMerge = /not the reverse of a merge in the record/;
   const refusedMerge = recWith([target(), merge({ state: 'refused' }), ['ask', 'A-1', ask()]]);
   const otherCommit = recWith([target({ merge_commit: OTHER }), merge({ state: 'merged' }), ['ask', 'A-1', ask()]]);

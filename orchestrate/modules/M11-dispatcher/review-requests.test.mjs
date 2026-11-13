@@ -303,6 +303,12 @@ test('L946: stopReview writes { card, head, role, stop: true } by target, 0644 u
     assert.equal(got.ok, true, got.reason);
     assert.equal(got.target, true);
     assert.equal(got.owner, process.getuid());
+    // L1000: the stop step's reason goes into the file as is; the runner reads it as the stop's reason.
+    const wr = p.stopReview({ card: 'C-7', role: 'auditor', head, reason: 'card_final' });
+    assert.equal(wr.ok, true, wr.reason);
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, wr.name), 'utf8')), { card: 'C-7', head, reason: 'card_final', role: 'auditor', stop: true });
+    const gr = readRequest(dir, wr.name);
+    assert.equal(gr.ok, true, gr.reason); assert.equal(gr.req.reason, 'card_final');
     // What the writer refuses is refused here too, and writes nothing (the runner's reader may have taken the file away).
     const before = readdirSync(dir).sort();
     for (const t of [{ card: 'C-7', role: 'auditor', head: 'B'.repeat(40) }, { card: 'C-7', role: 'plan_reviewer', head }, { card: '.x', role: 'reviewer', head }]) {

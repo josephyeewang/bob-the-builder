@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import { chmodSync, lstatSync, symlinkSync, mkdirSync, readFileSync, readdirSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { runnerPass, needsRole, readRequest, packagePlan, planAnswerFor, readPlanEnded, PLAN_REQUEST_ID, RETRY_MS, SWEEP_AFTER_MS, MAX_FAILED_STARTS, PLAN_FILE_NAME, PLAN_ANSWER_NAME } from './review-runner.mjs';
 import { planFingerprint } from '../../../shared/plan-fingerprint.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
@@ -627,4 +628,38 @@ test('L726 m3 planted: a map without plan_reviewer refuses plan starts with the 
   other.ask();
   refusedFor(await runnerPass(other.ctx), /the plan reviewer's Mac user \(uid \d+\) is not the review user/);
   assert.deepEqual(other.starts, []);
+});
+
+// #455 r2 m1 (P10): a plan reviewer whose end could not be recorded has ended, so it holds no slot under the cap.
+// It locks the ended folder with macOS's chflags, keeping its 0755 (the runner checks the mode, so chmod can't stand in).
+// The runner only runs on a Mac; on another system this one test is skipped, never passed.
+test('#455 r2 m1: a plan reviewer whose end is pending holds no cap slot', { skip: process.platform !== 'darwin' && 'needs macOS chflags' }, async () => {
+  const w = await ready({ planReviewCap: () => 1 });
+  w.cards.set('C-3', card());
+  w.ask();
+  await runnerPass(w.ctx);
+  assert.equal(w.starts.length, 1);
+  w.end('P-1');
+  w.ask({ card: 'C-3', fingerprint: fingerprintOf('C-3', w.cards.get('C-3')) });
+  // The folder keeps its 0755 (the runner checks it), but nothing can be added to it: the end can't be recorded.
+  const endedDir = join(w.root, 'plan-ended');
+  assert.equal(spawnSync('/usr/bin/chflags', ['uchg', endedDir]).status, 0);
+  let r;
+  try { r = await runnerPass(w.ctx); } finally { spawnSync('/usr/bin/chflags', ['nouchg', endedDir]); }
+  const st = JSON.parse(readFileSync(join(w.root, 'state.json'), 'utf8'));
+  assert.equal(st.running.find((x) => x.session_id === 'P-1')?.end_pending, true, 'its end is pending');
+  assert.deepEqual(r.started.map((s) => s.card), ['C-3'], r.refused.map((x) => x.reason).join(' | '));
+  assert.equal(w.starts.length, 2);
+  // #455 r2 m3: its own plan tried again (a try the runner keeps, here put in its memory) is told its end is not yet
+  // recorded, not that it still runs.
+  const fp = fingerprintOf('C-7', w.cards.get('C-7'));
+  const sp = join(w.root, 'state.json');
+  const st2 = JSON.parse(readFileSync(sp, 'utf8'));
+  st2.plan_tries = { [`C-7:${fp}:plan_reviewer`]: { card: 'C-7', fingerprint: fp, request_id: PLAN_REQUEST_ID('C-7', fp), failures: 0, waiting_since: new Date(w.clock.t).toISOString() } };
+  writeFileSync(sp, JSON.stringify(st2), { mode: 0o600 });
+  w.clock.t += RETRY_MS;
+  assert.equal(spawnSync('/usr/bin/chflags', ['uchg', endedDir]).status, 0);
+  let r2;
+  try { r2 = await runnerPass(w.ctx); } finally { spawnSync('/usr/bin/chflags', ['nouchg', endedDir]); }
+  refusedFor(r2, /a plan reviewer for card C-7's plan [0-9a-f]{12} has ended, but its end is not yet recorded/);
 });
