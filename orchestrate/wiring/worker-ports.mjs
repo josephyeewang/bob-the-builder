@@ -7,7 +7,10 @@
 //   hostLock()           → the text of Joe's host.lock (config hostLockPath, a file of config hostLockUid's), or null when there is no such file in a
 //                          folder that is there. A file or folder that can't be read throws: pass.mjs reads a throw as
 //                          "not known" and tells it, never as "no host". The read runs through limitedSync (a Dropbox
-//                          file may hang while it downloads).
+//                          file may hang while it downloads). With config hostLockStamp (only when the owner's copier
+//                          keeps hostLockPath as a copy of the synced file, L1041), the copier's stamp must show a run
+//                          within HOST_LOCK_STAMP_MAX_MS too (hostLockStampProblem); a stale or unreadable copy throws
+//                          marked HOST_COPY_FAIL, which pass.mjs takes as "starts off", told once (L1040).
 //   reviewEnded(session) → M9 runnerEnded on the runner's ended records (<reviewRoot>/ended), for the session's own
 //                          role, card and head. A runner folder that is gone, or not the review user's, is a refusal
 //                          with its reason, never "not ended yet".
@@ -55,7 +58,7 @@
 // cleanup.saveWork stays unwired (NOT_WIRED_CLEANUP).
 // The mirror and the seal folder are checked when the wiring starts, so a wrong path stops the start.
 
-import { lstatSync, statSync } from 'node:fs';
+import { closeSync, constants as FS, fstatSync, lstatSync, openSync, readSync, statSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { isRefusing, refusing } from './not-wired.mjs';
@@ -67,6 +70,8 @@ import { CLOCK_SKEW_MS, RUNNER_KINDS, ownerSyncPorts, requestWriter } from './ow
 import { ownerAsyncPorts } from './owner-asks.mjs';
 import { PLAN_REVIEW_ROLE } from '../shared/review-roles.mjs';
 import { WORKER_REQUESTS_ACL, aclText } from '../setup/layout.mjs';
+import { READING_FUTURE_MS } from '../modules/M12-sensors/facts.mjs';
+import { HOST_COPY_FAIL } from '../modules/M11-dispatcher/pass.mjs';
 
 const RUNNER_LAUNCHES = RUNNER_FOLDERS.launches;
 
@@ -157,6 +162,46 @@ export function cleanupPorts({ config: c, selfUid }, { run = safeGit } = {}) {
 // reads got another file's text). The owner check is on the file that was opened, so none of those gets a file that is
 // not the owner's own into the Record, and the owner can read their own files anyway (L739 self-review M1, L763).
 export const HOST_LOCK_MAX = 4096;
+/** The copier (setup host-lock-copy.mjs) runs every 60 s; a stamp older than five runs is a copier that stopped (L1041:
+ * the one limit, which the copier and check-dispatcher take from here). */
+export const HOST_LOCK_STAMP_MAX_MS = 5 * 60_000;
+const STAMP_MAX_BYTES = 4096;
+
+/**
+ * Why the copier's stamp at `stamp` (config hostLockStamp) does not show a good run within HOST_LOCK_STAMP_MAX_MS, or null
+ * (L1040, L1041; lane 3's stampProblem, moved here). It must be a plain file of the owner's (`ownerUid`, config
+ * hostLockUid; the copier runs as the owner), opened without following a link, holding `{ "at": <ISO time> }`, not more
+ * than READING_FUTURE_MS ahead of `now`. `io` lets a test stand in for open, fstat, read and close.
+ */
+export function hostLockStampProblem(stamp, { now, ownerUid }, io = {}) {
+  const { open = openSync, fstat = fstatSync, read = readSync, close = closeSync } = io;
+  const way = 'restart the owner\'s host.lock copier (setup.mjs host-lock-copier) and read its log';
+  let fd;
+  try { fd = open(stamp, FS.O_RDONLY | FS.O_NOFOLLOW | FS.O_NONBLOCK); } catch (e) {
+    if (e?.code === 'ENOENT') return `the host.lock copier has never finished a run (its stamp ${stamp} is not there): ${way}`;
+    if (e?.code === 'ELOOP') return `the host.lock copier's stamp ${stamp} is a link, not the copier's own file: ${way}`;
+    return `the host.lock copier's stamp ${stamp} can't be read (${e?.code ?? e}): ${way}`;
+  }
+  let text;
+  try {
+    const st = fstat(fd);
+    if (!st.isFile()) return `the host.lock copier's stamp ${stamp} is not a plain file: ${way}`;
+    if (st.uid !== ownerUid) return `the host.lock copier's stamp ${stamp} is not the owner's (its owner is uid ${st.uid}, not ${ownerUid}), so the owner's copier did not write it: ${way}`;
+    const b = Buffer.alloc(STAMP_MAX_BYTES + 1); let n = 0;
+    for (;;) { const k = read(fd, b, n, b.length - n, null); if (k === 0) break; n += k; if (n === b.length) break; }
+    if (n > STAMP_MAX_BYTES) return `the host.lock copier's stamp ${stamp} is over ${STAMP_MAX_BYTES} bytes: ${way}`;
+    text = b.subarray(0, n).toString('utf8');
+  } catch (e) {
+    return `the host.lock copier's stamp ${stamp} can't be read (${e?.code ?? e?.message ?? e}): ${way}`;
+  } finally { try { close(fd); } catch { /* the answer stands */ } }
+  let at;
+  try { const d = JSON.parse(text); at = typeof d?.at === 'string' ? Date.parse(d.at) : NaN; } catch { at = NaN; }
+  if (!Number.isFinite(at)) return `the host.lock copier's stamp ${stamp} can't be read as the copier's stamp: ${way}`;
+  const when = new Date(at).toISOString();
+  if (at - now > READING_FUTURE_MS) return `the host.lock copier's stamp ${stamp} says it ran at ${when}, ahead of this Mac's clock, so the copy's age is not known: ${way}`;
+  if (now - at > HOST_LOCK_STAMP_MAX_MS) return `the host.lock copier last ran well at ${when}, ${Math.floor((now - at) / 60_000)} minutes ago (the limit is ${HOST_LOCK_STAMP_MAX_MS / 60_000}), so the copy of host.lock may be old: ${way}`;
+  return null;
+}
 /** Why the config's workerUid can't be the worker runner's user, or null: it must be a Mac user id and host.lock's owner's
  * (hostLockUid). The runner is a LaunchAgent of the owner's own user (runner-job.mjs, L896), so one check on hostLockUid
  * covers it (not root, not the Dispatcher's, not the review user's), and a config naming two owners stops at the config
@@ -190,7 +235,22 @@ else { const b = Buffer.alloc(Number(max) + 1); let n = 0; for (;;) { const k = 
  * user `selfUid`. Missing file in a folder that is there → null (no host claimed). Anything else that stops the read
  * throws, so the pass reads it as "not known". Read by `run` (limitedSync's), in a child of this Node.
  */
-export function hostLockPort({ path, run, ownerUid, selfUid, stat = statSync, node = process.execPath }) {
+export function hostLockPort({ path, run, ownerUid, selfUid, stat = statSync, node = process.execPath, stamp, now = Date.now, stampIo }) {
+  if (stamp === undefined) return hostLockRead({ path, run, ownerUid, selfUid, stat, node });
+  // Under a copier (L1040, L1041): any refusal is a copy that can't be trusted, so it is marked for the pass to hold starts.
+  const read = hostLockRead({ path, run, ownerUid, selfUid, stat, node });
+  const failClosed = (why) => Object.assign(new Error(why), { code: HOST_COPY_FAIL });
+  return () => {
+    let text;
+    try { text = read(); } catch (e) { throw failClosed(`the copy of host.lock can't be read: ${e?.message ?? e}`); }
+    let bad;
+    try { bad = hostLockStampProblem(stamp, { now: now(), ownerUid }, stampIo); } catch (e) { bad = `the host.lock copier's stamp ${stamp} can't be checked (${e?.message ?? e})`; }
+    if (bad) throw failClosed(bad);
+    return text;
+  };
+}
+
+function hostLockRead({ path, run, ownerUid, selfUid, stat, node }) {
   return () => {
     if (typeof run !== 'function') throw new Error('host.lock: the wiring was given no limitedSync to read it with');
     if (!Number.isSafeInteger(selfUid)) throw new Error("host.lock: the wiring was given no Dispatcher uid to check it against");
@@ -395,7 +455,8 @@ export function workerPorts(ctx, io = {}) {
     cleanup,
     // A value the tick hands the pass (L887): the TOP outboxes folder, checked a real folder at start.
     outboxRoot: realFolder(c.outboxRoot, 'the outboxes folder (outboxRoot)'),
-    hostLock: hostLockPort({ path: c.hostLockPath, run: ctx.limitedSync, ownerUid: c.hostLockUid, selfUid: ctx.selfUid }),
+    hostLock: hostLockPort({ path: c.hostLockPath, run: ctx.limitedSync, ownerUid: c.hostLockUid, selfUid: ctx.selfUid,
+      ...(c.hostLockStamp !== undefined ? { stamp: c.hostLockStamp } : {}), ...(ctx.now ? { now: ctx.now } : {}) }),
     reviewEnded: reviewEndedPort({ root: c.reviewRoot, uid: c.reviewUid }),
     product: c.product,
     ...runnerSyncPorts({ config: c, rec: ctx.rec, ...(ctx.now ? { now: ctx.now } : {}) }, io),

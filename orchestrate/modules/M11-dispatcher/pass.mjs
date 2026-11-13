@@ -137,6 +137,10 @@ export async function rulesMissingAlert({ rec, factId = RULES_MISSING_FACT, keys
 }
 
 export const HOLD_FACT = (cause) => `hold-${cause}`;
+// A host.lock port's refusal under the owner's copier (wiring/worker-ports.mjs hostLockPort with config hostLockStamp,
+// L1040, L1041): the copy is stale or can't be read, so starts are off and the owner is told, on this one cause.
+export const HOST_COPY_FAIL = 'HOST_LOCK_COPY';
+export const HOST_COPY_CAUSE = 'host-lock-copy';
 // The shared still-waiting repeat, one definition (#164 audit c1).
 export const HOLD_REPEAT_MS = STILL_WAITING_MS;
 const SESSION_OUTBOX_CAUSE = (card) => `session-outbox-${card}`;
@@ -562,9 +566,23 @@ export async function dispatcherPass({ rec, rules, now, clock = () => now, accou
   let running = st ? [...st.running] : [...sessions];
   if (missing.length) startsOff ??= `the rules have no value for ${[...new Set(missing)].sort().join(', ')}`;
 
-  // 2. host.lock (m5). An unreadable file is "not known" and changes nothing (audit 0b-6 r3 MAT-1).
+  // 2. host.lock (m5). An unreadable file is "not known" and changes nothing (audit 0b-6 r3 MAT-1), except under the
+  // owner's copier (L1040, L1041): a copy that is stale or can't be read (HOST_COPY_FAIL) turns starts off and is told
+  // once a day on one cause, whose mark clears once the copy is good again, so a later stop is told afresh.
   let lockText;
-  try { lockText = hostLock(); } catch (e) { lockText = undefined; failing(`host.lock unreadable: ${e?.message ?? e}`); }
+  try { lockText = hostLock(); } catch (e) {
+    lockText = undefined;
+    const why = String(e?.message ?? e);
+    failing(`host.lock unreadable: ${why}`);
+    if (e?.code === HOST_COPY_FAIL) {
+      startsOff ??= `host.lock's copy can't be trusted (${why})`;
+      try { holdAlert({ rec, cause: HOST_COPY_CAUSE, text: `the Dispatcher holds every start but undo cards: ${why}`, alert, now }); }
+      catch (t) { failing(`the host.lock copy hold could not be told (${t?.message ?? t})`); }
+    }
+  }
+  // Without a copier there is never such a hold, so this only looks and writes nothing.
+  const copyHold = HOLD_FACT(HOST_COPY_CAUSE);
+  if (lockText !== undefined && (factDoc(rec, copyHold) || isQueued(rec, copyHold))) clearHold(rec, copyHold, now, report);
   const seen = factDoc(rec, HOST_FACT);
   if (lockText !== undefined && (seen?.doc?.text ?? null) !== (lockText ?? null)) {
     putFact(rec, HOST_FACT, { text: lockText ?? null, at: iso(now) }, 'host_lock', seen?.doc);

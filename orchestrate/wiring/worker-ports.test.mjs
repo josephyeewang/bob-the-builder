@@ -15,7 +15,7 @@ import { mirrorTree } from '../modules/M11-dispatcher/cleanup.mjs';
 import { ENDED_FOLDER } from '../modules/M9-record/outbox.mjs';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { MIRROR_CONFIG_TEMPLATE } from '../modules/M4-workshop/git/safe-git.mjs';
-import { CLEANUP_GIT, HOST_LOCK_MAX, REVIEW_KIND_OF, REVIEW_STATE_CORRUPT, cleanupPorts, hostLockPort, mirrorProblem, recordHolds, requestsAclProblem, requestsFolderProblem, reviewEndedPort, reviewSessions, runnerAsyncPorts, runnerSyncPorts, workerPorts } from './worker-ports.mjs';
+import { CLEANUP_GIT, HOST_LOCK_MAX, HOST_LOCK_STAMP_MAX_MS, hostLockStampProblem, REVIEW_KIND_OF, REVIEW_STATE_CORRUPT, cleanupPorts, hostLockPort, mirrorProblem, recordHolds, requestsAclProblem, requestsFolderProblem, reviewEndedPort, reviewSessions, runnerAsyncPorts, runnerSyncPorts, workerPorts } from './worker-ports.mjs';
 import { runnerTick } from './runner-loop.mjs';
 import { pauseLeadPort, saveWorkPort, startPort } from './runner-ports.mjs';
 import { NO_COPY_KINDS } from './owner-asks.mjs';
@@ -23,6 +23,8 @@ import { writeNewReadable } from './owner-status.mjs';
 import { mirrorFilesOf } from './review-ports.mjs';
 import { CLOCK_SKEW_MS } from './owner-status.mjs';
 import { STOP_STAMP_SKEW_MS } from '../modules/M4-workshop/launcher/review-runner.mjs';
+import { READING_FUTURE_MS } from '../modules/M12-sensors/facts.mjs';
+import { HOST_COPY_FAIL } from '../modules/M11-dispatcher/pass.mjs';
 
 const ME = process.getuid();
 const run = limitedSync(spawnSync);
@@ -284,6 +286,87 @@ test('C (L739, self-review M1, L763): hostLock reads only a file of the owner\'s
   // A hard link to a file only the Dispatcher can read: lstat shows a plain file, so the name alone can't tell.
   linkSync(own, path);
   assert.throws(() => hostLockPort({ path, run, ownerUid: ME, selfUid: ME + 1 })(), /has another name too \(a hard link\)/);
+});
+
+// ---- host.lock under the owner's copier (L1040, L1041) ----
+
+const T_STAMP = Date.parse('2026-11-12T10:00:00.000Z');
+const stampAt = (file, at) => writeFileSync(file, `${JSON.stringify({ at: new Date(at).toISOString(), source: 'present' })}\n`);
+
+test('L1041: the copier\'s stamp is good only when the owner\'s, within HOST_LOCK_STAMP_MAX_MS, and not ahead of the clock', () => {
+  assert.equal(HOST_LOCK_STAMP_MAX_MS, 5 * 60_000, 'the one limit: five missed 60 s runs');
+  const base = tempDir('orch-stamp-');
+  const stamp = join(base, 'host.lock.copied');
+  const at = (now, ownerUid = ME) => hostLockStampProblem(stamp, { now, ownerUid });
+  assert.match(at(T_STAMP), /has never finished a run .*is not there.*restart the owner's host\.lock copier/, 'missing');
+  stampAt(stamp, T_STAMP);
+  assert.equal(at(T_STAMP), null, 'fresh');
+  assert.equal(at(T_STAMP + HOST_LOCK_STAMP_MAX_MS), null, 'at the limit');
+  assert.match(at(T_STAMP + HOST_LOCK_STAMP_MAX_MS + 1), /last ran well at 2026-11-12T10:00:00\.000Z, 5 minutes ago \(the limit is 5\), so the copy of host\.lock may be old: restart/, 'stale');
+  assert.match(at(T_STAMP + 60 * 60_000), /60 minutes ago/, 'the age is named');
+  assert.equal(at(T_STAMP - READING_FUTURE_MS), null, 'ahead by the allowance');
+  assert.match(at(T_STAMP - READING_FUTURE_MS - 1), /ahead of this Mac's clock/, 'ahead past the allowance');
+  assert.match(at(T_STAMP, ME + 1), /is not the owner's \(its owner is uid \d+, not \d+\)/, 'another user\'s');
+  for (const bad of ['', 'not json', '{"at":"yesterday"}', '{"at":12}', '{}', 'null']) {
+    writeFileSync(stamp, bad);
+    assert.match(at(T_STAMP), /can't be read as the copier's stamp/, JSON.stringify(bad));
+  }
+  writeFileSync(stamp, 'x'.repeat(4097));
+  assert.match(at(T_STAMP), /is over 4096 bytes/);
+  rmSync(stamp);
+  stampAt(join(base, 'real'), T_STAMP);
+  symlinkSync(join(base, 'real'), stamp);
+  assert.match(at(T_STAMP), /is a link, not the copier's own file/, 'a link is never followed');
+  rmSync(stamp);
+  mkdirSync(stamp);
+  assert.match(at(T_STAMP), /is not a plain file/);
+  rmSync(stamp, { recursive: true });
+  stampAt(stamp, T_STAMP);
+  chmodSync(stamp, 0o000);
+  try { assert.match(at(T_STAMP), /can't be read \(EACCES\)/); } finally { chmodSync(stamp, 0o644); }
+  // A read that fails part way is an answer, never a throw.
+  assert.match(hostLockStampProblem(stamp, { now: T_STAMP, ownerUid: ME }, { read: () => { throw Object.assign(new Error('x'), { code: 'EIO' }); } }), /can't be read \(EIO\)/);
+});
+
+test('L1041: with a stamp, hostLock throws HOST_COPY_FAIL for a stale, missing, future or not-the-owner\'s stamp and for a copy it can\'t read; without one, nothing changes', () => {
+  const w = mirrorWorld();
+  const path = w.config.hostLockPath;
+  const stamp = join(w.base, 'host.lock.copied');
+  let now = T_STAMP;
+  const port = (o = {}) => hostLockPort({ path, run, ownerUid: ME, selfUid: ME + 1, stamp, now: () => now, ...o });
+  const failsClosed = (f, re, what) => {
+    let err; try { f(); } catch (e) { err = e; }
+    assert.ok(err, `${what}: no throw`);
+    assert.equal(err.code, HOST_COPY_FAIL, `${what}: ${err.message}`);
+    assert.match(err.message, re, what);
+  };
+  writeFileSync(path, 'mini\n');
+  failsClosed(() => port()(), /has never finished a run/, 'missing stamp');
+  stampAt(stamp, T_STAMP);
+  assert.equal(port()(), 'mini\n', 'a fresh stamp: the copy is read as before');
+  rmSync(path);
+  assert.equal(port()(), null, 'a fresh stamp and no copy: no host claimed, as the copier mirrors a missing host.lock');
+  writeFileSync(path, 'mini\n');
+  now = T_STAMP + HOST_LOCK_STAMP_MAX_MS + 1;
+  failsClosed(() => port()(), /may be old/, 'stale stamp');
+  now = T_STAMP - READING_FUTURE_MS - 1;
+  failsClosed(() => port()(), /ahead of this Mac's clock/, 'future stamp');
+  now = T_STAMP;
+  failsClosed(() => port({ ownerUid: ME, stampIo: { fstat: () => ({ isFile: () => true, uid: ME + 1 }) } })(), /is not the owner's/, 'not the owner\'s stamp');
+  chmodSync(path, 0o000);
+  try { failsClosed(() => port()(), /the copy of host\.lock can't be read: host\.lock .* can't be read \(EACCES\)/, 'unreadable copy'); } finally { chmodSync(path, 0o644); }
+  failsClosed(() => port({ run: () => ({ ok: false, why: 'timed out after 10000 ms' }) })(), /timed out/, 'a read held past its limit');
+  // Without the key: a stale stamp beside the copy changes nothing, and a refused read is not marked.
+  now = T_STAMP + 60 * 60_000;
+  assert.equal(hostLockPort({ path, run, ownerUid: ME, selfUid: ME + 1, now: () => now })(), 'mini\n');
+  chmodSync(path, 0o000);
+  try {
+    let err; try { hostLockPort({ path, run, ownerUid: ME, selfUid: ME + 1 })(); } catch (e) { err = e; }
+    assert.ok(err); assert.notEqual(err.code, HOST_COPY_FAIL);
+  } finally { chmodSync(path, 0o644); }
+  // Through workerPorts: config hostLockStamp reaches the port (here host.lock is not the owner's, so it fails closed).
+  assert.notEqual((() => { try { workerPorts(w.ctx).hostLock(); } catch (e) { return e.code; } })(), HOST_COPY_FAIL, 'no key: not marked');
+  assert.equal((() => { try { workerPorts({ ...w.ctx, config: { ...w.config, hostLockStamp: stamp } }).hostLock(); } catch (e) { return e.code; } })(), HOST_COPY_FAIL, 'the key: marked');
 });
 
 // A file this user can read but doesn't own, which a hard link can name (macOS lets a user hard-link a file it doesn't own).

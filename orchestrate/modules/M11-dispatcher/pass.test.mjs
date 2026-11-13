@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { STATES, FINAL_STATES } from '../../shared/record.mjs';
 import { STOP_QUIET_REASONS } from '../M4-workshop/launcher/review-runner.mjs';
-import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts, stopProcessGroup, guarded, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RUN, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0, UNKNOWN_FACT, REVIEW_STOP_FACT, REVIEW_STOP_RUNNER_REASON, REVIEW_STOP_AGAIN_MS, REVIEW_STOP_TELL_FACT, REVIEW_STOP_MAX_ASKS } from './pass.mjs';
+import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts, stopProcessGroup, guarded, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RUN, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0, UNKNOWN_FACT, REVIEW_STOP_FACT, REVIEW_STOP_RUNNER_REASON, REVIEW_STOP_AGAIN_MS, REVIEW_STOP_TELL_FACT, REVIEW_STOP_MAX_ASKS, HOST_COPY_FAIL, HOST_COPY_CAUSE, HOLD_FACT } from './pass.mjs';
 import { USAGE_FACT, BAND_FACT } from './usage.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { retellWaits, WAIT_TELL_FACT } from './joe-waits.mjs';
@@ -1066,6 +1066,48 @@ test('audit 0b-6 r3 MAT-1: a host.lock that cannot be read, or rules that cannot
     assert.equal(w.calls.alerts.filter((a) => /the rules have no value for .*timeouts\.cancel_grace_min/.test(a)).length, 1);
     assert.equal(w.calls.launched.length, 1, 'nothing new started');
   }
+});
+
+// L1041: under the owner's copier, a host.lock port that can't vouch for its copy throws with code HOST_COPY_FAIL
+// (stale, missing, future or not-the-owner's stamp, or a copy it can't read). Starts go off (undo cards still start, as
+// for every startsOff), the owner is told once a day on one cause, and the mark clears on the first good read.
+test('L1041: a HOST_COPY_FAIL from hostLock holds every start but undo cards and tells once; a good read clears it; a plain throw is as before', async () => {
+  const stale = () => { throw Object.assign(new Error('the host.lock copier last ran well at 2026-01-01T00:00:00.000Z, 9 minutes ago (the limit is 5), so the copy of host.lock may be old: restart the owner\'s host.lock copier'), { code: HOST_COPY_FAIL }); };
+  const told = (w) => w.calls.alerts.filter((a) => /the Dispatcher holds every start but undo cards: .*may be old: restart the owner's host\.lock copier/.test(a));
+  const w = world([card('C-1'), ...undoEntries('U-1')]);
+  const r = await w.pass(0, { hostLock: stale });
+  assert.deepEqual(r.started, ['U-1'], 'only the undo card starts');
+  assert.ok(!w.calls.launched.includes('C-1'));
+  assert.ok(r.notes.some((n) => /nothing but undo cards starts: host\.lock's copy can't be trusted \(the host\.lock copier last ran well/.test(n)), r.notes.join(' | '));
+  assert.ok(r.notes.some((n) => /host\.lock unreadable: /.test(n)), 'still noted as before');
+  assert.equal(told(w).length, 1, w.calls.alerts.join(' | '));
+  await w.pass(1, { hostLock: stale });
+  assert.equal(told(w).length, 1, 'once a day on the one cause, however often it repeats');
+  assert.ok(!w.calls.launched.includes('C-1'));
+  // A good read: the mark clears and starts go on.
+  const r3 = await w.pass(2);
+  assert.deepEqual(r3.started, ['C-1']);
+  assert.equal(w.rec.read('fact', HOLD_FACT(HOST_COPY_CAUSE)).doc.told_at, null, 'cleared on the good read');
+  // A later stop is told afresh, the same day.
+  await w.pass(3, { hostLock: stale });
+  assert.equal(told(w).length, 2, 'a return is told afresh');
+  // A throw without the code (no copier: hostLockStamp not in the config) is as before: noted, starts go on, no alert.
+  const p = world([card('C-2')]);
+  const rp = await p.pass(0, { hostLock: () => { throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }); } });
+  assert.deepEqual(rp.started, ['C-2']);
+  assert.equal(p.calls.alerts.length, 0, p.calls.alerts.join(' | '));
+  assert.equal(p.rec.read('fact', HOLD_FACT(HOST_COPY_CAUSE)), null, 'nothing written without a copier');
+});
+
+test('L1041: a hold alert that throws is noted, never fails the pass, and starts stay off', async () => {
+  const w = world([card('C-1')]);
+  const fail = () => { throw Object.assign(new Error('stamp missing'), { code: HOST_COPY_FAIL }); };
+  // The hold's own fact can't be read, so holdAlert throws; the pass goes on.
+  const real = w.rec.read.bind(w.rec);
+  const rec = { ...w.rec, read: (...a) => { if (a[0] === 'fact' && a[1] === HOLD_FACT(HOST_COPY_CAUSE)) throw new Error('record read failed'); return real(...a); } };
+  const r = await w.pass(0, { hostLock: fail, rec });
+  assert.deepEqual(r.started, []);
+  assert.ok(r.notes.some((n) => /the host\.lock copy hold could not be told \(record read failed\)/.test(n)), r.notes.join(' | '));
 });
 
 test('audit 0b-6 r3 MAT-5: with starts off (no account reading, or a rules value missing) an undo card still starts and nothing else does', async () => {
