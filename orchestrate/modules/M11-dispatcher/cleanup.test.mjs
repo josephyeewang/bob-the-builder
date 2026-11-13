@@ -51,7 +51,7 @@ const R = rulesWith({}, { delete_copy: ASK });
 // Joe's answers as M2 records them (channel, choice, approves).
 const YES = { channel: 'tap', choice: 'Yes', approves: true };
 const KEEP = { channel: 'tap', choice: 'No', approves: false };
-const locked = createSaveWork({ runLocked: (fn) => fn() }); // stands in for the lock-down runner
+const locked = createSaveWork({ runLocked: (j) => j.run() }); // stands in for the lock-down runner
 
 // The copy the record names for C-1 is on its worker launch (the card has no copy field, L72).
 const launchFor = (copy, id = 'L-1', at = T0 - 60 * MIN) => ['launch', id, { session_id: `S-${id}`, role: 'worker', card: 'C-1', head: 'a'.repeat(40), rev: 1, copy, launched_at: iso(at) }];

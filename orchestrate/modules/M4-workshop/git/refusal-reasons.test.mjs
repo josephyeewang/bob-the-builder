@@ -70,7 +70,7 @@ test('save-work: no .git, an alternates folder, http-alternates, a bad card id a
   const http = tmp(); mkdirSync(join(http, '.git', 'objects', 'info'), { recursive: true });
   writeFileSync(join(http, '.git', 'objects', 'info', 'http-alternates'), 'https://example.com/objects\n');
   assert.throws(() => resetCloneGit({ clone: http, mirror }), /the copy has objects\/info\/http-alternates/);
-  const saveWork = createSaveWork({ runLocked: (fn) => fn() });
+  const saveWork = createSaveWork({ runLocked: (j) => j.run() });
   assert.equal((await saveWork({ clone: tmp(), mirror, card: 'bad id!', branch: 'card/bad id!', outbox: tmp() })).reason, 'bad card id');
   const clone = tmp(); mkdirSync(join(clone, '.git'));
   assert.equal((await saveWork({ clone, mirror, card: 'C-1', branch: 'card/c-1', outbox: join(clone, 'no-outbox') })).reason, 'the outbox is not a real folder');
