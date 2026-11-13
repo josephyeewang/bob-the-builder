@@ -978,3 +978,19 @@ test('L343: a card with no reviewer put on the owner whose tell could not keep i
   const { moves } = await pass(rec, 300, { hasReviewer: () => false });
   assert.match(moves.find(([id]) => id === 'C-1')?.[1] ?? '', /^in_review->waiting; this card's tell could not be kept with its wait \(busy\)/, JSON.stringify(moves));
 });
+
+test('L1061 m1 (L1048): while home is unknown no merge is requested, an undo\'s too, on green; once home is known both are', () => {
+  const HOME = 'host.lock\'s copy can\'t be trusted, so which Mac is home is not known (stamp 9 minutes old)';
+  const mk = () => recWith([['product', 'p1', { state: 'active' }], ['card', 'C-1', { state: 'verified', product: 'p1', tier: 2, head: HA }],
+    launch('C-1', 'S-9'), prSeen(7), ...undoEntries('U-1', { state: 'verified', tier: 1, head: HB }), launch('U-1', 'S-8', -60, HB), prSeen(8, HB)]);
+  const rec = mk();
+  const held = requestMerges({ alert: noAlert, rec, rules: R, now: T0, b: GREEN, startsHeld: HOME, homeUnknown: HOME });
+  for (const id of ['C-1', 'U-1']) assert.deepEqual(held.filter(([c]) => c === id), [[id, `merge request held: ${HOME}`]], id);
+  assert.deepEqual(requests(rec), []);
+  // homeUnknown alone holds the undo too (startsHeld lets an undo through).
+  assert.deepEqual(requestMerges({ alert: noAlert, rec, rules: R, now: T0, b: GREEN, homeUnknown: HOME }).filter(([c]) => c === 'U-1'), [['U-1', `merge request held: ${HOME}`]]);
+  assert.deepEqual(requests(rec), []);
+  // Control: home known, both requested.
+  const ok = requestMerges({ alert: noAlert, rec, rules: R, now: T0 + MIN, b: GREEN });
+  assert.deepEqual(ok.map(([c, why]) => [c, why]).sort(), [['C-1', 'merge requested'], ['U-1', 'merge requested']]);
+});

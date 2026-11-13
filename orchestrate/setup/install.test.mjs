@@ -1507,6 +1507,15 @@ test('L871 PLANT check-dispatcher: the job\'s dispatcher.json without a root, wi
   const O = w.mac.at(`${BASE}/outboxes`); const C = w.mac.at(`${BASE}/worker-copies`);
   const rowOf = (key) => checkDispatcherKeys(w.mac, w.cfg).find((r) => r.what.endsWith(`(the Dispatcher's ${key})`));
   for (const key of ['outboxRoot', 'copiesRoot']) assert.deepEqual(rowOf(key), { ok: true, what: `${BASE}/install/orchestrate/dispatcher.json names ${key === 'outboxRoot' ? 'the top outbox root' : 'the workers\' top copies root'} ${key === 'outboxRoot' ? O : C} as ${key} (the Dispatcher's ${key})` });
+  // The job's hostLockPath is checked too (L1029 E review M2): the host.lock rows judge the setup config's, so a dispatcher.json
+  // naming another (hostLockPath moved to the copier's copy, dispatcher-config not run again) FAILs by name; load refuses.
+  const H = w.mac.at(w.cfg.hostLockPath); const hRow = () => checkDispatcherKeys(w.mac, w.cfg).find((r) => r.what.endsWith('(the host.lock this check reads)'));
+  assert.deepEqual(hRow(), { ok: true, what: `${BASE}/install/orchestrate/dispatcher.json names the owner's host.lock ${H} as hostLockPath (the host.lock this check reads)` });
+  put((c) => { c.hostLockPath = `${H}.old`; });
+  assert.equal(hRow().why, `it names ${JSON.stringify(`${H}.old`)}, not ${H}; run dispatcher-config`);
+  { const cd = w.run(['check-dispatcher']); assert.equal(cd.code, 1, cd.text); assert.ok(cd.text.includes(`not ${H}; run dispatcher-config`), cd.text);
+    const ld = w.run(['daemons', 'load', '--only', 'dispatcher']); assert.equal(ld.code, 1, ld.text); assert.match(ld.text, /dispatcher\.json is not the config this setup writes now: hostLockPath is /, ld.text); }
+  put(() => {}); assert.equal(hRow().ok, true, 'restored');
   const cases = [
     ['outboxRoot', (c) => { delete c.outboxRoot; }, 'it has no outboxRoot, so an existing dispatcher.json without it won\'t start the Dispatcher until dispatcher-config is run again (an older setup wrote it)'],
     ['copiesRoot', (c) => { delete c.copiesRoot; }, 'it has no copiesRoot, so an existing dispatcher.json without it won\'t start the Dispatcher until dispatcher-config is run again (an older setup wrote it)'],
