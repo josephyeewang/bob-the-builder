@@ -72,7 +72,7 @@ const isTime = (t) => typeof t === 'string' && Number.isFinite(Date.parse(t));
 const pct = (n) => typeof n === 'number' && Number.isFinite(n) && n >= 0 && n <= 100;
 const ROW = /^(weekly_all|weekly_scoped:[A-Za-z0-9._-]{1,40})$/;
 
-function shapeProblem(a) {
+export function shapeProblem(a) {
   if (!a || typeof a !== 'object' || Array.isArray(a)) return 'the answer is not an object';
   const known = new Set(['v', 'account', 'signed_in', 'observed_at', 'usage', 'usage_reason']);
   const extra = Object.keys(a).filter((k) => !known.has(k));

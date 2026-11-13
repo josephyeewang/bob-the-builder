@@ -17,7 +17,7 @@
 //   bob --from <a Bob checkout> --commit <40-hex sha> [--dry-run]   the Bob method folder the sessions read and its
 //                                       pinned file list, from that commit, together (launch check 13; bob-manifest.mjs)  (root)
 //   check-dispatcher     the review runner's launches folder, the job's dispatcher.json's outboxRoot and copiesRoot, and whether orchestrate can read the owner's host.lock, and if not why  (read only; sudo to read as orchestrate)
-//   dispatcher-config    [--dry-run]    write the Dispatcher's config, <base>/dispatcher.json (and the copy's, when the copy keeps it)  (root)
+//   dispatcher-config    [--dry-run]    write the Dispatcher's config, <base>/dispatcher.json, and the Sensors', <base>/sensors.json (and the copy's, when the copy keeps them)  (root)
 //                                       an existing dispatcher.json without outboxRoot and copiesRoot won't start the Dispatcher until this is run again
 //   dispatcher-keys      prints the Dispatcher config's reviewRoot, mirror, sealRoot, outboxRoot, copiesRoot, hostLockPath and hostLockUid as JSON (read only)
 //   daemons place|load|unload  [--dry-run]   the three background jobs' files; load; unload                    (root)
@@ -52,7 +52,9 @@ import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { ROOT_CONFIG_PATH, parseConfig } from './layout.mjs';
 import { checkDispatcherKeys, dispatcherKeysOn } from './dispatcher-check.mjs';
-import { DISPATCHER_JOB, checkDispatcherConfig, parseDispatcher, planDispatcherConfig } from './dispatcher-setup.mjs';
+import { DISPATCHER_JOB, parseDispatcher } from './dispatcher-setup.mjs';
+import { checkDispatcherAndSensors, planDispatcherAndSensors } from './sensors-setup.mjs';
+import { OWNER_JOB_SUBS, checkOwnerJob, planOwnerLoad, planOwnerPlace, planOwnerUnload } from './owner-answer-setup.mjs';
 import { realIo, rootProblem } from './mac.mjs';
 import { guarded } from './guard.mjs';
 import { apply, check, plan } from './users-folders.mjs';
@@ -72,9 +74,9 @@ const TOKEN_PAGE_NOTE = [
   '  - Repository access: only the one repository named in the config;',
   '  - Permissions: Metadata = Read-only (GitHub adds it by itself; fine if absent), Contents = Read-only (GitHub may call it "code"), Pull requests = Read-only, Commit statuses = Read-only (the watch job reads it to judge a merge), and nothing else. (Not Checks: the job reads check runs with the watcher App, which holds Checks: read.)',
 ];
-const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install [--watch-only]|check-dispatcher|dispatcher-config|dispatcher-keys|review-config --pin <x.y.z> --input <file> --out <file> [--for-install]|add-to-install --pin <x.y.z> --sha256 <hex>|bob --from <Bob checkout> --commit <sha>|daemons place|load|unload|list|check [--only <job>]|daemons reload-account|prove-token|proposals|check-proposals|safe-directory|check-safe-directory|token|check-token|watch-rules|check-watch-rules|watch-app> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
+const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install [--watch-only]|check-dispatcher|dispatcher-config|dispatcher-keys|review-config --pin <x.y.z> --input <file> --out <file> [--for-install]|add-to-install --pin <x.y.z> --sha256 <hex>|bob --from <Bob checkout> --commit <sha>|daemons place|load|unload|list|check [--only <job>]|daemons reload-account|owner-job place|load|unload|check (as the owner, no sudo)|prove-token|proposals|check-proposals|safe-directory|check-safe-directory|token|check-token|watch-rules|check-watch-rules|watch-app> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
 const DAEMON_SUBS = ['place', 'load', 'unload', 'list', 'check', 'reload-account'];
-const COMMANDS = ['users-folders', 'check', 'proofs', 'install', 'check-install', 'check-dispatcher', 'dispatcher-config', 'dispatcher-keys', 'review-config', 'add-to-install', 'bob', 'daemons', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app'];
+const COMMANDS = ['users-folders', 'check', 'proofs', 'install', 'check-install', 'check-dispatcher', 'dispatcher-config', 'dispatcher-keys', 'review-config', 'add-to-install', 'bob', 'daemons', 'owner-job', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app'];
 const READ_ONLY = ['check', 'check-install', 'check-dispatcher', 'dispatcher-keys', 'check-proposals', 'check-safe-directory', 'check-token', 'prove-token', 'check-watch-rules'];
 const PLAIN_CONFIG = ['users-folders', 'check', 'check-dispatcher', 'dispatcher-keys', 'proofs', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app', 'review-config'];
 
@@ -83,6 +85,7 @@ export function parseArgs(argv) {
   if (!COMMANDS.includes(cmd)) throw new Error(`first word must be ${COMMANDS.join(', ')}`);
   let rest = argv.slice(1); let sub = null;
   if (cmd === 'daemons') { sub = rest[0]; rest = rest.slice(1); if (!DAEMON_SUBS.includes(sub)) throw new Error(`daemons needs one of ${DAEMON_SUBS.join(', ')}`); }
+  if (cmd === 'owner-job') { sub = rest[0]; rest = rest.slice(1); if (!OWNER_JOB_SUBS.includes(sub)) throw new Error(`owner-job needs one of ${OWNER_JOB_SUBS.join(', ')}`); }
   const o = { cmd, sub, config: null, dry: false, prefix: '', main: null, repo: null, rulesSource: null, printLine: false, watchOnly: false, only: null, app: {}, pin: null, claudePin: null, sha256: null, input: null, out: null, forInstall: false, from: null, commit: null };
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
@@ -111,7 +114,7 @@ export function parseArgs(argv) {
       if (a === '--config') o.config = v; else if (a === '--main') { if (!/^[0-9a-f]{40}$/.test(v)) throw new Error('--main must be a 40-hex commit'); o.main = v; } else if (a === '--repo') o.repo = v; else if (a === '--rules-source') o.rulesSource = v; else if (a === '--only') o.only = v; else o.prefix = v;
     } else throw new Error(`argument ${i + 1} is not one this command takes (it is not shown, in case it is a secret)`);
   }
-  const readOnly = READ_ONLY.includes(cmd) || (cmd === 'daemons' && (sub === 'list' || sub === 'check'));
+  const readOnly = READ_ONLY.includes(cmd) || (cmd === 'daemons' && (sub === 'list' || sub === 'check')) || (cmd === 'owner-job' && sub === 'check');
   if (readOnly && o.dry) throw new Error('this command never changes anything, so --dry-run does not apply');
   if (o.repo !== null && !(cmd === 'watch-rules' && o.printLine)) throw new Error('--repo is only for watch-rules --print-config-line (prove-token takes the repository from the config)');
   if (o.printLine && cmd !== 'watch-rules') throw new Error('--print-config-line is only for watch-rules');
@@ -155,11 +158,12 @@ export function planCommand(io, cfg, o, { readSource = (p) => io.readSource(p), 
   if (o.cmd === 'watch-app') return guarded(io, cfg, planWatchApp(io, cfg, { raw: o.raw, text: o.text, app: o.app, rulesSha256: o.pin, dry: o.dry }));
   if (o.cmd === 'watch-rules') return guarded(io, cfg, planWatchRules(io, cfg, { source: o.rulesSource, readSource: (p) => io.readRules(p) }));
   if (o.cmd === 'safe-directory') return planSafeDirectory(io, cfg);   // root writes nothing: git runs as the owner
+  if (o.cmd === 'owner-job') return o.sub === 'place' ? planOwnerPlace(io, cfg) : o.sub === 'load' ? planOwnerLoad(io, cfg) : planOwnerUnload(io, cfg);   // the owner's, not root's: no base wall
   const res = o.cmd === 'install' ? planInstall(io, cfg, { readSource, runUpdater })
     : o.cmd === 'add-to-install' ? planAddToInstall(io, cfg, { pin: o.claudePin, sha256: o.sha256, readSource })
     : o.cmd === 'bob' ? planBob(io, cfg, { from: o.from, commit: o.commit, git: bobGitOf(o.from) })
     : o.cmd === 'token' ? planToken(io, cfg)
-    : o.cmd === 'dispatcher-config' ? planDispatcherConfig(io, cfg, { jobLive: () => jobLive(io, cfg, DISPATCHER_JOB) })
+    : o.cmd === 'dispatcher-config' ? planDispatcherAndSensors(io, cfg, { jobLive: () => jobLive(io, cfg, DISPATCHER_JOB) })
     : o.sub === 'place' ? planPlace(io, cfg, o.jobs) : o.sub === 'load' ? planLoad(io, cfg, o.jobs) : o.sub === 'reload-account' ? planReloadAccount(io, cfg) : planUnload(io, cfg, o.jobs);
   return guarded(io, cfg, res);
 }
@@ -208,6 +212,7 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, bobGitOf, out
   if (o.cmd === 'watch-rules' && o.printLine) { const r = watchConfigLine(cfg, { repo: o.repo, source: o.rulesSource, readSource: (p) => io.readRules(p) }); if (r.problem) { err(`PROBLEM  ${r.problem}`); return 1; } out(r.line); return 0; }
   if (o.cmd === 'prove-token') return proveToken(io, cfg, { proveApp: (on) => proveWatchAppChecks(io, cfg, on) }).then((res) => { const code = report(res, out); if (code === 0) for (const l of TOKEN_PAGE_NOTE) out(l); return code; });
   if (o.cmd === 'daemons' && o.sub === 'check') return report(checkDaemons(io, cfg, o.jobs), out);
+  if (o.cmd === 'owner-job' && o.sub === 'check') return report(checkOwnerJob(io, cfg), out);
   if (o.cmd === 'daemons' && o.sub === 'list') {
     for (const j of list(io, cfg, o.jobs)) out(j.loaded ? `${j.label}: loaded, ${j.state}, last exit ${j.lastExit}` : `${j.label}: not loaded${j.error ? ` (${j.error})` : ''}`);
     return 0;
@@ -223,7 +228,8 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, bobGitOf, out
     return bad ? 1 : 0;
   }
 
-  if (!o.dry) { const p = rootProblem(io); if (p) { err(`refused: ${p}`); return 2; } }
+  // The owner's answer job is the one command root does not run: it is the owner's, in the owner's session (owner-answer-setup.mjs).
+  if (!o.dry && o.cmd !== 'owner-job') { const p = rootProblem(io); if (p) { err(`refused: ${p}`); return 2; } }
   const planned = planCommand(io, cfg, o, { runUpdater, ...(bobGitOf ? { bobGitOf } : {}) });
   for (const n of planned.notes ?? []) out(`uses ${n}`);
   for (const w of planned.warnings ?? []) out(`WARNING  ${w}`);
@@ -243,9 +249,10 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, bobGitOf, out
   try { apply(planned.ops, { log: (t) => out(`run: ${t}`) }); } catch (e) { const why = String(e.message).replace(/\.+$/, '');   // a message that ends in its own period gets one, not two
     err(/run: daemons load/i.test(e.message) ? `stopped: ${why}.` : `stopped: ${why}. Run it again after fixing that; it picks up where it stopped.`); return 1; }
   const after = o.cmd === 'users-folders' ? check(io, cfg, { alsoKnown: rootMadeEntries(cfg, { dispatcher: o.dispatcherOn }) }) : o.cmd === 'install' || o.cmd === 'add-to-install' ? checkInstall(io, cfg)
-    : o.cmd === 'dispatcher-config' ? checkDispatcherConfig(io, cfg) : o.cmd === 'bob' ? checkBob(io, cfg, { commit: o.commit })
+    : o.cmd === 'dispatcher-config' ? checkDispatcherAndSensors(io, cfg) : o.cmd === 'bob' ? checkBob(io, cfg, { commit: o.commit })
     : o.cmd === 'proposals' ? checkProposals(io, cfg) : o.cmd === 'safe-directory' ? checkSafeDirectory(io, cfg) : o.cmd === 'token' ? checkToken(io, cfg) : o.cmd === 'watch-rules' ? checkRulesCopy(io, cfg) : o.cmd === 'watch-app' ? checkWatchAppConfig(io, cfg, o.app, o.pin)
     : o.sub === 'place' ? checkDaemons(io, cfg, o.jobs).filter((r) => /exactly the built job file$|under another label/.test(r.what)) : o.sub === 'load' ? checkDaemons(io, cfg, o.jobs).filter((r) => /is loaded$|loaded from the job file as it is now$/.test(r.what))
+    : o.cmd === 'owner-job' ? (o.sub === 'unload' ? null : checkOwnerJob(io, cfg).filter((r) => (o.sub === 'place' ? /exactly the built job file/ : /is loaded in the owner's session/).test(r.what)))
     : o.sub === 'reload-account' ? checkDaemons(io, cfg).filter((r) => /review-account (is loaded|was loaded from the job file as it is now)$/.test(r.what)) : null;
   if (!after) { out('done.'); return 0; }
   const bad = after.filter((r) => !r.ok);
