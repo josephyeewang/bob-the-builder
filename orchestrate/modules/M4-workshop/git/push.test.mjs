@@ -20,7 +20,7 @@ import { refusedPath } from './push-refusals.mjs';
 import { DO_PLANE_TOML, RULES_VERSION, scanSecrets } from './gitleaks.mjs';
 import { crc32 } from './binary-files.mjs';
 import { chunk, makePng, ihdr } from './png-fixture.mjs';
-import { startGate, factId, vercelFact } from './start-gate.mjs';
+import { startGate, factId, vercelFact, NO_VERCEL } from './start-gate.mjs';
 import { drainedPort } from '../../../wiring/runner-ports.mjs';
 import { memoryRecord } from '../../../shared/record.mjs';
 import { timeLimits } from '../../M11-dispatcher/merges.mjs';
@@ -2307,4 +2307,21 @@ test('L570: no Vercel project in the rules is said as that, for a fact naming no
   assert.match(call(at(doc('prj_2', true)), 'prj_1').reason, /for another project/);
   assert.match(call(at(doc(null, false)), 'prj_1').reason, /for another project/);
   assert.equal(call(at(doc('prj_1', true)), 'prj_1').ok, true);
+});
+
+test('L1081: exactly `none` in the rules holds both Vercel facts with no fact read; only that exact word', () => {
+  const now = Date.parse('2026-11-05T12:00:00Z');
+  assert.equal(NO_VERCEL, 'none');
+  const unread = { read: () => { throw new Error('no Vercel fact may be read for a product with none'); } };
+  for (const kind of ['vercel_skip', 'vercel_env']) {
+    assert.deepEqual(vercelFact({ record: unread, kind, product: PRODUCT, vercelProject: 'none', now }), { ok: true }, kind);
+    // Near misses are project names like any other: with no fact naming them, the gate stays shut.
+    for (const near of ['None', 'NONE', ' none', 'none ', 'none\n', 'no', 'null']) {
+      const r = vercelFact({ record: { read: () => null }, kind, product: PRODUCT, vercelProject: near, now });
+      assert.equal(r.ok, false, JSON.stringify(near));
+      assert.match(r.reason, /no fact yet/, JSON.stringify(near));
+    }
+    // Missing or empty still shuts as before (I1).
+    for (const missing of [undefined, null, '']) assert.match(vercelFact({ record: unread, kind, product: PRODUCT, vercelProject: missing, now }).reason, /rules name no Vercel project/);
+  }
 });
