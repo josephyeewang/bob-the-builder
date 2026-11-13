@@ -172,7 +172,7 @@ export const joinLines = (cmd) => String(cmd ?? '').replace(/\\\n/g, '');
  * and so is a line holding a space the shells read as a letter (a no-break or other Unicode space). Read
  * from the raw line: a backslash and line break inside a quoted body stay as written.
  */
-export function heredocs(cmd) {
+export function heredocs(cmd, { openBodies = false } = {}) {
   const s = String(cmd ?? '');
   let out = '';
   const bodies = [];
@@ -248,13 +248,18 @@ export function heredocs(cmd) {
       i += 1;
       for (const h of pending) {
         const lines = [];
+        const from = i;
+        let ended = false;
         while (i < s.length) {
           const end = s.indexOf('\n', i);
           const line = s.slice(i, end < 0 ? s.length : end);
           i = end < 0 ? s.length : end + 1;
-          if ((h.dash ? line.replace(/^\t+/, '') : line) === h.delim) break;
+          if ((h.dash ? line.replace(/^\t+/, '') : line) === h.delim) { ended = true; break; }
           lines.push(line);
         }
+        // `openBodies` (shellCommands): a body no end line closes is read as commands, so a line whose bodies were
+        // already taken out (`cat <<'A'` then the next command) is read on past it (#487 r4 M1, L1075).
+        if (!ended && openBodies) { i = from; break; }
         // With a quoted end word the shell joins no body lines, so the end is where the guard reads it (round 4 Minor).
         if (!h.quoted && lines.some((l) => l.endsWith('\\'))) return refuse('a here-document line ending in a backslash (quote the end word: <<\'EOF\')');
         bodies.push({ text: lines.join('\n'), quoted: h.quoted });
@@ -324,7 +329,7 @@ export function shellCommands(cmd, { raw = false } = {}) {
   // guards still see it among the words).
   let redirect = false;
   // A here-document's body is text fed to a program, not commands (L46).
-  for (const w of shellWords(joinLines(heredocs(cmd).text).replace(/\n/g, ' ; '))) {
+  for (const w of shellWords(joinLines(heredocs(cmd, { openBodies: true }).text).replace(/\n/g, ' ; '))) {
     if (w === '<' || w === '>') { redirect = true; continue; }
     if (redirect && w === '&') continue;
     if ([';', '&', '|', '(', ')', '`', '$'].includes(w)) { redirect = false; if (cur.length) cmds.push(cur); cur = []; continue; }

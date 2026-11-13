@@ -8,9 +8,9 @@
 // A missing or stale snapshot, or one without that block, blocks every call (fail closed).
 
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
-import { readdirSync } from 'node:fs';
+import { readdirSync, statSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
-import { isMain, runHook, MACHINE_WIDE_WAY_OUT, block, pass, toolPaths, shellCommands, shellWords, bothWords, programOf, landingPath, realFolder, inside, joinLines, unreadable, heredocs, expandBraces, fold, globRe } from './lib.mjs';
+import { isMain, runHook, MACHINE_WIDE_WAY_OUT, MANAGED_FILE, block, pass, toolPaths, shellCommands, shellWords, bothWords, programOf, landingPath, realFolder, inside, joinLines, unreadable, heredocs, expandBraces, fold, globRe } from './lib.mjs';
 import { readSnapshot } from './snapshot.mjs';
 
 // ---- whole-folder writes (LEAD-CALLS L41 G2: deny by default) ----
@@ -351,19 +351,10 @@ export function* commandsWithin(raw, depth = 0) {
   }
 }
 
-// The first production program any word of `raw` names: words split at anything that is not part of a name, read as
-// written and with quotes and backslashes taken out (`v'e'rcel`, `v\\ercel`), the program part of a path
-// (`./node_modules/.bin/<p>`) and of a versioned package (`<p>@latest`). Folded, as every name here is.
+// Folder changers and programs that match patterns in folders of their own: a wildcard is judged by its folder only
+// when none runs in the line (#487 r2 m1).
 const FOLDER_CHANGERS = ['cd', 'pushd', 'popd', 'chdir', 'z', 'zi'];
 const PATTERN_TAKERS = ['find', 'fd', 'locate', 'mdfind', 'rsync', 'tar', 'bsdtar', 'zip', 'unzip', 'ditto', 'git', 'rg', 'ag', 'du', 'pax', 'cpio'];
-
-export function programNamedIn(raw, programs) {
-  for (const t of wordsIn(raw)) {
-    const name = fold(basename(t).replace(/^@/, '').split('@')[0]);
-    if (name && programs.includes(name)) return name;
-  }
-  return null;
-}
 
 // Every word-like run of `raw`'s text (letters, digits and `._+@/-`), as written and with quotes and backslashes taken out.
 // No wildcard characters: in code (`a[0]`, `x*y`) they are not file patterns.
@@ -372,176 +363,166 @@ export function wordsIn(raw) {
   return [s, s.replace(/['"\\]/g, '')].flatMap((text) => text.split(/[^A-Za-z0-9._+@/-]+/)).filter(Boolean);
 }
 
-// ---- the machine-wide form's runners and text (#487 r4, LEAD-CALLS L1066) ----
+// ---- the machine-wide form: refuse by default (#487 r5, LEAD-CALLS L1075) ----
 //
-// Programs that start another program from words the plain read below does not take as a command. In the machine-wide
-// form a line using one is read like an unreadable shape: any word naming a production program refuses it (M1). Role
-// sessions refuse these through their own settings and have the sandbox's network list as the wall.
-const INSTALLERS = new Set(['add', 'i', 'in', 'ins', 'inst', 'insta', 'instal', 'install', 'isntall', 'ci', 'clean-install', 'remove', 'rm', 'r', 'un',
-  'uninstall', 'unlink', 'link', 'ln', 'ls', 'list', 'll', 'la', 'view', 'v', 'info', 'show', 'why', 'explain', 'update', 'up', 'upgrade',
-  'outdated', 'audit', 'init', 'pack', 'publish', 'config', 'c', 'cache', 'help', 'search', 'whoami', 'login', 'logout', 'version',
-  'dedupe', 'ddp', 'prune', 'store', 'rebuild', 'rb', 'test', 't', 'tst', 'start', 'stop', 'restart', 'doctor', 'fund', 'set', 'get',
-  'ping', 'root', 'bin', 'prefix', 'owner', 'team', 'token', 'profile', 'pkg', 'query', 'sbom', 'shrinkwrap', 'star', 'unstar',
-  'stars', 'deprecate', 'dist-tag', 'docs', 'repo', 'bugs', 'org', 'access', 'adduser', 'completion', 'diff', 'find-dupes',
-  'unpublish', 'patch', 'patch-commit', 'licenses', 'import', 'fetch', 'setup', 'plugin', 'workspaces', 'global', 'licenses', 'pm', 'outdated']);
-// Package-manager options that take a value, so the word after them is not the subcommand.
-const PM_VALUE_OPTS = new Set(['--dir', '--prefix', '-C', '--cwd', '--filter', '-F', '--workspace', '--package', '-p', '--registry',
-  '--loglevel', '--userconfig', '--cache', '--config']);
-const INTERPRETERS = /^(python[0-9.]*|node|nodejs|perl|ruby|php|deno|bun|lua|luajit|Rscript|R|osascript|tclsh|pwsh|powershell)$/;
-const CODE_FLAG = /^-{1,2}(e|c|command|encodedcommand|ec|eval)$/i;
-const WATCHERS = ['watchexec', 'nodemon', 'entr', 'tmux', 'screen', 'at', 'batch', 'crontab', 'ssh', 'npx', 'bunx', 'pnpx'];
+// Four rounds of runner lists and text exceptions each left a gap (a runner the list lacked, a call hidden inside an
+// exception), so the machine-wide form no longer reads what a line runs. Any word of the raw line, here-document bodies
+// and `$( )` included, that names a production program refuses it, unless the whole line is one of three closed shapes
+// (allowedShape) or the word is a path that can't be that program (notAProgram).
 
-/** The first runner of `raw` (a command that starts another from words the guard does not take as a command), or null. */
-export function runnerIn(raw) {
-  for (const c of commandsWithin(raw)) {
-    const prog = programOf(c);
-    const rest = c.slice(1);
-    if (WATCHERS.includes(prog)) return `"${prog}" starts another program`;
-    if (['pnpm', 'npm', 'yarn', 'bun', 'corepack'].includes(prog)) {
-      let k = 0;
-      while (k < rest.length && rest[k].startsWith('-')) { k += PM_VALUE_OPTS.has(rest[k]) ? 2 : 1; }
-      const sub = rest[k];
-      // `corepack pnpm …` is read as the package manager it starts.
-      if (prog === 'corepack' && ['pnpm', 'npm', 'yarn'].includes(sub)) { if (runnerIn(rest.slice(k).join(' '))) return '"corepack" starts a package runner'; continue; }
-      if (prog === 'corepack') continue;
-      if (sub !== undefined && !INSTALLERS.has(sub)) return `"${prog} ${sub}" runs a program or script`;
+// The words of one line of literal text: plain letters, quoted strings with no `$` or backtick, nothing the shell would
+// run or expand into a command. With `globs`, wildcards and braces are letters too; with `pipes`, a single `|` splits the
+// line into commands. → the commands, each a word list, or null when anything else is on the line.
+function literalLine(s, { globs = false, pipes = false } = {}) {
+  const plain = globs ? /[A-Za-z0-9._+@/:,=%^*?[\]{}-]/ : /[A-Za-z0-9._+@/:,=%^-]/;
+  const cmds = [[]];
+  let cur = null;
+  const end = () => { if (cur !== null) cmds.at(-1).push(cur); cur = null; };
+  for (let i = 0; i < s.length; i += 1) {
+    const ch = s[i];
+    if (ch === ' ' || ch === '\t') { end(); continue; }
+    if (ch === "'") {
+      const close = s.indexOf("'", i + 1);
+      if (close < 0 || s.slice(i + 1, close).includes('\n')) return null;
+      cur = (cur ?? '') + s.slice(i + 1, close);
+      i = close;
       continue;
     }
-    if (INTERPRETERS.test(prog) && rest.includes('-')) return `"${prog} -" reads code from its input`;
-    if (/^(lua|luajit|Rscript|R|pwsh|powershell|expect)$/.test(prog) && rest.some((w) => CODE_FLAG.test(w))) return `"${prog}" runs code given on the line`;
-    if (['fd', 'fdfind'].includes(prog) && rest.some((w) => /^(-[a-zA-Z]*[xX]|--exec(-batch)?(=.*)?)$/.test(w))) return '"fd -x" runs a command for each file';
-    if (prog === 'rg' && rest.some((w) => /^--pre(=.*)?$/.test(w))) return '"rg --pre" runs a command for each file';
-    if (prog === 'launchctl' && rest.some((w) => ['asuser', 'bsexec', 'submit'].includes(w))) return '"launchctl" starts a program';
-    if (prog === 'git') {
-      const sub = gitSub(c);
-      if (c[sub] === 'bisect' && c.slice(sub + 1).includes('run')) return '"git bisect run" runs a command';
-      if (c[sub] === 'rebase' && c.slice(sub + 1).some((w) => /^(--exec(=.*)?|-[a-z]*x.*)$/.test(w))) return '"git rebase --exec" runs a command';
+    if (ch === '"') {
+      let k = i + 1;
+      let body = '';
+      for (; k < s.length && s[k] !== '"'; k += 1) {
+        if ('$`\n'.includes(s[k])) return null;
+        if (s[k] === '\\') { if (k + 1 >= s.length || '$`\n'.includes(s[k + 1])) return null; k += 1; }
+        body += s[k];
+      }
+      if (k >= s.length) return null;
+      cur = (cur ?? '') + body;
+      i = k;
+      continue;
     }
+    if (pipes && ch === '|' && s[i + 1] !== '|' && s[i - 1] !== '|') { end(); cmds.push([]); continue; }
+    if (!plain.test(ch)) return null;
+    cur = (cur ?? '') + ch;
+  }
+  end();
+  return cmds.every((c) => c.length) ? cmds : null;
+}
+
+const NAME = /^[A-Za-z0-9._+@-]+$/;
+// What a search's output may be piped into, and the options those take (sort's --compress-program runs a program).
+const PIPE_TAILS = ['head', 'tail', 'wc', 'sort', 'uniq'];
+const TAIL_WORD = /^(-[A-Za-z0-9.,:]*|\+?[0-9][0-9A-Za-z.,]*|--(lines|bytes|count|unique|reverse|numeric-sort|human-numeric-sort|ignore-case|repeated|words|chars)(=[0-9]+)?)$/;
+// Search options that start a program of their own: rg --pre and --hostname-bin, ag --pager.
+const SEARCH_RUNS = /^--(pre|hostname-bin|pager)/;
+
+/**
+ * The allowed shape `raw` is, or null (L1075). Only these may name a production program in the machine-wide form:
+ *  1. one `git commit` / `git tag` / `gh pr|issue create|comment|edit` whose words are literal text, with its message from a
+ *     quoted here-document: fed to it (`-F - <<'EOF'`), or Claude's `-m "$(cat <<'EOF'` … `EOF` `)"` with nothing else
+ *     inside the `$( )` and nothing after `<<'EOF'` on its line;
+ *  2. one grep / rg / ag with literal words, piped into head, tail, wc, sort or uniq at most;
+ *  3. one `command -v` / `which` / `type` with plain names.
+ * Nothing else may be on the line: no `;`, `&&`, `||`, other pipe, redirection, or second `$( )` or backtick.
+ */
+export function allowedShape(raw) {
+  const s = String(raw).replace(/[ \t\n]+$/, '').replace(/^[ \t\n]+/, '');
+  if (!s.includes('\n')) {
+    const one = literalLine(s);
+    if (one?.length === 1) {
+      const [w] = one;
+      if (w[0] === 'command' && /^-[pvV]*[vV][pvV]*$/.test(w[1] ?? '') && w.length > 2 && w.slice(2).every((x) => NAME.test(x) && !x.startsWith('-'))) return 'lookup';
+      if (['which', 'type'].includes(w[0])) {
+        const names = w.slice(1).filter((x) => !/^-[a-zA-Z]+$/.test(x));
+        if (names.length && names.every((x) => NAME.test(x) && !x.startsWith('-'))) return 'lookup';
+      }
+    }
+    const piped = literalLine(s, { globs: true, pipes: true });
+    if (piped && ['grep', 'egrep', 'fgrep', 'rg', 'ag'].includes(piped[0][0]) && !piped[0].some((x) => SEARCH_RUNS.test(x))
+      && piped.slice(1).every((c) => PIPE_TAILS.includes(c[0]) && c.slice(1).every((x) => TAIL_WORD.test(x)))) return 'search';
+  }
+  return messageShape(s) ? 'message' : null;
+}
+
+// A git commit / tag or gh pr|issue create|comment|edit, as literal words (shape 1's command).
+function messageCommand(words) {
+  if (words[0] === 'git') {
+    let k = 1;
+    while (k < words.length) { if (words[k] === '-C' && k + 1 < words.length) k += 2; else if (['--no-pager', '-P'].includes(words[k])) k += 1; else break; }
+    return ['commit', 'tag'].includes(words[k]);
+  }
+  return words[0] === 'gh' && ['pr', 'issue'].includes(words[1]) && ['create', 'comment', 'edit'].includes(words[2]);
+}
+// A here-document's body lines up to its end line: → the lines after the end line, or null when no line ends it.
+function afterBody(lines, delim, dash) {
+  const at = lines.findIndex((l) => (dash ? l.replace(/^\t+/, '') : l) === delim);
+  return at < 0 ? null : lines.slice(at + 1);
+}
+function messageShape(s) {
+  const lines = s.split('\n');
+  const first = lines[0];
+  // `git commit -F - <<'EOF'` with the body on the lines below and nothing after its end line.
+  const fed = /^(.*?)<<(-?)[ \t]*(['"])([A-Za-z_][A-Za-z0-9_.-]*)\3$/.exec(first);
+  if (fed && lines.length > 1) {
+    const words = literalLine(fed[1]);
+    const rest = afterBody(lines.slice(1), fed[4], fed[2] === '-');
+    if (words?.length === 1 && messageCommand(words[0]) && rest && rest.every((l) => l.trim() === '')) return true;
+  }
+  // The same command on one line with a literal message (`git commit -m 'Fix vercel config'`): nothing in it runs.
+  if (lines.length === 1) { const words = literalLine(first); return Boolean(words?.length === 1 && messageCommand(words[0])); }
+  // `git commit -m "$(cat <<'EOF'` … `EOF` / `)"`, the substitution's end on the line after the end line.
+  const sub = /^(.*?)"\$\([ \t]*cat[ \t]+<<(-?)[ \t]*(['"])([A-Za-z_][A-Za-z0-9_.-]*)\3$/.exec(first);
+  if (!sub || lines.length < 3) return false;
+  const rest = afterBody(lines.slice(1), sub[4], sub[2] === '-');
+  if (!rest || rest.length !== 1) return false;
+  const close = /^[ \t]*\)"(.*)$/.exec(rest[0]);
+  if (!close) return false;
+  const words = literalLine(`${sub[1]}MESSAGE${close[1]}`);
+  return Boolean(words?.length === 1 && messageCommand(words[0]));
+}
+
+// A word that ends in a production program's name but can't start it (L1075): a path, trailing slashes taken off, that is
+// an existing folder or a file no one may run. Read only where the word is the whole of a plain shell word, or the folder
+// part of a wildcard (`src/lib/supabase/*.ts`), not part of `${X}/p` or `~/p`. A relative path is read from the call's
+// folder, but never `./p`, `../p` or `<…>bin/p`, since an earlier `cd` in the line could make it a real program
+// (`cd /opt/homebrew && bin/<p>`), and a missing one counts. A missing absolute path names nothing that can run.
+function notAProgram(t, plainWords, cwd) {
+  if (!plainWords.has(t)) return false;
+  const p = t.replace(/\/+$/, '');
+  if (!p) return false;
+  const abs = isAbsolute(p);
+  if (!abs) {
+    if (!(typeof cwd === 'string' && isAbsolute(cwd)) || /^\.\.?\//.test(p) || p.split('/').includes('..') || /bin$/i.test(basename(dirname(p)))) return false;
+  }
+  let st = null;
+  try { st = statSync(abs ? p : resolve(cwd, p)); } catch { return abs; }
+  return st.isDirectory() || (st.isFile() && (st.mode & 0o111) === 0);
+}
+
+/**
+ * The first production program a word of `raw` names: words split at anything that is not part of a name, read as written
+ * and with quotes and backslashes taken out (`v'e'rcel`, `v\\ercel`), the program part of a path (`./node_modules/.bin/<p>`)
+ * and of a versioned package (`<p>@latest`), folded as every name here is; a path that can't be the program is left out.
+ */
+export function programInLine(raw, programs, cwd) {
+  const s = String(raw);
+  const chunks = s.split(/[ \t\n;&|()<>'"=,:`]+/);
+  const plainWords = new Set([...chunks.filter((w) => /^[A-Za-z0-9._+@/-]+$/.test(w)),
+    ...chunks.map((w) => /^([A-Za-z0-9._+@/-]*\/)[*?[{]/.exec(w)?.[1]).filter(Boolean)]);
+  for (const t of new Set(wordsIn(s))) {
+    const name = fold(basename(t).replace(/^@/, '').split('@')[0]);
+    if (!name || !programs.includes(name)) continue;
+    if (t.includes('/') && notAProgram(t, plainWords, cwd)) continue;
+    return name;
   }
   return null;
 }
 
-// Where git's subcommand sits in a command (past its own options and their values), or -1.
-function gitSub(c) {
-  return c.findIndex((w, k) => k > 0 && !w.startsWith('-') && !['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env'].includes(c[k - 1]));
-}
-
-// Words that are only text: they never count as naming a program (m2). A word holding a substitution (`$(…)`, a
-// backtick) is a command after all, except a `$(cat <<'X' … X)` body, the usual way to pass a long message.
-const CAT_BODY = /\$\(\s*cat\s+<<-?\s*'([A-Za-z_][\w.-]*)'\s*;([\s\S]*?);\s*\1\s*(;\s*)?\)/g;
-function onlyText(word) {
-  const left = word.replace(CAT_BODY, (whole, delim, body) => (body.split(';').some((l) => l.trim() === delim) ? whole : ' '));
-  return !/\$\(|`/.test(left);
-}
-const SEARCHERS = ['grep', 'egrep', 'fgrep', 'rg', 'ag'];
-// Search options that take a value: the word after them is not the pattern (`--pre` names a program).
-const SEARCH_VALUE_OPTS = new Set(['-f', '--file', '-A', '-B', '-C', '-m', '--max-count', '-d', '-D', '--include', '--exclude', '--exclude-dir',
-  '-t', '--type', '-T', '--type-not', '-g', '--glob', '--iglob', '-M', '--max-columns', '-j', '--threads', '--context', '--after-context',
-  '--before-context', '--pre', '--pre-glob', '-E', '--encoding', '--color', '--colors', '-G', '--file-search-regex', '--ignore', '--path-to-ignore']);
-// Indexes (into `c`) of a search command's pattern: each `-e <p>` / `--regexp <p>`, or else the first plain word.
-function patternAt(c, from) {
-  const out = [];
-  let plain = -1;
-  for (let k = from + 1; k < c.length; k += 1) {
-    const w = c[k];
-    if (w === '-e' || w === '--regexp') { out.push(k + 1); k += 1; continue; }
-    if (w === '--') { if (plain < 0 && !out.length) plain = k + 1; break; }
-    if (w.startsWith('-')) { if (SEARCH_VALUE_OPTS.has(w)) k += 1; continue; }
-    if (plain < 0) plain = k;
-    break;
-  }
-  return out.length ? out : (plain >= 0 && plain < c.length ? [plain] : []);
-}
-// Indexes (into `c`) of the words that are only text in one command, read as the shell lists it (`shellCommands` raw).
-function textAt(c, { lookups = true } = {}) {
-  let i = 0;
-  // `command -v x` (and -V) looks a name up; it runs nothing.
-  for (;;) {
-    if (i < c.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(c[i])) { i += 1; continue; }
-    if (i < c.length && ['if', 'then', 'else', 'elif', 'do', 'while', 'until', '!', '{', '}'].includes(c[i])) { i += 1; continue; }
-    if (c[i] === 'command' && /^-[pvV]*[vV][pvV]*$/.test(c[i + 1] ?? '')) return lookups ? c.map((_, k) => k).filter((k) => k > i + 1) : [];
-    if (i < c.length && ['env', 'command', 'exec', 'nohup', 'time', 'sudo', 'xargs', 'nice', 'builtin'].includes(programOf([c[i]]))) { i += 1; while (i < c.length && c[i].startsWith('-')) i += 1; continue; }
-    break;
-  }
-  const prog = programOf(c.slice(i));
-  const out = [];
-  const valuesOf = (from, shorts, longs) => {
-    for (let k = from; k < c.length; k += 1) {
-      const w = c[k];
-      if (shorts.some((s) => new RegExp(`^-[A-Za-z]*${s}$`).test(w)) || longs.includes(w)) { out.push(k + 1); k += 1; continue; }
-      if (shorts.some((s) => w.startsWith(`-${s}`) && w.length > 2) || longs.some((l) => w.startsWith(`${l}=`))) out.push(k);
-    }
-  };
-  if (prog === 'git') {
-    const sub = gitSub(c.slice(i));
-    const at = sub < 0 ? -1 : i + sub;
-    if (['commit', 'tag'].includes(c[at])) valuesOf(at + 1, ['m', 'F'], ['--message', '--file']);
-    if (c[at] === 'grep') out.push(...patternAt(c, at));
-  }
-  if (prog === 'gh' && ['pr', 'issue'].includes(c[i + 1]) && ['create', 'comment', 'edit'].includes(c[i + 2])) valuesOf(i + 3, ['t', 'b', 'F'], ['--title', '--body', '--body-file']);
-  if (SEARCHERS.includes(prog)) out.push(...patternAt(c, i));
-  if (lookups && ['which', 'type', 'whence', 'where'].includes(prog)) out.push(...c.map((_, k) => k).filter((k) => k > i && !c[k].startsWith('-')));
-  // find -exec grep <p> {} +: the pattern of the search it runs.
-  if (prog === 'find') {
-    for (let k = i + 1; k < c.length; k += 1) {
-      if (!/^-(exec|execdir|ok|okdir)$/.test(c[k]) || !SEARCHERS.includes(programOf([c[k + 1] ?? '']))) continue;
-      out.push(...patternAt(c, k + 1));
-    }
-  }
-  return out.filter((k) => k < c.length && onlyText(c[k]));
-}
-// A `for … in` list's words (`for f in src/lib/supabase/*.ts`): read by their last part only, since the loop may run
-// one (`for f in a/vercel; do $f deploy`), but a folder on the way names nothing.
-const forListAt = (c) => (['for', 'select'].includes(c[0]) && c[2] === 'in' ? c.map((_, k) => k).filter((k) => k > 2) : []);
-// A name lookup's answer used as a command (`$(which <p>) deploy`, `which <p> | xargs …`) is a call after all: lookups
-// are text only in a line with no substitution and no pipe.
-const lookupsInert = (raw) => !/\$\(|`|(^|[^|])\|(?!\|)/.test(String(raw));
-// A command that reads its message from its input (`git commit -F -`, `gh pr create --body-file -`): the here-document
-// fed to it is text.
-function readsTextIn(c) {
-  const k = textAt(c);
-  return k.some((x) => c[x] === '-' || /^(-[mFtb]|--(message|file|body|title|body-file)=)-$/.test(c[x]));
-}
-
-/**
- * The words of `raw` that could start a program, for the name check of the machine-wide form: every word as the shell
- * splits it (quotes and backslashes taken out, a string handed to a shell kept whole) and every here-document body, but
- * not the words that are only text (m2: a commit or tag message, a gh title or body, a search pattern, a `command -v` /
- * `which` / `type` name, a `for … in` list), nor a quoted here-document fed to a command that reads its message from it.
- * The same word anywhere else still counts.
- */
-export function callWords(raw) {
-  const h = heredocs(raw);
-  const out = [];
-  for (const c of shellCommands(raw, { raw: true })) {
-    const skip = new Set(textAt(c, { lookups: lookupsInert(raw) }));
-    const last = new Set(forListAt(c));
-    c.forEach((w, k) => { if (last.has(k)) out.push(w.endsWith('/') ? '' : basename(w)); else if (!skip.has(k)) out.push(w); });
-  }
-  // A redirection's word (`bash <<< "<p> deploy"`, `< file`) is not in a command's list: read it too.
-  const all = shellWords(joinLines(h.text).replace(/\n/g, ' ; '));
-  all.forEach((w, k) => { if (['<', '>'].includes(all[k - 1]) && !['<', '>', '&'].includes(w)) out.push(w); });
-  // Each here-document's owner: the command its `<<` sits in.
-  const text = h.text;
-  const owners = [];
-  let q = null;
-  for (let i = 0; i < text.length; i += 1) {
-    const ch = text[i];
-    if (q) { if (ch === q) q = null; else if (ch === '\\' && q === '"') i += 1; continue; }
-    if (ch === "'" || ch === '"') { q = ch; continue; }
-    if (ch === '\\') { i += 1; continue; }
-    if (ch === '<' && text[i + 1] === '<') {
-      if (text[i + 2] === '<') { i += 2; continue; }
-      owners.push(shellCommands(text.slice(0, i).replace(/<</g, '< '), { raw: true }).at(-1) ?? []);
-      i += 1;
-    }
-  }
-  h.bodies.forEach((b, n) => {
-    const owner = owners[n] ?? [];
-    if (!(b.quoted || !/[$`]/.test(b.text)) || !readsTextIn(owner)) out.push(b.text);
-  });
-  return out;
-}
+// The block's way forward: what may name a production program on this Mac.
+const ALLOWED_SHAPES = 'a line naming one runs only as one git commit / git tag / gh pr|issue message from a quoted here-document, '
+  + 'one grep / rg / ag (piped into head, tail, wc, sort or uniq at most), or one command -v / which / type, with nothing else on the line. '
+  + 'Run the production program yourself in a Terminal window, or write inline code to a file and run that; '
+  + `to switch the machine-wide guard off: sudo rm "${MANAGED_FILE}" from the Terminal app`;
 
 // Where the first command of `raw` ends: the first `;`, `&`, `|`, line break, bracket, backtick or `$(` outside quotes.
 export function firstCommandEnd(raw) {
@@ -623,18 +604,11 @@ export function decide(input, args) {
     // Shapes no hook can read are refused as a class (lib.mjs `unreadable`; R-0b-44 round 2 MAT-1, R-0b-70).
     const why = unreadable(raw);
     if (why && !wide) return block(`${why}; write the command out plainly`);
-    // The machine-wide form lets those shapes run (L1044 M1), but not with a production program named anywhere in them
-    // (#487 r2 M1, L1057 option a): a wrapper (`timeout 300 <p>`, `sudo -u x <p>`), find -exec, a string or here-doc
-    // handed to a shell, or code handed to an interpreter (`python3 -c`, `node -e`, `osascript -e`) would otherwise start
-    // it unseen. Every word of the raw command counts, inside quotes and here-doc bodies too. A plain command keeps the
-    // narrow read below, so `grep vercel` or `npm i vercel` still pass.
-    // A runner (#487 r4 M1, L1066: a package runner, an interpreter reading `-`, tmux, ssh, at, a watcher, …) is read the
-    // same way. Words that are only text (m2: a commit message, a search pattern, a `which` name, a `for … in` list) are
-    // left out, unless the same word is used as a call elsewhere in the line.
-    const runner = wide && !why ? runnerIn(raw) : null;
-    if (why || runner) {
-      const named = programNamedIn(wide ? callWords(raw).join(' ') : raw, programs);
-      if (named) return block(`${why ?? runner}, and it names the production program "${named}"; run it plainly, where the guard can read it`);
+    // The machine-wide form refuses by default (#487 r5, L1075): any word of the raw line naming a production program
+    // refuses it, unless the whole line is one of the three allowed shapes or the word is a path that can't be one.
+    if (wide && !allowedShape(raw)) {
+      const named = programInLine(raw, programs, input.cwd);
+      if (named) return block(`"${named}" reaches production: the line names the production program "${named}"; on this Mac ${ALLOWED_SHAPES}`);
     }
     // Each protected file as listed and where it really is (a folder link, or /tmp on a Mac), folded.
     const listed = [...prod.env_files, ...(Array.isArray(snap.rules.secrets?.paths) ? snap.rules.secrets.paths : [])].filter((f) => typeof f === 'string' && isAbsolute(f));
@@ -648,8 +622,8 @@ export function decide(input, args) {
       && !within.some((c) => FOLDER_CHANGERS.includes(fold(programOf(c) ?? '')) || PATTERN_TAKERS.includes(fold(programOf(c) ?? '')))) { wildFolder = input.cwd; wildRaw = raw; wildEnd = firstCommandEnd(raw); }
     const folderWhy = wide ? null : folderWriteWhy(raw, { cwd: input.cwd, protectedFiles, home: process.env.HOME || homedir(), projectDir: process.env.CLAUDE_PROJECT_DIR });
     if (folderWhy) return block(folderWhy);
-    // `command -v <p>` looks a name up and runs nothing (#487 r4 m2): read as `which <p>` here.
-    for (const c of commandsWithin(wide && lookupsInert(raw) ? raw.replace(/(^|[\s;&|(])command([ \t]+-[pvV]*[vV][pvV]*)(?=[ \t])/g, '$1which$2') : raw)) {
+    // The role form's read of each command (the machine-wide form read every word above).
+    for (const c of wide ? [] : commandsWithin(raw)) {
       const prog = programOf(c);
       if (programs.includes(fold(prog))) return block(`"${prog}" reaches production`);
       // Package runners that would start the program: npx <p>, bunx <p>, pnpm dlx <p>, npm exec <p>.
