@@ -127,7 +127,7 @@ export function keepsNot(io, cfg) {
   return updaterConfigFor(io, cfg).keep.filter((n) => !keep.includes(n));
 }
 /** How a copy whose keep list lacks a name is put right: the one statement, said by install and dispatcher-config (L1029). */
-export const reinstallSteps = (cfg) => `install again, before the pinned Claude Code and add-to-install (a new install throws both away): unload the jobs (sudo node setup.mjs daemons unload), remove ${installPaths(cfg).install}, put the --for-install review.json at runnerConfig, run install, then put the full review.json back and run add-to-install (README, part 6)`;
+export const reinstallSteps = (cfg) => `install again, before the pinned Claude Code and add-to-install (a new install throws both away): unload the jobs (sudo node setup.mjs daemons unload), remove ${installPaths(cfg).install}, put the --for-install review.json at runnerConfig, run install, then put the full review.json back and run add-to-install (README, part 6); the machine-wide guard keeps running from its own folder throughout, and after add-to-install run managed-settings again if its code changed (README, part 2: a reinstall and the machine-wide guard)`;
 /** The warning for a copy that does not keep `names`. */
 export const keepsNotWarning = (cfg, names) => `the installed copy's updater does not keep ${names.join(', ')} (its keep list is fixed at the first install), so the copy never gets ${names.length > 1 ? 'them' : 'it'} and an update would drop ${names.length > 1 ? 'them' : 'it'}: ${reinstallSteps(cfg)}`;
 

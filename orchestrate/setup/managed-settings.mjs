@@ -225,6 +225,13 @@ export function checkManagedSettings(io, cfg, { readers = managedReaders(io), re
     return !!st && (kind === 'dir' ? st.isDirectory() : st.isFile()) && st.uid === io.rootUid && (st.mode & 0o777) === mode; };
   rows.push({ what: `the guard's folder ${dir} is root's 0755`, ok: plain(dir, 'dir', 0o755), why: 'run managed-settings again' });
   for (const n of GUARD_FILES) rows.push({ what: `${join(dir, n)} is root's 0644`, ok: plain(join(dir, n), 'file', 0o644), why: 'run managed-settings again' });
+  // #487 r2 m3: each guard file against the one installed (add-to-install brings new guard code; the live guard stays old
+  // until this command runs again).
+  const hooksDir = join(io.at(installPaths(cfg).installRoot), COPY_HOOKS);
+  for (const n of GUARD_FILES) {
+    let same = false; try { same = io.readText(join(dir, n)) === readFileSync(join(hooksDir, n), 'utf8'); } catch { /* missing: not the same */ }
+    rows.push({ what: `${join(dir, n)} is the installed ${join(hooksDir, n)}`, ok: same, why: 'the installed guard is newer or differs: run managed-settings again' });
+  }
   const r = readSnapshot(io.at(copy), { maxAgeMs: Infinity, ownerUid: io.rootUid });
   rows.push({ what: `the rules copy ${copy} reads back as the guard reads it`, ok: r.ok, why: r.ok ? '' : r.reason });
   // m4: the copy against the runner config's rules today: a rules change needs this command run again.

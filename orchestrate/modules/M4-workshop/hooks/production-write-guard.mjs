@@ -351,6 +351,27 @@ export function* commandsWithin(raw, depth = 0) {
   }
 }
 
+// The first production program any word of `raw` names: words split at anything that is not part of a name, read as
+// written and with quotes and backslashes taken out (`v'e'rcel`, `v\\ercel`), the program part of a path
+// (`./node_modules/.bin/<p>`) and of a versioned package (`<p>@latest`). Folded, as every name here is.
+const FOLDER_CHANGERS = ['cd', 'pushd', 'popd'];
+const PATTERN_TAKERS = ['find', 'fd', 'locate', 'mdfind', 'rsync', 'tar', 'bsdtar', 'zip', 'unzip', 'ditto', 'git', 'rg', 'ag', 'du', 'pax', 'cpio'];
+
+export function programNamedIn(raw, programs) {
+  for (const t of wordsIn(raw)) {
+    const name = fold(basename(t).replace(/^@/, '').split('@')[0]);
+    if (name && programs.includes(name)) return name;
+  }
+  return null;
+}
+
+// Every word-like run of `raw`'s text (letters, digits and `._+@/-`), as written and with quotes and backslashes taken out.
+// No wildcard characters: in code (`a[0]`, `x*y`) they are not file patterns.
+export function wordsIn(raw) {
+  const s = String(raw);
+  return [s, s.replace(/['"\\]/g, '')].flatMap((text) => text.split(/[^A-Za-z0-9._+@/-]+/)).filter(Boolean);
+}
+
 export function decide(input, args) {
   // The machine-wide form (L1031) reads root's copy, written once by setup.mjs managed-settings and never refreshed: no age
   // limit, but root's alone. `ownerUid` is a test's stand-in for root; parseArgs never sets it. A copy that can't be used
@@ -372,13 +393,30 @@ export function decide(input, args) {
   };
   // A word naming a production settings file by its short name or a wildcard (`p*.x`), which a
   // `cd` beforehand could point at the real file (audit R-0b-44 M-5).
+  // The machine-wide form (#487 r2 m1) judges a wildcard only in the folder it is read in, when that folder is certain:
+  // `wildFolder` is the call's own folder when the command is plainly readable and changes folder nowhere (no cd, pushd,
+  // popd), else null and the wildcard matches by name alone, as in the role form. So `ls -d .*` in a project passes for
+  // every session, and `ls -d .*` in the production file's own folder, or `cat /srv/app/p*` anywhere, is still blocked.
+  let wildFolder = null;
+  // A wildcard the shell itself expands: every place it is written in the command stands alone, unquoted and not after
+  // `=` (`'.p*'`, `.p\*` and `--include=.p*` are patterns a program matches in some other folder).
+  let wildRaw = '';
+  const expandedHere = (w) => {
+    const at = [...wildRaw.matchAll(new RegExp(w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'))];
+    return at.length > 0 && at.every((m) => /(^|[\s;&|(])$/.test(wildRaw.slice(0, m.index)) && /^($|[\s;&|)])/.test(wildRaw.slice(m.index + w.length)));
+  };
   const namesEnv = (w) => {
     const name = basename(w);
     // A name of stars alone (`dist/*`) names no file in particular (L46; round 3 MAT-14).
     if (!name || /^\*+$/.test(name)) return false;
     let re = null;
     try { re = /[*?[]/.test(name) ? globRe(fold(name), 'i') : null; } catch { return true; }
-    return envFiles.some((f) => (re ? re.test(basename(f)) : basename(f) === fold(name)));
+    if (!re) return envFiles.some((f) => basename(f) === fold(name));
+    const dir = dirname(w);
+    if (wildFolder === null || /[*?[~$]/.test(dir) || !expandedHere(w)) return envFiles.some((f) => re.test(basename(f)));
+    const at = resolve(wildFolder, dir);
+    const here = [at, realFolder(at)].filter(Boolean).map(fold);
+    return envFiles.some((f) => re.test(basename(f)) && [f, landingPath(f)].filter(Boolean).some((x) => here.includes(fold(dirname(x)))));
   };
   for (const p of toolPaths(input)) if (touchesEnv(p)) return block(`"${p}" is a production settings file`);
 
@@ -395,11 +433,27 @@ export function decide(input, args) {
     const raw = String(input.tool_input?.command ?? '');
     const cmd = joinLines(raw);
     // Shapes no hook can read are refused as a class (lib.mjs `unreadable`; R-0b-44 round 2 MAT-1, R-0b-70).
-    const why = wide ? null : unreadable(raw);
-    if (why) return block(`${why}; write the command out plainly`);
+    const why = unreadable(raw);
+    if (why && !wide) return block(`${why}; write the command out plainly`);
+    // The machine-wide form lets those shapes run (L1044 M1), but not with a production program named anywhere in them
+    // (#487 r2 M1, L1057 option a): a wrapper (`timeout 300 <p>`, `sudo -u x <p>`), find -exec, a string or here-doc
+    // handed to a shell, or code handed to an interpreter (`python3 -c`, `node -e`, `osascript -e`) would otherwise start
+    // it unseen. Every word of the raw command counts, inside quotes and here-doc bodies too. A plain command keeps the
+    // narrow read below, so `grep vercel` or `npm i vercel` still pass.
+    if (why) {
+      const named = programNamedIn(raw, programs);
+      if (named) return block(`${why}, and it names the production program "${named}"; run it plainly, where the guard can read it`);
+    }
     // Each protected file as listed and where it really is (a folder link, or /tmp on a Mac), folded.
     const listed = [...prod.env_files, ...(Array.isArray(snap.rules.secrets?.paths) ? snap.rules.secrets.paths : [])].filter((f) => typeof f === 'string' && isAbsolute(f));
     const protectedFiles = [...new Set(listed.flatMap((f) => [f, landingPath(f)]).filter(Boolean).map(fold))];
+    // The folder a wildcard is read in is certain (m1 above) only when nothing changes folder, a string handed to a shell
+    // included (its words are read below too).
+    const within = [...commandsWithin(raw)];
+    // Nor when a program that matches patterns in folders of its own runs (`find /srv -name .p*`: bash hands an unmatched
+    // wildcard on as written).
+    if (wide && !why && typeof input.cwd === 'string' && isAbsolute(input.cwd)
+      && !within.some((c) => FOLDER_CHANGERS.includes(fold(programOf(c) ?? '')) || PATTERN_TAKERS.includes(fold(programOf(c) ?? '')))) { wildFolder = input.cwd; wildRaw = raw; }
     const folderWhy = wide ? null : folderWriteWhy(raw, { cwd: input.cwd, protectedFiles, home: process.env.HOME || homedir(), projectDir: process.env.CLAUDE_PROJECT_DIR });
     if (folderWhy) return block(folderWhy);
     for (const c of commandsWithin(raw)) {
@@ -410,8 +464,11 @@ export function decide(input, args) {
         if (c.slice(1).some((w) => programs.includes(fold(basename(w.replace(/^--?[a-z-]+=/, '').split('@')[0]))))) return block('a package runner starts a production program');
       }
     }
-    // Each word as the shell would expand its braces, and the value after `=` too (`of=<file>`, `F=<file>`).
-    for (const word of bothWords(cmd)) {
+    // Each word as the shell would expand its braces, and the value after `=` too (`of=<file>`, `F=<file>`). The machine-wide
+    // form reads the words of a string handed to a shell (`bash -c "cd /srv && cat p*"`) too (#487 r3: the role form refuses
+    // those shapes), and in a shape no hook can read (`python3 -c "open('/srv/x')"`) every word-like run of its text.
+    const words = wide ? [...bothWords(cmd), ...within.flat(), ...(why ? wordsIn(raw) : [])] : bothWords(cmd);
+    for (const word of words) {
       for (const w of expandBraces(word)) {
         if (prod.hosts.some((h) => fold(w).includes(fold(h)))) return block('the command names a production host');
         const forms = [w, ...(w.includes('=') ? [w.slice(w.indexOf('=') + 1)] : [])];

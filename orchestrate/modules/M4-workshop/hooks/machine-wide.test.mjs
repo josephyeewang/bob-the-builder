@@ -134,9 +134,65 @@ test('L1044 A10, A11: in the machine-wide form, file tools on a production setti
     assert.match(decide({ tool_name, cwd: d, tool_input: { file_path: '/SRV/App/Prod-Settings.conf' } }, wide(f)).reason ?? '', /is a production settings file/, `${tool_name}, letter case`);
     assert.deepEqual(decide({ tool_name, cwd: d, tool_input: { file_path: join(d, 'notes.md') } }, wide(f)), { block: false }, tool_name);
   }
+  // #487 r2 m2: the other path keys toolPaths reads, NotebookEdit's notebook_path and Grep's path.
+  for (const [tool_name, key] of [['NotebookEdit', 'notebook_path'], ['Grep', 'path']]) {
+    assert.match(decide({ tool_name, cwd: d, tool_input: { [key]: '/srv/app/prod-settings.conf', pattern: 'x' } }, wide(f)).reason ?? '', /is a production settings file/, tool_name);
+    assert.match(decide({ tool_name, cwd: d, tool_input: { [key]: '/SRV/app/PROD-settings.conf', pattern: 'x' } }, wide(f)).reason ?? '', /is a production settings file/, `${tool_name}, letter case`);
+    assert.deepEqual(decide({ tool_name, cwd: d, tool_input: { [key]: join(d, 'notes.ipynb'), pattern: 'x' } }, wide(f)), { block: false }, tool_name);
+  }
   assert.match(decide({ tool_name: 'WebFetch', cwd: d, tool_input: { url: 'https://PROD.example.com/admin' } }, wide(f)).reason, /production host/);
   assert.deepEqual(decide({ tool_name: 'WebFetch', cwd: d, tool_input: { url: 'https://docs.example.com/' } }, wide(f)), { block: false });
   assert.match(decide({ tool_name: 'Bash', cwd: d, tool_input: { command: 'ssh deploy@prod.example.com' } }, wide(f)).reason, /production host/);
+});
+
+// #487 r2 M1 (L1057 option a): a shape the role guard refuses runs in the machine-wide form, but not with a production
+// program named anywhere in it; a plain command keeps the narrow read.
+const WRAPPED = ['timeout 300 vercel deploy --prod', 'gtimeout 300 vercel deploy', 'sudo -u deploy vercel deploy', 'nice -n 5 vercel deploy',
+  'echo deploy | xargs -n 1 vercel', 'caffeinate -i vercel deploy', 'arch -arm64 vercel deploy', 'script -q /dev/null vercel deploy',
+  'watch -n 60 vercel deploy', 'dotenv -- vercel deploy', 'env -S "vercel deploy"', 'su -c "vercel deploy" deploy', 'flock /tmp/l vercel deploy',
+  'stdbuf -oL vercel deploy', 'xcrun vercel deploy', 'setsid vercel deploy', 'doas vercel deploy', 'noglob vercel deploy',
+  'find . -name x -exec vercel deploy \\;', 'echo "vercel deploy --prod" | bash', 'bash <<< "vercel deploy"', 'bash <<EOF\nvercel deploy\nEOF',
+  'python3 -c "import os; os.system(\'vercel deploy\')"', 'node -e "require(\'child_process\').execSync(\'vercel deploy\')"',
+  'osascript -e \'do shell script "vercel deploy"\'', 'timeout 300 ./node_modules/.bin/vercel deploy', 'timeout 300 npx vercel@latest deploy',
+  'timeout 300 v\'e\'rcel deploy', 'timeout 300 VERCEL deploy'];
+test('#487 r2 M1: in the machine-wide form, a wrapper, a string handed to a shell or code handed to an interpreter that names a production program is blocked', () => {
+  const { d, f } = copyAt();
+  const bash = (command) => decide({ tool_name: 'Bash', cwd: d, tool_input: { command } }, wide(f));
+  for (const c of WRAPPED) {
+    const r = bash(c);
+    assert.equal(r.block, true, c); assert.match(r.reason, /names the production program "vercel"/, c);
+    assert.ok(!r.reason.includes('sudo rm'), `a block by rule is no lock-out: ${c}`);
+  }
+  // The same shapes naming a production settings file (#487 r3, the class of M1): a string handed to a shell is read word
+  // by word, and code handed to an interpreter word-like run by run.
+  for (const c of ['bash -c "cat /srv/app/prod-settings.conf"', 'bash -c "cd /srv/app && cat prod-settings.conf"', 'sh -c "cat p*.conf"',
+    'eval "cd /srv/app; cat prod-settings.conf"', 'timeout 5 cat /srv/app/prod-settings.conf', 'python3 -c "open(\'/srv/app/prod-settings.conf\').read()"',
+    'node -e "require(\'fs\').readFileSync(\'prod-settings.conf\')"', 'echo "cat /srv/app/prod-settings.conf" | bash']) {
+    assert.match(bash(c).reason ?? '', /production settings file/, c);
+  }
+  // Plain commands keep the narrow read, and wrapped shapes with no production program still pass.
+  for (const c of ['grep vercel x', 'npm i vercel', 'which vercel', 'cat vercel.json', 'git commit -m "fix vercel config"', 'ls vercel-notes',
+    'timeout 300 npm test', 'find . -name x -exec rm {} \\;', 'ls | xargs wc -l', 'python3 -c "print(1)"', 'python3 -c "print(a[0]*2)"', 'echo hi | bash', 'sudo -u me ls']) {
+    assert.deepEqual(bash(c), { block: false }, c);
+  }
+});
+
+test('#487 r2 m1: in the machine-wide form, a wildcard is judged in the folder it is read in, when that folder is certain', () => {
+  const p = realpathSync(tempDir('orch-mw-prod-'));
+  const { d, f } = copyAt(makeSnapshot({ production: { env_files: [join(p, '.prodsettings')], programs: ['vercel'], hosts: ['prod.example.com'] }, secrets: { paths: [] } }));
+  const bash = (command, cwd = d) => decide({ tool_name: 'Bash', cwd, tool_input: { command } }, wide(f));
+  for (const c of ['ls -d .*', 'cp *.* x', 'grep X .p*', 'ls .p*', `ls ${d}/.p*`]) assert.deepEqual(bash(c), { block: false }, `a project folder: ${c}`);
+  const link = join(d, 'via'); symlinkSync(p, link);
+  for (const [c, cwd] of [['ls -d .*', p], [`cat ${p}/.p*`, d], ['cat ../' + p.split('/').pop() + '/.p*', p], [`cd ${p} && ls -d .*`, d], [`pushd ${p}; cat .p*`, d],
+    [`bash -c "cd ${p} && cat .p*"`, d], [`bash -c 'cat .p*'`, p], ['eval cat .p*', p], ['timeout 5 cat .p*', d], ['cat via/.p*', d], ['cat ~/.p*', d], ['cat */.p*', d],
+    // A pattern a program matches in another folder: quoted, escaped, after `=`, or handed to find and the like.
+    [`find ${p} -name '.p*'`, d], [`find ${p} -name .p*`, d], ['ls \'.p*\'', d], ['ls .p\\*', d], ['grep -r --include=.p* X /srv', d], [`rsync -a ${p}/ x --include .p*`, d],
+    [`(cd ${p} && cat .p*)`, d], [`ls .p*; find ${p} -name '.p*'`, d]]) {
+    assert.equal(bash(c, cwd).block, true, `${c} (in ${cwd})`); assert.match(bash(c, cwd).reason, /production settings file/, c);
+  }
+  assert.equal(decide({ tool_name: 'Bash', tool_input: { command: 'cat .p*' } }, wide(f)).block, true, 'no working folder: judged by name, as before');
+  // The role form is unchanged: a wildcard matches by name in any folder.
+  assert.equal(decide({ tool_name: 'Bash', cwd: d, tool_input: { command: 'ls .p*' } }, { snapshot: f, maxAgeMs: Infinity }).block, true);
 });
 
 test('L1044 A1, A2: the root chain is judged all the way up: a folder written by others two levels above the copy is refused', () => {

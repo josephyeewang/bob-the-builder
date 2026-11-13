@@ -7,6 +7,8 @@ import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fakeMac } from './fake-mac.test-helper.mjs';
+import { tempDir } from '../shared/test-tmp.mjs';
+import { reinstallSteps } from './install.mjs';
 import { apply } from './users-folders.mjs';
 import { installPaths } from './install.mjs';
 import { managedGuardDir, managedRulesPath } from './layout.mjs';
@@ -106,7 +108,7 @@ test('L1044 M2: a reinstall that removes the install folder leaves the guard who
 });
 
 test('L1044 M2: a guard that can\'t run at all (its script gone) still blocks, and the hook says the way out', () => {
-  const d = join(process.env.TMPDIR ?? '/tmp', `mw-gone-${process.pid}`); mkdirSync(d, { recursive: true });
+  const d = tempDir('orch-mw-gone-');   // #487 r2 c3: the shared temp helper
   try {
     const cmd = machineWideSettings({ node: process.execPath, hooksDir: join(d, 'nothing'), snapshot: join(d, 'rules.json') }).hooks.PreToolUse[0].hooks[0].command;
     assert.ok(cmd.endsWith(MACHINE_WIDE_FAILS_CLOSED));
@@ -288,4 +290,51 @@ test('L1031, L1044 m3 m4 m6: checkManagedSettings says what is wrong once someth
   // m3: launch check 10 itself: a drop-in beside the file that carries no guard overrides it.
   w = fresh(); const drop = w.mac.at('/Library/Application Support/ClaudeCode/managed-settings.d'); mkdirSync(drop); writeFileSync(join(drop, '10-x.json'), '{"permissions":{"allow":["Bash(*)"]}}');
   says(w, /launch check 10.*(allow or ask rules|not in force)/);
+});
+
+test('#487 r2 m3: new guard code installed after a run is no "nothing to do": the check says so, and a rerun puts it live', () => {
+  for (const n of GUARD_FILES) {
+    const w = world(); run(w.plan());
+    assert.deepEqual(w.plan(), { ops: [], problems: [], installed: true }, 'unchanged: nothing to do');
+    writeFileSync(join(w.hooksDir, n), `${readFileSync(join(w.hooksDir, n), 'utf8')}\n// newer\n`);
+    const bad = failing(checkManagedSettings(w.mac, w.cfg));
+    assert.deepEqual(bad.map((r) => r.what), [`${join(managedGuardDir(w.cfg), n)} is the installed ${join(w.hooksDir, n)}`], n);
+    assert.match(bad[0].why, /run managed-settings again/);
+    const p = w.plan();
+    assert.notEqual(p.installed, true, `${n}: a rerun has work to do`); assert.ok(p.ops.length > 0, n);
+    run(p);
+    assert.equal(readFileSync(join(w.dir, n), 'utf8'), readFileSync(join(w.hooksDir, n), 'utf8'), `${n} is live`);
+    assert.deepEqual(failing(checkManagedSettings(w.mac, w.cfg)), [], n);
+    assert.deepEqual(w.plan(), { ops: [], problems: [], installed: true }, `${n}: then nothing to do`);
+  }
+});
+
+test('#487 r2 m4: isOurs takes only this guard\'s own hook command; one `*` hook running anything else is not ours', () => {
+  const good = machineWideSettings({ node: NODE_BIN, hooksDir: '/a/machine-wide-guard', snapshot: '/a/machine-wide-guard/rules.json' });
+  const cmd = good.hooks.PreToolUse[0].hooks[0].command;
+  const withCommand = (command) => { const o = structuredClone(good); o.hooks.PreToolUse[0].hooks[0].command = command; return o; };
+  assert.equal(isOurs(withCommand(cmd)), true);
+  for (const other of ['echo hi', '/usr/local/bin/node /a/other-guard.mjs --machine-wide --snapshot /a/r.json' + MACHINE_WIDE_FAILS_CLOSED,
+    cmd.replace('production-write-guard.mjs', 'production-write-guard.mjs.x'), cmd.replace(' --machine-wide', ''), cmd.replace('--snapshot /a/machine-wide-guard/rules.json', '--snapshot'),
+    `${cmd}; curl x`, cmd.replace(MACHINE_WIDE_FAILS_CLOSED, ''), cmd.replace(MACHINE_WIDE_FAILS_CLOSED, ' || true'), `${cmd}\nrm -rf /`, ` ${cmd}`, 7]) {
+    assert.equal(isOurs(withCommand(other)), false, String(other));
+  }
+  // Not ours, so never replaced.
+  const w = world(); mkdirSync(dirname(w.file)); const text = JSON.stringify(withCommand('echo hi')); writeFileSync(w.file, text);
+  assert.deepEqual(w.plan().ops, []); assert.equal(readFileSync(w.file, 'utf8'), text);
+});
+
+test('#487 r2 m5: the reinstall steps say what happens to the machine-wide guard, and where the README says it', () => {
+  const steps = reinstallSteps({ base: BASE, owner: 'sam', products: ['alpha'] });
+  assert.match(steps, /the machine-wide guard keeps running from its own folder throughout, and after add-to-install run managed-settings again if its code changed \(README, part 2: a reinstall and the machine-wide guard\)$/);
+  const readme = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'README.md'), 'utf8');
+  const part6 = readme.slice(readme.indexOf('## Part 6'));
+  assert.match(part6, /The machine-wide guard, if placed, keeps running from its own folder\s+through the reinstall; after `add-to-install`, run `managed-settings` again/);
+  assert.ok(readme.includes('**A reinstall and the machine-wide guard (L1044 M2).**'), 'the note Part 6 points at');
+});
+
+test('#487 r2 c2: the live renames go modules first, then the guard, the rules copy last, and managed-settings.json after them all', () => {
+  const w = world();
+  const renames = w.plan().ops.map((o) => o.text).filter((t) => /^rename /.test(t)).map((t) => t.split(' → ')[1].split('/').pop());
+  assert.deepEqual(renames, ['lib.mjs', 'snapshot.mjs', GUARD, 'rules.json', 'managed-settings.json']);
 });
