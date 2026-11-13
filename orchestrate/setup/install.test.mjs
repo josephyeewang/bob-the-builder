@@ -1450,6 +1450,8 @@ test('Dispatcher config: every key the Dispatcher takes, from the layout and the
   assert.deepEqual(config, {
     installRoot: R, wiring: `${R}/wiring/dispatcher-wiring.mjs`, lockFile: at(`${BASE}/home/orchestrate/dispatcher.lock`),
     product: 'alpha', recordRoot: at(`${BASE}/products/alpha/store`), ownerUid: uid('orchestrate'),
+    // Check 12's rules snapshot (L1001): the product's rules folder (layout.mjs dispatcherRulesPath).
+    rulesSnapshotFile: at(`${BASE}/products/alpha/rules/dispatcher-rules.json`),
     productsFile: at(GOOD_DISPATCHER.productsFile), rulesStateDir: at(GOOD_DISPATCHER.rulesStateDir), tokenFile: at(GOOD_DISPATCHER.tokenFile), approvalsStateDir: at(GOOD_DISPATCHER.approvalsStateDir),
     reviewRequestsDir: at(`${BASE}/review/requests`), reviewStatusFile: at(`${BASE}/review/status.json`), reviewUid: uid('review'),
     reviewRunnerLog: at(`${BASE}/logs/review-runner.err.log`), reviewInstallRoot: R,
@@ -1594,6 +1596,28 @@ test('Dispatcher config: changed later, dispatcher-config rewrites both files; a
   old.raw.hostLockPath = DLOCK; old.raw.dispatcher = { ...GOOD_DISPATCHER }; old.cfg = parseInstallConfig(old.raw);
   const r2 = old.run(['dispatcher-config']); assert.equal(r2.code, 1, r2.text); assert.match(r2.text, /does not keep dispatcher\.json .*install again/);
   assert.equal(existsSync(copyConfig(old)), false, 'nothing is put in a copy that would drop it');
+  // L1029 (bug B): the plan says so too, the dry run included, with the way to put it right; before, only the check after the run did.
+  const reinstall = /WARNING {2}the installed copy's updater does not keep dispatcher\.json .*install again, before the pinned Claude Code and add-to-install .*daemons unload.*remove .*\/install, put the --for-install review\.json at runnerConfig, run install, then put the full review\.json back and run add-to-install/;
+  assert.match(r2.text, reinstall);
+  const d2 = old.run(['dispatcher-config', '--dry-run']); assert.equal(d2.code, 0, d2.text); assert.match(d2.text, reinstall);
+  // A copy that keeps it: no warning.
+  const d3 = w.run(['dispatcher-config', '--dry-run']); assert.equal(d3.code, 0, d3.text); assert.doesNotMatch(d3.text, /WARNING/);
+});
+
+test('L1029: install on a copy made before the robot (or the Dispatcher) was set up does nothing, and says the copy must be installed again', async () => {
+  const w = await installed();
+  const same = w.run(['install', '--dry-run']); assert.equal(same.code, 0, same.text);
+  assert.match(same.text, /nothing to do: already installed\./); assert.doesNotMatch(same.text, /WARNING/, 'a copy that keeps everything: no warning');
+  // The robot turned on later: its robot.json is a new extra the copy's keep list lacks.
+  writeFileSync(join(w.ext, 'robot.json'), '{}');
+  w.raw.robot = true; w.raw.extras = [...w.raw.extras, join(w.ext, 'robot.json')]; w.cfg = parseInstallConfig(w.raw);
+  const robot = w.run(['install', '--dry-run']); assert.equal(robot.code, 0, robot.text);
+  assert.match(robot.text, /nothing to do: already installed\./);
+  assert.match(robot.text, /WARNING {2}the installed copy's updater does not keep robot\.json \(its keep list is fixed at the first install\), so the copy never gets it .*install again, before the pinned Claude Code/);
+  // The Dispatcher too: both named, in one line; and the real run (as root) says the same.
+  w.raw.hostLockPath = DLOCK; w.raw.dispatcher = { ...GOOD_DISPATCHER }; w.cfg = parseInstallConfig(w.raw);
+  const both = w.run(['install']); assert.equal(both.code, 0, both.text);
+  assert.match(both.text, /WARNING {2}the installed copy's updater does not keep dispatcher\.json, robot\.json \(.*so the copy never gets them and an update would drop them/);
 });
 
 // Each clause, planted one at a time after a good install and place: load refuses and names it, nothing loads, check FAILs.

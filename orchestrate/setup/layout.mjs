@@ -150,6 +150,12 @@ export const storePath = (cfg, prod) => join(cfg.base, 'products', prod, 'store'
 // hash, rules), in the runner's own folder. Its own name (L731 M2): M10's signed snapshot (snapshot.mjs SNAPSHOT_FILE) is
 // another format, not placed yet, and must never share a file name with this one.
 export const REVIEW_SNAPSHOT_FILE = 'review-rules-snapshot.json';
+// The rules in force the Dispatcher writes after each pass's rules read (M11 budget.mjs writeRulesSnapshot, L995, L1001):
+// check 12's rules for both runners. Its own folder per product, orchestrate's and closed to everyone but the review user
+// and the owner (L1002): the rules text names the account and the owner's GitHub id. Another name again from the two above.
+export const DISPATCHER_RULES_FILE = 'dispatcher-rules.json';
+export const dispatcherRulesDir = (cfg, prod) => join(cfg.base, 'products', prod, 'rules');
+export const dispatcherRulesPath = (cfg, prod) => join(dispatcherRulesDir(cfg, prod), DISPATCHER_RULES_FILE);
 // The two items add-to-install puts into the installed copy (L573): the pinned Claude Code (CLAUDE_CODE/<pin>/claude,
 // hooks-check.mjs pinnedBinary) and the hook scripts. One spelling each, for review-config and add-to-install alike.
 // M4's pinnedBinary spells claude-code once more, as a launcher may not depend on setup; review-config.test.mjs pins the two
@@ -212,6 +218,9 @@ export const COPIES_CLEANUP_ACL = Object.freeze({ who: 'user:orchestrate', perms
 // orchestrate's own, 0644 whatever its job's umask (owner-status.mjs writeNewReadable), which the runner checks before it
 // reads one (runner-files.mjs readRequest).
 export const WORKER_REQUESTS_ACL = Object.freeze({ who: 'user:orchestrate', perms: Object.freeze(['search', 'add_file']) });
+// The rules-in-force folder (L1002): one entry each for the review user and the owner, read only (list a folder is read of
+// its files), inherited by the file the Dispatcher writes there. No write, no delete: the file is orchestrate's alone.
+export const RULES_READ_ACL = (who) => Object.freeze({ who, perms: Object.freeze(['list', 'search', 'readattr', 'readextattr', 'readsecurity', 'file_inherit', 'directory_inherit']) });
 // The proposals folders are read only for orchestrate: no delete_child (that is for the outbox folders, which it clears).
 export const PROPOSALS_READ_ACL = Object.freeze({ who: 'user:orchestrate', perms: Object.freeze(['list', 'search', 'readattr', 'readextattr', 'readsecurity', 'file_inherit', 'directory_inherit']) });
 
@@ -276,6 +285,7 @@ export function folderTable(cfg) {
       [storePath(cfg, prod), 'orchestrate', 0o755, `${prod}: the record (the owner reads it)`],
       [p('products', prod, 'pages'), 'pages', 0o755, `${prod}: built pages (only pages writes them)`],
       [p('products', prod, 'handoffs'), 'orchestrate', 0o755, `${prod}: handoff copies`],
+      [dispatcherRulesDir(cfg, prod), 'orchestrate', 0o700, `${prod}: the rules in force, written by the Dispatcher each pass; read by the review user and the owner only (check 12)`, [RULES_READ_ACL('user:review'), RULES_READ_ACL(`user:${cfg.owner}`)]],
       [p('products', prod, 'pages-in'), 'orchestrate', 0o755, `${prod}: the page builder's input`],
     ]),
   ];

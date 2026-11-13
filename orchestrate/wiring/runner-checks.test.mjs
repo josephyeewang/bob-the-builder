@@ -99,14 +99,16 @@ test('step 6: a port for each check whose inputs are there, none for one whose i
     let seen; let given;
     const budget = { rules: {}, filesOf: () => [] };
     const gateOf = (b) => { given = b; return (ctx) => { seen = ctx; return { ok: true }; }; };
-    const p = workerChecks({ ...x, budget, kind: 'undo' }, { gateOf });
+    const p = workerChecks({ ...x, budget, kind: 'undo', undoCommit: 'f'.repeat(40) }, { gateOf });
     assert.deepEqual(await p[12](), { ok: true });
-    assert.equal(given, budget); assert.deepEqual(seen, { card: { id: x.card, ...x.cardDoc }, kind: 'undo', product: 'p1' }); assert.equal(seen.card.id, x.card, 'L863: the card carries its id');
+    // L976: an undo's gate is handed its reversed commit, to hold it to the source's.
+    assert.equal(given, budget); assert.deepEqual(seen, { card: { id: x.card, ...x.cardDoc }, kind: 'undo', product: 'p1', undoCommit: 'f'.repeat(40) }); assert.equal(seen.card.id, x.card, 'L863: the card carries its id');
     assert.match((await workerChecks({ ...x, budget, cardDoc: null }, { gateOf })[12]()).reason, /not in the Record/);
     // #369 r2 m4: the budget carries the pass's filesOf; an undo with none is refused here, saying so. Other kinds don't need it.
     seen = undefined;
     assert.match((await workerChecks({ ...x, budget: { rules: {} }, kind: 'undo' }, { gateOf })[12]()).reason, /carries no filesOf/); assert.equal(seen, undefined);
     assert.deepEqual(await workerChecks({ ...x, budget: { rules: {} }, kind: 'editing' }, { gateOf })[12](), { ok: true });
+    assert.equal('undoCommit' in seen, false, 'an editing gate is handed no reversed commit');
     assert.equal(typeof workerChecks({ ...x, bobFolder: '/b', bobManifest: { a: 'x' } })[13], 'function');
     assert.equal(workerChecks({ ...x, bobFolder: '/b', bobManifest: null })[13], undefined, 'no pinned list, no port');
     // Check 1 on the copy: this user's alone and holding the head.
@@ -340,4 +342,18 @@ test('#369 r1 m3: check 2 compares with the main the copy was restored from, not
     mkdirSync(deep, { recursive: true });
     assert.match(await setupFilesProblem({ ...f, mainAt: at }), /more than 64 folders deep/);
   } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('L1001: the config\'s budget and Bob file list reach the checks, which then have ports 12 and 13; with none, neither has', () => {
+  const c = checkRunnerConfig({ installRoot: '/i', requestsDir: '/r', statusFile: '/o/status.json', orchestrateUid: 501, outboxRoot: '/ob', copiesRoot: '/c', home: '/home',
+    path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/rec', recordUid: 502, claimMs: 1, pin: '2.1.300', machineWide: '/Library/Application Support/ClaudeCode/managed-settings.json',
+    budget: '/i/modules/M11-dispatcher/budget.mjs', bobManifest: '/i/bob-manifest.json', dispatcherRules: '/d/rules.json', reviewStatusFile: '/rv/status.json', reviewUid: 503,
+    products: { p1: { repo: 'o/p', mirror: '/m', rules: RULES, render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] }, hooksDir: '/h', snapshot: '/snap/s.json', bobFolder: '/b' } } } } });
+  const budget = { rules: {}, rec: {}, bandsNow: () => ({}), runningNow: () => [] }; const bobManifest = { 'a.md': 'f'.repeat(64) };
+  const i = workerCheckInputs(c, { product: 'p1', sessionId: SID }, { budget, bobManifest });
+  assert.equal(i.budget, budget); assert.equal(i.bobManifest, bobManifest);
+  const wx = { role: 'worker', profile: DESIGN_PROFILES.worker, kind: 'editing', product: 'p1', sessionId: SID, copy: '/c/C-1', settings: { file: '/f', settings: {} } };
+  const ports = (o) => Object.keys(startDeps(c, o).checksFor(wx)).map(Number);
+  assert.deepEqual(ports({ budget, bobManifest }), [1, 2, 3, 5, 6, 7, 8, 9, 10, 12, 13]);
+  assert.deepEqual(ports({}), [1, 2, 3, 5, 6, 7, 8, 9, 10], 'none loaded: no port, so launch refuses');
 });

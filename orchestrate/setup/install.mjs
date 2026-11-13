@@ -113,6 +113,25 @@ export function updaterConfigFor(io, cfg) {
 }
 
 /**
+ * The names this setup's updater config keeps (updaterConfigFor) that the installed copy's updater does not: [] when it keeps
+ * them all, null when there is no copy or its updater.json can't be read. The keep list is fixed when the copy is first
+ * installed, so a file set up later (dispatcher.json, robot.json, another extra) is never carried into the copy, and the
+ * next update would drop one put there by hand (L1029; the 12 Nov rehearsal's bug B).
+ */
+export function keepsNot(io, cfg) {
+  const P = installPaths(cfg);
+  const cur = currentCopy(io.at(P.installRoot), { owner: io.rootUid });
+  if (cur.missing || cur.problem || !cur.link) return null;
+  let keep; try { keep = JSON.parse(io.readText(join(P.installRoot, UPDATER_CONFIG)))?.keep; } catch { return null; }
+  if (!Array.isArray(keep)) return null;
+  return updaterConfigFor(io, cfg).keep.filter((n) => !keep.includes(n));
+}
+/** How a copy whose keep list lacks a name is put right: the one statement, said by install and dispatcher-config (L1029). */
+export const reinstallSteps = (cfg) => `install again, before the pinned Claude Code and add-to-install (a new install throws both away): unload the jobs (sudo node setup.mjs daemons unload), remove ${installPaths(cfg).install}, put the --for-install review.json at runnerConfig, run install, then put the full review.json back and run add-to-install (README, part 6)`;
+/** The warning for a copy that does not keep `names`. */
+export const keepsNotWarning = (cfg, names) => `the installed copy's updater does not keep ${names.join(', ')} (its keep list is fixed at the first install), so the copy never gets ${names.length > 1 ? 'them' : 'it'} and an update would drop ${names.length > 1 ? 'them' : 'it'}: ${reinstallSteps(cfg)}`;
+
+/**
  * The runner config, read and checked: it must name this copy, the copy's own code by its place from main, and every other path
  * inside one of the `carried` top-level items. Adds to `problems`; never quotes the file. → { rc, rcText }.
  */
@@ -202,7 +221,10 @@ export function planInstall(io, cfg, { readSource, runUpdater }) {
   if (!cur.missing) {
     const why = cur.problem ?? (cur.link ? null : 'is a plain folder, not the link the updater flips');
     if (why) problems.push(`${P.installRoot}: ${why}. Nothing was changed`);
-    return { ops, problems, installed: !why };
+    // A copy made before something this setup now carries (the Dispatcher's config, the robot's, another extra): install does
+    // nothing, so say what it would take (L1029).
+    const missing = why ? null : keepsNot(io, cfg);
+    return { ops, problems, installed: !why, warnings: missing?.length ? [keepsNotWarning(cfg, missing)] : [] };
   }
   const { rcText } = readRunnerConfig(io, cfg, { readSource, carried: cfg.extras.map((e) => posix.basename(e)), problems });
   // Everything root would copy in is checked NOW, before any root step (L149 m4, m6): a linked program or a node root may not run
