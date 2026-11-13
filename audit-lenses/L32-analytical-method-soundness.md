@@ -87,6 +87,12 @@ SR 11-7 defines a "model" as *any quantitative method, system, or analytical too
 
 8. **Rank by decision-stakes × unsoundness.** A shallow method behind a high-stakes decision (health diagnosis, credit eligibility) outranks a defensible-but-improvable method behind a low-stakes one. Top 3 by stakes × severity-of-flaw.
 
+### Confidence claims at the output boundary
+
+Inventory displayed probabilities, confidence labels and uncertainty ranges, including ordinary statistical methods without AI. Each claim needs affirmative validation for the served population, horizon, units and method version. Numeric bounds existing in storage are not calibration clearance. Test an approved case, a failed case and an unmeasured case through the actual reader; use truthful unvalidated labeling or withhold the unsupported claim according to the product contract. An incidental display condition is not an enforced validation gate.
+
+For independent validation, freeze selection rules, identity mappings, thresholds, method revision, data cutoff and prior exposure before viewing outcomes. A later change is a revised analysis, not untouched confirmation. Preserve the receipt with the existing evaluation evidence; do not invent precision where adequate validation data is unavailable.
+
 ## Check questions
 
 1. Have you inventoried every analytical site (AI **and** deterministic)?
