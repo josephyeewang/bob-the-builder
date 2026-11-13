@@ -347,6 +347,20 @@ test('#378 r1 M1: a runner restart carrying over a product A session whose setti
     const all = [...most, join(d, 'mirror2')];
     writeFileSync(join(c.settingsDir, `${SA}.json`), JSON.stringify({ sandbox: { filesystem: { denyRead: all } }, permissions: { deny: all.flatMap((x) => [`Read(/${x}/**)`, `Edit(/${x}/**)`]) } }));
     assert.equal(carriedOverProblem(c, { sessions: [A], requests: {} }, { groupGone: () => false }), null);
+    // #463 r2 m5: its save settings must deny the later product too; none written is no gap, one unreadable refuses.
+    const save = join(c.settingsDir, `${SA}.save.json`);
+    writeFileSync(save, JSON.stringify({ sandbox: { filesystem: { denyRead: most } }, permissions: { deny: most.flatMap((x) => [`Read(/${x}/**)`, `Edit(/${x}/**)`]) } }));
+    // A row with no save settings' hash is never saved: its file is not read.
+    assert.equal(carriedOverProblem(c, { sessions: [A], requests: {} }, { groupGone: () => false }), null);
+    const As = { ...A, save_settings_sha: 'a'.repeat(64) };
+    // Self-review M-1: a stopped session (its group gone) is still to be saved, so its save settings count too.
+    assert.match(carriedOverProblem(c, { sessions: [{ ...As, alive: false }], requests: {} }, { groupGone: () => true }), /save settings were written before product p2's folders/);
+    assert.match(carriedOverProblem(c, { sessions: [As], requests: {} }, { groupGone: () => false }), new RegExp(`session ${SA} \\(product p1\\)'s save settings were written before product p2's folders were on their deny list \\(its shell may read ${join(d, 'mirror2')}\\)`));
+    writeFileSync(save, JSON.stringify({ sandbox: { filesystem: { denyRead: all } }, permissions: { deny: all.flatMap((x) => [`Read(/${x}/**)`, `Edit(/${x}/**)`]) } }));
+    assert.equal(carriedOverProblem(c, { sessions: [As], requests: {} }, { groupGone: () => false }), null);
+    rmSync(save); symlinkSync(join(c.settingsDir, `${SA}.json`), save);
+    assert.match(carriedOverProblem(c, { sessions: [As], requests: {} }, { groupGone: () => false }), /save settings can't be read \(ELOOP\)/, 'never through a link');
+    rmSync(save);
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 

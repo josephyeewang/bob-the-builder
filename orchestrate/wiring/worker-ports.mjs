@@ -48,10 +48,10 @@
 //   stopGroup(session)   → stopGroup-<id>-<nonce>.json; ok once the session is listed stopped (ok: false: it may still run).
 //   saveWork(session)    → saveWork-<id>-<nonce>.json; review, audit and the other kinds with no copy are ok unasked.
 //   pauseLead({product}) → pauseLead-<product>-<nonce>.json; any failure is a throw.
-// On the runner's side three still refuse, each with its reason in the answer (cutover blockers, not this file's): a
-// launch ("not wired: no worker prompt is given to the runner", runner-ports.mjs promptFor), a save (M4 save-work with no
-// lock-down runner, runLocked) and a pause ("not wired: the Lead's wrap-up needs the activity tracker's feed"). Until
-// they are given, no worker starts, no stop is cleared as saved, and every pause throws and is told.
+// On the runner's side two still refuse, each with its reason in the answer (cutover blockers, not this file's): a
+// launch ("not wired: no worker prompt is given to the runner", runner-ports.mjs promptFor) and a pause ("not wired: the
+// Lead's wrap-up needs the activity tracker's feed"). Until they are given, no worker starts, and every pause throws and
+// is told. A save runs through the lock-down runner (runner-locked.mjs, L969) once the config names claude.
 // cleanup.saveWork stays unwired (NOT_WIRED_CLEANUP).
 // The mirror and the seal folder are checked when the wiring starts, so a wrong path stops the start.
 
