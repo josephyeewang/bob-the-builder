@@ -299,7 +299,8 @@ export function planAddToInstall(io, cfg, { pin, sha256, readSource }) {
   try { keep = readUpdaterConfig(io.at(join(copy, UPDATER_CONFIG))); } catch (e) { problems.push(`the copy's ${UPDATER_CONFIG} was refused: ${e.message}`); }
   try { scripts = io.list(hookSource); } catch { /* reported below */ }
   if (!scripts.length) problems.push(`the copy has no hook scripts at ${hookSource}`);
-  const { rc, rcText } = readRunnerConfig(io, cfg, { readSource, carried: [CLAUDE_CODE, HOOKS], problems });
+  // What the updater already carries counts too: the bob step's list (bobManifest, L1035 m1) is one of keep once it ran.
+  const { rc, rcText } = readRunnerConfig(io, cfg, { readSource, carried: [CLAUDE_CODE, HOOKS, ...(Array.isArray(keep?.keep) ? keep.keep : [])], problems });
   if (rc && typeof rc === 'object') {
     const want = { pin, claudeBin: pinnedBinary(inCopy, pin), hooksDir: join(inCopy, HOOKS) };
     for (const [k, v] of Object.entries(want)) if (rc[k] !== v) problems.push(`the runner config's ${k} must be ${v}`);
