@@ -23,7 +23,7 @@ import { USAGE_FACT } from './usage.mjs';
 import { KEYS as K } from './keys.mjs';
 import { rulesWith, recWith, seed, change, setClock, usageFact, undoEntries, filesOfCommits, T0, MIN, iso } from './fixtures.test-helper.mjs';
 import { writeLog, queueFor, assertDropFirst, lateMark } from './fixtures.test-helper.mjs';
-import { FACTS, FD_RESTART_FACT } from './phone-link.mjs';
+import { FACTS, FD_RESTART_FACT, LINK_FACT } from './phone-link.mjs';
 import { goFingerprint } from '../M2-approvals/go.mjs';
 
 // The wiring module is loaded by its computed path; one shared call keeps the M2 reach scan's count at 1 (consume-ask ALLOWED).
@@ -2075,4 +2075,53 @@ test('L1048 m2: while home is unknown, the account and band holds are not told (
       assert.equal(w.calls.alerts.filter((a) => /holds every start, undo cards too/.test(a)).length, 1, `${what}: ${w.calls.alerts.join(' | ')}`);
     }
   }
+});
+
+test('L1061 M1: while home is unknown, a cancelled card\'s session is still stopped and the approvals step still runs', async () => {
+  const stops = [];
+  const running = [{ id: 'S-X', product: 'p1', kind: 'editing', card: 'X-1', pgid: 99 }];
+  const w = world([account(), usage(), card('X-1', { state: 'cancelled' })], { over: { hostLock: copyFail, sessions: () => running,
+    stopGroup: async (s) => { stops.push(s.id); return { ok: true, how: 'SIGTERM' }; } } });
+  const rules = rulesWith({ ...M2_RULES, 'onboarding.state': 'active' }, allow);
+  const stateDir = join(tempDir('m11-approvals-'), 'm2');
+  const r = await w.pass(0, { rules, ports: { approvals: () => [{ product: 'p2', stateDir }] } });
+  assert.match(String(r.steps.leads.result), HOME_UNKNOWN, 'the hold is on');
+  assert.equal(r.steps.stops.ok, true, r.steps.stops.error);
+  assert.deepEqual(stops, ['S-X'], 'the stop is made during the hold');
+  assert.equal(r.steps.approvals.ok, true, r.steps.approvals.error);
+  assert.deepEqual(r.steps.approvals.result, [{ product: 'p2', ok: true, events: r.steps.approvals.result[0].events }]);
+  assert.equal(w.rec.read('product', 'p2').doc.state, 'active', 'Joe\'s approvals pass ran and wrote its answer');
+});
+
+test('L1061 m1: the phone step marks nothing as tried while home is unknown, and the first pass after the hold restarts and starts', async () => {
+  const calls = [];
+  let lock = copyFail;
+  const w = world([account(), usage()], { over: { frontDoorAlive: () => false, hostLock: () => lock(),
+    restartFrontDoor: async () => { calls.push('front door'); return { ok: true }; }, startMinibase: async () => { calls.push('mini base'); return { ok: true }; } } });
+  for (const id of [FACTS.network, FACTS.reachable]) assert.equal(w.rec.write({ actor: factFamilyOf(id), entity: 'fact', id, expectRev: 0, doc: { value: true, observed_at: iso(T0) } }).ok, true);
+  assert.equal(w.rec.write({ actor: factFamilyOf(FACTS.minibase), entity: 'fact', id: FACTS.minibase, expectRev: 0, doc: { value: false, observed_at: iso(T0) } }).ok, true);
+  const tried = () => { const d = w.rec.read('fact', LINK_FACT)?.doc ?? {}; return { fd: d.fd_restarted_at ?? null, mb: d.minibase_started_at ?? null }; };
+  await w.pass();
+  await w.pass(1, { ports: { frontDoorAlive: () => true } });
+  assert.deepEqual(calls, []);
+  assert.deepEqual(tried(), { fd: null, mb: null }, 'nothing is marked as tried during the hold');
+  // The hold ends: the very next pass restarts the missing Front Door, and once it is back starts Mini Base.
+  lock = () => 'mini';
+  await w.pass(2);
+  assert.deepEqual(calls, ['front door']);
+  await w.pass(3, { ports: { frontDoorAlive: () => true } });
+  assert.deepEqual(calls, ['front door', 'mini base']);
+});
+
+test('L1061 m2: while home is unknown and the main pass fails, the tick still tells the copy hold, once', async () => {
+  let calls = 0;
+  const w = world([account(), usage()], { over: { hostLock: copyFail,
+    sessions: () => { calls += 1; if (calls > 1) throw new Error('session list unreadable'); return []; } } });
+  const r = await w.pass();
+  assert.equal(r.steps.pass.ok, false, 'control: the main pass failed');
+  assert.equal(w.calls.alerts.filter((a) => /holds every start, undo cards too/.test(a) && a.includes(COPY_WHY)).length, 1, w.calls.alerts.join(' | '));
+  // With the pass working too, it is still told once (one copy per cause).
+  const ok = world([account(), usage()], { over: { hostLock: copyFail } });
+  await ok.pass();
+  assert.equal(ok.calls.alerts.filter((a) => /holds every start, undo cards too/.test(a)).length, 1, ok.calls.alerts.join(' | '));
 });

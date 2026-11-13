@@ -49,7 +49,7 @@ import { READING_FUTURE_MS } from '../M12-sensors/facts.mjs';
 import { outageStep, OUTAGE_FACT } from './outage.mjs';
 import { intakePass } from './outbox-intake.mjs';
 import { leadRestartStep, leadInFlight, handoffVet, tellLeadSkipped, HANDOFF_NAME } from './lead-restart.mjs';
-import { dispatcherPass, stopPass, undoStarts, rulesMissingAlert, holdAlert, refusalReport, readHostLock, hostCopyReason, HELD_BANDS, HOLD_REPEAT_MS, TOLD_BANDS } from './pass.mjs';
+import { dispatcherPass, stopPass, undoStarts, rulesMissingAlert, holdAlert, refusalReport, readHostLock, hostCopyReason, hostCopyAlertText, HOST_COPY_CAUSE, HELD_BANDS, HOLD_REPEAT_MS, TOLD_BANDS } from './pass.mjs';
 import { startGate } from './gate.mjs';
 import { currentBands } from './usage.mjs';
 import { timeLimits, requestMerges } from './merges.mjs';
@@ -266,7 +266,8 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
   // host.lock is read once a tick (L1048 c1); the undo-starts step and the main pass get that one answer. Under the
   // owner's copier, a copy that can't be trusted (HOST_COPY_FAIL) means which Mac is home is not known, and then nothing
   // starts (L1048): no card or undo card, review, merge, plan review, read-only helper, Lead, Front Door or Mini Base.
-  // Stops and Joe's own answers still run. A plain throw (no copier) holds nothing here, as before.
+  // Stops and Joe's own answers still run. A plain throw (no copier) holds nothing here, as before. host.lock is read at
+  // tick start, so a copy that goes bad mid-tick is noticed the next tick, well inside the 5-minute limit (L1061 c1).
   const lockOnce = readHostLock(p.hostLock ?? (() => null));
   const hostLock = () => { if (lockOnce.thrown !== null) throw lockOnce.thrown; return lockOnce.text; };
   const homeUnknown = lockOnce.copyFail !== null ? hostCopyReason(lockOnce.copyFail) : null;
@@ -407,6 +408,12 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
   // A step that failed did not report what it lacked, so nothing already told is dropped this tick.
   const complete = ['stops', 'undo-starts', 'pass', 'limits', 'merges'].every((s) => res[s]?.ok);
   try { await rulesMissingAlert({ rec, keys: missing, alert, now, complete }); } catch (e) { alert(`the Dispatcher could not record missing rules values: ${e?.message ?? e}`); }
+  // The copy hold is told from the tick too (L1061 m2), so a main pass that failed still tells Joe home is not known.
+  // Same cause and text as the pass's: once a day, one copy in the outbox.
+  if (lockOnce.copyFail !== null) {
+    try { holdAlert({ rec, cause: HOST_COPY_CAUSE, text: hostCopyAlertText(lockOnce.copyFail), alert, now }); }
+    catch (e) { alert(`the Dispatcher could not record the host.lock copy hold: ${e?.message ?? e}`); }
+  }
   // No silent hold (L38). The band is not told while the account is unknown: that hold is the account's. Neither is told
   // while home is not known (L1048 m2): both say undo cards run, and that hold, the stronger, is told by the main pass.
   if (!homeUnknown) try {

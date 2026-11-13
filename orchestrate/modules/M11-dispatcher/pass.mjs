@@ -146,6 +146,8 @@ export const HOST_COPY_CAUSE = 'host-lock-copy';
 // L1048: the tick holds every other start on it too (reviews, merges, plan reviews, read-only helpers, Lead restarts, the
 // Front Door and Mini Base), reading host.lock once a tick. Stops and Joe's own answers still run.
 export const hostCopyReason = (why) => `host.lock's copy can't be trusted, so which Mac is home is not known (${why})`;
+// The copy hold's alert, one text for the main pass and the tick (L1061 m2: the tick tells it too, so a pass that fails still tells it).
+export const hostCopyAlertText = (why) => `the Dispatcher holds every start, undo cards too: ${why}`;
 /** The host.lock port's answer as { text, copyFail }: copyFail is the reason when the port marked HOST_COPY_FAIL,
  * text is undefined when the read threw (thrown: what it threw). A throw without the mark (no copier) is "not known" and holds nothing. */
 export function readHostLock(hostLock) {
@@ -589,7 +591,7 @@ export async function dispatcherPass({ rec, rules, now, clock = () => now, accou
   if (lock.error !== null) failing(`host.lock unreadable: ${lock.error}`);
   if (hostCopy !== null) {
     startsOff ??= hostCopyReason(hostCopy);
-    try { holdAlert({ rec, cause: HOST_COPY_CAUSE, text: `the Dispatcher holds every start, undo cards too: ${hostCopy}`, alert, now }); }
+    try { holdAlert({ rec, cause: HOST_COPY_CAUSE, text: hostCopyAlertText(hostCopy), alert, now }); }
     catch (t) { failing(`the host.lock copy hold could not be told (${t?.message ?? t})`); }
   }
   // Without a copier there is never such a hold, so this only looks and writes nothing.
