@@ -91,6 +91,39 @@
       "rounds": 1,
       "evidence": "evolutions/009-standalone-skills/release-transport-audit.md",
       "zero_finding_rerun": "Independently exercised the complete publisher with the installed CLI and loopback server, including interrupted upload/retry, exact byte readback and pointer ordering."
+    },
+    {
+      "audit": "Field-learning record validation and AUDIT/EVOLVE integration",
+      "ran": "2026-11-13",
+      "tier": 1,
+      "class_of_work": "ops-ci",
+      "material_found": 0,
+      "material_remaining": 0,
+      "minor": 0,
+      "cosmetic": 1,
+      "remaining_cosmetic": 0,
+      "auditor_context": "fresh subagent; authored no implementation",
+      "rounds": 1,
+      "evidence": "evolutions/010-field-learning/fresh-audit.md",
+      "zero_finding_rerun": "Independent actual-CLI adversarial probes against the ledger wrapper in addition to the behavioral suite; legacy compatibility, Material blocking, unknown adoption and malformed inputs.",
+      "cosmetic_note": "Release entry moved beneath changelog section 1 after review."
     }
-  ]
+  ],
+  "learning": {
+    "version": 1,
+    "incidents": [],
+    "changes": [
+      {
+        "id": "field-learning",
+        "material_remaining": 0,
+        "rounds": [
+          {
+            "id": "independent-review",
+            "kind": "initial",
+            "material_found": 0
+          }
+        ]
+      }
+    ]
+  }
 }
