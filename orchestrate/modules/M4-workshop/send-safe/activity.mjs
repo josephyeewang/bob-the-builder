@@ -188,7 +188,7 @@ export class ActivityTracker {
   }
 
   // Applies one hook signal { valid, state, event, toolName, toolUseId, prompt | watchdog, at, launchId }.
-  // → 'applied', 'same' (no state change) or 'dropped'; callers before R-0b-175a ignore it.
+  // → 'applied', 'same' (nothing to write) or 'dropped'; callers before R-0b-175a ignore it.
   // R-0b-155b: every line taken for the current launch, 'applied' or 'same', is numbered (changes.mjs): a typed prompt
   // often leaves the state as it was, and the "took" wait must still see it. A dropped line is not numbered.
   applySignal(id, signal) {
