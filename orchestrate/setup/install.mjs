@@ -28,7 +28,7 @@ import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.m
 import { uidsProblem } from '../modules/M4-workshop/launcher/review-user.mjs';
 import { reviewUserProblem } from '../modules/M9-record/outbox.mjs';
 import { PLAN_REVIEW_ROLE, RUNNER_ROLES } from '../shared/review-roles.mjs';
-import { COPY_CLAUDE_CODE as CLAUDE_CODE, COPY_HOOKS as HOOKS, managedRulesPath, parseConfig } from './layout.mjs';
+import { COPY_CLAUDE_CODE as CLAUDE_CODE, COPY_HOOKS as HOOKS, managedGuardDir, parseConfig } from './layout.mjs';
 import { parseRobot } from './robot-setup.mjs';
 import { DISPATCHER_CONFIG, dispatcherConfigFor, dispatcherConfigText, dispatcherSourcePath, parseDispatcher } from './dispatcher-setup.mjs';
 import { readUser } from './users-folders.mjs';
@@ -79,7 +79,7 @@ export function installPaths(cfg) {
 /** The entries the install and the jobs put directly under the base, so `check` does not call them strangers (r3 n4). */
 // The base dispatcher.json only with a dispatcher entry: a leftover one from a removed entry is then a stranger check names (L807 c2).
 // `dispatcher`: whether the config has a dispatcher entry (check reads the config without the install's keys, so main says).
-export const rootMadeEntries = (cfg, { dispatcher = cfg.dispatcher !== undefined } = {}) => { const P = installPaths(cfg); return [P.install, P.work, P.logDir, P.accountCopy, managedRulesPath(cfg), ...(dispatcher ? [dispatcherSourcePath(cfg)] : [])]; };
+export const rootMadeEntries = (cfg, { dispatcher = cfg.dispatcher !== undefined } = {}) => { const P = installPaths(cfg); return [P.install, P.work, P.logDir, P.accountCopy, managedGuardDir(cfg), ...(dispatcher ? [dispatcherSourcePath(cfg)] : [])]; };
 
 const op = (text, run) => ({ text, run });
 /** Why `p` (a real path outside the prefix) cannot be carried into the copy, or null: it must exist, be a plain file or folder, and hold no link anywhere inside (the copy is root's alone and carries no links). */
@@ -362,8 +362,13 @@ function folderList(io, cfg) {
   return out;
 }
 
-/** Read only → [{ ok, what, why? }]. `main` is a commit the stamp must equal, when the caller knows it. */
-export function checkInstall(io, cfg, { main = null } = {}) {
+/**
+ * Read only → [{ ok, what, why? }]. `main` is a commit the stamp must equal, when the caller knows it. `watchOnly` checks only
+ * what the hourly watch job uses (L1026): the copy whole and root's, its stamp, no access lists, review.json readable and
+ * naming this copy. It leaves out the review runner's role-to-user map (L726) and the runner's files (RUNNER_NAMES), which
+ * the full review.json brings on cutover night; the watch job never starts the runner. Every other caller keeps the full check.
+ */
+export function checkInstall(io, cfg, { main = null, watchOnly = false } = {}) {
   const P = installPaths(cfg); const out = [];
   const item = (ok, what, why) => out.push({ ok, what, ...(ok ? {} : { why }) });
   const top = io.prefix || '/';
@@ -382,6 +387,7 @@ export function checkInstall(io, cfg, { main = null } = {}) {
   item(acl === null, `none of the ${dirs.length} install folders has an access list`, acl);
   let rc = null; try { rc = JSON.parse(io.readText(join(P.installRoot, RUNNER_CONFIG))); } catch { /* reported below */ }
   item(rc !== null && rc.installRoot === root, 'the copy\'s review.json is JSON and names this copy', 'unreadable or names another installRoot');
+  if (watchOnly) return out;
   if (rc !== null) {
     const what = 'review.json names a Mac user for every role, and every role the runner starts (the plan reviewer too) names review';
     const old = planReviewerOnlyMissing(io, rc.uids, P.installRoot);

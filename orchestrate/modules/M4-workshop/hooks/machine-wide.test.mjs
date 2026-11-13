@@ -109,3 +109,48 @@ test('L1031: a folder written by others above the copy is refused, whoever owns 
   const f = join(sub, 'c.json'); writeFileSync(f, makeSnapshot(RULES)); chmodSync(f, 0o644);
   assert.match(rootChainProblem(f, ME), /folder .*sub above/);
 });
+
+test('L1044 M1: the machine-wide form blocks production names only; everyday shell shapes the role guard refuses pass for every session', () => {
+  const { d, f } = copyAt();
+  const bash = (command, cwd = d) => decide({ tool_name: 'Bash', cwd, tool_input: { command } }, wide(f));
+  for (const c of ['TMPDIR=$(getconf DARWIN_USER_TEMP_DIR) node --test x.test.mjs', 'bash ~/x/run-slot.sh node --test a', 'echo $PATH', 'for f in a b; do echo $f; done',
+    './scripts/check.sh', 'find . -name x -exec rm {} \;', 'ls | xargs wc -l', 'W=/a; cd $W', 'cd /tmp && rm -rf .', 'git status', 'eval "$X"', 'source ./env.sh']) {
+    assert.deepEqual(bash(c), { block: false }, c);
+    assert.equal(decide({ tool_name: 'Bash', cwd: d, tool_input: { command: c } }, { snapshot: join(d, 'role.json') }).block, true, `the role form still refuses or has no snapshot: ${c}`);
+  }
+  assert.deepEqual(bash('ls', undefined), { block: false }, 'a call with no working folder is no reason to block every session');
+  for (const c of ['cat /srv/app/prod-settings.conf', 'vercel deploy --prod', 'npx vercel deploy', 'pnpm dlx vercel', 'curl https://prod.example.com/x', 'echo $(cat /srv/app/prod-settings.conf)',
+    'for f in a; do vercel deploy; done', 'cp prod-settings.conf /tmp/x', 'X=/srv/app/prod-settings.conf; cat $X', 'cat /srv/app/{prod-settings,x}.conf', 'VERCEL=1 bash -c "vercel deploy"', 'sh -lc "cd x && npx vercel"', 'eval vercel deploy', '/bin/bash -c "bash -c \\"vercel\\""']) {
+    assert.equal(bash(c).block, true, c); assert.ok(!bash(c).reason.includes('sudo rm'), 'a block by rule is no lock-out: no way out said');
+  }
+});
+
+test('L1044 A10, A11: in the machine-wide form, file tools on a production settings file and a production host in a URL are blocked', () => {
+  const { d, f } = copyAt();
+  for (const tool_name of ['Read', 'Edit', 'Write', 'MultiEdit']) {
+    assert.match(decide({ tool_name, cwd: d, tool_input: { file_path: '/srv/app/prod-settings.conf' } }, wide(f)).reason, /is a production settings file/, tool_name);
+    assert.match(decide({ tool_name, cwd: d, tool_input: { file_path: '/SRV/App/Prod-Settings.conf' } }, wide(f)).reason ?? '', /is a production settings file/, `${tool_name}, letter case`);
+    assert.deepEqual(decide({ tool_name, cwd: d, tool_input: { file_path: join(d, 'notes.md') } }, wide(f)), { block: false }, tool_name);
+  }
+  assert.match(decide({ tool_name: 'WebFetch', cwd: d, tool_input: { url: 'https://PROD.example.com/admin' } }, wide(f)).reason, /production host/);
+  assert.deepEqual(decide({ tool_name: 'WebFetch', cwd: d, tool_input: { url: 'https://docs.example.com/' } }, wide(f)), { block: false });
+  assert.match(decide({ tool_name: 'Bash', cwd: d, tool_input: { command: 'ssh deploy@prod.example.com' } }, wide(f)).reason, /production host/);
+});
+
+test('L1044 A1, A2: the root chain is judged all the way up: a folder written by others two levels above the copy is refused', () => {
+  const { d } = copyAt();
+  const mid = join(d, 'a'); const low = join(mid, 'b'); mkdirSync(low, { recursive: true }); chmodSync(low, 0o755);
+  const f = join(low, 'c.json'); writeFileSync(f, makeSnapshot(RULES)); chmodSync(f, 0o644);
+  chmodSync(mid, 0o755); assert.deepEqual(decide(HARMLESS, wide(f)), { block: false }, 'a clean chain passes');
+  chmodSync(mid, 0o775); assert.match(rootChainProblem(f, ME), /folder .*\/a above/); wayOut(decide(HARMLESS, wide(f)));
+  chmodSync(mid, 0o755); chmodSync(d, 0o757); assert.match(rootChainProblem(f, ME), new RegExp(`folder ${d.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} above`));
+  chmodSync(d, 0o755);
+  if (ME !== 0) assert.match(rootChainProblem(f, ME + 1), /not root's alone/, 'a chain owned by someone neither root nor the stand-in');
+});
+
+test('L1044 m1: a copy stamped ahead of the clock still guards in the machine-wide form; the role form refuses it', () => {
+  const { f } = copyAt(makeSnapshot(RULES, new Date(Date.now() + YEAR)));
+  assert.deepEqual(decide(HARMLESS, wide(f)), { block: false }, 'a clock set back must not lock every session out');
+  assert.match(decide(PROD, wide(f)).reason, /"vercel" reaches production/);
+  assert.match(decide(HARMLESS, { snapshot: f }).reason, /from the future/);
+});

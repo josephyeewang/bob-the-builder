@@ -12,7 +12,7 @@ import { SETTINGS as S, HOOK_FIELDS as H, HOOK_EVENTS as E, ENV, REFUSED_SETTING
 import { hasShell, DESIGN_PROFILES, shadowKindsFor, OUTBOX_FILE } from './role-profiles.mjs';
 import { REVIEW_ROLES, RUNNER_ROLES } from '../../../shared/review-roles.mjs';
 import { noteInOutbox } from '../hooks/compact-note.mjs';
-import { inside } from '../hooks/lib.mjs';
+import { inside, MACHINE_WIDE_WAY_OUT } from '../hooks/lib.mjs';
 import { foldKey } from '../../../shared/plan-fingerprint.mjs';
 
 // Two folders apart, neither inside the other, without regard to case (#410 r1 m2, r2 m3): the Mac's disk ignores
@@ -598,6 +598,11 @@ export function checkSettings(obj, { machineWide = false, profile = null } = {})
 }
 
 // The paths a machine-wide hook command may carry: plain path letters only, since claude runs the command in a shell (L1031).
+// The machine-wide hook's end (L1044 M2): exit 2 whatever went wrong, as HOOK_FAILS_CLOSED, and when the guard could not run at
+// all (its script missing, node failing: any exit but its own block's 2) the way out is said too, since then the guard never
+// printed it. A block by the guard (exit 2) says its own reason and no more.
+if (MACHINE_WIDE_WAY_OUT.includes("'")) throw new Error('the machine-wide way out must hold no single quote: the hook command quotes it');
+export const MACHINE_WIDE_FAILS_CLOSED = ` || { [ $? -eq 2 ] || echo 'the machine-wide guard could not run; ${MACHINE_WIDE_WAY_OUT}' >&2; exit 2; }`;
 const PLAIN_ABS = /^\/[A-Za-z0-9._/-]+$/;
 /**
  * The machine-wide settings (L1031): one PreToolUse hook on every tool, the production-write guard in its machine-wide
@@ -606,7 +611,7 @@ const PLAIN_ABS = /^\/[A-Za-z0-9._/-]+$/;
  */
 export function machineWideSettings({ node, hooksDir, snapshot }) {
   for (const [k, v] of Object.entries({ node, hooksDir, snapshot })) if (!(typeof v === 'string' && PLAIN_ABS.test(v) && !v.split('/').includes('..'))) throw new Error(`machineWideSettings: ${k} must be a plain absolute path (letters, digits, . _ - /)`);
-  const command = `${node} ${join(hooksDir, 'production-write-guard.mjs')} --machine-wide --snapshot ${snapshot}${HOOK_FAILS_CLOSED}`;
+  const command = `${node} ${join(hooksDir, 'production-write-guard.mjs')} --machine-wide --snapshot ${snapshot}${MACHINE_WIDE_FAILS_CLOSED}`;
   return { [S.hooks]: { [E.preToolUse]: [{ [H.matcher]: '*', [H.hooks]: [{ [H.type]: 'command', [H.command]: command, [H.timeout]: HOOK_TIMEOUT, [H.onFailure]: 'block' }] }] } };
 }
 

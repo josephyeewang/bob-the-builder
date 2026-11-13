@@ -36,7 +36,9 @@ export function parseSnapshot(text, { now = Date.now(), maxAgeMs = SNAPSHOT_MAX_
   if (!Number.isFinite(at)) return refuse('rules snapshot has no time');
   const age = now - at;
   if (age > maxAgeMs) return refuse(staleReason(age, maxAgeMs));
-  if (age < -60000) return refuse('rules snapshot is from the future');
+  // A copy read with no age limit (the machine-wide one, L1031) is not judged by the clock at all: a clock stepped back after
+  // it was written would otherwise block every session on the Mac until it caught up (L1044 m1).
+  if (age < -60000 && Number.isFinite(maxAgeMs)) return refuse('rules snapshot is from the future');
   return { ok: true, rules: s.rules, writtenAt: s.written_at, hash: s.hash };
 }
 

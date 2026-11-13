@@ -332,6 +332,25 @@ function judge(t, abs, deletes, protectedFiles, shielded, how = 'written') {
   return null;
 }
 
+/**
+ * Each command in `raw`, and each command in a string a shell is handed to run (`bash -c "<s>"`, `sh -lc '<s>'`, `eval <s>`),
+ * read the same way, a few levels deep. The role form refuses those shapes outright (`unreadable`); the machine-wide form
+ * lets them run (L1044 M1), so it reads inside them for a production program (#487 r2).
+ */
+export function* commandsWithin(raw, depth = 0) {
+  for (const c of shellCommands(raw)) {
+    yield c;
+    if (depth >= 4) continue;
+    const word = programOf(c) ?? '';
+    const prog = basename(word);
+    const rest = c.slice(c.indexOf(word) + 1);
+    if (prog === 'eval') { yield* commandsWithin(rest.join(' '), depth + 1); continue; }
+    if (!['sh', 'bash', 'zsh', 'dash', 'ksh'].includes(prog)) continue;
+    const flag = rest.findIndex((w) => /^-[a-z]*c[a-z]*$/i.test(w));
+    if (flag >= 0 && typeof rest[flag + 1] === 'string') yield* commandsWithin(rest[flag + 1], depth + 1);
+  }
+}
+
 export function decide(input, args) {
   // The machine-wide form (L1031) reads root's copy, written once by setup.mjs managed-settings and never refreshed: no age
   // limit, but root's alone. `ownerUid` is a test's stand-in for root; parseArgs never sets it. A copy that can't be used
@@ -363,21 +382,27 @@ export function decide(input, args) {
   };
   for (const p of toolPaths(input)) if (touchesEnv(p)) return block(`"${p}" is a production settings file`);
 
+  // The machine-wide form (L1044 M1) blocks production names only: a production settings file on a tool path or in a
+  // command's words, a production program (also through a package runner) and a host. It never applies the role guard's
+  // shell-shape and whole-folder rules to every session on the Mac (the owner's and the lead's normal work); role sessions
+  // keep them through their own settings. Words are read as written, so a name behind `$VAR` or `$(…)` is not seen: the
+  // ruled trade (L1044), and the role guard is the one that refuses such shapes.
+  const wide = args.machineWide === true;
   if (input.tool_name === 'Bash') {
     // A short name is read from the session's folder; without it the guard can't tell (lane 3, R-0b-70).
-    if (typeof input.cwd !== 'string' || !isAbsolute(input.cwd)) return block('the call gives no working folder, so a short file name can\'t be checked');
+    if (!wide && (typeof input.cwd !== 'string' || !isAbsolute(input.cwd))) return block('the call gives no working folder, so a short file name can\'t be checked');
     // Read raw where a here-document matters: joining lines first could move where its body ends (L46).
     const raw = String(input.tool_input?.command ?? '');
     const cmd = joinLines(raw);
     // Shapes no hook can read are refused as a class (lib.mjs `unreadable`; R-0b-44 round 2 MAT-1, R-0b-70).
-    const why = unreadable(raw);
+    const why = wide ? null : unreadable(raw);
     if (why) return block(`${why}; write the command out plainly`);
     // Each protected file as listed and where it really is (a folder link, or /tmp on a Mac), folded.
     const listed = [...prod.env_files, ...(Array.isArray(snap.rules.secrets?.paths) ? snap.rules.secrets.paths : [])].filter((f) => typeof f === 'string' && isAbsolute(f));
     const protectedFiles = [...new Set(listed.flatMap((f) => [f, landingPath(f)]).filter(Boolean).map(fold))];
-    const folderWhy = folderWriteWhy(raw, { cwd: input.cwd, protectedFiles, home: process.env.HOME || homedir(), projectDir: process.env.CLAUDE_PROJECT_DIR });
+    const folderWhy = wide ? null : folderWriteWhy(raw, { cwd: input.cwd, protectedFiles, home: process.env.HOME || homedir(), projectDir: process.env.CLAUDE_PROJECT_DIR });
     if (folderWhy) return block(folderWhy);
-    for (const c of shellCommands(raw)) {
+    for (const c of commandsWithin(raw)) {
       const prog = programOf(c);
       if (programs.includes(fold(prog))) return block(`"${prog}" reaches production`);
       // Package runners that would start the program: npx <p>, bunx <p>, pnpm dlx <p>, npm exec <p>.

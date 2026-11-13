@@ -12,11 +12,15 @@
 //     "recordRoot": "/abs", "recordUid": <uid>, "claimMs": <ms>,
 //     "products": { "<name>": { "repo": "owner/name", "mirror": "/abs", "render": { "paths": {...}, "product": {...},
 //                   "rulesHosts": [], "productionFiles": [], "proposalOutboxes": [] }, "rules": {...}? } },
-//     "pin": "<claude version>"?, "machineWide": "/Library/Application Support/ClaudeCode/managed-settings.json"? (that file only, L913) }
+//     "pin": "<claude version>"?, "machineWide": "/Library/Application Support/ClaudeCode/managed-settings.json"? (that file only, L913),
+//     "budget": "/abs.mjs"?, "bobManifest": "/abs"?,        inside installRoot and root's alone, each loaded once at start (L1001)
+//     "dispatcherRules": "/abs"?, "reviewStatusFile": "/abs"?, "reviewUid": <uid>?  required with budget }
 // The launch checks (runner-checks.mjs, step 6) read pin, machineWide and each product's rules; one that is left out
-// leaves its check without a port, so launch() refuses there and no session starts. The budget (check 12) and the
-// pinned Bob file list (check 13) have no config field yet, so no session starts until they do; a worker is refused
-// first at check 4 (no install port), a script session at check 12.
+// leaves its check without a port, so launch() refuses there and no session starts. `budget` names M11's budget module
+// (launch check 12: the rules the Dispatcher's snapshot at dispatcherRules holds, the Record, and the running count from
+// this runner's status file and the review runner's), `bobManifest` the pinned Bob file list (check 13); each is root's
+// own file in the copy, and one that can't be loaded is logged and leaves its check without a port. Until both are
+// named no session starts; a worker is refused first at check 4 (no install port).
 // Each product's render.paths.deny must name the Record, ~/.ssh, the gh config, ~/.claude and the robot keys (full paths,
 // not /), and list the secrets with the approvals and rules state (#364 r1 M2): a config missing any is refused.
 // The runner's own folder is the status file's folder: it holds the status, the memory (memory.json, 0o600), the
@@ -30,9 +34,9 @@
 // through a link (#378 r1 m4), when a session it carries over may read a product's folders (#378 r1 M1,
 // carriedOverProblem), or when it has no memory but earlier sessions' settings files are there (#378 self-review M3).
 
-import { lstatSync, mkdirSync, readdirSync, realpathSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readJobConfig } from '../shared/job-config.mjs';
 import { makeLock } from '../modules/M9-record/lock.mjs';
 import { PRODUCT, runnerPlaces } from '../shared/product-paths.mjs';
@@ -47,9 +51,13 @@ import { fullPath } from './runner-job.mjs';
 import { productRoleClash } from './owner-status.mjs';
 import { CLAUDE_FILE, MANAGED_SOURCES_CHECKED_ON } from '../modules/M4-workshop/launcher/env-check.mjs';
 import { apart } from '../modules/M4-workshop/launcher/render-settings.mjs';
+import { installProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
 
 const ABS = ['installRoot', 'requestsDir', 'statusFile', 'outboxRoot', 'copiesRoot', 'home', 'claudeBin', 'recordRoot'];
 const UIDS = ['orchestrateUid', 'recordUid'];
+// Launch checks 12 and 13's files (L1001): optional, each root's own in the copy; budget needs the three after it.
+const PINNED = ['budget', 'bobManifest'];
+const BUDGET_NEEDS = ['dispatcherRules', 'reviewStatusFile', 'reviewUid'];
 // The read-deny entries every product's sessions must have (#364 r1 M2): the Record, the keys, the sign-in and the home's.
 export const DENY_KEYS = Object.freeze(['record', 'ssh', 'gh', 'claudeHome', 'robotKeys']);
 // The product rule is setup's (shared/product-paths.mjs PRODUCT, #378 M1): each product's folders are setup's, named as on disk.
@@ -87,6 +95,10 @@ export function checkRunnerConfig(c) {
     for (const k of RENDER_PATHS) if (p.render.paths[k] !== undefined && !fullPath(p.render.paths[k])) fail(`product ${name}: render.paths.${k} must be a full path in its simplest form, not / itself`);
   }
   if (c.pin !== undefined && (typeof c.pin !== 'string' || !/^\d+\.\d+\.\d+$/.test(c.pin))) fail('pin must be a Claude Code version');
+  for (const k of [...PINNED, 'dispatcherRules', 'reviewStatusFile']) if (c[k] !== undefined && !fullPath(c[k])) fail(`${k} must be a full path in its simplest form, not / itself`);
+  if (c.reviewUid !== undefined && (!Number.isInteger(c.reviewUid) || c.reviewUid < 0)) fail('reviewUid must be a uid');
+  if (c.budget !== undefined) for (const k of BUDGET_NEEDS) if (c[k] === undefined) fail(`${k} must be set with budget (launch check 12 reads it)`);
+  for (const k of PINNED) if (c[k] !== undefined && !insideCopy(c.installRoot, c[k])) fail(`${k} must be inside installRoot (${c.installRoot})`);
   // L913 (a): claude reads only its fixed managed file, so it is the one value taken, spelled exactly (its name has a
   // space, which the full-path rule refuses elsewhere); any other would refuse every session at check 10 instead. Any
   // other value, a near miss too, is told the fixed file (#419 r3 c1).
@@ -123,12 +135,18 @@ export function checkRunnerConfig(c) {
     workerRunner: { requestsDir: c.requestsDir, statusFile: c.statusFile } };
 }
 
-/** What the launch checks read for one start (runner-checks.mjs workerChecks): the start port's x and the config's. */
-export function workerCheckInputs(c, x, { log = () => {} } = {}) {
+const insideCopy = (root, p) => p.startsWith(`${root}/`);
+
+/**
+ * What the launch checks read for one start (runner-checks.mjs workerChecks): the start port's x and the config's, and
+ * the budget and Bob file list main loaded once at start from the config's `budget` and `bobManifest` (null: none, so
+ * checks 12 and 13 have no port).
+ */
+export function workerCheckInputs(c, x, { log = () => {}, budget = null, bobManifest = null } = {}) {
   const p = c.products[x.product];
   return { ...x, mirror: p.mirror, pin: c.pin, hooksDir: p.render.paths.hooksDir, rules: p.rules, snapshot: p.render.paths.snapshot, writeSnapshot,
     machineWide: c.machineWide, busy: holdersOf, alert: (t) => log(`worker runner: ${x.sessionId}: ${t}`), spawn: childSpawn, home: c.home,
-    testCommand: p.render.product?.commands?.test, budget: null, bobFolder: p.render.paths.bobFolder, bobManifest: null };
+    testCommand: p.render.product?.commands?.test, budget, bobFolder: p.render.paths.bobFolder, bobManifest };
 }
 
 /** The checks run once more just before claude starts (#369 M1, r1 m1 and m2): the copy (its folder and HEAD), its setup
@@ -136,7 +154,7 @@ export function workerCheckInputs(c, x, { log = () => {} } = {}) {
 export const RECHECK = Object.freeze([1, 2, 3, 8]);
 /** The start port's ports from the config: the stop flag, check 0's pinned version, the worker launch checks, and the
  * RECHECK checks once more just before claude starts. */
-export const startDeps = (c, { stopped = () => false, log, productHeld, checksOf = (x) => workerChecks(workerCheckInputs(c, x, { log })) } = {}) => ({ stopped, log, productHeld, names: { version: c.pin },
+export const startDeps = (c, { stopped = () => false, log, productHeld, budget = null, bobManifest = null, checksOf = (x) => workerChecks(workerCheckInputs(c, x, { log, budget, bobManifest })) } = {}) => ({ stopped, log, productHeld, names: { version: c.pin },
   checksFor: checksOf,
   beforeStart: async (x) => {
     const k = checksOf(x);
@@ -182,10 +200,10 @@ export function carriedOverProblem(c, memory, { groupGone, readSettings = sessio
 export const listenStop = (fn) => { process.on('SIGTERM', fn); };
 
 /** The ports from the config; `over` replaces any (a test's fakes). `stopped` tells the start port the runner is stopping. */
-export function realRunnerPorts(c, over = {}, { stopped = () => false, log, productHeld } = {}) {
+export function realRunnerPorts(c, over = {}, { stopped = () => false, log, productHeld, budget = null, bobManifest = null } = {}) {
   return {
     ...processGroupPorts(),
-    start: startPort(c, startDeps(c, { stopped, log, productHeld })),
+    start: startPort(c, startDeps(c, { stopped, log, productHeld, budget, bobManifest })),
     saveWork: saveWorkPort({ mirrorOf: (product) => c.products[product]?.mirror }),
     pauseLead: pauseLeadPort(),
     // The Record's read-only fact reader (L852, M4 readFactFile): an outbox is drained once every file in it is taken or told.
@@ -334,9 +352,10 @@ export function keepSnapshots(c, { fresh = keepSnapshotFresh, log = () => {}, re
  * memory (the memory reader), folderProblem (snapshotFolderProblem).
  * → the exit code.
  */
-export async function main(argv, { readConfig = (f) => { const self = selfPath(); if (!self) throw new Error('its own script\'s path can\'t be read, so it can\'t be checked'); return readJobConfig(f, { code: [], self }); }, lock = (dir) => makeLock({ dir, timeoutMs: 2_000 }),
+export async function main(argv, { readConfig = (f) => { const self = selfPath(); if (!self) throw new Error('its own script\'s path can\'t be read, so it can\'t be checked'); return readJobConfig(f, { code: [], optionalCode: ['budget'], self }); }, lock = (dir) => makeLock({ dir, timeoutMs: 2_000 }),
   ports = {}, run = runRunner, log = (s) => process.stderr.write(`${new Date().toISOString()} ${s}\n`), onStop = listenStop, fresh = keepSnapshotFresh,
-  realpath = (p) => realpathSync.native(p), memory = loadMemory, folderProblem = (dir) => snapshotFolderProblem(dir) } = {}) {
+  realpath = (p) => realpathSync.native(p), memory = loadMemory, folderProblem = (dir) => snapshotFolderProblem(dir),
+  pinnedProblem = (root, files) => installProblem(root, files, { owner: 0 }), loadBudget = importBudget, readManifest = readRootFile, portsOf = realRunnerPorts } = {}) {
   let c;
   try { c = checkRunnerConfig(readConfig(argv[0])); } catch (e) { log(`the worker runner did not start: ${e.message}`); return 1; }
   // The roots each deny is spelled from are their real paths (#378 r1 m4): the Mac's sandbox does not apply a deny reached
@@ -344,6 +363,22 @@ export async function main(argv, { readConfig = (f) => { const self = selfPath()
   for (const k of ['copiesRoot', 'outboxRoot']) {
     let real; try { real = realpath(c[k]); } catch (e) { log(`the worker runner did not start: ${k} can't be read (${e?.code ?? e?.message})`); return 1; }
     if (real !== c[k]) { log(`the worker runner did not start: ${k} is reached through a link (it is ${real})`); return 1; }
+  }
+  // Launch checks 12 and 13's files are root's alone in the copy (L1001), as the review runner's are: the budget module
+  // runs inside the runner, and the Bob file list decides check 13. One that isn't stops the runner here.
+  const pinned = PINNED.map((k) => c[k]).filter((p) => p !== undefined);
+  if (pinned.length) {
+    let bad; try { bad = pinnedProblem(c.installRoot, pinned); } catch (e) { bad = e?.message ?? String(e); }
+    if (bad) { log(`the worker runner did not start: its budget or Bob file list is not root's alone in the installed copy: ${bad}`); return 1; }
+  }
+  // Each is loaded once (L1001). One that can't be is logged; its check then has no port, so no session starts.
+  let budget = null; let bobManifest = null;
+  if (c.budget !== undefined) {
+    try { budget = await loadBudget(c.budget, { ...c, workerStatusFile: c.statusFile, workerUid: process.getuid() }); } catch (e) { log(`worker runner: the budget module could not be loaded (${e?.message ?? e}); no session starts`); }
+    if (budget && !['rules', 'rec', 'bandsNow', 'runningNow'].every((k) => budget[k])) { log('worker runner: the budget module gave no rules, rec, bandsNow and runningNow; no session starts'); budget = null; }
+  }
+  if (c.bobManifest !== undefined) {
+    try { bobManifest = JSON.parse(readManifest(c.bobManifest)); } catch (e) { log(`worker runner: the Bob file list could not be read (${e?.message ?? e}); no session starts`); }
   }
   // Each product's rules snapshot's folder, only the runner's to write (L926, #419 r3 M1): one anyone else could write
   // stops the runner here, before its lock; a missing one holds that product instead (keepSnapshots, below).
@@ -368,7 +403,7 @@ export async function main(argv, { readConfig = (f) => { const self = selfPath()
   const snaps = keepSnapshots(c, { fresh: guarded, log, recheck: (path) => folderProblem(dirname(path))?.reason ?? null });
   let P;
   try {
-    P = realRunnerPorts(c, ports, { stopped: () => stopping, log, productHeld: snaps.held });
+    P = portsOf(c, ports, { stopped: () => stopping, log, productHeld: snaps.held, budget, bobManifest });
     // A memory that can't be read is the loop's to refuse; one read is checked for carried-over sessions first.
     let m = null; try { m = memory(c.memoryFile, { uid: process.getuid() }); } catch { m = null; }
     const why = m ? carriedOverProblem(c, m, { groupGone: P.groupGone }) : null;
@@ -380,6 +415,20 @@ export async function main(argv, { readConfig = (f) => { const self = selfPath()
     snaps.stop();
     try { l.release(held.nonce); } catch { /* gone */ }
   }
+}
+
+/** M11's budget module at `file`, called with the runner's config (budget.mjs `budget`). */
+export async function importBudget(file, config) { return (await import(pathToFileURL(file).href)).budget(config); }
+
+const MAX_MANIFEST_BYTES = 4 * 1024 * 1024;
+/** A plain file of root's that no one else writes, read whole without following a link. → its text, or throws. */
+export function readRootFile(p, { uid = 0 } = {}) {
+  const fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile() || st.uid !== uid || st.mode & 0o022 || st.size > MAX_MANIFEST_BYTES) throw new Error(`${p} is not root's own plain file`);
+    return readFileSync(fd, 'utf8');
+  } finally { closeSync(fd); }
 }
 
 function selfPath() { try { return realpathSync.native(fileURLToPath(import.meta.url)); } catch { return undefined; } }
