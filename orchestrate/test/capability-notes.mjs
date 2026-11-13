@@ -25,7 +25,7 @@
 // Code lines are not read, only comments: a version in code (a minimum, an example in an error message) is not a
 // note. Over-listing is cheap: a block that is no note gets the tag of the version it was written against, or is
 // reworded.
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parsePolicy } from '../modules/M10-rules/policy.mjs';
@@ -139,7 +139,8 @@ export function scan({ root = ROOT, now = Date.now(), tools = TOOLS } = {}) {
   return { problems, open };
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+// Resolved first, so a start through a link still runs (#261).
+if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
   const { problems, open } = scan();
   for (const o of open) console.log(`open  ${o.file}:${o.line}  ${o.tool} ${o.version}, until ${o.until} (${o.row})`);
   for (const p of problems) console.log(`FAIL  ${p.file}:${p.line}  ${p.why}`);
