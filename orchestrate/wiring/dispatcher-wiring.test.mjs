@@ -19,7 +19,7 @@ import { openRecord } from '../modules/M9-record/writer.mjs';
 import { FIRST, ENTRY, SAMPLE } from '../modules/M10-rules/first-cutover.test-helper.mjs';
 import { ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
 import { LAST_PASS_FACT, STEPS, STEP_ERROR_FACT, runTick } from '../modules/M11-dispatcher/tick.mjs';
-import { wire, notWiredText, refusing, checkConfig, PORT_GROUPS, TICK_PORTS } from './dispatcher-wiring.mjs';
+import { wire, notWiredText, refusing, checkConfig, CONFIG_KEYS, OPTIONAL_CONFIG_KEYS, PORT_GROUPS, TICK_PORTS } from './dispatcher-wiring.mjs';
 import { fakeAlert } from '../test/fake-alert.test-helper.mjs';
 import { CLEANUP_PORTS, NOT_WIRED_CLEANUP, NOT_WIRED_WORKER, cleanupProblem, workerPorts } from './worker-ports.mjs';
 import { NOT_WIRED_REVIEW, reviewPorts } from './review-ports.mjs';
@@ -186,6 +186,22 @@ test('A2: each review and worker path must be absolute, and present', () => {
     assert.throws(() => checkConfig(gone), { message: `config: ${k} must be an absolute path` }, `${k} left out`);
   }
   assert.equal(checkConfig(w.config), w.config, 'the whole config passes');
+});
+
+// L1041: hostLockStamp, the owner's copier's stamp, is the one optional key: absent, the config is as before; given, it
+// must be an absolute path and not host.lock's copy itself. Any other list (the robot's) still refuses it.
+test('L1041: checkConfig takes an optional absolute hostLockStamp, refuses a relative one or the copy itself, and only for the Dispatcher', () => {
+  const w = world();
+  assert.deepEqual(OPTIONAL_CONFIG_KEYS, ['hostLockStamp']);
+  assert.equal(CONFIG_KEYS.includes('hostLockStamp'), false, 'not required: setup without a copier still writes a whole config');
+  assert.equal(checkConfig(w.config).hostLockStamp, undefined, 'absent: the config passes as before');
+  const stamp = `${w.config.hostLockPath}.copied`;
+  assert.equal(checkConfig({ ...w.config, hostLockStamp: stamp }).hostLockStamp, stamp);
+  for (const bad of ['host.lock.copied', '', 7, null, ['/x']]) {
+    assert.throws(() => checkConfig({ ...w.config, hostLockStamp: bad }), { message: 'config: hostLockStamp must be an absolute path when given' }, JSON.stringify(bad));
+  }
+  assert.throws(() => checkConfig({ ...w.config, hostLockStamp: w.config.hostLockPath }), /hostLockStamp must be the copier's stamp, not host\.lock's copy itself/);
+  assert.throws(() => checkConfig({ ...w.config, hostLockStamp: stamp }, { keys: [...CONFIG_KEYS] }), /config: unknown key hostLockStamp/, 'another key list: not optional');
 });
 
 // L805 m1: a host.lock owner that can't be right stops the start before anything is made: no approvals folder, no Record.

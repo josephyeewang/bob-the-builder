@@ -25,7 +25,7 @@ import { WRITERS, fieldsAllowed } from './permissions.mjs';
 export const NOT_RECORD_RECEIVERS = Object.freeze([
   { receiver: 'process.stdout', files: null, reason: "standard output, Node's own stream in every file" },
   { receiver: 'process.stderr', files: null, reason: "standard error, Node's own stream in every file" },
-  { receiver: 'io', files: ['setup/users-folders.mjs', 'setup/daemons.mjs', 'setup/install.mjs', 'setup/dispatcher-setup.mjs', 'setup/bob-manifest.mjs'], reason: "the setup's file io, which writes plain files" },
+  { receiver: 'io', files: ['setup/users-folders.mjs', 'setup/daemons.mjs', 'setup/install.mjs', 'setup/dispatcher-setup.mjs', 'setup/bob-manifest.mjs', 'setup/managed-settings.mjs'], reason: "the setup's file io, which writes plain files" },
 ]);
 const notRecord = (file, receiver) => NOT_RECORD_RECEIVERS.some((x) => x.receiver === receiver && (!x.files || x.files.includes(file)));
 
