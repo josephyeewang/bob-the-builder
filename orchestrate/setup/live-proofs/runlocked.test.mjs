@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { tempDir } from '../../shared/test-tmp.mjs';
-import { CURL_UNREACHED, LEFTOVER_INSTALL, LEFTOVER_WAIT_MS, SLOW_INSTALL, STEPS, TEST_REPO, blockedBy, guardProblem, cleanupProof, hooksSet, main, proveRunLocked, readStream, realWiring, recordGroups, report, variant, walledInstall } from './runlocked.mjs';
+import { CURL_UNREACHED, LEFTOVER_INSTALL, LEFTOVER_WAIT_MS, SLOW_INSTALL, STEPS, TEST_REPO, blockedBy, guardProblem, cleanupProof, hooksSet, main, proofInputs, proveRunLocked, readStream, realWiring, recordGroups, report, variant, walledInstall } from './runlocked.mjs';
 import { JOBS_DIR, LOCKED_SAVE_MS, quoted } from '../../wiring/runner-locked.mjs';
 import { CLONE_CONFIG_TEMPLATE } from '../../modules/M4-workshop/git/save-work.mjs';
 
@@ -381,4 +381,30 @@ test('#463 harness r2 m4: the real cleanup removes the copy, the outbox and ever
   assert.deepEqual(readdirSync(dir).sort(), ['other.json', `${id}.txt`, 'proof-x-10.json'], 'planted: the baseline left, or another session\'s file taken');
   assert.equal(existsSync(copy), false); assert.equal(existsSync(outbox), false);
   assert.match(logged.join(' '), /left running, not killed .*4321/);
+});
+
+test('L1092: realWiring hands launch checks 12 and 13 their inputs, so the launch has their ports; without them it has neither', () => {
+  const c = { ...cfg(), home: '/nonexistent-proof-home', copiesRoot: '/nonexistent-proof/copies', outboxRoot: '/nonexistent-proof/outboxes', workerRunner: {}, path: '/usr/bin:/bin' };
+  c.products.trial.render.paths = { deny: {}, bobFolder: '/nonexistent-proof/bob' };
+  const budget = { rules: {}, rec: {}, bandsNow: () => ({}), runningNow: () => [] };
+  const x = { product: 'trial', kind: 'editing', sessionId: 'proof-rl-1213-1', card: 'proof-rl-1213-c' };
+  const rec = () => ({ answers: {}, settingsText: null, runs: [] });
+  const wired = realWiring('/nonexistent-proof/runs', () => {}, { budget, bobManifest: { 'a.md': 'x' } })(c, rec());
+  const k = wired.checksFor(x);
+  assert.equal(typeof k[12], 'function', 'check 12 has its port');
+  assert.equal(typeof k[13], 'function', 'check 13 has its port');
+  const bare = realWiring('/nonexistent-proof/runs', () => {})(c, rec()).checksFor(x);
+  assert.equal(bare[12], undefined); assert.equal(bare[13], undefined);
+});
+
+test('L1092: proofInputs loads checks 12 and 13 by the runner\'s own loader; files not root\'s alone, a throw or no answer stop the proof', async () => {
+  const c = { installRoot: '/i' };
+  const ok = await proofInputs(c, async (cc, { log }) => { assert.equal(cc, c); log('worker runner: the Bob file list could not be read (x); no session starts'); return { budget: { b: 1 }, bobManifest: null }; });
+  assert.deepEqual(ok, { budget: { b: 1 }, bobManifest: null, said: ['worker runner: the Bob file list could not be read (x); no session starts'] });
+  assert.deepEqual(await proofInputs(c, async () => ({ problem: 'its budget or Bob file list is not root\'s alone in the installed copy: b' })),
+    { problem: 'the worker runner would not start: its budget or Bob file list is not root\'s alone in the installed copy: b' });
+  assert.match((await proofInputs(c, async () => { throw new Error('boom'); })).problem, /^the worker runner would not start: boom$/);
+  assert.match((await proofInputs(c, async () => undefined)).problem, /gave no answer/);
+  // The real loader, with neither in the config: both null, nothing said.
+  assert.deepEqual(await proofInputs(c), { budget: null, bobManifest: null, said: [] });
 });

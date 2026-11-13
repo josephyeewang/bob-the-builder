@@ -37,7 +37,7 @@ import { fileURLToPath } from 'node:url';
 import { execFileSync, spawn as childSpawn, spawnSync } from 'node:child_process';
 import { readJobConfig } from '../../shared/job-config.mjs';
 import { makeLock } from '../../modules/M9-record/lock.mjs';
-import { checkRunnerConfig, lockedOf, lockedWiring } from '../../wiring/runner-main.mjs';
+import { checkRunnerConfig, launchInputs, lockedOf, lockedWiring } from '../../wiring/runner-main.mjs';
 import { JOBS_DIR, lockedRunner, LOCKED_SAVE_MS, quoted } from '../../wiring/runner-locked.mjs';
 import { startPort, removeAll, chmodTree, saveSettingsName } from '../../wiring/runner-ports.mjs';
 import { loadMemory, processGroupPorts } from '../../wiring/runner-loop.mjs';
@@ -102,6 +102,8 @@ export const SLOW_INSTALL = 'sleep 1213';
 export const CURL_UNREACHED = Object.freeze([6, 7, 28, 35, 56]);
 /** A launch refused for a reason that is not runLocked's: the names check (launch check 0), or checks 12 and 13. */
 // → 'launch check 0' | 'launch check 12' | 'launch check 13', or null for any other reason (L989: the line names the check).
+// The check-0 prefixes are a copy of the names check's own wording until #531 lands (R-0b-177, L1108); then this uses
+// isNamesCheckRefusal from modules/M4-workshop/launcher/settings-names.mjs instead.
 export const blockedBy = (reason) => {
   const r = String(reason ?? '');
   if (/^(setting names not confirmed|the role file given to the names check)/.test(r)) return 'launch check 0';
@@ -347,11 +349,13 @@ export const recordGroups = (base, rec) => (typeof base !== 'function' ? base : 
   if (typeof o.onGroup === 'function') o.onGroup(g);
 } }));
 
-/** The runner's own builders, as realRunnerPorts builds them, plus this proof's two inputs (see the top). */
-export function realWiring(dir, log) {
+/** The runner's own builders, as realRunnerPorts builds them, plus this proof's two inputs (see the top). `budget` and
+ * `bobManifest` are launch checks 12 and 13's inputs, loaded by the runner's own launchInputs (L1092): a null one leaves
+ * its check without a port, as in the runner, and the steps it stops read NOT RUN (blockedBy). */
+export function realWiring(dir, log, { budget = null, bobManifest = null } = {}) {
   return (cfg, rec) => {
     const runLocked = recordGroups(lockedOf(cfg, { make: (o) => lockedRunner({ ...o, spawn: recordingSpawn(rec, dir) }) }), rec);
-    const locked = lockedWiring(cfg, { runLocked, log });
+    const locked = lockedWiring(cfg, { runLocked, log, budget, bobManifest });
     const inner = locked.startDeps.checksFor;
     const checksFor = (x) => {
       const k = inner(x);
@@ -364,7 +368,7 @@ export function realWiring(dir, log) {
     };
     const readCard = (card) => ({ ok: true, doc: { state: 'claimed', claim: { session_id: rec.sessionId }, product: rec.product, tier: 2, id: card } });
     const start = startPort(cfg, { ...locked.startDeps, checksFor, readCard, promptFor: () => PROOF_PROMPT });
-    return { start: (req) => { rec.sessionId = req.sessionId; rec.product = req.product; return start(req); }, saveWork: locked.saveWork };
+    return { start: (req) => { rec.sessionId = req.sessionId; rec.product = req.product; return start(req); }, saveWork: locked.saveWork, checksFor };
   };
 }
 
@@ -388,16 +392,30 @@ export function cleanupProof({ copy, outbox, settingsFile, saveSettingsFile, set
   for (const f of new Set([settingsFile, saveSettingsFile, ...own])) if (f) { try { rmSync(f, { force: true }); } catch (e) { log(`the proof's settings file ${f} can't be removed (${e?.code ?? e?.message})`); } }
 }
 
-export async function main(argv, { print = (t) => process.stdout.write(t), uid = process.getuid?.(), now = () => Date.now(), platform = process.platform } = {}) {
+/** Launch checks 12 and 13's inputs for the proof, by the runner's own launchInputs (L1092). Files not root's alone, or a
+ * loader that throws → { problem } (no step runs). Otherwise → { budget, bobManifest, said }: a null one (not in the
+ * config, or not loadable, which `said` tells) leaves its check without a port, so the steps it stops read NOT RUN. */
+export async function proofInputs(c, inputsOf = launchInputs) {
+  const said = [];
+  let r; try { r = await inputsOf(c, { log: (t) => said.push(t) }); } catch (e) { return { problem: `the worker runner would not start: ${e?.message ?? e}` }; }
+  if (!r || r.problem) return { problem: `the worker runner would not start: ${r?.problem ?? 'its launch checks 12 and 13 inputs gave no answer'}` };
+  return { budget: r.budget ?? null, bobManifest: r.bobManifest ?? null, said };
+}
+
+export async function main(argv, { print = (t) => process.stdout.write(t), uid = process.getuid?.(), now = () => Date.now(), platform = process.platform, inputsOf = launchInputs } = {}) {
   const fails = (why) => { print(report(STEPS.map(([n]) => notRun(n, why))).text); return 1; };
   // macOS only (L1005): ps -g, pgrep and perl's setsid are read as the Mini's; anywhere else, a named skip, never a run.
   if (platform !== 'darwin') return fails(`SKIP: this proof runs on macOS only (the Mini), not on ${platform}`);
-  let c; try { c = checkRunnerConfig(readJobConfig(arg(argv, '--config'), { code: [], self: selfPath() })); } catch (e) { return fails(`the worker runner's config can't be read (${e?.message ?? e})`); }
+  let c; try { c = checkRunnerConfig(readJobConfig(arg(argv, '--config'), { code: [], optionalCode: ['budget'], self: selfPath() })); } catch (e) { return fails(`the worker runner's config can't be read (${e?.message ?? e})`); }
   const product = arg(argv, '--product');
   let ownDirUid; try { const st = lstatSync(c.ownDir); ownDirUid = st.isDirectory() && !st.isSymbolicLink() ? st.uid : null; } catch { ownDirUid = null; }
   let claudeVersion = null; try { claudeVersion = /^(\d+\.\d+\.\d+)/.exec(execFileSync(c.claudeBin, ['--version'], { encoding: 'utf8', timeout: 30_000 }).trim())?.[1] ?? null; } catch { /* not readable */ }
   const bad = guardProblem({ c, product, uid, ownDirUid, claudeVersion });
   if (bad) return fails(bad);
+  // Launch checks 12 and 13's inputs, loaded as the runner loads them (L1092): files not root's alone stop the proof, as
+  // they stop the runner; one that can't be loaded is said, and its check then refuses the launch (NOT RUN, blockedBy).
+  const inputs = await proofInputs(c, inputsOf);
+  if (inputs.problem) return fails(inputs.problem);
   // A session the runner started may outlive it; the proof's starts check no other product's walls against it (live: []).
   let m; try { m = loadMemory(c.memoryFile, { uid }); } catch (e) { return fails(`the worker runner's memory can't be read (${e?.message ?? e})`); }
   const live = (Array.isArray(m?.sessions) ? m.sessions : []).filter((s) => s?.alive === true || (s?.alive !== false && s?.ended !== true));
@@ -406,10 +424,11 @@ export async function main(argv, { print = (t) => process.stdout.write(t), uid =
   try { held = lock.acquire(); } catch (e) { return fails(/busy/.test(e?.message ?? '') ? 'the worker runner is running. Stop it first, then run this again' : `the worker runner's lock can't be taken (${e?.message ?? e})`); }
   const dir = mkdtempSync(join(tmpdir(), 'runlocked-proof-'));
   const log = (t) => appendFileSync(join(dir, 'runner.log'), `${new Date().toISOString()} ${t}\n`);
+  for (const t of inputs.said) { log(t); print(`${t}\n`); }
   let n = 0; const tag = now().toString(36);
   const { stopGroup } = processGroupPorts();
   const io = {
-    wiring: realWiring(dir, log), stopGroup,
+    wiring: realWiring(dir, log, { budget: inputs.budget, bobManifest: inputs.bobManifest }), stopGroup,
     // ps answers exit 1 with nothing for an empty group, and also for a bad argument, which it says on stderr: only the first is "gone".
     groupListed: (pid) => {
       if (!Number.isInteger(pid) || pid <= 1) return null;
