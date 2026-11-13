@@ -1507,6 +1507,15 @@ test('L871 PLANT check-dispatcher: the job\'s dispatcher.json without a root, wi
   const O = w.mac.at(`${BASE}/outboxes`); const C = w.mac.at(`${BASE}/worker-copies`);
   const rowOf = (key) => checkDispatcherKeys(w.mac, w.cfg).find((r) => r.what.endsWith(`(the Dispatcher's ${key})`));
   for (const key of ['outboxRoot', 'copiesRoot']) assert.deepEqual(rowOf(key), { ok: true, what: `${BASE}/install/orchestrate/dispatcher.json names ${key === 'outboxRoot' ? 'the top outbox root' : 'the workers\' top copies root'} ${key === 'outboxRoot' ? O : C} as ${key} (the Dispatcher's ${key})` });
+  // The job's hostLockPath is checked too (L1029 E review M2): the host.lock rows judge the setup config's, so a dispatcher.json
+  // naming another (hostLockPath moved to the copier's copy, dispatcher-config not run again) FAILs by name; load refuses.
+  const H = w.mac.at(w.cfg.hostLockPath); const hRow = () => checkDispatcherKeys(w.mac, w.cfg).find((r) => r.what.endsWith('(the host.lock this check reads)'));
+  assert.deepEqual(hRow(), { ok: true, what: `${BASE}/install/orchestrate/dispatcher.json names the owner's host.lock ${H} as hostLockPath (the host.lock this check reads)` });
+  put((c) => { c.hostLockPath = `${H}.old`; });
+  assert.equal(hRow().why, `it names ${JSON.stringify(`${H}.old`)}, not ${H}; run dispatcher-config`);
+  { const cd = w.run(['check-dispatcher']); assert.equal(cd.code, 1, cd.text); assert.ok(cd.text.includes(`not ${H}; run dispatcher-config`), cd.text);
+    const ld = w.run(['daemons', 'load', '--only', 'dispatcher']); assert.equal(ld.code, 1, ld.text); assert.match(ld.text, /dispatcher\.json is not the config this setup writes now: hostLockPath is /, ld.text); }
+  put(() => {}); assert.equal(hRow().ok, true, 'restored');
   const cases = [
     ['outboxRoot', (c) => { delete c.outboxRoot; }, 'it has no outboxRoot, so an existing dispatcher.json without it won\'t start the Dispatcher until dispatcher-config is run again (an older setup wrote it)'],
     ['copiesRoot', (c) => { delete c.copiesRoot; }, 'it has no copiesRoot, so an existing dispatcher.json without it won\'t start the Dispatcher until dispatcher-config is run again (an older setup wrote it)'],
@@ -2131,6 +2140,32 @@ test('add-to-install: the next real update carries claude-code and hooks across,
   assert.equal(readFileSync(join(w.root, 'a.txt'), 'utf8'), 'two\n');
   assert.equal(readFileSync(pinnedBinary(w.root, PIN), 'utf8'), PROGRAM);
   assert.deepEqual(readdirSync(join(w.root, 'hooks')), ['guard.mjs']);
+});
+
+// L1031: managed-settings through setup.mjs's own main, after add-to-install: the way out is said first, a dry run changes
+// nothing, the real run places the copy and the file, and its after-check passes. The guard trial is the in-process guard with
+// this test's uid as root (the `managed` port); managed-settings.test.mjs has the rest.
+test('L1031: managed-settings after add-to-install, through main: dry run, real run, the way out said, again nothing to do', async () => {
+  const MW = '/Library/Application Support/ClaudeCode/managed-settings.json';
+  const rules = { production: { env_files: ['/srv/app/prod-settings.conf'], programs: ['vercel'], hosts: ['prod.example.com'] }, secrets: { paths: [] } };
+  const w = await readyToAdd({ machineWide: MW, rules });
+  assert.equal(w.run(ADD).code, 0);
+  // The copy's hooks folder holds the stand-in origin's scripts: the real guard and its two modules go in beside them, root's.
+  const hooksDir = join(w.root, 'hooks'); const src = join(dirname(fileURLToPath(import.meta.url)), '../modules/M4-workshop/hooks');
+  for (const n of ['production-write-guard.mjs', 'lib.mjs', 'snapshot.mjs']) { writeFileSync(join(hooksDir, n), readFileSync(join(src, n))); chmodSync(join(hooksDir, n), 0o644); }
+  mkdirSync(w.mac.at('/Library/Application Support'), { recursive: true });
+  const { decide } = await import('../modules/M4-workshop/hooks/production-write-guard.mjs');
+  const managed = { nodeBin: join(w.ext, 'node'), guard: ({ copy, input }) => { const r = decide(input, { machineWide: true, snapshot: copy, ownerUid: w.mac.rootUid }); return { code: r.block ? 2 : 0, stderr: r.block ? `[orchestrate] blocked: ${r.reason}\n` : '' }; } };
+  const way = `sudo rm "${MW}"`;
+  const dry = w.run(['managed-settings', '--dry-run'], { managed });
+  assert.equal(dry.code, 0, dry.text); assert.ok(dry.text.includes(way), dry.text); assert.match(dry.text, /would run: read back .*\.next as the guard will.*would run: run the guard in .*would run: rename .*managed-settings\.json\.writing →/s);
+  assert.equal(existsSync(w.mac.at(MW)), false, 'a dry run places nothing');
+  const r = w.run(['managed-settings'], { managed });
+  assert.equal(r.code, 0, r.text); assert.ok(r.text.includes(way)); assert.match(r.text, /done: all \d+ items PASS/);
+  assert.match(readFileSync(w.mac.at(MW), 'utf8'), /machine-wide-guard\/production-write-guard\.mjs --machine-wide --snapshot \S+machine-wide-guard\/rules\.json \|\| \{ \[ \$\? -eq 2 \]/);
+  assert.match(w.run(['managed-settings'], { managed }).text, /nothing to do: already installed/);
+  // check knows the copy: it is no stranger in the base.
+  assert.equal(check(w.mac, w.cfg, { alsoKnown: rootMadeEntries(w.cfg) }).filter((x) => !x.ok && /machine-wide-guard/.test(`${x.what} ${x.why}`)).length, 0);
 });
 
 // ───────────────────────────── L1026: the watch job's start gate asks only what the watch job uses ─────────────────────────────
