@@ -9,6 +9,7 @@ import { tempDir } from '../shared/test-tmp.mjs';
 import { pushPass, RETRY_MS, PUSH_WAIT_CAUSE, PUSH_REFUSED_CAUSE, PUSH_TROUBLE_CAUSE, PR_WAIT_CAUSE, PR_TROUBLE_CAUSE } from './push-pass.mjs';
 import { PUSH_FACT, bundleName } from '../modules/M4-workshop/git/push.mjs';
 import { HOLD_FACT } from '../modules/M11-dispatcher/pass.mjs';
+import { fakeAlert } from '../test/fake-alert.test-helper.mjs';
 
 const P = 'app';
 const T0 = Date.parse('2026-11-13T12:00:00.000Z');
@@ -44,7 +45,7 @@ function world({ sessions = 1 } = {}) {
     return createHash('sha256').update(bytes).digest('hex');
   };
   let now = T0;
-  const run = (o = {}) => pushPass({ rec, product: P, outboxRoot, pushCard, alert: () => true, now: () => now, hold, drop, ...o });
+  const run = (o = {}) => pushPass({ rec, product: P, outboxRoot, pushCard, alert: fakeAlert(), now: () => now, hold, drop, ...o });
   return { root, outboxRoot, rec, put, made, holds, drops, calls, bundle, run, setAnswer: (f) => { answer = f; }, setNow: (t) => { now = t; }, docs };
 }
 
