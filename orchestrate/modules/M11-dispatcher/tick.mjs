@@ -276,7 +276,7 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
   });
   await run('undo', () => undoStep({ rec, rules, now, filesOf: p.filesOf, alert }));
   await run('undo-starts', async () => {
-    const r = await undoStarts({ rec, rules, now, bands: stops?.bands ?? HELD_BANDS, running: stops?.running ?? p.sessions(), launch: p.launch, stopGroup: p.stopGroup, outboxRoot: p.outboxRoot, filesOf: p.filesOf, alert, failureLog: failed('undo-starts'), ...portDeadlines });
+    const r = await undoStarts({ rec, rules, now, bands: stops?.bands ?? HELD_BANDS, running: stops?.running ?? p.sessions(), launch: p.launch, stopGroup: p.stopGroup, outboxRoot: p.outboxRoot, filesOf: p.filesOf, alert, failureLog: failed('undo-starts'), hostLock: p.hostLock, ...portDeadlines });
     missing.push(...r.missing);
     if (stops) stops.running = r.running;
     return { started: r.started, refused: r.refused, notes: r.notes };

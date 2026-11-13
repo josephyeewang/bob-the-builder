@@ -5,7 +5,7 @@ import { mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync, readdirSyn
 import { takePassLock } from './pass-lock.mjs';
 import { RESTART_FACT, HANDOFF_NAME } from './lead-restart.mjs';
 import { leadLaunchHead } from '../../shared/record.mjs';
-import { RULES_MISSING_FACT, STOP_FACT, PAUSE_FACT, UNDO_HELD_FACT, HOLD_FACT } from './pass.mjs';
+import { RULES_MISSING_FACT, STOP_FACT, PAUSE_FACT, UNDO_HELD_FACT, HOLD_FACT, HOST_COPY_FAIL } from './pass.mjs';
 import { factFamilyOf } from '../M9-record/permissions.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { installedLayout } from '../../shared/job-config.test-helper.mjs';
@@ -1100,6 +1100,22 @@ test('L38: with the main pass failing (its session list unreadable), a cancel st
   assert.deepEqual(stops, ['S-X']);
   assert.deepEqual(r.steps['undo-starts'].result.started, ['U-1']);
   assert.ok(w.calls.launched.includes('U-1'));
+});
+
+// L1045: the tick's undo-starts step runs before the pass, so it is handed the host.lock port too: a copy that can't be
+// trusted starts no undo card in either step.
+test('L1045: under a host.lock copy that can\'t be trusted, the tick starts no undo card, in its own step or the pass', async () => {
+  const w = world([account(), usage(), ...undoEntries('U-1')], { over: {
+    hostLock: () => { throw Object.assign(new Error('the host.lock copier\'s stamp is not the owner\'s'), { code: HOST_COPY_FAIL }); } } });
+  const r = await w.pass();
+  assert.equal(r.steps['undo-starts'].ok, true);
+  assert.deepEqual(r.steps['undo-starts'].result.started, []);
+  assert.ok(r.steps['undo-starts'].result.notes.some((n) => /no undo card starts: host\.lock's copy can't be trusted/.test(n)), JSON.stringify(r.steps['undo-starts'].result));
+  assert.deepEqual(w.calls.launched, []);
+  // Control: a good read, and the undo starts in its own step.
+  const g = world([account(), usage(), ...undoEntries('U-1')]);
+  const rg = await g.pass();
+  assert.deepEqual(rg.steps['undo-starts'].result.started, ['U-1']);
 });
 
 test('L38: the account-age rule missing is told even when every step that reads the bands fails', async () => {

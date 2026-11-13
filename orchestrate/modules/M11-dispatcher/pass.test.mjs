@@ -1068,35 +1068,62 @@ test('audit 0b-6 r3 MAT-1: a host.lock that cannot be read, or rules that cannot
   }
 });
 
-// L1041: under the owner's copier, a host.lock port that can't vouch for its copy throws with code HOST_COPY_FAIL
-// (stale, missing, future or not-the-owner's stamp, or a copy it can't read). Starts go off (undo cards still start, as
-// for every startsOff), the owner is told once a day on one cause, and the mark clears on the first good read.
-test('L1041: a HOST_COPY_FAIL from hostLock holds every start but undo cards and tells once; a good read clears it; a plain throw is as before', async () => {
+// L1041, L1045: under the owner's copier, a host.lock port that can't vouch for its copy throws with code HOST_COPY_FAIL
+// (stale, missing, future or not-the-owner's stamp, or a copy it can't read). Every start waits, undo cards too (a bad
+// copy means this Mac can't tell which Mac is home). The owner is told once a day on one cause, each waiting undo at once
+// by name, and the mark clears on the first good read.
+test('L1045: a HOST_COPY_FAIL from hostLock holds every start, undo cards too, tells once and names the undo; a good read clears it; a plain throw is as before', async () => {
   const stale = () => { throw Object.assign(new Error('the host.lock copier last ran well at 2026-01-01T00:00:00.000Z, 9 minutes ago (the limit is 5), so the copy of host.lock may be old: restart the owner\'s host.lock copier'), { code: HOST_COPY_FAIL }); };
-  const told = (w) => w.calls.alerts.filter((a) => /the Dispatcher holds every start but undo cards: .*may be old: restart the owner's host\.lock copier/.test(a));
+  const told = (w) => w.calls.alerts.filter((a) => /the Dispatcher holds every start, undo cards too: .*may be old: restart the owner's host\.lock copier/.test(a));
+  const undoTold = (w) => w.calls.alerts.filter((a) => /^your undo \(card U-1\) is waiting: host\.lock's copy can't be trusted, so which Mac is home is not known \(.*may be old/.test(a));
   const w = world([card('C-1'), ...undoEntries('U-1')]);
   const r = await w.pass(0, { hostLock: stale });
-  assert.deepEqual(r.started, ['U-1'], 'only the undo card starts');
-  assert.ok(!w.calls.launched.includes('C-1'));
-  assert.ok(r.notes.some((n) => /nothing but undo cards starts: host\.lock's copy can't be trusted \(the host\.lock copier last ran well/.test(n)), r.notes.join(' | '));
+  assert.deepEqual(r.started, [], 'nothing starts, the undo card included');
+  assert.deepEqual(w.calls.launched, []);
+  assert.ok(r.refused.some(([id, why]) => id === 'U-1' && /host\.lock's copy can't be trusted/.test(why)), JSON.stringify(r.refused));
+  assert.ok(r.notes.some((n) => /nothing starts, undo cards too: host\.lock's copy can't be trusted, so which Mac is home is not known \(the host\.lock copier last ran well/.test(n)), r.notes.join(' | '));
   assert.ok(r.notes.some((n) => /host\.lock unreadable: /.test(n)), 'still noted as before');
   assert.equal(told(w).length, 1, w.calls.alerts.join(' | '));
+  assert.equal(undoTold(w).length, 1, 'the waiting undo is told at once, by name');
   await w.pass(1, { hostLock: stale });
   assert.equal(told(w).length, 1, 'once a day on the one cause, however often it repeats');
-  assert.ok(!w.calls.launched.includes('C-1'));
-  // A good read: the mark clears and starts go on.
+  assert.equal(undoTold(w).length, 1, 'the undo, once per cause');
+  assert.deepEqual(w.calls.launched, []);
+  // A good read: the mark clears and both start, the undo first.
   const r3 = await w.pass(2);
-  assert.deepEqual(r3.started, ['C-1']);
+  assert.deepEqual(r3.started, ['U-1', 'C-1']);
   assert.equal(w.rec.read('fact', HOLD_FACT(HOST_COPY_CAUSE)).doc.told_at, null, 'cleared on the good read');
   // A later stop is told afresh, the same day.
+  w.setCard('C-1', { state: 'cancelled' });
   await w.pass(3, { hostLock: stale });
   assert.equal(told(w).length, 2, 'a return is told afresh');
   // A throw without the code (no copier: hostLockStamp not in the config) is as before: noted, starts go on, no alert.
-  const p = world([card('C-2')]);
+  const p = world([card('C-2'), ...undoEntries('U-2')]);
   const rp = await p.pass(0, { hostLock: () => { throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }); } });
-  assert.deepEqual(rp.started, ['C-2']);
+  assert.deepEqual(rp.started, ['U-2', 'C-2']);
   assert.equal(p.calls.alerts.length, 0, p.calls.alerts.join(' | '));
   assert.equal(p.rec.read('fact', HOLD_FACT(HOST_COPY_CAUSE)), null, 'nothing written without a copier');
+});
+
+test('L1045: the usage hold and every other startsOff still let an undo card through; only the host.lock copy hold stops it', async () => {
+  const w = world([card('C-1'), ...undoEntries('U-1')]);
+  const r = await w.pass(0, { startsOff: 'the signed-in account is not known', hostLock: () => { throw Object.assign(new Error('EACCES'), { code: 'EACCES' }); } });
+  assert.deepEqual(r.started, ['U-1']);
+});
+
+test('L1045: undoStarts, the tick\'s own undo step, reads host.lock and holds every undo card on HOST_COPY_FAIL, telling each at once', async () => {
+  const rec = recWith([['product', 'p1', { state: 'active' }], ...undoEntries('U-1')]);
+  const launched = [];
+  const alerts = [];
+  const ask = (hostLock) => undoStarts({ rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), now: T0, bands: { band: 'green', own_building: 'open', prodBlocked: false },
+    running: [], launch: async (x) => { launched.push(x.card.id); return { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/${x.product}/worker/${x.sessionId}`, pid: 4242, pidStart: 's4242', head: 'h'.repeat(40) }; }, filesOf: filesOfCommits, alert: (t) => alerts.push(t), hostLock });
+  const r = await ask(() => { throw Object.assign(new Error('the host.lock copier has never finished a run'), { code: HOST_COPY_FAIL }); });
+  assert.deepEqual([r.started, launched], [[], []]);
+  assert.ok(r.notes.some((n) => /no undo card starts: host\.lock's copy can't be trusted, so which Mac is home is not known \(the host\.lock copier has never finished a run\)/.test(n)), r.notes.join(' | '));
+  assert.equal(alerts.filter((a) => /^your undo \(card U-1\) is waiting: host\.lock's copy can't be trusted/.test(a)).length, 1, alerts.join(' | '));
+  // A plain throw (no copier) holds nothing, as before.
+  const r2 = await ask(() => { throw new Error('EACCES'); });
+  assert.deepEqual(r2.started, ['U-1']);
 });
 
 test('L1041: a hold alert that throws is noted, never fails the pass, and starts stay off', async () => {

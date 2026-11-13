@@ -141,6 +141,17 @@ export const HOLD_FACT = (cause) => `hold-${cause}`;
 // L1040, L1041): the copy is stale or can't be read, so starts are off and the owner is told, on this one cause.
 export const HOST_COPY_FAIL = 'HOST_LOCK_COPY';
 export const HOST_COPY_CAUSE = 'host-lock-copy';
+// L1045: under this hold undo cards wait too. A copy that can't be trusted means this Mac can't tell which Mac is home,
+// and two Macs running one undo is what the single-host rule stops. (Every other startsOff still lets undo cards through.)
+const hostCopyReason = (why) => `host.lock's copy can't be trusted, so which Mac is home is not known (${why})`;
+/** The host.lock port's answer as { text, copyFail }: copyFail is the reason when the port marked HOST_COPY_FAIL,
+ * text is undefined when the read threw. A throw without the mark (no copier) is "not known" and holds nothing. */
+function readHostLock(hostLock) {
+  try { return { text: hostLock(), copyFail: null, error: null }; } catch (e) {
+    const why = String(e?.message ?? e);
+    return { text: undefined, copyFail: e?.code === HOST_COPY_FAIL ? why : null, error: why };
+  }
+}
 // The shared still-waiting repeat, one definition (#164 audit c1).
 export const HOLD_REPEAT_MS = STILL_WAITING_MS;
 const SESSION_OUTBOX_CAUSE = (card) => `session-outbox-${card}`;
@@ -569,16 +580,14 @@ export async function dispatcherPass({ rec, rules, now, clock = () => now, accou
   // 2. host.lock (m5). An unreadable file is "not known" and changes nothing (audit 0b-6 r3 MAT-1), except under the
   // owner's copier (L1040, L1041): a copy that is stale or can't be read (HOST_COPY_FAIL) turns starts off and is told
   // once a day on one cause, whose mark clears once the copy is good again, so a later stop is told afresh.
-  let lockText;
-  try { lockText = hostLock(); } catch (e) {
-    lockText = undefined;
-    const why = String(e?.message ?? e);
-    failing(`host.lock unreadable: ${why}`);
-    if (e?.code === HOST_COPY_FAIL) {
-      startsOff ??= `host.lock's copy can't be trusted (${why})`;
-      try { holdAlert({ rec, cause: HOST_COPY_CAUSE, text: `the Dispatcher holds every start but undo cards: ${why}`, alert, now }); }
-      catch (t) { failing(`the host.lock copy hold could not be told (${t?.message ?? t})`); }
-    }
+  const lock = readHostLock(hostLock);
+  const lockText = lock.text;
+  const hostCopy = lock.copyFail;
+  if (lock.error !== null) failing(`host.lock unreadable: ${lock.error}`);
+  if (hostCopy !== null) {
+    startsOff ??= hostCopyReason(hostCopy);
+    try { holdAlert({ rec, cause: HOST_COPY_CAUSE, text: `the Dispatcher holds every start, undo cards too: ${hostCopy}`, alert, now }); }
+    catch (t) { failing(`the host.lock copy hold could not be told (${t?.message ?? t})`); }
   }
   // Without a copier there is never such a hold, so this only looks and writes nothing.
   const copyHold = HOLD_FACT(HOST_COPY_CAUSE);
@@ -685,10 +694,12 @@ export async function dispatcherPass({ rec, rules, now, clock = () => now, accou
 
   // 6. Starts. When starts are off (no account reading, a rules value missing), undo cards still go
   // through the gate (audit 0b-6 r3 MAT-5, L31): the gate itself refuses what it cannot check.
+  // The one exception is a host.lock copy that can't be trusted (L1045): then undo cards wait too, each told at once.
   if (factDoc(rec, OUTAGE_FACT)?.doc?.state === 'open') { out.notes.push('outage: nothing starts'); }
   else {
-    if (startsOff) out.notes.push(`nothing but undo cards starts: ${startsOff}`);
-    await starts({ rec, rules, now, b, running, launch, stopGroup, outboxRoot, out, alert, report, failureLog, onlyUndo: !!startsOff, missing, filesOf, portDeadlineMs, host });
+    if (hostCopy !== null) out.notes.push(`nothing starts, undo cards too: ${hostCopyReason(hostCopy)}`);
+    else if (startsOff) out.notes.push(`nothing but undo cards starts: ${startsOff}`);
+    await starts({ rec, rules, now, b, running, launch, stopGroup, outboxRoot, out, alert, report, failureLog, onlyUndo: !!startsOff, hostCopy, missing, filesOf, portDeadlineMs, host });
   }
   // The tick tells Joe once for all its steps (`tellMissing` false); run alone, the pass tells him itself.
   out.missing = missing;
@@ -721,12 +732,16 @@ export async function dispatcherPass({ rec, rules, now, clock = () => now, accou
 
 // Undo cards' starts, alone, before every other step (L38): the tick's own step, so a failure in the
 // main pass cannot keep an undo from starting. The gate still checks each one (L40).
-export async function undoStarts({ rec, rules, now, bands = HELD_BANDS, running = [], launch, stopGroup, outboxRoot, filesOf, alert, failureLog = () => {}, portDeadlineMs = PORT_DEADLINE_MS, host = hostname() }) {
+// Under the owner's copier, a copy that can't be trusted holds them too (L1045): this step runs before the pass, so it
+// reads host.lock itself. Only the HOST_COPY_FAIL mark holds; a plain throw (no copier) changes nothing, as before.
+export async function undoStarts({ rec, rules, now, bands = HELD_BANDS, running = [], launch, stopGroup, outboxRoot, filesOf, alert, failureLog = () => {}, portDeadlineMs = PORT_DEADLINE_MS, host = hostname(), hostLock = () => null }) {
   const out = { started: [], refused: [], notes: [] };
   const missing = [];
   if (factDoc(rec, OUTAGE_FACT)?.doc?.state === 'open') { out.notes.push('outage: nothing starts'); return { ...out, missing, running }; }
   const live = [...running];
-  await starts({ rec, rules, now, b: bands, running: live, launch, stopGroup, outboxRoot, out, alert, report: refusalReport({ rec, alert, now, lines: out.notes, failureLog }), failureLog, onlyUndo: true, missing, filesOf, portDeadlineMs, host });
+  const hostCopy = readHostLock(hostLock).copyFail;
+  if (hostCopy !== null) out.notes.push(`no undo card starts: ${hostCopyReason(hostCopy)}`);
+  await starts({ rec, rules, now, b: bands, running: live, launch, stopGroup, outboxRoot, out, alert, report: refusalReport({ rec, alert, now, lines: out.notes, failureLog }), failureLog, onlyUndo: true, hostCopy, missing, filesOf, portDeadlineMs, host });
   return { ...out, missing, running: live };
 }
 
@@ -840,7 +855,7 @@ export const causeOf = (reason) => FIXED_CAUSES.find(([, re]) => re.test(reason)
 /** Card kinds the start loop never hands to a session. */
 export const NEVER_STARTED = Object.freeze(['lead_daily_card', 'research_copy']);
 
-async function starts({ rec, rules, now, b, running, launch, stopGroup, outboxRoot, out, alert, report, failureLog, onlyUndo = false, missing = [], filesOf, portDeadlineMs = PORT_DEADLINE_MS, host = hostname() }) {
+async function starts({ rec, rules, now, b, running, launch, stopGroup, outboxRoot, out, alert, report, failureLog, onlyUndo = false, hostCopy = null, missing = [], filesOf, portDeadlineMs = PORT_DEADLINE_MS, host = hostname() }) {
   const amberish = b.band !== 'green' || b.own_building !== 'open';
   // Undo cards first, then (in amber) Tier 1 before Tier 2, then the longest in ready, by the Record's clock.
   // The Record's own ready rule (rec.ready: unclaimed, dependencies merged, a go where one is needed; L72).
@@ -896,6 +911,8 @@ async function starts({ rec, rules, now, b, running, launch, stopGroup, outboxRo
         tellThen(alert, `your undo (card ${id}) is waiting: ${reason}`, { fact: UNDO_HELD_FACT(id), fields: { reason, told_cause: cause, told_at: iso(now) }, kind: 'undo_held' });
       }
     };
+    // L1045: a copy of host.lock that can't be trusted holds every start, undo cards too; the undo's own alert names it at once.
+    if (hostCopy !== null) { await refuse(hostCopyReason(hostCopy)); continue; }
     let may;
     // M10's start_session reads product, role, tier (1 or 2), editing and, for Tier 1, the usage reading's time
     // (L81 sweep: asked with the card alone, the real engine refused every start). The tier is the one the start
