@@ -183,7 +183,7 @@ test('L1042 m2 (A16): each product\'s rules folder is orchestrate\'s 0700, read 
     assert.equal(row.mode, 0o700, `${prod}: mode ${row.mode.toString(8)}`);
     assert.deepEqual(row.acl, [RULES_READ_ACL('user:review'), RULES_READ_ACL(`user:${c2.owner}`)], prod);
     // The runners' own check (M11 budget.mjs) takes a folder made at that mode, so cutover's first read is not refused.
-    const d = join(tempDir('setup-rules-dir-'), 'rules'); mkdirSync(d); chmodSync(d, row.mode);
+    const d = join(tempDir('orch-setup-rules-'), 'rules'); mkdirSync(d); chmodSync(d, row.mode);
     assert.equal(rulesSnapshotFolderProblem(d, process.getuid()), null, prod);
   }
 });
