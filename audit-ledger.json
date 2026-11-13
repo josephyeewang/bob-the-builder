@@ -91,6 +91,70 @@
       "rounds": 1,
       "evidence": "evolutions/009-standalone-skills/release-transport-audit.md",
       "zero_finding_rerun": "Independently exercised the complete publisher with the installed CLI and loopback server, including interrupted upload/retry, exact byte readback and pointer ordering."
+    },
+    {
+      "audit": "Field-learning record validation and AUDIT/EVOLVE integration",
+      "ran": "2026-11-13",
+      "tier": 1,
+      "class_of_work": "ops-ci",
+      "material_found": 0,
+      "material_remaining": 0,
+      "minor": 0,
+      "cosmetic": 1,
+      "remaining_cosmetic": 0,
+      "auditor_context": "fresh subagent; authored no implementation",
+      "rounds": 1,
+      "evidence": "evolutions/010-field-learning/fresh-audit.md",
+      "zero_finding_rerun": "Independent actual-CLI adversarial probes against the ledger wrapper in addition to the behavioral suite; legacy compatibility, Material blocking, unknown adoption and malformed inputs.",
+      "cosmetic_note": "Release entry moved beneath changelog section 1 after review."
+    },
+    {
+      "audit": "Evidence meaning: source availability and actual task-result validation",
+      "ran": "2026-11-13",
+      "tier": 1,
+      "class_of_work": "calculations",
+      "material_found": 1,
+      "material_remaining": 0,
+      "minor": 1,
+      "cosmetic": 0,
+      "remaining_minor": 0,
+      "auditor_context": "fresh subagent; authored no implementation",
+      "rounds": 2,
+      "evidence": "evolutions/011-evidence-meaning/fresh-audit.md",
+      "at_decision": "D-039"
     }
-  ]
+  ],
+  "learning": {
+    "version": 1,
+    "incidents": [],
+    "changes": [
+      {
+        "id": "field-learning",
+        "material_remaining": 0,
+        "rounds": [
+          {
+            "id": "independent-review",
+            "kind": "initial",
+            "material_found": 0
+          }
+        ]
+      },
+      {
+        "id": "evidence-meaning",
+        "material_remaining": 0,
+        "rounds": [
+          {
+            "id": "initial-independent-review",
+            "kind": "initial",
+            "material_found": 1
+          },
+          {
+            "id": "repair-independent-review",
+            "kind": "follow-up",
+            "material_found": 0
+          }
+        ]
+      }
+    ]
+  }
 }

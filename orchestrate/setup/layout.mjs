@@ -59,7 +59,7 @@ export const isRepoName = (r) => typeof r === 'string' && /^[A-Za-z0-9_.-]{1,100
 /** The checked config, or a thrown Error naming the first problem. */
 export function parseConfig(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('config: expected an object with base, owner and products');
-  const { base, owner, products = [], proposalsParent, watch, hostLockPath } = raw;
+  const { base, owner, products = [], proposalsParent, watch, hostLockPath, hostLockSource, hostLockCopierNode } = raw;
   if (typeof base !== 'string' || !BASE.test(base) || base.split('/').some((s) => s === '..' || s === '.') || base.includes('//') || base.length > 200) {
     throw new Error('config: base must be a full path of letters, digits and . _ - / only, with no .. and no spaces');
   }
@@ -85,6 +85,25 @@ export function parseConfig(raw) {
     || hostLockPath.endsWith('/') || /[\u0000-\u001f\u007f]/.test(hostLockPath) || hostLockPath.length > 300)) {
     throw new Error(`config: hostLockPath must be the full path of a file in /Users/${owner}/, with no .. and no control characters`);
   }
+  // The synced host.lock, when the owner's copier copies it to hostLockPath (L757 fallback, L1029 E; host-lock-copy.mjs): the
+  // same rules as hostLockPath, and only with it, since the copy is what the Dispatcher reads.
+  if (hostLockSource !== undefined) {
+    if (typeof hostLockSource !== 'string' || !hostLockSource.startsWith(`/Users/${owner}/`) || posix.normalize(hostLockSource) !== hostLockSource
+      || hostLockSource.endsWith('/') || /[\u0000-\u001f\u007f]/.test(hostLockSource) || hostLockSource.length > 300) {
+      throw new Error(`config: hostLockSource must be the full path of a file in /Users/${owner}/, with no .. and no control characters`);
+    }
+    if (hostLockPath === undefined) throw new Error('config: hostLockSource needs hostLockPath, the copy the Dispatcher reads');
+    if (hostLockSource.toLowerCase() === hostLockPath.toLowerCase()) throw new Error('config: hostLockSource and hostLockPath must be two different files (the copy is not the synced file)');
+  }
+  // The copier's own node (L1041 fallback, README Part 6 step 5): when macOS refuses the owner's job the synced folder, a
+  // node only the copier runs gets Full Disk Access, never the installed copy's, which every orchestrate job runs.
+  if (hostLockCopierNode !== undefined) {
+    if (hostLockSource === undefined) throw new Error('config: hostLockCopierNode needs hostLockSource (it runs only the host.lock copier)');
+    if (typeof hostLockCopierNode !== 'string' || !hostLockCopierNode.startsWith(`/Users/${owner}/`) || posix.normalize(hostLockCopierNode) !== hostLockCopierNode
+      || hostLockCopierNode.endsWith('/') || /[\u0000-\u001f\u007f]/.test(hostLockCopierNode) || hostLockCopierNode.length > 300) {
+      throw new Error(`config: hostLockCopierNode must be the full path of a node program in /Users/${owner}/ (the copier's own, never the installed copy's), with no .. and no control characters`);
+    }
+  }
   // The watch-only week: `repo` is the repository the token is proven against (prove-token reads it from here, never from the command
   // line) and the one watch-rules prints; `rulesSha256` is the hash of the rules file root put in place (watch-rules), absent until then.
   if (watch !== undefined) {
@@ -101,7 +120,7 @@ export function parseConfig(raw) {
     }
     if (watch.rulesSha256 !== undefined && (typeof watch.rulesSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(watch.rulesSha256))) throw new Error('config: watch.rulesSha256 must be 64 hex characters');
   }
-  return { base: b, owner, products: [...products], ...(hostLockPath !== undefined ? { hostLockPath } : {}), ...(proposalsParent !== undefined ? { proposalsParent } : {}), ...(watch !== undefined ? { watch: { repo: watch.repo, ...(watch.rulesSha256 !== undefined ? { rulesSha256: watch.rulesSha256 } : {}), ...(watch.app !== undefined ? { app: { ...watch.app } } : {}) } } : {}) };
+  return { base: b, owner, products: [...products], ...(hostLockPath !== undefined ? { hostLockPath } : {}), ...(hostLockSource !== undefined ? { hostLockSource } : {}), ...(hostLockCopierNode !== undefined ? { hostLockCopierNode } : {}), ...(proposalsParent !== undefined ? { proposalsParent } : {}), ...(watch !== undefined ? { watch: { repo: watch.repo, ...(watch.rulesSha256 !== undefined ? { rulesSha256: watch.rulesSha256 } : {}), ...(watch.app !== undefined ? { app: { ...watch.app } } : {}) } } : {}) };
 }
 
 /** Where the proposals folders live (R-0b-128, runbook A7; "a proposal for the owner's OK" until they OK it): one folder per product under this parent. */
@@ -321,3 +340,9 @@ export function folderTable(cfg) {
 /** The rules draft the watch-only week judges by (R-0b-122): root's copy, in orchestrate's watch folder; the config holds its hash. */
 export const watchRulesPath = (cfg) => join(cfg.base, 'watch', 'rules-draft.yaml');
 export const watchNotesPath = (cfg) => join(cfg.base, 'watch-notes');
+// The machine-wide guard's own folder (L1031, L1044 M2; setup.mjs managed-settings): root's 0755, in the base (root's), outside
+// `install`, so no reinstall or updater step removes it. It holds the guard, the two modules it imports and its rules copy,
+// each root's 0644: no one else can change them or rename them away. Written by managed-settings alone, never refreshed
+// (the hook reads the copy with no age limit).
+export const managedGuardDir = (cfg) => join(cfg.base, 'machine-wide-guard');
+export const managedRulesPath = (cfg) => join(managedGuardDir(cfg), 'rules.json');

@@ -37,6 +37,7 @@ Before building anything:
 - Read the Behavioral Core (if this changes AI behavior)
 - Read recent entries in decision-log.md (has a related decision already been made?)
 - Determine: Does this change require spec updates? Which ones?
+- Run the learning preflight in `reference/field-learning.md`: bring relevant prior failure classes, applicable invariants, discovered callers and prevention checks into the change plan before coding. Missing history is unassessed, not evidence of no repeat failures.
 
 `→ HG (Medium/Large):` Present which specs are affected and what changes are anticipated
 
@@ -71,6 +72,7 @@ When it fires: run the same scan as NEW Step 3a-pre but scoped tightly to the *s
 ### Step E4: Execute
 
 - Build the change
+- Apply the repair checks in `reference/field-learning.md` when resolving review findings; preserve previously verified behavior and test new callers/state affected by the repair.
 - Type-check / build / run tests
 - Commit working code
 
@@ -78,6 +80,7 @@ When it fires: run the same scan as NEW Step 3a-pre but scoped tightly to the *s
 
 - Update affected domain spec(s) to reflect the change
 - Update Build Manifest (add an evolution entry with date, description, affected subsystems)
+- Run the learning close check from `reference/field-learning.md` for recorded incidents; preserve unknown adoption and unresolved Material. Review built-but-inactive work in the existing capability matrix before expanding the next phase.
 - Log decision in decision-log.md if a non-obvious choice was made
 - If this change affects the Behavioral Core: update it and flag for extra review
 

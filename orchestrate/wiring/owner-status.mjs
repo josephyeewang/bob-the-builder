@@ -19,7 +19,9 @@
 // workers share the owner's user (the runner wall, L751), and is a check to add once they do not.
 //
 // The status file (the runner writes it; this is the only reader):
-//   { written_at: ISO, sessions: [SESSION], requests: { <sessionId>: { state } }, answers?: { <ask>: ANSWER } }
+//   { written_at: ISO, sessions: [SESSION], requests: { <sessionId>: { state } }, answers?: { <ask>: ANSWER }, held?: [HELD] }
+//   HELD (R-0b-175a): an interactive session past its start timeout, or the hook store unreadable (no session named), as
+//     send-safe/hook-store.mjs heldOk takes it. Absent when the runner has no hook store; interactiveHolds() hands them on.
 //   SESSION: { id, product, kind, card, lead, role, pgid, signin, config_dir, bundle_files, outbox, uid, outbox_open,
 //              stop_requested, alive?, ended?, last_write_at?, size?, activity?, drain_held? }
 //   - drain_held (L896): { cause: a DRAIN_CAUSES name (M11 drain-alerts.mjs), since: ISO }, only on a session not live
@@ -61,6 +63,7 @@ import { workerOutboxProblem } from '../modules/M4-workshop/git/session-outbox.m
 import { State } from '../modules/M4-workshop/send-safe/activity.mjs';
 import { PRODUCT_OUTBOX_ROLES, runnerOutbox, runnerPlaces } from '../shared/product-paths.mjs';
 import { drainHeldOk } from '../modules/M11-dispatcher/drain-alerts.mjs';
+import { heldOk } from '../modules/M4-workshop/send-safe/hook-store.mjs';
 
 export const REQUEST_STATES = Object.freeze(['waiting', 'started', 'refused', 'stopped', 'cancelled']);
 /** The states in which a launch request is used up: it can never start a session from now on. */
@@ -147,7 +150,7 @@ export function checkSession(x, { uid, outboxRoot, realpath }) {
 /**
  * The worker runner's status, checked whole, or a throw. `uid` is the owner's user (who runs the runner). `stat` and
  * `open` let a test stand in for the folder and the file.
- * → { sessions, requests }
+ * → { sessions, requests, answers, held }
  */
 export function readOwnerStatus({ file, now, uid, outboxRoot, realpath, stat = lstatSync, open = openRead }) {
   if (typeof file !== 'string' || !isAbsolute(file)) throw new Error('the worker runner\'s status file is not a full path');
@@ -183,7 +186,9 @@ export function readOwnerStatus({ file, now, uid, outboxRoot, realpath, stat = l
   for (const [k, a] of Object.entries(answers)) {
     if (!ANSWER_KEY.test(k) || !a || typeof a !== 'object' || typeof a.ok !== 'boolean' || (a.ok === false && (typeof a.reason !== 'string' || !a.reason))) throw new Error('an answer in the worker runner\'s status is not what the runner writes');
   }
-  return { sessions: s.sessions, requests: s.requests, answers };
+  const held = Object.hasOwn(s, 'held') ? s.held : [];
+  if (!Array.isArray(held) || !held.every(heldOk)) throw new Error('the worker runner\'s held list is not what the runner writes');
+  return { sessions: s.sessions, requests: s.requests, answers, held };
 }
 
 const pick = (x, fields) => Object.fromEntries(fields.map((f) => [f, x[f]]));
@@ -235,6 +240,9 @@ export function ownerSyncPorts({ statusFile, uid, outboxRoot, product, clock = D
     },
     // Every ended session whose outbox stays undrained past the runner's limit, with why (L896). A status that can't be
     // read throws, so the relay says so and never reads it as "nothing held".
+    // R-0b-175a: the interactive sessions held (past their start timeout, or the hook store unreadable). A status that
+    // can't be read throws, so the relay says so and never reads it as "nothing held".
+    interactiveHolds: () => status().held,
     drainHolds: () => status().sessions.filter((x) => x.drain_held).map((x) => ({ session: x.id, card: x.card, product: x.product, cause: x.drain_held.cause, since: x.drain_held.since })),
     stopSession: (sessionId) => {
       if (!REQUEST_ID.test(sessionId ?? '')) return false;

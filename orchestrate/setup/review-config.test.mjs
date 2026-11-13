@@ -139,8 +139,8 @@ test('the input file may not set a field setup or the pin gives, nor any field t
       ['product not in the setup config', (i) => { i.product = 'other'; }, /product must be one of .*acme, beta/],
       ['relative machineWide', (i) => { i.machineWide = 'settings.json'; }, /machineWide must be the full path/],
       // L909: any file but claude's fixed one, whose guard would never apply.
-      ['another machineWide', (i) => { i.machineWide = '/etc/claude/managed-settings.json'; }, /the input file's machineWide must be \/Library\/Application Support\/ClaudeCode\/managed-settings\.json: claude 2\.1\.322 reads only that file/],
-      ...NEAR_MISSES.map((m) => [`machineWide near miss ${JSON.stringify(m)}`, (i) => { i.machineWide = m; }, new RegExp(`the input file's machineWide must be ${esc(FIXED)}: claude 2\\.1\\.322 reads only that file`)]),
+      ['another machineWide', (i) => { i.machineWide = '/etc/claude/managed-settings.json'; }, /the input file's machineWide must be \/Library\/Application Support\/ClaudeCode\/managed-settings\.json: claude 2\.1\.316 reads only that file/],
+      ...NEAR_MISSES.map((m) => [`machineWide near miss ${JSON.stringify(m)}`, (i) => { i.machineWide = m; }, new RegExp(`the input file's machineWide must be ${esc(FIXED)}: claude 2\\.1\\.316 reads only that file`)]),
       ['a rules list that is not a list', (i) => { i.rules.production.hosts = 'api'; }, /rules\.production\.hosts must be a list/],
       ['an unknown rules part', (i) => { i.rules.extra = {}; }, /rules hold "extra"/],
       ['an unknown rules list', (i) => { i.rules.secrets.more = []; }, /rules\.secrets holds "more"/],
