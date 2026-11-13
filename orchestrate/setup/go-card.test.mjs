@@ -1,6 +1,8 @@
-// go-card.test.mjs — the owner's go by command (lane N, N2; L1082, L1096): on a real Record with a card a Lead wrote
-// through its outbox, real M2 asks and gos, through to the Dispatcher's own pass moving the card to ready. Plus the
-// L1096 plants: stdin piped with the right id, no terminal, and a wrong id, each refused.
+// go-card.test.mjs — the owner writes a Tier-2 card of the test product and gives his go by command (lane N, N2;
+// L1082, L1096, L1100): on a real Record, real M2 asks and gos, through to the Dispatcher's own pass moving the card to
+// ready. Plus the plants: L1100's (a wrong kind, Tier 1, a product not marked the test product, no terminal), each
+// refused by the command and, written straight to the Record as owner_command, by M9 itself; and L1096's (stdin piped
+// with the right id, no terminal, a wrong id).
 // Run: node --test orchestrate/setup/go-card.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -19,105 +21,188 @@ import { doneBar } from '../modules/M2-approvals/go.mjs';
 import { answerByOwnerCommand, OWNER_COMMAND } from '../modules/M2-approvals/owner-command.mjs';
 import { planGoPass } from '../modules/M11-dispatcher/plan-go.mjs';
 import { outbox } from '../modules/M11-dispatcher/alerts.mjs';
-import { canonicalJson } from '../shared/plan-fingerprint.mjs';
+import { AI_ROLES, outboxFolders } from '../shared/record.mjs';
 import { tempDir } from '../shared/test-tmp.mjs';
-import { GO_CARD_PRODUCT, goCard, main, ttyConfirm, whoProblem } from './go-card.mjs';
+import { CARD_FILE_FIELDS, RUN_AS, USAGE, goCard, main, readCardFile, ttyConfirm, whoProblem, withPlannedCard } from './go-card.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..');
 const ROWS = { 'R-1': { id: 'R-1', what: 'row R-1', module: 'M1', tier: 2, done_when: 'tests pass for R-1', status: 'planned' } };
 const FILES = ['src/a.mjs', 'docs/blueprint/rows/R-1.yaml'];
 const OWNER = 501;
-const sha = (s) => createHash('sha256').update(s, 'utf8').digest('hex');
+const CARD = Object.freeze({ id: 'C-1', product: PRODUCT, module: 'M1', kind: 'ordinary', tier: 2, what: 'add the first thing', files: FILES });
+const sha = (s) => createHash('sha256').update(s).digest('hex');
+const RULES = { 'caps.rounds': 3, 'product_state_rules.active.start': 'within_caps', 'product_state_rules.paused.start': 'none' };
 
-function world({ card = {} } = {}) {
-  const t = env({ values: { 'caps.rounds': 3, 'product_state_rules.active.start': 'within_caps', 'product_state_rules.paused.start': 'none' } });
+// testProduct: the product's product.test_product as rules text (yaml-lite gives text), or undefined for none.
+function world(opts = {}) {
+  const testProduct = Object.hasOwn(opts, 'testProduct') ? opts.testProduct : 'true';
+  const t = env({ values: { ...RULES, ...(testProduct === undefined ? {} : { 'product.test_product': testProduct }) } });
   product(t);
   const g = fakeGitHub({ now: () => t.clock.t });
   const M0 = g.repo.commit([], { 'src/a.mjs': 'one', 'docs/blueprint/rows/R-1.yaml': 'id: R-1\n' });
   g.repo.main = M0;
   Object.assign(t.ctx, { gh: g.gh, owner: 'sample-org', repo: 'sample-app' });
   const view = makeGitView({ gh: g.gh, owner: 'sample-org', repo: 'sample-app' });
-  // The Lead's card, through its outbox (the fixture's roadmap- file), as the first run's would come in.
-  if (card !== null) leadCard(t, 'C-1', { what: 'add the first thing', files: FILES, done_when: doneBar(ROWS), ...card });
   const w = { t, M0, view, shown: [], rowsAsked: [] };
   w.readRows = async (x) => { w.rowsAsked.push(x); return ROWS; };
   w.yes = ({ cardId, text }) => { w.shown.push(text); return { ok: true, cardId }; };
   return w;
 }
-const run = (w, over = {}) => goCard({ ctx: w.t.ctx, cardId: 'C-1', sudoUid: OWNER, readRows: w.readRows, view: w.view, mainSha: w.M0, confirm: w.yes, onlyProduct: PRODUCT, ...over });
+const fileOf = (over = {}) => JSON.stringify({ ...CARD, ...over });
+const run = (w, over = {}) => goCard({ ctx: w.t.ctx, cardText: fileOf(), sudoUid: OWNER, readRows: w.readRows, view: w.view, mainSha: w.M0, confirm: w.yes, ...over });
 const asks = (w) => askStore(w.t.record).asks();
+const ports = (w) => ({ startPlanReview: async () => ({ ok: false, reason: 'not here' }), planReviewAnswer: async () => ({ ok: false, reason: 'not here' }),
+  planRows: async () => ROWS, planView: async () => w.view, mainSha: async () => w.M0, replyToLead: async () => ({ ok: true }) });
+const { id: _id, ...CARD_DOC } = CARD;
+const asWritten = { state: 'draft', ...CARD_DOC, done_when: doneBar(ROWS) };
+// A card written straight to the Record as the owner command, past the command's own checks (the M9 plants).
+const direct = (w, over = {}, id = 'C-9') => w.t.record.write({ actor: 'owner_command', entity: 'card', id, expectRev: 0, doc: { ...asWritten, ...over } });
 
-test('the go is recorded as an owner-command go, and the Dispatcher\'s own pass moves the card to ready', async () => {
+test('the card is written by owner_command, the go recorded as an owner-command go, and the Dispatcher\'s own pass moves the card to ready', async () => {
   const w = world();
-  const shownCard = w.t.record.read('card', 'C-1').doc;
-  const r = await run(w);
+  const text = fileOf();
+  const r = await run(w, { cardText: text });
   assert.equal(r.ok, true, r.reason);
-  assert.deepEqual(w.rowsAsked, [{ product: PRODUCT, card: 'C-1' }]);
+  assert.equal(w.rowsAsked.length, 1);
+  assert.equal(w.rowsAsked[0].cardId, 'C-1');
+  // The card: what the file said, a draft, its pass test its rows', and its first diary line names the owner command.
+  const { round: _r, ...card } = w.t.record.read('card', 'C-1').doc;
+  assert.deepEqual(card, asWritten);
+  assert.equal(w.t.record.meta('card', 'C-1').createdBy, 'owner_command');
   const go = askStore(w.t.record).go('go-C-1').doc;
   assert.equal(go.binding.kind, OWNER_COMMAND);
   assert.equal(go.binding.sudo_uid, OWNER);
-  assert.equal(go.binding.card_json_sha256, sha(canonicalJson(shownCard)));
+  assert.equal(go.binding.card_json_sha256, sha(Buffer.from(text, 'utf8')), 'the sha256 of the card file\'s own bytes');
   assert.equal(go.plan_fingerprint, r.fingerprint);
   const [a] = asks(w);
   assert.equal(a.doc.state, 'consumed');
   assert.equal(a.doc.answer.channel, 'tap');
   assert.equal(a.doc.answer.binding.kind, OWNER_COMMAND);
-  // What the owner read before retyping the id names every file, the pass test, and that this is not a tap (L1096).
+  // What the owner read before retyping the id names every file, the pass test, the fingerprint and that this is not a tap.
   assert.equal(w.shown.length, 1);
   for (const f of FILES) assert.ok(w.shown[0].includes(f), f);
   assert.match(w.shown[0], /tests pass for R-1/);
-  assert.match(w.shown[0], /owner command \(binding kind owner_command\), not as a phone tap/);
+  assert.ok(w.shown[0].includes(r.fingerprint));
+  assert.match(w.shown[0], /written by owner command.*\(binding kind owner_command\), not as a phone tap/);
   assert.equal(w.t.record.read('card', 'C-1').doc.state, 'draft', 'the command moves no card');
-  const ports = { startPlanReview: async () => ({ ok: false, reason: 'not here' }), planReviewAnswer: async () => ({ ok: false, reason: 'not here' }),
-    planRows: async () => ROWS, planView: async () => w.view, mainSha: async () => w.M0, replyToLead: async () => ({ ok: true }) };
-  must(await planGoPass(w.t.ctx, { ...ports, alert: outbox(w.t.record, w.t.clock.t) }));
+  must(await planGoPass(w.t.ctx, { ...ports(w), alert: outbox(w.t.record, w.t.clock.t) }));
   assert.equal(w.t.record.read('card', 'C-1').doc.state, 'ready');
+  // Taken up again once it is ready: refused.
+  assert.match((await run(w)).reason, /C-1 is ready; a go is given on a draft card/);
 });
 
-test('refused, with nothing written: another product, no card, Tier 1, a pass test not yet its rows\', rows that can\'t be read', async () => {
+test('plants (L1100): refused by the command with nothing written or shown — a product not marked the test product, a wrong kind, Tier 1, and the rest', async () => {
   const cases = [
-    [{}, { onlyProduct: undefined }, new RegExp(`${GO_CARD_PRODUCT} only`)],
-    [{}, { cardId: 'C-2' }, /no card C-2; a Lead writes it first/],
-    [{}, { cardId: '../x' }, /card id must be/],
-    [{ card: { tier: 1 } }, {}, /Tier 1; this command gives a go on a Tier-2 card only/],
-    [{ card: { done_when: 'the Lead\'s own words' } }, {}, /pass test is not yet its rows'/],
+    [{ testProduct: undefined }, {}, /only on a product whose rules mark it the test product/],
+    [{ testProduct: 'false' }, {}, /test product/],
+    [{ testProduct: 'yes' }, {}, /test product/],
+    [{}, { cardText: fileOf({ kind: 'fix' }) }, /"fix" card; this command makes an ordinary card only/],
+    [{}, { cardText: fileOf({ kind: 'lead_daily_card' }) }, /ordinary card only/],
+    [{}, { cardText: fileOf({ tier: 1 }) }, /Tier 1; this command makes a Tier-2 card only/],
+    [{}, { cardText: fileOf({ tier: '2' }) }, /Tier-2 card only/],
+    [{}, { cardText: fileOf({ product: 'other-app' }) }, /for product "other-app"/],
+    [{}, { cardText: fileOf({ done_when: 'my own words' }) }, /may not set done_when \(the pass test comes from the card's rows\)/],
+    [{}, { cardText: fileOf({ state: 'ready' }) }, /may not set state/],
+    [{}, { cardText: fileOf({ plan_sha256: 'a'.repeat(64) }) }, /may not set plan_sha256/],
+    [{}, { cardText: fileOf({ id: '../x' }) }, /card id must be/],
+    [{}, { cardText: fileOf({ files: [] }) }, /no file list/],
+    [{}, { cardText: fileOf({ what: ' ' }) }, /no what/],
+    [{}, { cardText: '[1]' }, /one JSON object/],
+    [{}, { cardText: 'not json' }, /not JSON/],
+    [{}, { cardText: ' '.repeat(70 * 1024) }, /far larger/],
     [{}, { readRows: async () => { throw new Error('row R-1 is missing at main'); } }, /rows could not be read: row R-1 is missing/],
   ];
   for (const [opts, over, want] of cases) {
     const w = world(opts);
-    const before = w.t.record.read('card', 'C-1');
     const r = await run(w, over);
-    assert.equal(r.ok, false, JSON.stringify(over));
+    assert.equal(r.ok, false, `${JSON.stringify(opts)} ${JSON.stringify(over).slice(0, 80)}`);
     assert.match(r.reason, want);
-    assert.deepEqual(w.t.record.read('card', 'C-1'), before);
+    assert.equal(w.t.record.read('card', 'C-1'), null);
     assert.equal(asks(w).length, 0);
     assert.equal(w.shown.length, 0);
   }
 });
 
-test('not confirmed: no go, the card stays a draft and its ask open; a second run picks the ask up', async () => {
+test('plant (L1100): with no terminal (not confirmed) nothing is written — no card, no ask, no go; a later run with a terminal goes through', async () => {
   const w = world();
-  const r = await run(w, { confirm: () => ({ ok: false, reason: 'the id typed was not C-1; no go was given' }) });
-  assert.match(r.reason, /no go was given/);
+  const r = await run(w, { confirm: ({ cardId, text }) => ttyConfirm({ cardId, text, open: () => { throw Object.assign(new Error('Device not configured'), { code: 'ENXIO' }); } }) });
+  assert.match(r.reason, /no terminal is attached/);
+  assert.equal(w.t.record.read('card', 'C-1'), null);
+  assert.equal(asks(w).length, 0);
   assert.equal(askStore(w.t.record).go('go-C-1'), null);
-  assert.deepEqual(asks(w).map((a) => a.doc.state), ['open']);
-  const again = await run(w);
-  assert.equal(again.ok, true, again.reason);
-  assert.equal(asks(w).length, 1, 'the same ask, not a second one');
-  assert.equal(askStore(w.t.record).go('go-C-1').doc.binding.kind, OWNER_COMMAND);
+  assert.equal((await run(w)).ok, true);
 });
 
-test('a card that is not a draft any more is refused', async () => {
+test('plants (L1100): M9 itself holds the owner_command actor to one Tier-2 ordinary draft card on the test product', () => {
+  // Control: the one card it may make, and its diary names it.
+  const ok = world();
+  must(direct(ok));
+  assert.equal(ok.t.record.meta('card', 'C-9').createdBy, 'owner_command');
+  // A wrong kind, Tier 1, another state, a field outside its row.
+  for (const [over, want] of [[{ kind: 'fix' }, /fix/], [{ kind: 'lead_daily_card' }, /lead_daily_card/], [{ tier: 1 }, /Tier-2 cards only/],
+    [{ state: 'ready' }, /./], [{ plan_sha256: 'a'.repeat(64) }, /plan_sha256/], [{ needs_joe: true }, /needs_joe/]]) {
+    const w = world();
+    const r = direct(w, over);
+    assert.equal(r.ok, false, JSON.stringify(over));
+    assert.match(r.reason, want, JSON.stringify(over));
+    assert.equal(w.t.record.read('card', 'C-9'), null);
+  }
+  // A product whose rules don't mark it the test product: missing, false, or not exactly true.
+  for (const testProduct of [undefined, 'false', 'yes', 'TRUE']) {
+    const w = world({ testProduct });
+    assert.match(direct(w).reason, /only on a product whose rules mark it the test product/, String(testProduct));
+  }
+  // It updates nothing, not even the card it made, and writes no ask and no go (only M2 does).
+  const rev = ok.t.record.read('card', 'C-9').rev;
+  for (const fields of [{ what: 'changed' }, { needs_joe: true }, { summary: 'x' }]) {
+    const r = ok.t.record.write({ actor: 'owner_command', entity: 'card', id: 'C-9', expectRev: rev, doc: { ...ok.t.record.read('card', 'C-9').doc, ...fields } });
+    assert.equal(r.ok, false, JSON.stringify(fields));
+  }
+  assert.equal(ok.t.record.read('card', 'C-9').rev, rev);
+  assert.equal(ok.t.record.write({ actor: 'owner_command', entity: 'ask', id: 'go-C-9', expectRev: 0, doc: { state: 'open' } }).ok, false);
+  assert.equal(ok.t.record.write({ actor: 'owner_command', entity: 'go', id: 'go-C-9', expectRev: 0, doc: { product: PRODUCT, card_id: 'C-9', plan_fingerprint: 'a'.repeat(64) } }).ok, false);
+  assert.equal(askStore(ok.t.record).go('go-C-9'), null);
+  // No session's outbox can hand a document in under the name: it is a script actor, not an AI role.
+  assert.ok(!AI_ROLES.includes('owner_command'));
+  assert.match(ok.t.record.applyOutbox({ role: 'owner_command', sessionId: 'S-1' }, 'roadmap-C-8.json').reason, /unknown role "owner_command"/);
+  assert.equal(outboxFolders({ outboxRoot: '/x', tag: { role: 'owner_command', sessionId: 'S-1' } }).ok, false);
+});
+
+test('a rerun after a stop takes up only a draft the command made, with the same plan', async () => {
+  // Its own draft, same plan (a stop after the card was written): taken up, one card, one ask.
   const w = world();
-  assert.equal((await run(w)).ok, true);
-  const ports = { startPlanReview: async () => ({ ok: false }), planReviewAnswer: async () => ({ ok: false }), planRows: async () => ROWS, planView: async () => w.view, mainSha: async () => w.M0, replyToLead: async () => ({ ok: true }) };
-  must(await planGoPass(w.t.ctx, { ...ports, alert: outbox(w.t.record, w.t.clock.t) }));
-  assert.match((await run(w)).reason, /C-1 is ready; a go is given on a draft card/);
+  must(direct(w, {}, 'C-1'));
+  const rev = w.t.record.read('card', 'C-1').rev;
+  const r = await run(w);
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(asks(w).length, 1);
+  assert.equal(w.t.record.read('card', 'C-1').rev, rev, 'not written again');
+  // Its own draft with another plan: refused, nothing shown.
+  const v = world();
+  must(direct(v, { what: 'something else' }, 'C-1'));
+  assert.match((await run(v)).reason, /already in the Record with another plan/);
+  assert.equal(v.shown.length, 0);
+  // A card of that id another writer made (here the Lead, through its outbox): refused, whatever its plan.
+  const l = world();
+  leadCard(l.t, 'C-1', { what: CARD.what, files: FILES, done_when: doneBar(ROWS) });
+  assert.match((await run(l)).reason, /already in the Record, made by lead:L-1; pick another id/);
+  assert.equal(asks(l).length, 0);
+});
+
+test('the card file holds the owner_command create row less state and done_when, plus the id; withPlannedCard shows the planned card only', () => {
+  assert.deepEqual([...CARD_FILE_FIELDS].sort(), ['brief', 'desired', 'files', 'id', 'kind', 'lane', 'module', 'product', 'tier', 'what']);
+  assert.equal(readCardFile(fileOf({ lane: 'L-1', brief: 'b', desired: 'd' }), PRODUCT).ok, true);
+  const rec = { read: (e, id) => ({ e, id, from: 'record' }), other: 1 };
+  const p = withPlannedCard(rec, 'C-1', { what: 'x' });
+  assert.deepEqual(p.read('card', 'C-1'), { id: 'C-1', doc: { what: 'x' } });
+  assert.deepEqual(p.read('card', 'C-2'), { e: 'card', id: 'C-2', from: 'record' });
+  assert.deepEqual(p.read('ask', 'C-1'), { e: 'ask', id: 'C-1', from: 'record' });
+  assert.equal(p.other, 1);
 });
 
 test('M2 answerByOwnerCommand: only a live Tier-2 go of this product, with no risky class, counted by the same rule as a tap', () => {
-  const w = world({ card: null });
+  const w = world();
   const fp = 'a'.repeat(64);
   const mk = (id, kind, over = {}) => must(createAsk(w.t.ctx, { id, kind, card: 'C-9', title: 'x', tier: kind === 'go_t1' ? 1 : 2, fingerprint: fp, files: ['src/a.mjs'], ...over }));
   const who = { sudoUid: OWNER, cardJsonSha256: 'b'.repeat(64) };
@@ -181,7 +266,10 @@ test('plant: stdin piped with the right id, in a process with no terminal (as a 
   assert.match(r.reason, /no terminal is attached/);
 });
 
-test('who may run it: the Dispatcher\'s user, started through sudo by the owner', () => {
+test('who may run it: the Dispatcher\'s user, started through sudo by the owner', async () => {
+  const { DISPATCHER_USER } = await import('./dispatcher-setup.mjs');
+  assert.equal(RUN_AS, DISPATCHER_USER, 'go-card\'s own copy of the Dispatcher\'s user name');
+  assert.ok(USAGE.startsWith(`sudo -u ${RUN_AS} `));
   const ok = { uid: 300, sudoUid: String(OWNER), dispatcherUid: 300, ownerUid: OWNER };
   assert.equal(whoProblem(ok), null);
   assert.match(whoProblem({ ...ok, uid: OWNER }), /sudo -u orchestrate/);

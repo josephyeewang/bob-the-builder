@@ -33,6 +33,8 @@ export const KEYS = Object.freeze({
   models: { required: true, type: 'map' },
   merge: { required: true, type: 'map' }, 'merge.queue.tier1_hours': { required: true, type: 'text' },
   product: { required: false, type: 'map' }, 'product.cutover_stage': { required: false, type: 'text' },
+  // L1100: marks the test product, the only one the owner's go command (M9 actor owner_command) may make a card on.
+  'product.test_product': { required: false, type: 'text' },
   docs_paths: { required: false, type: 'list' },
   approvals: { required: false, type: 'map' }, 'approvals.decisions_dir': { required: false, type: 'text' },
   product_profile: { required: false, type: 'map' }, 'product_profile.required_checks': { required: false, type: 'list' },
@@ -142,6 +144,9 @@ function check(raw) {
   // Optional; a missing stage reads as `first`, the stricter one (0b-1 R3-m4, R3-m10: a new key enters as optional).
   const stage = raw.product?.cutover_stage;
   if (stage !== undefined && !CUTOVER_STAGES.includes(stage)) bad('product.cutover_stage must be first or second');
+  // Exactly true or false (shared/rules.mjs exactFlag); missing reads as not the test product.
+  const testProduct = raw.product?.test_product;
+  if (testProduct !== undefined && testProduct !== 'true' && testProduct !== 'false') bad('product.test_product must be true or false');
   const p = structuredClone(raw);
   p.product = { ...(raw.product ?? {}), cutover_stage: stage ?? 'first' };
 

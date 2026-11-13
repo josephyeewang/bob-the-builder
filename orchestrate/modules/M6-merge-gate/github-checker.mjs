@@ -786,6 +786,8 @@ const KEYS = Object.freeze({
   models: { required: true, type: 'map' },
   merge: { required: true, type: 'map' }, 'merge.queue.tier1_hours': { required: true, type: 'text' },
   product: { required: false, type: 'map' }, 'product.cutover_stage': { required: false, type: 'text' },
+  // L1100: marks the test product, the only one the owner's go command (M9 actor owner_command) may make a card on.
+  'product.test_product': { required: false, type: 'text' },
   docs_paths: { required: false, type: 'list' },
   approvals: { required: false, type: 'map' }, 'approvals.decisions_dir': { required: false, type: 'text' },
   product_profile: { required: false, type: 'map' }, 'product_profile.required_checks': { required: false, type: 'list' },
@@ -895,6 +897,9 @@ function check(raw) {
   // Optional; a missing stage reads as `first`, the stricter one (0b-1 R3-m4, R3-m10: a new key enters as optional).
   const stage = raw.product?.cutover_stage;
   if (stage !== undefined && !CUTOVER_STAGES.includes(stage)) bad('product.cutover_stage must be first or second');
+  // Exactly true or false (shared/rules.mjs exactFlag); missing reads as not the test product.
+  const testProduct = raw.product?.test_product;
+  if (testProduct !== undefined && testProduct !== 'true' && testProduct !== 'false') bad('product.test_product must be true or false');
   const p = structuredClone(raw);
   p.product = { ...(raw.product ?? {}), cutover_stage: stage ?? 'first' };
 
@@ -2243,7 +2248,7 @@ const INTERNAL_MOVES = Object.freeze({ card: Object.freeze({ claimed: Object.fre
 // The state each entity is created in, and by whom (R2-M5). A fix card over the round cap is created in `waiting`
 // by the writer itself, whatever state the Dispatcher asked for (M-8).
 const CREATE_STATES = Object.freeze({
-  card: Object.freeze({ draft: Object.freeze(['lead', 'dispatcher']) }),
+  card: Object.freeze({ draft: Object.freeze(['lead', 'dispatcher', 'owner_command']) }),
   ask: Object.freeze({ open: A }),
   session: Object.freeze({ preparing: D }),
   merge: Object.freeze({ requested: G }),
@@ -2275,6 +2280,7 @@ Object.defineProperties(__bob_e, {
   TAB_HEARTBEAT_FAMILY: { get: () => TAB_HEARTBEAT_FAMILY, enumerable: true },
   factFrom: { get: () => factFrom, enumerable: true },
   CARD_CREATORS: { get: () => CARD_CREATORS, enumerable: true },
+  TEST_PRODUCT_KEY: { get: () => TEST_PRODUCT_KEY, enumerable: true },
   WRITERS: { get: () => WRITERS, enumerable: true },
   actorName: { get: () => actorName, enumerable: true },
   fieldsAllowed: { get: () => fieldsAllowed, enumerable: true },
@@ -2389,7 +2395,12 @@ function factFrom(role, entry, family) {
 const CARD_CREATORS = Object.freeze({
   lead: Object.freeze(['ordinary', 'lead_daily_card']),
   dispatcher: Object.freeze(['fix', 'exact_reverse', 'research_copy']),
+  // L1100: the owner's go command, ordinary cards only; the writer adds Tier 2 and the test product (checkNewCard).
+  owner_command: Object.freeze(['ordinary']),
 });
+// The rules flag that marks a product as the test product (L1100): exactly true there, missing or false elsewhere. M10
+// policy.mjs declares it; the writer and setup/go-card.mjs read it under this one name.
+const TEST_PRODUCT_KEY = 'product.test_product';
 
 const f = (...a) => Object.freeze(a.flat());
 const createOnly = (fields = '*') => Object.freeze({ create: fields });
@@ -2422,6 +2433,12 @@ const WRITERS = Object.freeze({
       // GO_FREE), so a bar changed there would be one nobody approved. Missing draftKinds means every kind (the Lead).
       draftKinds: f('ordinary'),
       kinds: CARD_CREATORS.dispatcher,
+    }),
+    // L1100: creates a Tier-2 card and never changes one (no update, no draft grant). No plan_sha256 or main_commit (Tier
+    // 1 only), no depends_on, merge request or needs_joe: the thin first-run card the owner's go is given on.
+    owner_command: Object.freeze({
+      create: f('state', 'product', 'module', 'lane', 'kind', 'what', 'files', 'done_when', 'tier', 'brief', 'desired'),
+      kinds: CARD_CREATORS.owner_command,
     }),
     worker: Object.freeze({ update: f('summary', 'report_ref') }),
     // L838: a script hands in as a worker does, its own claimed card only (writer.mjs's hand-in checks), and nothing else.
@@ -2885,8 +2902,10 @@ const outboxKind = outboxKindOf;
 
 // Plain-script actors write under their own name; AI roles only through applyOutbox, as `<role>:<sessionId>`.
 // `joe` writes nothing in 0b (the owner acts through `approvals`); it stays a name so old diary lines still parse.
+// `owner_command` is the owner's own command on the Mac (setup/go-card.mjs, L1100): it creates one Tier-2 ordinary card
+// on the test product and nothing else (M9 permissions CARD_CREATORS and writer checkNewCard hold it to that).
 const SCRIPT_ACTORS = Object.freeze(['dispatcher', 'workshop', 'merge_gate', 'approvals', 'sensors', 'ledger',
-  'live_check', 'joe']);
+  'live_check', 'joe', 'owner_command']);
 const AI_ROLES = Object.freeze(['lead', 'worker', 'reviewer', 'auditor', 'incident', 'scout', 'writer',
   'front_door', 'thinking', 'learning', 'script', 'plan_reviewer']);
 

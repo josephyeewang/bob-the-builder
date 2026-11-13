@@ -1,50 +1,59 @@
-// go-card.mjs — the owner gives his go on one Tier-2 card of the test product, from the Terminal (lane N, N2; LEAD-CALLS
-// L1078, L1082, L1096). For the first run only: no phone channel is wired yet, so nothing else can give a go.
+// go-card.mjs — the owner writes one Tier-2 card of the test product and gives his go on it, from the Terminal (lane N,
+// N2; LEAD-CALLS L1078, L1082, L1096, L1100). For the first run only: no Lead can be launched yet and no phone channel is
+// wired, so nothing else can make the card or give the go.
 //
-//   sudo -u orchestrate node <installed copy>/setup/go-card.mjs <the Dispatcher's config> <card id>
+//   sudo -u orchestrate node <installed copy>/setup/go-card.mjs <the Dispatcher's config> <card.json>
 //
-// The card is one a Lead already wrote the normal way (its outbox's roadmap- or plan- file). The Record takes a card from
-// an AI role only through its outbox (shared/record.mjs: "AI roles write only through their outbox"), so this command
-// writes no card. It must be a draft, ordinary, Tier-2 card of the test product whose pass test the Dispatcher has set
-// from its rows (M11 plan-go.mjs).
+// The card file is a JSON object: { id, product, module, kind: "ordinary", tier: 2, what, files, lane?, brief?,
+// desired? } (the owner_command create row of M9 permissions.mjs, less the two this command sets). The pass test is not
+// in it: it is the card's rows' (docs/blueprint/rows/<id>.yaml among its files), read at main.
 //
-// WHAT IT CHECKS, in order, and refuses on any failure (I1: nothing is guessed):
+// WHAT IT DOES, in order, and refuses on any failure (I1: nothing is guessed):
 //   1. It runs as the Dispatcher's user (orchestrate), started through sudo by the owner: SUDO_UID is the config's
 //      ownerUid. A builder session runs as its own user and can't sudo.
-//   2. The product is the test product (L1082), and the card is a draft, ordinary, Tier-2 card of it.
-//   3. Its rows are read at main the way the Merge Gate reads them (wiring/review-ports.mjs planRows), and its pass test
-//      is theirs.
-//   4. M2 raiseGo asks for the go exactly as the Dispatcher would (rows, pass test, fingerprint, file list at main).
-//   5. The card, its files, its pass test and the plan's fingerprint are shown, and the owner retypes the card id at
-//      the terminal. It is read from /dev/tty only, never stdin (L1096 Q11): with no terminal, or another id, nothing
-//      is given. A Claude session's shell has no terminal, so a session can't give its own go even while sudo's
-//      password is still cached.
-//   6. M2 answerByOwnerCommand records the answer on channel 'tap' with binding kind 'owner_command' (L1096 Q10), its
-//      card_json_sha256 the sha256 of the card as the Record held it when shown (canonical JSON). M10's
-//      count_approval counts it exactly as it counts a tap (and refuses it for a risky class or Tier 1), and M2
-//      recordGo writes the go record, whose binding says it came from this command. recordGo checks the plan is still
-//      the one asked on, so a card changed since it was shown gets no go.
+//   2. The product's own rules mark it the test product (M9 TEST_PRODUCT_KEY, exactly true), and the card is ordinary,
+//      Tier 2, of that product.
+//   3. Its rows are read at main the way the Merge Gate reads them (wiring/review-ports.mjs planRows), and its pass
+//      test is set to theirs (M2 doneBar), so the Dispatcher's pass has nothing to change and the go binds what was shown.
+//   4. The card, its files, its pass test and the plan's fingerprint are shown, and the owner retypes the card id at the
+//      terminal. It is read from /dev/tty only, never stdin (L1096 Q11): with no terminal, or another id, nothing is
+//      written. A Claude session's shell has no terminal, so a session can't do this even while sudo's password is
+//      still cached.
+//   5. The card is written under the Record actor `owner_command` (L1100), which M9 lets create only an ordinary Tier-2
+//      draft on a test product (permissions CARD_CREATORS, writer checkNewCard), so the diary names who made it.
+//   6. M2 raiseGo asks for the go exactly as the Dispatcher would; its fingerprint must be the one shown. M2
+//      answerByOwnerCommand records the answer on channel 'tap' with binding kind 'owner_command' (L1096 Q10), its
+//      card_json_sha256 the sha256 of the card file's bytes; M10's count_approval counts it as it counts a tap. M2
+//      recordGo writes the go record, whose binding says it came from this command.
 // The Dispatcher's own pass then moves the card to ready (M11 plan-go.mjs), as it does for any covered draft card.
-// A stop after step 4 leaves the card in draft and its ask open; running the command again picks the ask up.
+// A stop after step 5 leaves the card in draft (and its ask open). Running the command again with the same file takes
+// that card up again: only a draft this command made, with the same plan; any other card of that id is refused.
 //
 // Exit: 0 the go is recorded; 1 refused or failed (one line saying why on stderr).
 
-import { closeSync, openSync, readSync, realpathSync, writeSync } from 'node:fs';
+import { closeSync, openSync, readFileSync, readSync, realpathSync, writeSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { isatty } from 'node:tty';
 import { fileURLToPath } from 'node:url';
 import { askStore } from '../modules/M2-approvals/ask-store.mjs';
 import { doneBar, raiseGo, recordGo } from '../modules/M2-approvals/go.mjs';
 import { answerByOwnerCommand, OWNER_COMMAND } from '../modules/M2-approvals/owner-command.mjs';
-import { canonicalJson } from '../shared/plan-fingerprint.mjs';
+import { TEST_PRODUCT_KEY, WRITERS } from '../modules/M9-record/permissions.mjs';
+import { canonicalJson, planFingerprint } from '../shared/plan-fingerprint.mjs';
 
-// The one product this command may give a go on (L1082: the first run, the test product only).
-export const GO_CARD_PRODUCT = 'orchestrate-test';
-export const USAGE = 'sudo -u orchestrate node …/setup/go-card.mjs <the Dispatcher\'s config> <card id>';
+// The Dispatcher's user. Written here, as dispatcher-check.mjs does, not imported from dispatcher-setup.mjs: that module
+// builds job files, and a module that loads one must be a listed job builder (M4 review-install-closure.test, L136 m1).
+// go-card.test pins it to dispatcher-setup's DISPATCHER_USER.
+export const RUN_AS = 'orchestrate';
+export const USAGE = 'sudo -u orchestrate node …/setup/go-card.mjs <the Dispatcher\'s config> <card.json>';
 const CARD_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const MAX_LINE = 256;
+const MAX_CARD_FILE = 64 * 1024;
+// The fields the card file may hold: the Record actor's own create row (one source), less the two set here, plus the id.
+const SET_HERE = Object.freeze(['state', 'done_when']);
+export const CARD_FILE_FIELDS = Object.freeze(['id', ...[...WRITERS.card[OWNER_COMMAND].create].filter((f) => !SET_HERE.includes(f))]);
 const fail = (reason) => ({ ok: false, reason });
-const sha256 = (s) => createHash('sha256').update(s, 'utf8').digest('hex');
+const sha256 = (s) => createHash('sha256').update(s).digest('hex');
 
 /** Why this process may not give the go, or null. `sudoUid` is the SUDO_UID text sudo set. */
 export function whoProblem({ uid, sudoUid, dispatcherUid, ownerUid }) {
@@ -68,7 +77,7 @@ export function ttyConfirm({ cardId, text, open = () => openSync('/dev/tty', 'r+
     return fail('no terminal is attached, so the go can\'t be confirmed. Run this yourself in the Terminal app; a session can\'t give a go');
   }
   try {
-    show(fd, `${text}\n\nTo give your go, type the card id (${cardId}) and press Return. Anything else stops here: `);
+    show(fd, `${text}\n\nTo write this card and give your go, type the card id (${cardId}) and press Return. Anything else stops here: `);
     const bytes = []; const one = Buffer.alloc(1);
     for (;;) {
       if (readSync(fd, one, 0, 1, null) !== 1) break;
@@ -81,54 +90,89 @@ export function ttyConfirm({ cardId, text, open = () => openSync('/dev/tty', 'r+
   } finally { closeSync(fd); }
 }
 
-/** What the owner reads before retyping the id: the card, its files, its pass test, and how the go will be recorded. */
-export function goText({ product, cardId, card, fingerprint, askId }) {
+/**
+ * The card file's text → { ok: true, id, doc } (doc without state and done_when) | { ok: false, reason }. Only the
+ * listed fields; an ordinary Tier-2 card of `product` with a module, a what and a file list.
+ */
+export function readCardFile(text, product) {
+  let v;
+  try { v = JSON.parse(text); } catch { return fail('the card file is not JSON'); }
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return fail('the card file is not one JSON object');
+  const extra = Object.keys(v).filter((k) => !CARD_FILE_FIELDS.includes(k));
+  if (extra.length) return fail(`the card file may not set ${extra.join(', ')}${extra.includes('done_when') ? ' (the pass test comes from the card\'s rows)' : ''}`);
+  if (typeof v.id !== 'string' || !CARD_ID.test(v.id)) return fail('the card id must be letters, digits, dots, dashes and underscores');
+  if (v.product !== product) return fail(`the card is for product ${JSON.stringify(v.product ?? null)}, and this Dispatcher runs ${product}`);
+  if (v.kind !== 'ordinary') return fail(`the card is a ${JSON.stringify(v.kind ?? null)} card; this command makes an ordinary card only`);
+  if (v.tier !== 2) return fail(`the card is Tier ${JSON.stringify(v.tier ?? null)}; this command makes a Tier-2 card only`);
+  for (const k of ['module', 'what']) if (typeof v[k] !== 'string' || !v[k].trim()) return fail(`the card has no ${k}`);
+  if (!Array.isArray(v.files) || !v.files.length || v.files.some((f) => typeof f !== 'string' || !f)) return fail('the card has no file list');
+  const { id, ...doc } = v;
+  return { ok: true, id, doc };
+}
+
+/** What the owner reads before retyping the id: the card, its files, its pass test, and how it will be recorded. */
+export function goText({ product, cardId, card, fingerprint }) {
   return [
     `Card ${cardId} (${product}, Tier 2, module ${card.module}): ${card.what}`,
     'Files it may change:',
     ...[...card.files].sort().map((f) => `  ${f}`),
     'Its pass test (from its rows):',
     ...String(card.done_when).split('\n').map((l) => `  ${l}`),
-    `Plan fingerprint: ${fingerprint}   (ask ${askId})`,
-    `This go is recorded as given by owner command (binding kind ${OWNER_COMMAND}), not as a phone tap.`,
+    `Plan fingerprint: ${fingerprint}`,
+    `The card is written by owner command, and this go is recorded as given by owner command (binding kind ${OWNER_COMMAND}), not as a phone tap.`,
   ].join('\n');
 }
 
 /**
- * Everything after the process checks: ask, confirmation, answer, go. ctx is an M2 context ({ record, rules, product,
- * now, alert }); readRows({ product, card }) → rows; view and mainSha as M2 raiseGo takes them; confirm({ cardId, text })
- * → { ok } (ttyConfirm in production). `onlyProduct` is for a test, whose Record is another product's; main passes none.
+ * Everything after the process checks. ctx is an M2 context ({ record, rules, product, now, alert }); cardText is the
+ * card file's bytes (a Buffer or string); readRows({ product, cardId, doc }) → rows for that card as planned; view and
+ * mainSha as M2 raiseGo takes them; confirm({ cardId, text }) → { ok } (ttyConfirm in production).
  * → { ok: true, card, ask, go, fingerprint } | { ok: false, reason }
  */
-export async function goCard({ ctx, cardId, sudoUid, readRows, view, mainSha, confirm, onlyProduct = GO_CARD_PRODUCT }) {
-  if (ctx.product !== onlyProduct) return fail(`this command gives a go on ${onlyProduct} only, and this Dispatcher runs ${ctx.product}`);
-  if (typeof cardId !== 'string' || !CARD_ID.test(cardId)) return fail('the card id must be letters, digits, dots, dashes and underscores');
-  const c = ctx.record.read('card', cardId);
-  if (!c) return fail(`the Record has no card ${cardId}; a Lead writes it first (its outbox's roadmap- or plan- file)`);
-  if (c.corrupt || !c.doc) return fail(`card ${cardId} can't be read`);
-  const d = c.doc;
-  if (d.product !== ctx.product) return fail(`card ${cardId} belongs to product ${d.product}`);
-  if (d.tier !== 2) return fail(`card ${cardId} is Tier ${d.tier}; this command gives a go on a Tier-2 card only`);
-  if (d.kind !== 'ordinary') return fail(`card ${cardId} is a ${d.kind} card; only an ordinary card is given a go here`);
-  if (d.state !== 'draft') return fail(`card ${cardId} is ${d.state}; a go is given on a draft card`);
+export async function goCard({ ctx, cardText, sudoUid, readRows, view, mainSha, confirm }) {
+  const product = ctx.product;
+  if (ctx.rules.flag(TEST_PRODUCT_KEY, { product }) !== true) return fail(`this command works only on a product whose rules mark it the test product (${TEST_PRODUCT_KEY}: true), and ${product}'s don't`);
+  const text = Buffer.isBuffer(cardText) ? cardText : Buffer.from(String(cardText ?? ''), 'utf8');
+  if (text.length > MAX_CARD_FILE) return fail('the card file is far larger than a card');
+  const f = readCardFile(text.toString('utf8'), product);
+  if (!f.ok) return f;
+  const cardId = f.id;
   let rows;
-  try { rows = await readRows({ product: ctx.product, card: cardId }); } catch (e) { return fail(`the card's rows could not be read: ${String(e?.message ?? e).slice(0, 300)}`); }
-  if (d.done_when !== doneBar(rows)) return fail(`card ${cardId}'s pass test is not yet its rows' (the Dispatcher sets it on its next pass); run this again after that`);
+  try { rows = await readRows({ product, cardId, doc: f.doc }); } catch (e) { return fail(`the card's rows could not be read: ${String(e?.message ?? e).slice(0, 300)}`); }
+  const doc = { state: 'draft', ...f.doc, done_when: doneBar(rows) };
+  // A card already there is taken up only if this command made it and it is still the same draft (a rerun after a stop).
+  const had = ctx.record.read('card', cardId);
+  if (had) {
+    if (had.corrupt || !had.doc) return fail(`card ${cardId} is in the Record but can't be read`);
+    const by = ctx.record.meta('card', cardId)?.createdBy ?? null;
+    if (by !== OWNER_COMMAND) return fail(`card ${cardId} is already in the Record, made by ${by ?? 'an unknown writer'}; pick another id`);
+    if (had.doc.state !== 'draft') return fail(`card ${cardId} is ${had.doc.state}; a go is given on a draft card`);
+    const { round: _r, ...stored } = had.doc;
+    if (canonicalJson(stored) !== canonicalJson(doc)) return fail(`card ${cardId} is already in the Record with another plan; pick another id`);
+  }
+  const fp = planFingerprint({ product, card_id: cardId, tier: doc.tier, files: doc.files, done_when: doc.done_when, plan_sha256: doc.plan_sha256, main_commit: doc.main_commit });
+  if (!fp.ok) return fail(`the plan can't be fingerprinted: ${fp.reason}`);
+  const said = confirm({ cardId, text: goText({ product, cardId, card: doc, fingerprint: fp.sha256 }) });
+  if (!said?.ok) return fail(said?.reason ?? 'the go was not confirmed');
+  if (!had) {
+    const w = ctx.record.write({ actor: 'owner_command', entity: 'card', id: cardId, expectRev: 0, doc });
+    if (!w.ok) return fail(`the Record refused the card: ${w.reason}`);
+  }
   const g = await raiseGo(ctx, { cardId, rows, view, mainSha });
-  if (!g.ok) return fail(`the go could not be asked: ${g.reason}`);
+  if (!g.ok) return fail(`the card is written, but the go could not be asked: ${g.reason}`);
   const ask = askStore(ctx.record).ask(g.id);
   if (!ask) return fail(`ask ${g.id} could not be read back`);
+  if (ask.doc.fingerprint !== fp.sha256) return fail(`the go asked is on fingerprint ${ask.doc.fingerprint}, not the ${fp.sha256} shown; no go was given`);
   if (Array.isArray(ask.doc.risky) && ask.doc.risky.length) return fail(`the go is for a risky class (${ask.doc.risky.join(', ')}), which needs your own Approve on GitHub`);
-  const shown = ctx.record.read('card', cardId);
-  if (!shown?.doc || shown.corrupt) return fail(`card ${cardId} can't be read`);
-  const said = confirm({ cardId, text: goText({ product: ctx.product, cardId, card: shown.doc, fingerprint: ask.doc.fingerprint, askId: g.id }) });
-  if (!said?.ok) return fail(said?.reason ?? 'the go was not confirmed');
-  const a = answerByOwnerCommand(ctx, g.id, { sudoUid, cardJsonSha256: sha256(canonicalJson(shown.doc)) });
+  const a = answerByOwnerCommand(ctx, g.id, { sudoUid, cardJsonSha256: sha256(text) });
   if (!a.ok) return a;
   const go = recordGo(ctx, g.id);
   if (!go.ok) return fail(`the answer is recorded, but the go is not: ${go.reason}`);
-  return { ok: true, card: cardId, ask: g.id, go: go.go, fingerprint: ask.doc.fingerprint };
+  return { ok: true, card: cardId, ask: g.id, go: go.go, fingerprint: fp.sha256 };
 }
+
+/** The Record as planRows reads it, with the planned card in it before it is written. */
+export const withPlannedCard = (rec, cardId, doc) => ({ ...rec, read: (entity, id) => (entity === 'card' && id === cardId ? { id, doc } : rec.read(entity, id)) });
 
 /** The command. Ports are for a test; production passes none. → exit code. */
 export async function main(argv, {
@@ -143,19 +187,20 @@ export async function main(argv, {
     const { githubReads, planRows } = await import('../wiring/review-ports.mjs');
     const { readUser } = await import('./users-folders.mjs');
     const { realIo } = await import('./mac.mjs');
-    const { DISPATCHER_USER } = await import('./dispatcher-setup.mjs');
     const c = readConfig(argv[0], { self });
     checkConfig(c);
-    const who = whoProblem({ uid, sudoUid: env.SUDO_UID, dispatcherUid: readUser(realIo(), DISPATCHER_USER).uid, ownerUid: c.ownerUid });
+    const who = whoProblem({ uid, sudoUid: env.SUDO_UID, dispatcherUid: readUser(realIo(), RUN_AS).uid, ownerUid: c.ownerUid });
     if (who) throw new Error(who);
-    if (c.product !== GO_CARD_PRODUCT) throw new Error(`this command gives a go on ${GO_CARD_PRODUCT} only, and this config runs ${c.product}`);
+    let cardText;
+    try { cardText = readFileSync(argv[1]); } catch (e) { throw new Error(`the card file can't be read (${e?.code ?? 'unknown error'})`); }
     const { rec, rules, gh, entry } = await recordAndRules(c, { who: 'go-card', log, fetchFn, now });
     const reads = githubReads({ gh, entry });
     const ctx = { record: rec, rules, product: c.product, now, alert: (a) => { log(`go-card: alert not sent: ${JSON.stringify(a)}`); return false; } };
-    const r = await goCard({ ctx, cardId: argv[1], sudoUid: Number(env.SUDO_UID), readRows: planRows({ gh, entry, rec }),
+    const readRows = ({ product, cardId, doc }) => planRows({ gh, entry, rec: withPlannedCard(rec, cardId, doc) })({ product, card: cardId });
+    const r = await goCard({ ctx, cardText, sudoUid: Number(env.SUDO_UID), readRows,
       view: await reads.planView({ product: c.product }), mainSha: await reads.mainSha({ product: c.product }), confirm });
     if (!r.ok) throw new Error(r.reason);
-    out(`Go recorded for card ${r.card} (go ${r.go}, fingerprint ${r.fingerprint.slice(0, 12)}), given by owner command, not a phone tap. The Dispatcher moves the card to ready on its next pass.`);
+    out(`Card ${r.card} written and its go recorded (go ${r.go}, fingerprint ${r.fingerprint.slice(0, 12)}), by owner command, not a phone tap. The Dispatcher moves the card to ready on its next pass.`);
     return 0;
   } catch (e) {
     log(`go-card: ${String(e?.message ?? e).slice(0, 500)}`);

@@ -187,6 +187,12 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
     if (!mayCreateKind(name, doc.kind)) return no(`${name} may not create a ${doc.kind} card`);
     if (doc.product !== product) return no(`a card in this record belongs to product ${product}`);
     if (doc.state !== 'draft') return no('a card is created in draft');
+    // L1100: the owner's command makes Tier-2 cards, and only on a product whose own rules mark it the test product.
+    if (name === 'owner_command') {
+      if (doc.tier !== 2) return no('an owner command makes Tier-2 cards only');
+      // The key is written out (not TEST_PRODUCT_KEY) so required-keys.test can name every rules read here.
+        if (rules.flag('product.test_product', { product }) !== true) return no('an owner command makes cards only on a product whose rules mark it the test product (product.test_product)');
+    }
     if (doc.depends_on !== undefined && (!Array.isArray(doc.depends_on) || doc.depends_on.some((d) => typeof d !== 'string'))) return no('depends_on must be a list of card ids');
     if (doc.claim !== undefined || doc.wait !== undefined) return no('a new card has no claim or wait');
     if (doc.needs_joe === false) delete doc.needs_joe;

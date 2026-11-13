@@ -29,6 +29,7 @@ export const REQUIRED_KEYS = Object.freeze([
 export const OPTIONAL_KEYS = Object.freeze([
   'claims.stuck_min',   // writer.mjs: missing breaks no dead session's claim (it fails slow: the running limit ends it)
   'claims.unlaunched_min',   // writer.mjs: missing uses UNLAUNCHED_MIN_DEFAULT; set but not a positive whole number refuses
+  'product.test_product',    // writer.mjs: missing means not the test product, so an owner command may make no card there (L1100)
 ]);
 
 // A pattern as the reason prints it: text in quotes; anything else (a map, a list, null) is named, never converted, since
