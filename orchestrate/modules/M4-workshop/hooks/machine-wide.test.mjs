@@ -152,7 +152,7 @@ const WRAPPED = ['timeout 300 vercel deploy --prod', 'gtimeout 300 vercel deploy
   'watch -n 60 vercel deploy', 'dotenv -- vercel deploy', 'env -S "vercel deploy"', 'su -c "vercel deploy" deploy', 'flock /tmp/l vercel deploy',
   'stdbuf -oL vercel deploy', 'xcrun vercel deploy', 'setsid vercel deploy', 'doas vercel deploy', 'noglob vercel deploy',
   'find . -name x -exec vercel deploy \\;', 'echo "vercel deploy --prod" | bash', 'bash <<< "vercel deploy"', 'bash <<EOF\nvercel deploy\nEOF',
-  'python3 -c "import os; os.system(\'vercel deploy\')"', 'node -e "require(\'child_process\').execSync(\'vercel deploy\')"',
+  'python3 -c "import os; os.system(\'vercel deploy\')"', 'node -e "cp.execSync(\'vercel deploy\')"',
   'osascript -e \'do shell script "vercel deploy"\'', 'timeout 300 ./node_modules/.bin/vercel deploy', 'timeout 300 npx vercel@latest deploy',
   'timeout 300 v\'e\'rcel deploy', 'timeout 300 VERCEL deploy'];
 test('#487 r2 M1: in the machine-wide form, a wrapper, a string handed to a shell or code handed to an interpreter that names a production program is blocked', () => {
@@ -167,7 +167,7 @@ test('#487 r2 M1: in the machine-wide form, a wrapper, a string handed to a shel
   // by word, and code handed to an interpreter word-like run by run.
   for (const c of ['bash -c "cat /srv/app/prod-settings.conf"', 'bash -c "cd /srv/app && cat prod-settings.conf"', 'sh -c "cat p*.conf"',
     'eval "cd /srv/app; cat prod-settings.conf"', 'timeout 5 cat /srv/app/prod-settings.conf', 'python3 -c "open(\'/srv/app/prod-settings.conf\').read()"',
-    'node -e "require(\'fs\').readFileSync(\'prod-settings.conf\')"', 'echo "cat /srv/app/prod-settings.conf" | bash']) {
+    'node -e "fs.readFileSync(\'prod-settings.conf\')"', 'echo "cat /srv/app/prod-settings.conf" | bash']) {
     assert.match(bash(c).reason ?? '', /production settings file/, c);
   }
   // Plain commands keep the narrow read, and wrapped shapes with no production program still pass.
