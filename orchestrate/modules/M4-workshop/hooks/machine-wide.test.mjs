@@ -197,6 +197,20 @@ test('#487 r2 m1: in the machine-wide form, a wildcard is judged in the folder i
   assert.equal(decide({ tool_name: 'Bash', cwd: d, tool_input: { command: 'ls .p*' } }, { snapshot: f, maxAgeMs: Infinity }).block, true);
 });
 
+// #487 r5 m2: in the role form, a stray line equal to a here-document's end word hid the commands up to the real end
+// from `unreadable`, which looked for bodies again in text whose bodies were already taken out (lib.mjs bodiesTaken).
+test('#487 r5 m2: the role form refuses a production call between a stray end-word line and the real end', () => {
+  const { d, f } = copyAt(makeSnapshot({ ...RULES, production: { ...RULES.production, programs: PROGRAMS } }));
+  const role = (command) => decide({ tool_name: 'Bash', cwd: d, tool_input: { command } }, { snapshot: f, maxAgeMs: Infinity });
+  for (const c of ["cat > a <<'EOF'\nA\nEOF\ntimeout 300 vercel deploy\nEOF", "cat > a <<'EOF'\nA\nEOF\nsudo -u joe vercel deploy\nEOF",
+    "cat > a <<EOF\nA\nEOF\ntimeout 300 vercel deploy\nEOF", "git commit -F - <<'M'\nx\nM\nnice -n 5 vercel deploy\nM"]) {
+    assert.equal(role(c).block, true, c);
+  }
+  assert.ok(unreadable("cat > a <<'EOF'\nA\nEOF\ntimeout 300 vercel deploy\nEOF"), 'unreadable sees the wrapper after the stray end line');
+  // The plain here-document still passes the role form.
+  assert.deepEqual(role("cat > a <<'EOF'\nA\nEOF"), { block: false });
+});
+
 // #487 r5 (LEAD-CALLS L1075): the machine-wide form refuses by default. Any word of the raw line, here-document bodies and
 // `$( )` included, naming a production program refuses it, unless the whole line is one of three allowed shapes or the
 // word is a path that can't be the program. Every r3 and r4 probe is kept here and must refuse.
@@ -241,6 +255,10 @@ const MUST_REFUSE = {
   // r4 m2, m3: the install-if-missing line (the ruled trade), and a for-in word whose trailing slash the loop takes off.
   'r4 m2, m3': ['command -v vercel || npm i -g vercel', 'command -v supabase || brew install supabase/tap/supabase', 'which vercel || npm i -g vercel',
     'for f in node_modules/.bin/vercel/; do timeout 5 ${f%/} deploy; done', 'ls -l $(which vercel)', 'which supabase | xargs ls -l'],
+  // r5 m4 (P14, P9): the lookup shape takes only -v and -V; the message shape only gh pr|issue create, comment and edit.
+  'r5 m4': ['command -p vercel deploy', 'command -x vercel deploy', 'command -- vercel deploy',
+    MSG('gh pr merge 5 --body', 'vercel'), MSG('gh pr review 5 --approve --body', 'vercel'), MSG('gh pr close 5 --comment', 'vercel'),
+    MSG('gh issue close 5 --comment', 'vercel'), MSG('gh pr ready 5 --body', 'vercel'), MSG('gh issue delete 5 --body', 'vercel')],
   // r4 m4 (D31): git's -C value is not its subcommand.
   'r4 m4 D31': ['git -C /x bisect run vercel deploy', "git -C /x rebase -x 'vercel deploy' main", 'git -C commit bisect run vercel deploy'],
   // r2 M1: wrappers, strings handed to a shell, inline code.

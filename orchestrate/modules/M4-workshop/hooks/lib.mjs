@@ -321,15 +321,18 @@ export const bothWords = (cmd) => [...new Set([...shellWords(cmd), ...shellWords
 // it lets through (WRAPPERS below).
 const STRIPPED_WRAPPERS = ['env', 'command', 'exec', 'nohup', 'time', 'sudo', 'xargs', 'nice', 'builtin'];
 
-/** The command line split into its commands (at ; && || | and newlines), each a word list. */
-export function shellCommands(cmd, { raw = false } = {}) {
+/** The command line split into its commands (at ; && || | and newlines), each a word list. `bodiesTaken`: `cmd` is text
+ *  whose here-document bodies were already taken out (heredocs().text, as `unreadable` reads it), so they are not looked
+ *  for again: a second look would read a stray line equal to an end word as the end of a body that is no longer there,
+ *  and hide the commands after it (#487 r5 m2). */
+export function shellCommands(cmd, { raw = false, bodiesTaken = false } = {}) {
   const cmds = [];
   let cur = [];
   // The word after `<` or `>` is a file, not a command: it stays out of the command list (the
   // guards still see it among the words).
   let redirect = false;
   // A here-document's body is text fed to a program, not commands (L46).
-  for (const w of shellWords(joinLines(heredocs(cmd, { openBodies: true }).text).replace(/\n/g, ' ; '))) {
+  for (const w of shellWords(joinLines(bodiesTaken ? cmd : heredocs(cmd, { openBodies: true }).text).replace(/\n/g, ' ; '))) {
     if (w === '<' || w === '>') { redirect = true; continue; }
     if (redirect && w === '&') continue;
     if ([';', '&', '|', '(', ')', '`', '$'].includes(w)) { redirect = false; if (cur.length) cmds.push(cur); cur = []; continue; }
@@ -367,8 +370,8 @@ const SHELLS = ['sh', 'bash', 'zsh', 'dash', 'ksh', 'fish', 'csh', 'tcsh'];
 const INLINE = { node: /^(-e|-p|--eval|--print)$/, deno: /^eval$/, bun: /^(-e|--eval)$/, perl: /^-\w*e/, ruby: /^-\w*e/, php: /^-r$/, osascript: /^-e$/ };
 
 /** A wrapper that runs a string as a command: sh -c, eval, source, `.`; with `inline`, node -e and kin too. */
-export function wrapperOf(cmd, { inline = false } = {}) {
-  for (const c of shellCommands(cmd)) {
+export function wrapperOf(cmd, { inline = false, bodiesTaken = false } = {}) {
+  for (const c of shellCommands(cmd, { bodiesTaken })) {
     const prog = programOf(c);
     if (SHELLS.includes(prog) && c.slice(1).some((w) => /^-[A-Za-z]*c[A-Za-z]*$/.test(w))) return `${prog} -c`;
     if (['eval', 'source', '.'].includes(prog)) return prog;
@@ -570,7 +573,7 @@ export function unreadable(cmd) {
   if (/<\d*-\d*>/.test(bare)) return 'a zsh number range (<1-9>)';
   if (/\*\*\*/.test(bare)) return 'a *** pattern (it follows links into any folder)';
   if (SETS_SAFE_VAR.some((re) => re.test(bare))) return 'a line that sets HOME, PWD, TMPDIR or USER, which the guards read as fixed';
-  for (const raw of shellCommands(c, { raw: true })) {
+  for (const raw of shellCommands(c, { raw: true, bodiesTaken: true })) {
     let i = 0;
     while (i < raw.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(raw[i]) || KEYWORDS.includes(raw[i]))) i += 1;
     while (i < raw.length) {
@@ -582,11 +585,11 @@ export function unreadable(cmd) {
       return `"${prog}" runs another program the guard can't read; run it directly`;
     }
   }
-  const wrap = wrapperOf(c, { inline: true });
+  const wrap = wrapperOf(c, { inline: true, bodiesTaken: true });
   if (wrap) return `"${wrap}" runs code the guard can't check`;
   if (/\|[ \t\n]*([^ \t\n]*\/)?(python[0-9.]*|node|perl|ruby|php|deno|bun|osascript|lua|tclsh)([ \t\n]+-[^ \t\n]+)*[ \t\n]*($|[;&|)])/.test(c)
     || /(^|[;&|(][ \t\n]*)([^ \t\n]*\/)?(python[0-9.]*|node|perl|ruby|php|deno|bun|osascript|lua|tclsh)([ \t\n]+-[^ \t\n]+)*[ \t\n]*<(?!\()/.test(c)) return 'an interpreter fed code on its input';
-  for (const words of shellCommands(c)) {
+  for (const words of shellCommands(c, { bodiesTaken: true })) {
     const prog = programOf(words);
     const word0 = words[0];
     if (SHELLS.includes(prog)) return `"${prog}" runs commands the guard can't see`;
