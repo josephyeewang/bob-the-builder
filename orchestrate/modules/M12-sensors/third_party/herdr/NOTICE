@@ -9,6 +9,7 @@ Files modified: ported from Rust and TOML to JavaScript, with changes.
   screen/match.mjs          from src/detect/manifest.rs (validator limits, the rule loop, gates and regions)
   screen/match.test.mjs     partly from src/detect/manifest/tests.rs
   screen/waiting.mjs        from src/pane/agent_detection.rs (the pending-idle confirmation)
+  screen/tools/capture.mjs  from scripts/capture_agent_screen.py (the tmux capture loop)
 
 Main changes from the original:
   - a screen no rule matches reads "unknown" (hold); herdr falls back to idle for a known agent;

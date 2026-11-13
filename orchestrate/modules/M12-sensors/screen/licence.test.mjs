@@ -38,7 +38,8 @@ export function licenceProblems({ license, notice, files, read }) {
   }
   // Every source file under screen/ carries herdr-derived code or is a test of it, so each needs a NOTICE line;
   // only our own checks (this file) and tests that port nothing are exempt.
-  const exempt = new Set(['licence.test.mjs', 'waiting.test.mjs']);
+  // tools/ besides capture.mjs is our own publish gate, its test and a stand-in MCP server: nothing ported.
+  const exempt = new Set(['licence.test.mjs', 'waiting.test.mjs', 'tools/fixture-check.mjs', 'tools/fixture-check.test.mjs', 'tools/elicit-server.mjs']);
   for (const f of files) if (!exempt.has(f) && !listed.includes(f)) out.push(`${f} has no NOTICE line`);
   return out;
 }
