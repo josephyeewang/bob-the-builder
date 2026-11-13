@@ -26,6 +26,7 @@ import { readUser } from './users-folders.mjs';
 import { watchPlist, WATCH_NO_HASH } from './watch-setup.mjs';
 import { watchRulesPath } from './layout.mjs';
 import { ROBOT_JOB, robotAppKeyItems, robotConfigProblem, robotPlist } from './robot-setup.mjs';
+import { WORKER_RUNNER_JOB, WORKER_RUNNER_OFF, workerRunnerJobPlist, workerRunnerLoadProblem } from './worker-runner-setup.mjs';
 import { DISPATCHER_JOB, DISPATCHER_OFF, DISPATCHER_RUN_LIMIT_S, dispatcherConfigProblem, dispatcherKeysProblem, dispatcherLoadProblem, dispatcherPlist, robotMatchProblem, writeAside } from './dispatcher-setup.mjs';
 
 export const DAEMON_DIR = '/Library/LaunchDaemons';
@@ -35,9 +36,10 @@ export const JOBS = Object.freeze(['review-updater', 'review-account', 'review-r
 // a repo-only entry (all prove-token needs) leaves the three review jobs exactly as before.
 // The robot job (robot-setup.mjs) is one more only when the config says `"robot": true`, so a config without it places exactly what it did.
 // The Dispatcher job (dispatcher-setup.mjs) likewise, only when the config has its `dispatcher` entry; it loads before the robot job.
-export const jobsFor = (cfg) => [...JOBS, ...(cfg.watch?.rulesSha256 ? ['watch-only'] : []), ...(cfg.dispatcher ? [DISPATCHER_JOB] : []), ...(cfg.robot ? [ROBOT_JOB] : [])];
+// The worker runner's job (worker-runner-setup.mjs, L1092) likewise, only with the config's `workerRunner` entry; it loads last.
+export const jobsFor = (cfg) => [...JOBS, ...(cfg.watch?.rulesSha256 ? ['watch-only'] : []), ...(cfg.dispatcher ? [DISPATCHER_JOB] : []), ...(cfg.robot ? [ROBOT_JOB] : []), ...(cfg.workerRunner ? [WORKER_RUNNER_JOB] : [])];
 /** The jobs a config may turn on or leave off. One left off must not be placed or loaded either (a full check says so). */
-export const OPTIONAL_JOBS = Object.freeze(['watch-only', DISPATCHER_JOB, ROBOT_JOB]);
+export const OPTIONAL_JOBS = Object.freeze(['watch-only', DISPATCHER_JOB, ROBOT_JOB, WORKER_RUNNER_JOB]);
 export const ALL_JOBS = Object.freeze([...JOBS, ...OPTIONAL_JOBS]);
 const ROBOT_OFF = 'the config does not turn the robot job on: add "robot": true, with its robot.json among the extras';
 /**
@@ -47,11 +49,12 @@ const ROBOT_OFF = 'the config does not turn the robot job on: add "robot": true,
  * tests pin it, and changing it is outside this change (raised with the lead).
  */
 export function onlyJobs(cfg, name, { anyKnown = false } = {}) {
-  if (anyKnown && (name === ROBOT_JOB || name === DISPATCHER_JOB)) return [name];
+  if (anyKnown && (name === ROBOT_JOB || name === DISPATCHER_JOB || name === WORKER_RUNNER_JOB)) return [name];
   const all = jobsFor(cfg);
   if (name === 'watch-only' && cfg.watch && !cfg.watch.rulesSha256) throw new Error(WATCH_NO_HASH);
   if (name === ROBOT_JOB && !cfg.robot) throw new Error(ROBOT_OFF);
   if (name === DISPATCHER_JOB && !cfg.dispatcher) throw new Error(DISPATCHER_OFF);
+  if (name === WORKER_RUNNER_JOB && !cfg.workerRunner) throw new Error(WORKER_RUNNER_OFF);
   if (!all.includes(name)) throw new Error(`--only names no job of this config: ${JSON.stringify(String(name).slice(0, 60))}; the jobs are ${all.join(', ')}`);
   return [name];
 }
@@ -82,6 +85,7 @@ export function plistTexts(io, cfg) {
     if (cfg.watch?.rulesSha256) plists['watch-only'] = watchPlist(io, cfg);
     if (cfg.dispatcher) plists[DISPATCHER_JOB] = dispatcherPlist(cfg);
     if (cfg.robot) plists[ROBOT_JOB] = robotPlist(cfg);
+    if (cfg.workerRunner) plists[WORKER_RUNNER_JOB] = workerRunnerJobPlist(cfg);
     return { plists, problems };
   } catch (e) { return { plists: {}, problems: [`the job files cannot be built from the owner's Mac user ${cfg.owner} (${e.message}); is its home folder set?`] }; }
 }
@@ -256,6 +260,8 @@ function startChecks(io, cfg, jobs) {
   }
   // The Dispatcher: its config in the copy, then check-dispatcher (L757), before it may start.
   if (jobs.includes(DISPATCHER_JOB)) { const why = dispatcherLoadProblem(io, cfg); if (why) problems.push(why); }
+  // The worker runner: its config in the copy, root's, and one its own check takes (L1092).
+  if (jobs.includes(WORKER_RUNNER_JOB)) { const why = workerRunnerLoadProblem(io, cfg); if (why) problems.push(why); }
   return { problems, known: problems.filter((p) => !unknown.has(p)) };
 }
 
