@@ -9,6 +9,7 @@
 #   D-020: bob-upgrade.mjs (own-version detection, green-gate test command, damaged list, pointer target) ·
 #          doc-pointers-check.mjs short paths · config-protection.js's required-checks advice · commit-sweep.sh
 #   D-036: templates/wired.test.mjs (Phase Gate 17)
+#   R-3-16, R-3-17: skill-size/test-skill-size.sh · skill-review-check.mjs (skill size and review)
 #
 # Rule 28's discipline applied to Bob's own checkers: each check is run against the defect it
 # was written for (must catch it) AND against a clean case (must pass it). Everything happens in
@@ -1156,6 +1157,39 @@ wired_base; printf 'export async function syncJob() { return 1; }\n' > "$WT/src/
 printf 'module.exports = { run() { return require("./clean.js").cleanupJob(); } };\n' > "$WT/src/runner.js"
 printf '#!/usr/bin/env node\nimport runner from "./runner.js";\nimport { syncJob } from "./jobs.mjs";\nawait syncJob(); runner.run();\n' > "$WT/src/main.mjs"
 expect "wired: required and called inside a method of an exported object -> pass" 0 "" -- node --test "$WT/test/wired.test.mjs"
+
+# ── 24. skill-size/test-skill-size.sh + skill-review-check.mjs: skill size and review (R-3-16, R-3-17) ──
+echo "skill size and review checks"
+SZ="$TMP/skillsize"; mkdir -p "$SZ/scripts/skill-size" "$SZ/skills/ok" "$SZ/skill"
+cp "$HERE/skill-size/test-skill-size.sh" "$SZ/scripts/skill-size/"
+printf -- '---\nname: ok\ndescription: fine\n---\nshort\n' > "$SZ/skills/ok/SKILL.md"
+cp "$SZ/skills/ok/SKILL.md" "$SZ/skill/SKILL.md"
+expect "skill-size: every SKILL.md small -> pass" 0 "PASS" -- bash "$SZ/scripts/skill-size/test-skill-size.sh"
+head -c 19999 /dev/zero | tr '\0' 'a' > "$SZ/skills/ok/SKILL.md"
+expect "skill-size: 19,999 bytes is under the limit -> pass" 0 "PASS" -- bash "$SZ/scripts/skill-size/test-skill-size.sh"
+mkdir -p "$SZ/skills/big"; head -c 20000 /dev/zero | tr '\0' 'a' > "$SZ/skills/big/SKILL.md"
+expect "skill-size: a planted skill at 20,000 bytes -> FAIL, named" 1 "skills/big/SKILL.md is 20000 bytes" -- bash "$SZ/scripts/skill-size/test-skill-size.sh"
+rm -r "$SZ/skills/big"; head -c 25000 /dev/zero | tr '\0' 'a' > "$SZ/skill/SKILL.md"
+expect "skill-size: an oversized front-door skill/SKILL.md (Bob addition) -> FAIL" 1 "skill/SKILL.md is 25000 bytes" -- bash "$SZ/scripts/skill-size/test-skill-size.sh"
+expect "skill-size: Bob's own skills pass today" 0 "PASS" -- bash "$HERE/skill-size/test-skill-size.sh"
+
+SR="$TMP/skillreview"; mkdir -p "$SR/good/references" "$SR/vague" "$SR/terse" "$SR/big" "$SR/broken"
+GOODDESC='Turns meeting notes into an action list. Use when the user says "summarise this meeting" or pastes notes and asks what to do next.'
+printf -- '---\nname: good\ndescription: %s\n---\n# Notes to actions\n\nRead the notes. List each action with its owner. See [the format](references/format.md).\n' "$GOODDESC" > "$SR/good/SKILL.md"
+echo '# Format' > "$SR/good/references/format.md"
+expect "skill-review: a sound skill -> no Material, pass" 0 "no findings" -- node "$HERE/skill-review-check.mjs" "$SR/good"
+printf -- '---\nname: vague\ndescription: A helpful skill that assists with many different kinds of tasks and makes work better overall.\n---\nDo things well.\n' > "$SR/vague/SKILL.md"
+expect "skill-review: a planted vague description (no trigger cue) -> FAIL" 1 "vague: no trigger cue" -- node "$HERE/skill-review-check.mjs" "$SR/vague"
+printf -- '---\nname: terse\ndescription: Helps with stuff.\n---\nDo things.\n' > "$SR/terse/SKILL.md"
+expect "skill-review: a planted too-short description -> FAIL" 1 "vague: 17 characters" -- node "$HERE/skill-review-check.mjs" "$SR/terse"
+{ printf -- '---\nname: big\ndescription: %s\n---\n' "$GOODDESC"; for _ in $(seq 1 520); do echo "Read the notes and list each action with its owner."; done; } > "$SR/big/SKILL.md"
+expect "skill-review: a planted oversized body (5,200 words) -> FAIL" 1 "oversized: 5200 words" -- node "$HERE/skill-review-check.mjs" "$SR/big"
+printf -- '---\nname: broken\ndescription: %s\n---\nYou should read [the format](references/missing.md).\n' "$GOODDESC" > "$SR/broken/SKILL.md"
+expect "skill-review: a link to a missing file -> FAIL, named" 1 "links to references/missing.md" -- node "$HERE/skill-review-check.mjs" "$SR/broken"
+expect "skill-review: second person in the body -> Minor, reported" 1 "Minor\] style" -- node "$HERE/skill-review-check.mjs" "$SR/broken"
+printf 'no frontmatter here\n' > "$SR/broken/SKILL.md"
+expect "skill-review: no frontmatter -> FAIL" 1 "no YAML frontmatter" -- node "$HERE/skill-review-check.mjs" "$SR/broken"
+expect "skill-review: a skill it cannot read -> exit 2, never a pass" 2 "cannot read the skill" -- node "$HERE/skill-review-check.mjs" "$SR/absent"
 
 echo
 echo "selftest-gate-scripts: $PASS passed, $FAIL failed"
