@@ -43,7 +43,9 @@ export function checkRoleEnv(env) {
 
 // MANAGED SOURCES: the managed (policy) settings sources check 10 reads, as claude reads them.
 //
-// CAPABILITY NOTE, checked on claude 2.1.322 (its bundled code): RECHECK ON EVERY UPGRADE of the pin.
+// CAPABILITY NOTE, checked on claude 2.1.322 (its bundled code) and again in 2.1.316's, the pin, 13 Nov 2026: the same
+// sources, the two plist paths in the same order, both overrides built out (checked: claude-code 2.1.316; MANAGED_SOURCES_CHECKED_ON below
+// is code, its owner's to move). RECHECK ON EVERY UPGRADE of the pin.
 // A source a newer claude adds, moves or reorders gets past check 10 until this list follows it.
 // This build has two overrides built out, which a newer one may build in: CLAUDE_CODE_MANAGED_SETTINGS_PATH
 // (another managed file) and CLAUDE_CODE_REMOTE_SETTINGS_PATH (another remote cache). Its storage backend

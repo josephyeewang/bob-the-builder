@@ -343,7 +343,7 @@ test('check 10: the machine-wide file must carry the production guard and no esc
   }
 });
 
-// ---- check 10, L900: every managed settings source claude 2.1.322 reads ----
+// ---- check 10, L900: every managed settings source claude 2.1.322 reads (and 2.1.316; checked: claude-code 2.1.316) ----
 
 function managedWorld() {
   const guard = { [H.matcher]: '*', [H.hooks]: [{ [H.type]: 'command', [H.command]: '/o/node /o/hooks/production-write-guard.mjs --role any', [H.timeout]: 10, [H.onFailure]: 'block' }] };
@@ -380,7 +380,7 @@ test('L900 check 10: with only a good managed-settings.json it passes, and it lo
 
 // L909 reverses L900's "the config names another file, and claude's own is checked too; none there passes" on
 // purpose: claude 2.1.322 reads only its fixed file, so a guard anywhere else never applies, and "nothing there"
-// can't pass for the file that must carry it.
+// can't pass for the file that must carry it. 2.1.316 does the same (checked: claude-code 2.1.316).
 test('L909 check 10: machineWide must be claude\'s fixed file; another path refuses before anything is read', () => {
   const w = managedWorld();
   w.files['/x/other.json'] = w.good;

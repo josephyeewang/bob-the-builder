@@ -62,7 +62,7 @@ test('step 6, check 2: the copy\'s setup files are main\'s exactly; one changed,
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
 
-// claude as its Bash tool runs a command (#463 r2 M3, claude 2.1.322): detached, in a process group of its own, so claude's
+// claude as its Bash tool runs a command (#463 r2 M3, claude 2.1.322; checked: claude-code 2.1.316): detached, in a process group of its own, so claude's
 // group is not the command's; claude ends when the command does.
 const bashTool = (cmd, opts) => childSpawn(process.execPath, ['-e',
   "const c = require('node:child_process').spawn('/bin/sh', ['-c', process.argv[1]], { detached: true, stdio: 'ignore' }); c.on('exit', (x) => process.exit(x ?? 1));", cmd], opts);
