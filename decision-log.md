@@ -672,3 +672,13 @@ ADRs that describe the decision without consequences are useless. The Consequenc
 **Why:** Field reviews showed repeat failures despite written rules, repairs creating new defects, static scope lists missing new instances, and completion claims outrunning real consumer tests. A rung label, a test count or another review round does not establish prevention. Checks need clean controls and independently examined counterexamples, and builders need applicable contracts before coding.
 
 **Boundaries:** No automatic rule rewriting, fixed audit-round cap, product migrations or parallel-owned runtime changes. Machine validation checks records and evidence presence, not their truth. No measured reduction in field failures is claimed at publication; compare like-for-like first-pass and follow-up outcomes after adoption.
+
+### D-039: Evidence must match its workload, meaning and current operation
+
+**Date:** 2026-11-13
+
+**Decision:** Repair source-fidelity false passes and extend existing coverage records with optional structured task-result validation. Strengthen the existing evaluation, Behavioral Core, phase-report and audit-lens checkpoints for applicability, useful output, source-read depth, meaning preservation and recovery composition.
+
+**Why:** A source inventory did not prove original requirements were retained; a completed process did not prove its report passed; a score from one workload did not certify another. Format conversions, optional work and rollback could silently lose meaning or accepted state. The intervention is concrete negative controls and precise evidence contracts in existing tools, not more audit rounds.
+
+**Limits:** Legacy coverage remains supported without a new claim of report verification. Receipt checks cannot establish semantic correctness or reviewer judgment. No private project details, new audit panel, fixed audit cap, other-project changes or parallel-owned implementation changes are included. Effectiveness must be measured after use.
