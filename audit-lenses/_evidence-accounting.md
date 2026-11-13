@@ -46,6 +46,14 @@ A unit is a stable combination of *surface × boundary × subsystem × check-cla
 
 The payoff is one sentence at the end of every audit that most audits cannot produce: **"Here is what we checked, here is what we did not check, and here is why."**
 
+### Fixed coverage for a change review, and planted defects (2026-11-13, D-040)
+
+A review of one change has the same blind spot at a smaller scale: it reports what it found, and its coverage is whatever the reviewer happened to read. So the coverage of a change review is fixed in advance.
+
+- **Every change review covers, and says it covered:** the invariants the change names (`reference/global-invariants.md`), every caller in the change's collision table (Rule 26), and the previous round's verified-good list (`reference/field-learning.md`).
+- **Planted defects measure the reviewer.** Before the review, the builder or the coordinating session plants defects from this catalogue into a copy of the change, wherever they apply: an error read as success; a hold nobody is told about; a lost retry; a process killed mid-write; unreadable input; the wrong user or folder; a stale or future-dated time.
+- **The report lists each plant as caught or missed.** A missed plant means the review under-ran: its "clean" covers only what it caught, and the gap is recorded as an uncovered unit like any other.
+
 ### Read depth is separate from coverage and file identity
 
 For source-reading checks, record in each unit's evidence notes whether each source was fully read, sampled (with inspected extent), reused as an exact duplicate of a named inspected source, or could not be extracted. Name the interpretation check separately. A matching hash establishes identity, not understanding; an extraction failure is a coverage gap. Read the raw source independently of any inherited requirement inventory when testing fidelity. Runtime/model identity comes from the launch receipt, not the model's own prose.
