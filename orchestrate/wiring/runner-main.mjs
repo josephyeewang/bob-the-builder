@@ -9,7 +9,7 @@
 // descriptor, inside the installed copy, and owned by root or this user alone. It names every path:
 //   { "installRoot": "/abs", "requestsDir": "/abs", "statusFile": "/abs", "orchestrateUid": <uid>,
 //     "outboxRoot": "/abs", "copiesRoot": "/abs", "home": "/abs", "path": "/abs:/abs", "claudeBin": "/abs",
-//     "recordRoot": "/abs", "recordUid": <uid>, "claimMs": <ms>,
+//     "recordRoot": "/abs", "recordUid": <uid>, "claimMs": <ms>, "lockedMs": <ms>? (the install job's limit, at most runner-locked.mjs LOCKED_MS; save-work's is LOCKED_SAVE_MS),
 //     "products": { "<name>": { "repo": "owner/name", "mirror": "/abs", "render": { "paths": {...}, "product": {...},
 //                   "rulesHosts": [], "productionFiles": [], "proposalOutboxes": [] }, "rules": {...}? } },
 //     "pin": "<claude version>"?, "machineWide": "/Library/Application Support/ClaudeCode/managed-settings.json"? (that file only, L913),
@@ -20,7 +20,9 @@
 // (launch check 12: the rules the Dispatcher's snapshot at dispatcherRules holds, the Record, and the running count from
 // this runner's status file and the review runner's), `bobManifest` the pinned Bob file list (check 13); each is root's
 // own file in the copy, and one that can't be loaded is logged and leaves its check without a port. Until both are
-// named no session starts; a worker is refused first at check 4 (no install port).
+// named no session starts; a worker is refused first at check 4 when its product declares no install command
+// (render.product.commands.install; its registry hosts in render.registryHosts). Check 4 and save-work run through one
+// lock-down runner (lockedWiring, L969, #456 r1 m3), so neither is ever on without the other.
 // Each product's render.paths.deny must name the Record, ~/.ssh, the gh config, ~/.claude and the robot keys (full paths,
 // not /), and list the secrets with the approvals and rules state (#364 r1 M2): a config missing any is refused.
 // The runner's own folder is the status file's folder: it holds the status, the memory (memory.json, 0o600), the
@@ -42,14 +44,16 @@ import { makeLock } from '../modules/M9-record/lock.mjs';
 import { PRODUCT, runnerPlaces } from '../shared/product-paths.mjs';
 import { foldKey } from '../shared/plan-fingerprint.mjs';
 import { loadMemory, processGroupPorts, runRunner } from './runner-loop.mjs';
-import { drainedPort, liveWallProblem, pauseLeadPort, saveWorkPort, sessionSettingsOf, sizePort, startPort } from './runner-ports.mjs';
+import { drainedPort, liveWallProblem, pauseLeadPort, productWallGap, saveSettingsName, saveWorkPort, sessionEnv, sessionSettingsOf, sizePort, startPort } from './runner-ports.mjs';
 import { workerChecks } from './runner-checks.mjs';
 import { holdersOf, readFactFile, readSessionFile } from '../modules/M4-workshop/launcher/review-runner-main.mjs';
 import { keepSnapshotFresh, writeSnapshot } from '../modules/M4-workshop/hooks/snapshot.mjs';
 import { spawn as childSpawn, spawnSync } from 'node:child_process';
 import { fullPath } from './runner-job.mjs';
 import { productRoleClash } from './owner-status.mjs';
-import { CLAUDE_FILE, MANAGED_SOURCES_CHECKED_ON } from '../modules/M4-workshop/launcher/env-check.mjs';
+import { CLAUDE_FILE, MANAGED_SOURCES_CHECKED_ON, checkRoleEnv } from '../modules/M4-workshop/launcher/env-check.mjs';
+import { accountInUse } from '../modules/M4-workshop/launcher/accounts.mjs';
+import { LOCKED_MS, lockedRunner } from './runner-locked.mjs';
 import { apart } from '../modules/M4-workshop/launcher/render-settings.mjs';
 import { installProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
 
@@ -73,6 +77,7 @@ export function checkRunnerConfig(c) {
   for (const k of UIDS) if (!Number.isInteger(c[k]) || c[k] < 0) fail(`${k} must be a uid`);
   if (typeof c.path !== 'string' || !c.path || !c.path.split(':').every(fullPath)) fail('path must be full folders in their simplest form joined by ":"');
   if (!Number.isFinite(c.claimMs) || c.claimMs <= 0) fail('claimMs must be the claim timeout in ms');
+  if (c.lockedMs !== undefined && (!Number.isInteger(c.lockedMs) || c.lockedMs <= 0 || c.lockedMs > LOCKED_MS)) fail('lockedMs must be the install job\'s time limit in ms, at most 10 minutes, the lock-down\'s own cap (left out: 10 minutes)');
   if (!c.products || typeof c.products !== 'object' || Array.isArray(c.products) || !Object.keys(c.products).length) fail('products must name at least one product');
   for (const [name, p] of Object.entries(c.products)) {
     if (!productName(name)) fail(`product ${JSON.stringify(name)} is not a product name`);
@@ -138,13 +143,13 @@ export function checkRunnerConfig(c) {
 const insideCopy = (root, p) => p.startsWith(`${root}/`);
 
 /**
- * What the launch checks read for one start (runner-checks.mjs workerChecks): the start port's x and the config's, and
- * the budget and Bob file list main loaded once at start from the config's `budget` and `bobManifest` (null: none, so
- * checks 12 and 13 have no port).
+ * What the launch checks read for one start (runner-checks.mjs workerChecks): the start port's x and the config's, the
+ * lock-down runner check 4 runs the install through, and the budget and Bob file list main loaded once at start from the
+ * config's `budget` and `bobManifest` (null: none, so checks 12 and 13 have no port).
  */
-export function workerCheckInputs(c, x, { log = () => {}, budget = null, bobManifest = null } = {}) {
+export function workerCheckInputs(c, x, { log = () => {}, runLocked = null, budget = null, bobManifest = null } = {}) {
   const p = c.products[x.product];
-  return { ...x, mirror: p.mirror, pin: c.pin, hooksDir: p.render.paths.hooksDir, rules: p.rules, snapshot: p.render.paths.snapshot, writeSnapshot,
+  return { ...x, runLocked, installCommand: p.render.product?.commands?.install, registryHosts: p.render.registryHosts, mirror: p.mirror, pin: c.pin, hooksDir: p.render.paths.hooksDir, rules: p.rules, snapshot: p.render.paths.snapshot, writeSnapshot,
     machineWide: c.machineWide, busy: holdersOf, alert: (t) => log(`worker runner: ${x.sessionId}: ${t}`), spawn: childSpawn, home: c.home,
     testCommand: p.render.product?.commands?.test, budget, bobFolder: p.render.paths.bobFolder, bobManifest };
 }
@@ -154,7 +159,7 @@ export function workerCheckInputs(c, x, { log = () => {}, budget = null, bobMani
 export const RECHECK = Object.freeze([1, 2, 3, 8]);
 /** The start port's ports from the config: the stop flag, check 0's pinned version, the worker launch checks, and the
  * RECHECK checks once more just before claude starts. */
-export const startDeps = (c, { stopped = () => false, log, productHeld, budget = null, bobManifest = null, checksOf = (x) => workerChecks(workerCheckInputs(c, x, { log, budget, bobManifest })) } = {}) => ({ stopped, log, productHeld, names: { version: c.pin },
+export const startDeps = (c, { stopped = () => false, log, productHeld, runLocked = null, budget = null, bobManifest = null, checksOf = (x) => workerChecks(workerCheckInputs(c, x, { log, runLocked, budget, bobManifest })) } = {}) => ({ stopped, log, productHeld, names: { version: c.pin },
   checksFor: checksOf,
   beforeStart: async (x) => {
     const k = checksOf(x);
@@ -171,7 +176,7 @@ export const startDeps = (c, { stopped = () => false, log, productHeld, budget =
  * still waiting) whose settings do not deny some other product of this config whole, a product added after it started.
  * groupGone(s) is the process-group port; a group it can't tell about counts as live.
  */
-export function carriedOverProblem(c, memory, { groupGone, readSettings = sessionSettingsOf(c.settingsDir), listSettings = () => readdirSync(c.settingsDir) } = {}) {
+export function carriedOverProblem(c, memory, { groupGone, readSettings = sessionSettingsOf(c.settingsDir), readSaveSettings = sessionSettingsOf(c.settingsDir, saveSettingsName), listSettings = () => readdirSync(c.settingsDir) } = {}) {
   // No memory (a first run, or one lost) while settings files of earlier sessions are there (#378 self-review M3): a
   // session started with one may still run, and the runner knows nothing of it, so it can't be told about.
   // A memory with no sessions and no requests is no memory either (#378 r2 n4: one restored or edited to empty lists).
@@ -190,21 +195,65 @@ export function carriedOverProblem(c, memory, { groupGone, readSettings = sessio
   // Waiting rows are not counted here (#378 self-review M2): no group of theirs can be shown gone, and they are never
   // dropped, so the runner would stay down, serving no stop. Each start still checks them (worker-runner.mjs `live`).
   for (const q of Object.keys(c.products)) {
-    const why = liveWallProblem(live, q, { ...runnerPlaces({ copiesRoot: c.copiesRoot, outboxRoot: c.outboxRoot, product: q }), mirror: c.products[q]?.mirror }, readSettings);
+    const places = { ...runnerPlaces({ copiesRoot: c.copiesRoot, outboxRoot: c.outboxRoot, product: q }), mirror: c.products[q]?.mirror };
+    const why = liveWallProblem(live, q, places, readSettings);
     if (why) return why;
+    // Its save settings too (#463 r2 m5): a later save of that session runs claude with them. A save comes after the stop,
+    // so every listed session that can still be saved counts (self-review M-1), live or not: one whose row keeps the
+    // hash of its save settings. None written is no gap: a row with no hash is never saved (worker-runner.mjs).
+    for (const s of Array.isArray(memory?.sessions) ? memory.sessions : []) {
+      if (!s?.save_settings_sha || s.product === q) continue;
+      if (typeof s.product !== 'string') return `session ${s.id} names no product, so whether its saves may read product ${q}'s folders can't be told`;
+      let set; try { set = readSaveSettings(s.id); } catch (e) {
+        if (e?.code === 'ENOENT') continue;
+        return `session ${s.id}'s save settings can't be read (${e?.code ?? e?.message}), so whether its saves may read product ${q}'s folders can't be told`;
+      }
+      const gap = productWallGap(set, places);
+      if (gap) return `session ${s.id} (product ${s.product})'s save settings were written before product ${q}'s folders were on their deny list (${gap}); start product ${q}'s sessions once it has ended`;
+    }
   }
   return null;
+}
+
+/**
+ * The one lock-down runner of this runner (L969): null when the config names no claude to run a job with. The sign-in is
+ * read for each save, as the start port reads it for each start (runner-ports.mjs sessionEnv, the one form), and the
+ * environment is held to launch check 9 (checkRoleEnv) as the session's is; the install is given the start's own (#463 r1 m6). `who` and `base` stand in for accountInUse and process.env in a test.
+ */
+export function lockedOf(c, { make = lockedRunner, who: account = accountInUse, base = process.env } = {}) {
+  if (typeof c.claudeBin !== 'string' || !c.claudeBin.startsWith('/')) return null;
+  return make({ claudeBin: c.claudeBin, ...(c.lockedMs !== undefined ? { ms: c.lockedMs } : {}), envOf: () => {
+    const who = account({ home: c.home });
+    if (!who?.account) throw new Error(who?.reason ?? 'no answer');
+    const env = sessionEnv(c, who, base);
+    const nine = checkRoleEnv(env);
+    if (!nine?.ok) throw new Error(nine?.reason ?? 'check 9 gave no answer');
+    return env;
+  } });
+}
+
+/**
+ * Save-work and launch check 4 from ONE runLocked (#456 r1 m3): a launch is never possible while its work could not be
+ * saved. Without one, save-work refuses ("lock-down") and no worker passes check 4 (no port); with one, both run.
+ */
+export function lockedWiring(c, { runLocked = lockedOf(c), stopped, log, productHeld, budget = null, bobManifest = null } = {}) {
+  return {
+    runLocked,
+    saveWork: saveWorkPort({ mirrorOf: (product) => c.products[product]?.mirror, runLocked, settingsDir: c.settingsDir }),
+    startDeps: startDeps(c, { stopped, log, productHeld, runLocked, budget, bobManifest }),
+  };
 }
 
 /** Every SIGTERM is listened for, not only the first (#364 r1 m4): a second one during the drain must not end the run. */
 export const listenStop = (fn) => { process.on('SIGTERM', fn); };
 
 /** The ports from the config; `over` replaces any (a test's fakes). `stopped` tells the start port the runner is stopping. */
-export function realRunnerPorts(c, over = {}, { stopped = () => false, log, productHeld, budget = null, bobManifest = null } = {}) {
+export function realRunnerPorts(c, over = {}, { stopped = () => false, log, productHeld, runLocked, budget = null, bobManifest = null, wire = lockedWiring } = {}) {
+  const locked = wire(c, { stopped, log, productHeld, budget, bobManifest, ...(runLocked !== undefined ? { runLocked } : {}) });
   return {
     ...processGroupPorts(),
-    start: startPort(c, startDeps(c, { stopped, log, productHeld, budget, bobManifest })),
-    saveWork: saveWorkPort({ mirrorOf: (product) => c.products[product]?.mirror }),
+    start: startPort(c, locked.startDeps),
+    saveWork: locked.saveWork,
     pauseLead: pauseLeadPort(),
     // The Record's read-only fact reader (L852, M4 readFactFile): an outbox is drained once every file in it is taken or told.
     // The session reader (L899) gives the attempt whose push took the card's bundle (L898).
