@@ -28,7 +28,7 @@ import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.m
 import { uidsProblem } from '../modules/M4-workshop/launcher/review-user.mjs';
 import { reviewUserProblem } from '../modules/M9-record/outbox.mjs';
 import { PLAN_REVIEW_ROLE, RUNNER_ROLES } from '../shared/review-roles.mjs';
-import { COPY_CLAUDE_CODE as CLAUDE_CODE, COPY_HOOKS as HOOKS, parseConfig } from './layout.mjs';
+import { COPY_CLAUDE_CODE as CLAUDE_CODE, COPY_HOOKS as HOOKS, managedGuardDir, parseConfig } from './layout.mjs';
 import { parseRobot } from './robot-setup.mjs';
 import { DISPATCHER_CONFIG, dispatcherConfigFor, dispatcherConfigText, dispatcherSourcePath, parseDispatcher } from './dispatcher-setup.mjs';
 import { readUser } from './users-folders.mjs';
@@ -79,7 +79,7 @@ export function installPaths(cfg) {
 /** The entries the install and the jobs put directly under the base, so `check` does not call them strangers (r3 n4). */
 // The base dispatcher.json only with a dispatcher entry: a leftover one from a removed entry is then a stranger check names (L807 c2).
 // `dispatcher`: whether the config has a dispatcher entry (check reads the config without the install's keys, so main says).
-export const rootMadeEntries = (cfg, { dispatcher = cfg.dispatcher !== undefined } = {}) => { const P = installPaths(cfg); return [P.install, P.work, P.logDir, P.accountCopy, ...(dispatcher ? [dispatcherSourcePath(cfg)] : [])]; };
+export const rootMadeEntries = (cfg, { dispatcher = cfg.dispatcher !== undefined } = {}) => { const P = installPaths(cfg); return [P.install, P.work, P.logDir, P.accountCopy, managedGuardDir(cfg), ...(dispatcher ? [dispatcherSourcePath(cfg)] : [])]; };
 
 const op = (text, run) => ({ text, run });
 /** Why `p` (a real path outside the prefix) cannot be carried into the copy, or null: it must exist, be a plain file or folder, and hold no link anywhere inside (the copy is root's alone and carries no links). */
@@ -127,7 +127,7 @@ export function keepsNot(io, cfg) {
   return updaterConfigFor(io, cfg).keep.filter((n) => !keep.includes(n));
 }
 /** How a copy whose keep list lacks a name is put right: the one statement, said by install and dispatcher-config (L1029). */
-export const reinstallSteps = (cfg) => `install again, before the pinned Claude Code and add-to-install (a new install throws both away): unload the jobs (sudo node setup.mjs daemons unload), remove ${installPaths(cfg).install}, put the --for-install review.json at runnerConfig, run install, then put the full review.json back and run add-to-install (README, part 6)`;
+export const reinstallSteps = (cfg) => `install again, before the pinned Claude Code and add-to-install (a new install throws both away): unload the jobs (sudo node setup.mjs daemons unload), remove ${installPaths(cfg).install}, put the --for-install review.json at runnerConfig, run install, then put the full review.json back and run add-to-install (README, part 6); the machine-wide guard keeps running from its own folder throughout, and after add-to-install run managed-settings again if its code changed (README, part 2: a reinstall and the machine-wide guard)`;
 /** The warning for a copy that does not keep `names`. */
 export const keepsNotWarning = (cfg, names) => `the installed copy's updater does not keep ${names.join(', ')} (its keep list is fixed at the first install), so the copy never gets ${names.length > 1 ? 'them' : 'it'} and an update would drop ${names.length > 1 ? 'them' : 'it'}: ${reinstallSteps(cfg)}`;
 

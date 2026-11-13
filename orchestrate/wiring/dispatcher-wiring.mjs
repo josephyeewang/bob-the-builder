@@ -96,6 +96,11 @@ export const REVIEW_CONFIG_KEYS = Object.freeze(['reviewRequestsDir', 'reviewSta
 // outboxes are outboxRoot's, so there is no second outbox key.
 export const WORKER_CONFIG_KEYS = Object.freeze(['reviewRoot', 'mirror', 'sealRoot', 'outboxRoot', 'copiesRoot', 'hostLockPath', 'hostLockUid', 'workerRequestsDir', 'workerStatusFile', 'workerUid']);
 const UID_KEYS = Object.freeze(['reviewUid', 'hostLockUid', 'workerUid']);
+// Keys the Dispatcher takes but setup need not write (L1041). hostLockStamp: the owner's host.lock copier's stamp, present
+// only when hostLockPath is the copier's copy; then a stale or unreadable copy holds starts (worker-ports.mjs hostLockPort).
+// Not in WORKER_CONFIG_KEYS, which setup must fill in full (setup dispatcherConfigFor): setup writes it once it runs a
+// copier, taking it from this list.
+export const OPTIONAL_CONFIG_KEYS = Object.freeze(['hostLockStamp']);
 // rulesSnapshotFile: optional, the Dispatcher's alone (the robot job's list leaves it out).
 export const CONFIG_KEYS = Object.freeze(['installRoot', 'wiring', 'lockFile', 'runDeadlineMs', 'product', 'recordRoot', 'ownerUid', 'productsFile', 'rulesStateDir', 'tokenFile', 'approvalsStateDir',
   'rulesSnapshotFile', ...REVIEW_CONFIG_KEYS, ...WORKER_CONFIG_KEYS]);
@@ -121,14 +126,17 @@ export const TICK_PORTS = Object.freeze([...WIRED_HERE, 'cleanup', 'board', 'fil
   'stopGroup', 'stopReview', 'stopSession', 'strayFrontDoor', 'wait']);
 
 // `keys` and `paths`: the robot job's wiring (robot-wiring.mjs) checks its own config with its own lists.
-export function checkConfig(c, { keys = CONFIG_KEYS, paths = PATHS, selfUid = process.getuid() } = {}) {
+// `optional`: keys taken but not required, each an absolute path when given; the Dispatcher's by default, none for another list.
+export function checkConfig(c, { keys = CONFIG_KEYS, paths = PATHS, optional = keys === CONFIG_KEYS ? OPTIONAL_CONFIG_KEYS : [], selfUid = process.getuid() } = {}) {
   if (!c || typeof c !== 'object' || Array.isArray(c)) throw new Error('config: must be an object');
   // A misspelt key would be ignored and its default used instead, so an unknown key stops the start.
-  const extra = Object.keys(c).filter((k) => !keys.includes(k));
+  const extra = Object.keys(c).filter((k) => !keys.includes(k) && !optional.includes(k));
   if (extra.length) throw new Error(`config: unknown key ${extra.join(', ')}`);
   // Setup's product rule (shared/product-paths.mjs PRODUCT, #378 r1 m3): the name its folders are made under.
   if (typeof c.product !== 'string' || !PRODUCT.test(c.product)) throw new Error('config: product must be a product name (lower case letters, digits and -, a letter or digit first)');
   for (const k of paths) if (typeof c[k] !== 'string' || !isAbsolute(c[k])) throw new Error(`config: ${k} must be an absolute path`);
+  for (const k of optional) if (k in c && (typeof c[k] !== 'string' || !isAbsolute(c[k]))) throw new Error(`config: ${k} must be an absolute path when given`);
+  if (c.hostLockStamp !== undefined && c.hostLockStamp === c.hostLockPath) throw new Error('config: hostLockStamp must be the copier\'s stamp, not host.lock\'s copy itself (hostLockPath)');
   if (c.rulesSnapshotFile !== undefined && (typeof c.rulesSnapshotFile !== 'string' || !isAbsolute(c.rulesSnapshotFile))) throw new Error('config: rulesSnapshotFile must be an absolute path');
   if (!Number.isSafeInteger(c.ownerUid) || c.ownerUid < 0) throw new Error('config: ownerUid must be a Mac user id');
   // host.lock's owner, with the rest of the config: before wire() makes any folder or opens the Record (L805 m1). The
