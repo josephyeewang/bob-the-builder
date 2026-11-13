@@ -1,4 +1,4 @@
-// Setup part 1 (R-0b-05): the three plain-script Mac users and their folders. Three things, all through an `io` (mac.mjs):
+// Setup part 1 (R-0b-05): the plain-script Mac users (USERS) and their folders. Three things, all through an `io` (mac.mjs):
 //
 //   plan(io, cfg)    reads the Mac and returns what would change: { ops, problems }. Reads only. `--dry-run` prints this.
 //   apply(io, ops)   does the ops, in order. The caller has checked for root.
@@ -15,7 +15,7 @@
 // mac.mjs `secure`. New folders are made while still root's, parents first; owners and modes are set deepest first, so
 // a parent that a robot user will own is handed over last.
 
-import { BASE_MARKER, BOB_NEW, BOB_OLD, NO_SHELL, USERS, USER_ID_RANGE, aclText, baseMarkerPath, folderTable, homeOf, oldFlatOutboxPaths, workerCopiesPath } from './layout.mjs';
+import { BASE_MARKER, BOB_NEW, BOB_OLD, BUILDER, USERS, USER_ID_RANGE, WORKER_STATUS_FILE, aclText, baseMarkerPath, folderTable, homeOf, oldFlatOutboxPaths, shellOf, workerCopiesPath, workerRunnerPaths } from './layout.mjs';
 import { baseChainProblem, guardOp } from './guard.mjs';
 
 const DSCL = '/usr/bin/dscl';
@@ -88,11 +88,11 @@ function readRecord(io, kind, name, keys) {
 const inRange = (n) => Number.isInteger(n) && n >= USER_ID_RANGE.low && n <= USER_ID_RANGE.high;
 
 /**
- * Users: { ops, problems, ids: { name: { uid, gid } } } for the three users and `cfg.owner`.
+ * Users: { ops, problems, ids: { name: { uid, gid } } } for USERS and `cfg.owner`.
  * A user or group that is only partly there (a run cut off half way) is FINISHED, never deleted or overwritten: if every
  * attribute already set matches the table, only the missing ones are written; if any set one differs, nothing is
  * changed and the problem names it. An admin is refused whatever else is true. New ids come from USER_ID_RANGE; an id in
- * use by any other user or group, or by two of the three, is refused.
+ * use by any other user or group, or by two of USERS, is refused.
  */
 export function planUsers(io, cfg) {
   const ops = []; const problems = []; const ids = {};
@@ -123,7 +123,7 @@ export function planUsers(io, cfg) {
     for (const k of ['GroupMembership', 'NestedGroups']) if (G.attrs[k] !== undefined) bad.push(`its group has ${k} set (${k === 'GroupMembership' ? 'members' : 'nested groups'}); it must have none`);
     let id = idWords.length ? Number(idWords[0][1]) : null;
     if (U.exists) {
-      if (U.attrs.UserShell !== undefined && U.attrs.UserShell !== NO_SHELL) bad.push(`its shell is ${U.attrs.UserShell}, not ${NO_SHELL}`);
+      if (U.attrs.UserShell !== undefined && U.attrs.UserShell !== shellOf(name)) bad.push(`its shell is ${U.attrs.UserShell}, not ${shellOf(name)}`);
       if (U.attrs.IsHidden !== undefined && U.attrs.IsHidden !== '1') bad.push('it is not hidden');
       if (U.attrs.NFSHomeDirectory !== undefined && U.attrs.NFSHomeDirectory !== home) bad.push(`its home is ${U.attrs.NFSHomeDirectory}, not ${home}`);
       if (U.attrs.Password !== undefined && U.attrs.Password !== '*') bad.push('it has a password set (it must be \'*\', which matches nothing)');
@@ -147,14 +147,16 @@ export function planUsers(io, cfg) {
     };
     want(G, 'Groups', [['PrimaryGroupID', String(id)], ['Password', '*']]);
     // The safe settings first (no shell, hidden, no password), the number last: a record cut off half way is never a usable account (L100 m6).
-    want(U, 'Users', [['UserShell', NO_SHELL], ['IsHidden', '1'], ['Password', '*'], ['RealName', name], ['NFSHomeDirectory', home], ['PrimaryGroupID', String(id)], ['UniqueID', String(id)]]);
+    want(U, 'Users', [['UserShell', shellOf(name)], ['IsHidden', '1'], ['Password', '*'], ['RealName', name], ['NFSHomeDirectory', home], ['PrimaryGroupID', String(id)], ['UniqueID', String(id)]]);
   }
   return { ops, problems, ids };
 }
 
 const ownerIds = (io, ids, who) => (who === 'root' ? { uid: io.rootUid, gid: 0 } : ids[who]);
-/** The group a folder must have, or undefined when the person's own group is taken as it comes: a robot user's own, or wheel where the table pins it (L100 m1). */
-const wantGidOf = (row, want) => (row.group === 'root' ? 0 : row.owner === 'owner' ? undefined : want.gid);
+/** The group a folder must have, or undefined when the person's own group is taken as it comes: wheel where the table pins
+ *  it (L100 m1), the own group of the one of USERS the row names (L1079: the builder's outboxes, orchestrate's), else a
+ *  robot user's own. null: the row names a user with no id yet, so its group can't be set (a problem, never a guess). */
+const wantGidOf = (row, want, ids) => (row.group === 'root' ? 0 : row.group !== undefined ? (ids[row.group]?.gid ?? null) : row.owner === 'owner' ? undefined : want.gid);
 const modeText = (m) => m.toString(8).padStart(3, '0');
 const expectedAcl = (row) => row.acl.map(aclText).sort();
 
@@ -199,6 +201,7 @@ export function planFolders(io, cfg, ids, rows = folderTable(cfg), { afterBase =
   for (const row of rows) {
     const want = ownerIds(io, ids, row.owner);
     if (!want) { problems.push(`${row.path}: no id for ${row.owner}, so its owner can't be set`); continue; }
+    if (wantGidOf(row, want, ids) === null) { problems.push(`${row.path}: no id for ${row.group}, so its group can't be set`); continue; }
     let st = null;
     try { st = io.lstat(row.path); } catch (e) { if (e?.code !== 'ENOENT') { problems.push(`${row.path} could not be read (${e?.code ?? e})`); continue; } }
     const modeDo = (gid, ino) => op(`set owner and mode of ${row.path}: chown ${want.uid}:${gid ?? 'same group'}, chmod ${modeText(row.mode)}   (${row.owner})`,
@@ -206,14 +209,21 @@ export function planFolders(io, cfg, ids, rows = folderTable(cfg), { afterBase =
     if (st === null) {
       makes.push(op(`mkdir -m 700 ${row.path}`, () => { io.mkdir(row.path, 0o700); const s = io.lstat(row.path); made.set(row.path, { ino: s.ino, dev: s.dev }); }));
       if (row.path === cfg.base) makes.push(...afterBase);   // root's note goes in the moment root has made the base
-      fixes.push([modeDo(wantGidOf(row, want)), aclOp(io, row, () => made.get(row.path))]);
+      fixes.push([modeDo(wantGidOf(row, want, ids)), aclOp(io, row, () => made.get(row.path))]);
       continue;
     }
     if (st.isSymbolicLink() || !st.isDirectory()) { problems.push(`${row.path} exists but is ${st.isSymbolicLink() ? 'a link' : 'not a folder'}; nothing was changed`); continue; }
     // A folder under the base is root's or the one user it is for (NEW-1): one owned by anyone else was put there by someone
     // else, and is not adopted (that would hand root's later work, and the next owner, to whoever made it).
-    if (st.uid !== io.rootUid && st.uid !== want.uid) { problems.push(`${row.path} is owned by uid ${st.uid}, who is neither root nor ${row.owner}, so it is not taken over: someone else could have put files in it. Look inside it, remove it by hand, then run users-folders again. Nothing was changed`); continue; }
-    const wantGid = wantGidOf(row, want);
+    // L1079, start clean: a builder folder the owner's own user still owns (the worker runner ran as the owner before) is
+    // taken over only while it holds nothing but the table's own folders; anything else is named, to be moved out of the
+    // base by hand first. Setup moves and deletes nothing: a copy or a hand-in there may not be saved yet.
+    if (row.owner === BUILDER && ids.owner && st.uid === ids.owner.uid && st.uid !== want.uid) {
+      const left = ownerLeftovers(io, row, rows);
+      if (left === null) { problems.push(`${row.path} is still the owner's (from before the builder user, L1079), and its contents could not be listed; nothing was changed`); continue; }
+      if (left.length) { problems.push(`${row.path} is still the owner's (from before the builder user, L1079) and holds ${left.length === 1 ? 'an entry' : `${left.length} entries`} from then: ${left.slice(0, 5).join(', ')}${left.length > 5 ? ` and ${left.length - 5} more` : ''}. The builder starts clean: check that nothing there is unsaved, then move the folder out of the base (README, "Moving the workers to the builder user"), and run users-folders again. Nothing was changed`); continue; }
+    } else if (st.uid !== io.rootUid && st.uid !== want.uid) { problems.push(`${row.path} is owned by uid ${st.uid}, who is neither root nor ${row.owner}, so it is not taken over: someone else could have put files in it. Look inside it, remove it by hand, then run users-folders again. Nothing was changed`); continue; }
+    const wantGid = wantGidOf(row, want, ids);
     const group = [];
     if (st.uid !== want.uid || (wantGid !== undefined && st.gid !== wantGid) || (st.mode & 0o7777) !== row.mode) group.push(modeDo(wantGid, { ino: st.ino, dev: st.dev }));
     const acl = aclEntries(io, row.path);
@@ -222,6 +232,28 @@ export function planFolders(io, cfg, ids, rows = folderTable(cfg), { afterBase =
     if (group.length) fixes.push(group);
   }
   return { ops: [...makes, ...fixes.reverse().flat()], problems };
+}
+
+/** The entries in an owner's folder that are not the table's own folders (Finder's .DS_Store let be), or null if it can't be listed. */
+function ownerLeftovers(io, row, rows) {
+  let names; try { names = io.list(row.path); } catch { return null; }
+  const known = new Set(rows.map((r) => r.path));
+  return names.filter((n) => n !== '.DS_Store' && !known.has(`${row.path}/${n}`)).map((n) => `${row.path}/${n}`).sort();
+}
+
+/**
+ * Null, or why the folders can't be handed to the builder now (L1079: refuse while a session is live). The worker runner's
+ * status file, when there is one, must list no live session: a session the owner's runner started would lose its folders
+ * mid-run. Missing is fine (no runner has run); unreadable or not what the runner writes is refused, never read as "none".
+ */
+export function liveSessionsProblem(io, cfg) {
+  const file = `${workerRunnerPaths(cfg).state}/${WORKER_STATUS_FILE}`;
+  let text;
+  try { text = io.readText(file); } catch (e) { return e?.code === 'ENOENT' ? null : `the worker runner's status ${file} could not be read (${e?.code ?? e?.message}), so it is not known that no session is live; nothing was changed`; }
+  let s; try { s = JSON.parse(text); } catch { s = null; }
+  if (!s || !Array.isArray(s.sessions)) return `the worker runner's status ${file} is not what the runner writes, so it is not known that no session is live; nothing was changed`;
+  const live = s.sessions.filter((x) => x?.alive === true || (x?.alive !== false && x?.ended !== true));
+  return live.length ? `the worker runner's status lists ${live.length} live session${live.length === 1 ? '' : 's'} (${live.slice(0, 3).map((x) => String(x?.id).slice(0, 60)).join(', ')}). The builder starts clean: stop the old worker runner and let its sessions end, then run users-folders again. Nothing was changed` : null;
 }
 
 /**
@@ -247,6 +279,8 @@ export function plan(io, cfg) {
   const b = baseProblem(io, cfg);
   if (b.problem) return { ops: [], problems: [b.problem] };
   const u = planUsers(io, cfg);
+  const live = liveSessionsProblem(io, cfg);
+  if (live) return { ops: [], problems: [...u.problems, live] };
   // Root's note goes in right after root makes the base (so a run cut off half way can be picked up, and a base that was
   // there before the run never has one).
   const marker = [{
@@ -286,7 +320,7 @@ export function check(io, cfg, { alsoKnown = [] } = {}) {
       const groupSharers = c.gids.filter(([n, id]) => id === u.gid && n !== name).map(([n]) => n);
       item(groupSharers.length === 0, `group ${name}'s id belongs to no other group`, `also the id of group ${groupSharers.join(', ')}`);
     } else item(false, `user ${name}'s id is used by no other account`, censusError);
-    item(u.shell === NO_SHELL, `user ${name} has no login shell`, `shell is ${u.shell || 'unset'}`);
+    item(u.shell === shellOf(name), name === BUILDER ? `user ${name}'s shell is ${shellOf(name)} (its sessions' Bash tool runs it; #487 r5 m1)` : `user ${name} has no login shell`, `shell is ${u.shell || 'unset'}, want ${shellOf(name)}`);
     item(u.hidden, `user ${name} is hidden`, 'IsHidden is not 1');
     item(u.home === homeOf(cfg, name), `user ${name}'s home is ${homeOf(cfg, name)}`, `home is ${u.home || 'unset'}`);
     const a = adminAnswer(io, name);
@@ -314,8 +348,8 @@ export function check(io, cfg, { alsoKnown = [] } = {}) {
     const uids = [0, ...(ids.owner ? [ids.owner.uid] : []), ...USERS.filter((n) => ids[n]).map((n) => ids[n].uid)];
     const gids = USERS.filter((n) => ids[n]).map((n) => ids[n].gid);
     const dup = uids.filter((x, i) => uids.indexOf(x) !== i);
-    item(dup.length === 0, 'the three users, the owner and root all have different ids', `shared id(s): ${[...new Set(dup)].join(', ')}`);
-    item(new Set(gids).size === gids.length, 'the three users have different groups', `shared group id(s) among ${gids.join(', ')}`);
+    item(dup.length === 0, `${USERS.join(', ')}, the owner and root all have different ids`, `shared id(s): ${[...new Set(dup)].join(', ')}`);
+    item(new Set(gids).size === gids.length, `${USERS.join(', ')} have different groups`, `shared group id(s) among ${gids.join(', ')}`);
   }
   const above = baseChainProblem(io, cfg);
   item(above === null, `folders above ${cfg.base} are root's alone, no links, no access lists`, above);
@@ -369,8 +403,9 @@ export function folderChecks(io, rows, ids, item, { known = new Set(rows.map((r)
     if (!want) why.push(`no id for ${row.owner}`);
     else {
       if (st.uid !== want.uid) why.push(`owner is uid ${st.uid}, want ${want.uid} (${row.owner})`);
-      const wantGid = wantGidOf(row, want);
-      if (wantGid !== undefined && st.gid !== wantGid) why.push(`group is ${st.gid}, want ${wantGid}`);
+      const wantGid = wantGidOf(row, want, ids);
+      if (wantGid === null) why.push(`no id for ${row.group}, its group`);
+      else if (wantGid !== undefined && st.gid !== wantGid) why.push(`group is ${st.gid}, want ${wantGid}`);
     }
     // A folder only root writes holds only what the table names (and the base its note): anything else was put there by
     // someone, and could be code root or a robot will run (NEW-1).

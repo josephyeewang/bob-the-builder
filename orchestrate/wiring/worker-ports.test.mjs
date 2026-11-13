@@ -62,8 +62,8 @@ function mirrorWorld() {
   // host.lock's owner (hostLockUid) is never the Dispatcher's own user: the test user is the Dispatcher here.
   // The TOP outboxes and worker-copies folders (L887), as setup makes them.
   for (const f of ['outboxes', 'worker-copies', 'worker-runner/requests', 'worker-runner/runner']) mkdirSync(join(base, f), { recursive: true, mode: 0o755 });
-  // The worker runner runs as the owner: host.lock's user (L896).
-  const config = { product: P, mirror, sealRoot: join(base, 'seals'), outboxRoot: join(base, 'outboxes'), copiesRoot: join(base, 'worker-copies'), reviewRoot: join(base, 'review-runner'), reviewUid: ME, hostLockPath: join(base, 'host.lock'), hostLockUid: ME + 2,
+  // The worker runner runs as the builder (L1079): its own user, never host.lock's (the owner's).
+  const config = { product: P, mirror, sealRoot: join(base, 'seals'), outboxRoot: join(base, 'outboxes'), copiesRoot: join(base, 'worker-copies'), reviewRoot: join(base, 'review-runner'), reviewUid: ME, hostLockPath: join(base, 'host.lock'), hostLockUid: ME + 3,
     workerRequestsDir: join(base, 'worker-runner', 'requests'), workerStatusFile: join(base, 'worker-runner', 'runner', 'status.json'), workerUid: ME + 2 };
   mkdirSync(join(config.reviewRoot, 'launches'), { recursive: true, mode: 0o755 }); chmodSync(config.reviewRoot, 0o755);
   return { base, mirror, first, second, empty, config, ctx: { config, selfUid: ME, limitedSync: run } };
@@ -109,7 +109,7 @@ test('C (L739): the mirror is checked at start: missing, a link, another user\'s
   assert.throws(start({ mirror: join(w.base, 'nope') }), /the product's mirror \(mirror\) .*nope can't be read \(ENOENT\)/);
   symlinkSync(w.mirror, join(w.base, 'link'));
   assert.throws(start({ mirror: join(w.base, 'link') }), /is not a plain folder/);
-  assert.throws(() => workerPorts({ ...w.ctx, config: { ...w.config, hostLockUid: ME + 5, workerUid: ME + 5 }, selfUid: ME + 1 }), /belongs to uid \d+, not to this job's uid/);
+  assert.throws(() => workerPorts({ ...w.ctx, config: { ...w.config, hostLockUid: ME + 5 }, selfUid: ME + 1 }), /belongs to uid \d+, not to this job's uid/);
   chmodSync(w.mirror, 0o775);
   assert.throws(start({}), /can be written by others \(mode 775\)/);
   chmodSync(w.mirror, 0o755);
@@ -482,7 +482,7 @@ test('L925: stopSession writes its stop request into the runner\'s requests fold
   assert.deepEqual(used.writes, []);
   assert.equal(used.ports.stopSession('S-1'), false);
   assert.deepEqual(used.writes, [[join(used.c.workerRequestsDir, 'stop-S-1.json'), '{"stop":"S-1"}\n']]);
-  for (const [folder, re] of [[fakeSt({ dir: true, uid: ME }), /is not the owner's \(workerUid\)/], [fakeSt({ dir: true, link: true }), /is not a plain folder/], [fakeSt(), /is not a plain folder/]]) {
+  for (const [folder, re] of [[fakeSt({ dir: true, uid: ME }), /is not the worker runner's user's \(workerUid\)/], [fakeSt({ dir: true, link: true }), /is not a plain folder/], [fakeSt(), /is not a plain folder/]]) {
     const w = syncWorld({ folder });
     assert.throws(() => w.ports.stopSession('S-1'), re);
     assert.deepEqual(w.writes, [], 'nothing written');
@@ -542,16 +542,18 @@ test('L943 m4: on this Mac, a real folder with another user\'s writing entry is 
   assert.match(requestsFolderProblem(dir, process.getuid()), /can be written by group or others \(mode 770\)/);
 });
 
-test('L925, L896: the worker runner is the owner\'s user and its requests folder is there, or the start is refused; the ports are wired', () => {
+test('L925, L1079 (I1): the worker runner is the builder\'s user, never the owner, root, the Dispatcher or review, and its requests folder is there, or the start is refused; the ports are wired', () => {
   const w = mirrorWorld();
-  assert.throws(() => workerPorts({ ...w.ctx, config: { ...w.config, workerUid: ME + 9 } }), /workerUid must be the owner's Mac user id, hostLockUid's/);
-  assert.throws(() => workerPorts({ ...w.ctx, config: { ...w.config, workerUid: undefined } }), /workerUid must be/);
+  assert.throws(() => workerPorts({ ...w.ctx, config: { ...w.config, workerUid: w.config.hostLockUid } }), /workerUid is the owner's Mac user id \(hostLockUid\); the worker runner runs as the builder user, never as the owner/);
+  assert.throws(() => workerPorts({ ...w.ctx, config: { ...w.config, workerUid: ME } }), /workerUid is the Dispatcher's own user/);
+  assert.throws(() => workerPorts({ ...w.ctx, config: { ...w.config, reviewUid: ME + 6, workerUid: ME + 6 }, selfUid: ME + 1 }), /workerUid is the review user/);
+  for (const u of [0, -1, undefined, '601', 1.5]) assert.throws(() => workerPorts({ ...w.ctx, config: { ...w.config, workerUid: u } }), /workerUid must be the builder user's Mac user id/, String(u));
   assert.throws(() => workerPorts({ ...w.ctx, config: { ...w.config, workerRequestsDir: join(w.base, 'nope') } }), /requests folder \(workerRequestsDir\) .*nope can't be read \(ENOENT\)/);
   const ports = workerPorts(w.ctx);
   assert.equal(ports.product, P, 'the stop step\'s product is the config\'s (L927)');
   for (const k of ['sessions', 'board', 'outboxSessions', 'probe', 'stopSession', 'launch', 'stopGroup', 'saveWork', 'pauseLead']) assert.equal(typeof ports[k], 'function', k);
-  // The real reads: this test's runner folder is this user's, not the owner's, so the status is never trusted.
-  assert.throws(() => ports.sessions(), /the worker runner's folder is not owned by the owner's user/);
+  // The real reads: this test's runner folder is this user's, not the builder's, so the status is never trusted.
+  assert.throws(() => ports.sessions(), /the worker runner's folder is not owned by the worker runner's user \(workerUid\)/);
 });
 
 // ---- C (L963): the four asks, wired, end to end ----

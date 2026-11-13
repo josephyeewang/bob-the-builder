@@ -15,7 +15,7 @@
 import { realpathSync } from 'node:fs';
 import { basename, dirname, join, sep } from 'node:path';
 import { FOLDERS as RUNNER_FOLDERS } from '../modules/M4-workshop/launcher/review-runner.mjs';
-import { dispatcherKeys } from './layout.mjs';
+import { BUILDER, dispatcherKeys } from './layout.mjs';
 import { readUser } from './users-folders.mjs';
 import { installPaths } from './install.mjs';                                  // cycles (they read this file's dispatcherKeysOn):
 import { DISPATCHER_CONFIG, dispatcherSourcePath } from './dispatcher-setup.mjs';   // all used only when called
@@ -41,10 +41,11 @@ export function foldersAbove(file) {
 const GUARDED = /^(\/Users\/[^/]+\/(Library\/CloudStorage|Library\/Mobile Documents|Desktop|Documents|Downloads)|\/Volumes\/[^/]+)(\/|$)/i;
 export const guardedFolder = (real) => GUARDED.test(real);
 
-/** The Dispatcher's worker keys on this Mac: dispatcherKeys, with host.lock's owner read as the owner's Mac user id. */
+/** The Dispatcher's worker keys on this Mac: dispatcherKeys, with host.lock's owner read as the owner's Mac user id and the
+ *  worker runner's user as the builder user's (L1079), both from this Mac's user records. */
 export function dispatcherKeysOn(io, cfg) {
-  const o = readUser(io, cfg.owner);
-  return dispatcherKeys(cfg, { hostLockUid: o.exists ? o.uid : undefined });
+  const o = readUser(io, cfg.owner); const b = readUser(io, BUILDER);
+  return dispatcherKeys(cfg, { hostLockUid: o.exists ? o.uid : undefined, workerUid: b.exists ? b.uid : undefined });
 }
 
 /** The first folder above `paths` (each, top first, without repeats) orchestrate can't go into, or null. */

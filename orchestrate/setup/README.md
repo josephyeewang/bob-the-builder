@@ -3,9 +3,10 @@
 Commands for the Mac-level setup that has no other home (runbook Part A). Plain Node, no dependencies. Bob is public, so
 nothing here names a product, a person or a machine: those come from a config file.
 
-## Part 1 (R-0b-05): the three Mac users and their folders
+## Part 1 (R-0b-05): the Mac users and their folders
 
-`layout.mjs` is the one list of what exists: the users `orchestrate`, `pages` and `review`, and every folder with its
+`layout.mjs` is the one list of what exists: the users `orchestrate`, `pages`, `review` and `builder` (`USERS`; `builder`
+since L1079, the user the worker runner and every worker session run as), and every folder with its
 owner and exact mode (v4 §14.1.4). `setup.mjs` makes them and checks them.
 
 ### The config: root reads only its own file
@@ -28,10 +29,10 @@ A config that does not parse is reported as "not valid JSON": the file's own tex
 | Command | What it does | Root? |
 |---|---|---|
 | `node setup.mjs users-folders --config <file> --dry-run` | prints every step it would take; changes nothing (`--config` names your editable copy; there is no `--config` under `sudo`) | no |
-| `sudo /usr/local/bin/node setup.mjs users-folders` | makes the three users (ids 600-699, all different; hidden, shell `/usr/bin/false`, password `*`, own group with no members, never admin), then the folders (owner, group, exact mode, exact access list), then runs `check` | yes |
-| `node setup.mjs check --config <file>` | read only: `PASS`, `FAIL` or `NEEDS ROOT` per item; exit 1 on any FAIL, exit 3 if all that could be seen passed but some items need root. Before setup it lists 54 FAILs of 58 items for one product (about 10 more for each extra product: its copies, outbox and rules folders, L836), which is expected | no |
+| `sudo /usr/local/bin/node setup.mjs users-folders` | makes the users in `USERS` (ids 600-699, all different; hidden, shell `/usr/bin/false`, password `*`, own group with no members, never admin), then the folders (owner, group, exact mode, exact access list), then runs `check` | yes |
+| `node setup.mjs check --config <file>` | read only: `PASS`, `FAIL` or `NEEDS ROOT` per item; exit 1 on any FAIL, exit 3 if all that could be seen passed but some items need root. Before setup it lists 56 FAILs of 60 items for one product (about 10 more for each extra product: its copies, outbox and rules folders, L836), which is expected | no |
 | `sudo /usr/local/bin/node setup.mjs check` | the same with nothing hidden: the sudo-rule and password-hash items can be read | yes |
-| `sudo /usr/local/bin/node setup.mjs proofs` | runs, as the owner's user, the "cannot" proofs: the record, hooks, settings, launcher, lead-main and claude-code copies, the outbox folders cannot be written and the robot keys cannot be read (two controls first) | yes |
+| `sudo /usr/local/bin/node setup.mjs proofs` | runs, as `builder` (L1079), the "cannot" proofs: the record, hooks, settings, launcher, lead-main, claude-code and install copies and the outbox folders cannot be written; the robot keys, the other users' homes, the owner's home and every production file and secret the installed `review.json`'s rules name cannot be read; and `builder` is in no group but its own and the ones macOS gives every local user (controls first). A rules entry that names nothing on this Mac (none, a relative name, a pattern, a missing file) is NOT TRIED, which fails the run like a FAIL: containment is proven only when every line is PASS | yes |
 
 - Run it twice and the second run does nothing. A run cut off at any step is finished by the next one: it writes only
   the attributes that are missing and deletes nothing. The safe settings of a user (no shell, hidden, no password) are
@@ -95,8 +96,42 @@ A config that does not parse is reported as "not valid JSON": the file's own tex
 - **The seal folder.** `seals/` is orchestrate's 0700: where cleanup seals a copy's bundle it could not prove saved (the
   Dispatcher config's `sealRoot`).
 - It never sets or reads a password. An unknown argument is never printed back (it could be a secret).
+- **The builder user (L1079).** The worker runner's job is a LaunchDaemon running as `builder` (`wiring/runner-job.mjs`),
+  so a worker session holds no production credentials and cannot read the owner's home. `builder` owns what the worker
+  runner writes: `worker-copies/` and each product's copies folder, `worker-runner/requests`, `runner/` and `snapshots/`,
+  and each product's `worker/` and `script/` outbox folders (0750, group `orchestrate`, with the `orchestrate` read entry:
+  the robot reads hand-ins and bundles there and writes nothing). The Dispatcher's `workerUid` is `builder`'s id, never the
+  owner's (`dispatcherKeys`); each product's rules-in-force folder is read by `review` and `builder`. The worker runner
+  refuses to start as root or as any user in staff or admin (`runner-main.mjs personUserProblem`), and reads the owner's
+  account choice from root's copy (`accountCopy`), signing in from `builder`'s own account folders.
 - Not in this part: the install and the background jobs (part 2, below); the ownerTaps and proposals folders, the account job
   reload and the watch-only token file (part 3).
+
+### Moving the workers to the builder user (L1079)
+
+On a Mini set up before L1079 the worker folders are the owner's own. The builder starts clean: `users-folders` takes an
+owner's folder over only while it holds nothing but the table's own folders, and refuses, changing nothing, while the
+worker runner's status lists a live session or any such folder holds a copy or hand-in from before. It never moves or
+deletes anything. Steps, on the Mini, in a new Terminal app window, with your base in place of `/Library/orchestrate`:
+
+1. Stop any worker runner still running as you. Paste `launchctl list | grep -i worker-runner`. If a line comes back,
+   paste `launchctl bootout gui/$(id -u)/<the label it shows>` and remove its file from `~/Library/LaunchAgents`.
+   *An old runner left loaded would be a second runner, as you.*
+2. In the `orchestrate/setup` folder you run setup from, paste `sudo /usr/local/bin/node setup.mjs users-folders --dry-run`.
+   *Shows what would change; it makes `builder` and lists any folder it refuses.*
+3. For each folder it names as "still the owner's ... holds": in that folder run `git status` and `git log @{u}..` in each
+   copy, so nothing unsaved is lost, then paste `mkdir -p ~/orchestrate-before-builder && sudo mv "<the folder>" ~/orchestrate-before-builder/`.
+   *Moves the old work out of the base into your home, where `builder` can't read it.*
+4. Paste the same command without `--dry-run`: `sudo /usr/local/bin/node setup.mjs users-folders`.
+   *Makes `builder` and hands it the worker folders; it ends with `check`.*
+5. Sign `builder` in to Claude Code once per account it will use: paste `sudo -H -u builder /usr/local/bin/claude` (with
+   `CLAUDE_CONFIG_DIR=<builder's home>/.claude-b` before `/usr/local/bin/claude` for account b), then type `/login` and
+   finish in the browser. *The sign-in lives in `builder`'s home; it is never copied from yours.*
+6. Paste `sudo /usr/local/bin/node setup.mjs proofs`. *Must end "all N proofs PASS: containment is proven on this Mac";
+   a FAIL or NOT TRIED line says what to fix.*
+
+Not yet in setup (recorded in the PR): placing the worker runner's job and building its config; until then the job file
+comes from `wiring/runner-job.mjs` by hand.
 
 ## Part 2: the install and the background jobs
 

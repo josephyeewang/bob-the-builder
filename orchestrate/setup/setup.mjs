@@ -2,9 +2,9 @@
 // The always-on Mac's one-time setup commands (R-0b-05 and the install). Every command has a --dry-run (changing commands)
 // or is read only; every changing command is safe to run twice and refuses clearly when it needs root and does not have it.
 //
-//   users-folders        [--dry-run]    the three Mac users and their folders                                  (root)
+//   users-folders        [--dry-run]    the plain-script Mac users and their folders                             (root)
 //   check                               PASS, FAIL or NEEDS ROOT per item for the above; exit 3 if some need root (read only)
-//   proofs               [--dry-run]    the owner's own Mac user cannot write the record, hooks,
+//   proofs               [--dry-run]    the builder user (L1079) cannot write the record, hooks,
 //                                       settings, launcher... or read the keys                                 (root, read only)
 //   install              [--dry-run]    the link layout, then the updater's first run                          (root)
 //   check-install        [--main <sha>] [--watch-only] the copy, its link, every install folder, access lists; --watch-only
@@ -214,13 +214,14 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, bobGitOf, out
   }
 
   if (o.cmd === 'proofs') {
-    if (o.dry) { for (const c of proofCommands(cfg)) out(`would run: ${c}`); out('dry run: nothing was run.'); return 0; }
+    if (o.dry) { for (const c of proofCommands(io, cfg)) out(c.startsWith('not tried') ? c : `would run: ${c}`); out('dry run: nothing was run.'); return 0; }
     const p = rootProblem(io); if (p) { err(`refused: ${p}`); return 2; }
     const res = runProofs(io, cfg);
-    for (const r of res) out(r.ok ? `PASS  ${r.what}` : `FAIL  ${r.what} — ${r.why}`);
-    const bad = res.filter((r) => !r.ok).length;
-    out(bad ? `${bad} of ${res.length} proofs FAILED` : `all ${res.length} proofs PASS`);
-    return bad ? 1 : 0;
+    // NOT TRIED is not a pass (L1079, as L707 c1): containment is proven only when every line is PASS.
+    for (const r of res) out(r.ok ? `PASS  ${r.what}` : r.notTried ? `NOT TRIED  ${r.what} — ${r.why}` : `FAIL  ${r.what} — ${r.why}`);
+    const failed = res.filter((r) => !r.ok && !r.notTried).length; const untried = res.filter((r) => r.notTried).length;
+    out(failed || untried ? `${failed} of ${res.length} proofs FAILED, ${untried} NOT TRIED: containment is not proven` : `all ${res.length} proofs PASS: containment is proven on this Mac`);
+    return failed || untried ? 1 : 0;
   }
 
   if (!o.dry) { const p = rootProblem(io); if (p) { err(`refused: ${p}`); return 2; } }

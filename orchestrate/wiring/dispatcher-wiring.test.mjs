@@ -62,9 +62,9 @@ const NW = (port) => notWiredText(port);
 // uid + 1), since the Dispatcher's own user may not be it, so the runner's status here is not that user's and the limits
 // step fails with exactly that. The in-process test below pins limits 'ok' on the healthy path. The lead checks this line.
 const NOT_REVIEW_USERS = "no review was asked for: the review runner's folder is not owned by the review user";
-// The worker runner is the owner's (workerUid, host.lock's stand-in uid): the test's runner folder is this user's, so its
+// The worker runner is the builder's (workerUid, L1079, a stand-in uid): the test's runner folder is this user's, so its
 // status is never trusted, and every step that reads it fails with exactly that (L925: "not known", never a list).
-const NOT_THE_RUNNERS = "the worker runner's folder is not owned by the owner's user";
+const NOT_THE_RUNNERS = "the worker runner's folder is not owned by the worker runner's user (workerUid)";
 const EXPECTED_STEPS = Object.freeze({
   stops: NOT_THE_RUNNERS, undo: 'ok', 'undo-starts': NOT_THE_RUNNERS, outage: NOT_THE_RUNNERS, intake: NOT_THE_RUNNERS, proposals: NW('proposals'), research: 'ok', leads: NW('leads'), approvals: 'ok', 'plan-go': 'ok',
   pass: NOT_THE_RUNNERS, limits: NOT_REVIEW_USERS, merges: 'ok', waits: 'ok', 'lost-cards': 'ok', 'stuck-cards': 'ok', phone: 'ok', cleanup: NW(`cleanup.${NOT_WIRED_CLEANUP[0]}`),
@@ -205,16 +205,18 @@ test('L805 m1: wire() refuses a bad hostLockUid before it makes the approvals fo
   assert.equal(existsSync(rev.config.approvalsStateDir), false);
 });
 
-// L943 m3: the worker runner's user (workerUid) must be a Mac user id and host.lock's owner's, checked with the config,
-// before wire() makes a folder, opens the Record or reads GitHub.
-test('L943 m3: checkConfig and wire() refuse a workerUid that is not a safe integer equal to hostLockUid, before anything is made', async () => {
+// L943 m3, L1079 (I1): the worker runner's user (workerUid) must be a Mac user id that is the builder's: not root, not
+// host.lock's owner (the owner's), not the Dispatcher's, not review's; checked with the config, before wire() makes a
+// folder, opens the Record or reads GitHub.
+test('L943 m3, L1079: checkConfig and wire() refuse a workerUid that is not a Mac user id, or is the owner\'s, before anything is made', async () => {
   const base = world();
   const owner = base.config.hostLockUid;
-  assert.equal(checkConfig(base.config).workerUid, owner, 'the test world\'s workerUid is the owner\'s');
-  for (const uid of [owner + 1, String(owner), owner + 0.5, -1, null, undefined, 2 ** 53]) {
+  assert.notEqual(checkConfig(base.config).workerUid, owner, 'the test world\'s workerUid is the builder\'s, not the owner\'s');
+  const notId = /config: workerUid must be the builder user's Mac user id \(L1079\), not root's/;
+  for (const [uid, re] of [[owner, /config: workerUid is the owner's Mac user id \(hostLockUid\)/], [process.getuid(), /config: workerUid is the Dispatcher's own user/],
+    ...[String(owner), owner + 0.5, -1, 0, null, undefined, 2 ** 53].map((u) => [u, notId])]) {
     const w = world({ extra: { workerUid: uid } });
     if (uid === undefined) delete w.config.workerUid;
-    const re = /config: workerUid must be the owner's Mac user id, hostLockUid's: the worker runner runs as the owner/;
     assert.throws(() => checkConfig(w.config), re, String(uid));
     let fetched = 0;
     await assert.rejects(wire(w.config, { log: () => {}, fetchFn: (...a) => { fetched++; return fakeGitHubFetch(w.fake)(...a); } }), re, String(uid));

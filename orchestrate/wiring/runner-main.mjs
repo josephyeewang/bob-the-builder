@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Part C, runner step 5: the script the worker runner's LaunchAgent runs as the owner's user (runner-job.mjs):
+// Part C, runner step 5: the script the worker runner's LaunchDaemon runs as the builder user (runner-job.mjs, L1079):
 // `node runner-main.mjs <config.json>`. Unlike the review runner (one pass a run), this run is the loop
 // (runner-loop.mjs runRunner): a tick every RUNNER_TICK_MS until launchd stops it. launchd starts it at load and, once it
 // has ended, again within 60 s, under the Dispatcher's stale window (STATUS_STALE_MS), so a runner that dies is "not
@@ -14,7 +14,8 @@
 //                   "rulesHosts": [], "productionFiles": [], "proposalOutboxes": [] }, "rules": {...}? } },
 //     "pin": "<claude version>"?, "machineWide": "/Library/Application Support/ClaudeCode/managed-settings.json"? (that file only, L913),
 //     "budget": "/abs.mjs"?, "bobManifest": "/abs"?,        inside installRoot and root's alone, each loaded once at start (L1001)
-//     "dispatcherRules": "/abs"?, "reviewStatusFile": "/abs"?, "reviewUid": <uid>?  required with budget }
+//     "dispatcherRules": "/abs"?, "reviewStatusFile": "/abs"?, "reviewUid": <uid>?  required with budget,
+//     "accountCopy": "/abs"? root's copy of the owner's account choice (L1079: the runner runs as the builder; runner-ports.mjs workerAccount) }
 // The launch checks (runner-checks.mjs, step 6) read pin, machineWide and each product's rules; one that is left out
 // leaves its check without a port, so launch() refuses there and no session starts. `budget` names M11's budget module
 // (launch check 12: the rules the Dispatcher's snapshot at dispatcherRules holds, the Record, and the running count from
@@ -44,7 +45,7 @@ import { makeLock } from '../modules/M9-record/lock.mjs';
 import { PRODUCT, runnerPlaces } from '../shared/product-paths.mjs';
 import { foldKey } from '../shared/plan-fingerprint.mjs';
 import { loadMemory, processGroupPorts, runRunner } from './runner-loop.mjs';
-import { drainedPort, liveWallProblem, pauseLeadPort, productWallGap, saveSettingsName, saveWorkPort, sessionEnv, sessionSettingsOf, sizePort, startPort } from './runner-ports.mjs';
+import { drainedPort, liveWallProblem, pauseLeadPort, productWallGap, saveSettingsName, saveWorkPort, sessionEnv, sessionSettingsOf, sizePort, startPort, workerAccount } from './runner-ports.mjs';
 import { workerChecks } from './runner-checks.mjs';
 import { holdersOf, readFactFile, readSessionFile } from '../modules/M4-workshop/launcher/review-runner-main.mjs';
 import { keepSnapshotFresh, writeSnapshot } from '../modules/M4-workshop/hooks/snapshot.mjs';
@@ -52,7 +53,6 @@ import { spawn as childSpawn, spawnSync } from 'node:child_process';
 import { fullPath } from './runner-job.mjs';
 import { productRoleClash } from './owner-status.mjs';
 import { CLAUDE_FILE, MANAGED_SOURCES_CHECKED_ON, checkRoleEnv } from '../modules/M4-workshop/launcher/env-check.mjs';
-import { accountInUse } from '../modules/M4-workshop/launcher/accounts.mjs';
 import { LOCKED_MS, lockedRunner } from './runner-locked.mjs';
 import { apart } from '../modules/M4-workshop/launcher/render-settings.mjs';
 import { installProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
@@ -69,6 +69,19 @@ const productName = (p) => PRODUCT.test(p);
 
 // The session's own folders in render.paths that the config may give (L915).
 export const RENDER_PATHS = Object.freeze(['node', 'hooksDir', 'notes', 'bobFolder']);
+
+// The Mac's own groups a person's user is in: staff (every person's account, which a home folder opens to) and admin.
+// The builder is in neither (setup users-folders, L1079), so a runner in either is running as a person, never the builder.
+export const PERSON_GROUPS = Object.freeze({ staff: 20, admin: 80 });
+/** Null, or why the runner must not run as this user (L1079, I1: nothing falls back to the owner's user): root, or a user
+ *  in staff or admin. `groups` is process.getgroups(); a list that can't be read is refused, never read as empty. */
+export function personUserProblem(uid, groups) {
+  if (uid === 0) return 'it runs as root; its job file must name the builder user (UserName)';
+  if (!Array.isArray(groups) || !groups.length || !groups.every(Number.isInteger)) return 'its user\'s groups can\'t be read, so it is not known that it is not a person\'s user';
+  const hit = Object.entries(PERSON_GROUPS).filter(([, g]) => groups.includes(g)).map(([n]) => n);
+  return hit.length ? `it runs as a user in ${hit.join(' and ')} (a person's user); it must run as the builder user (L1079)` : null;
+}
+const readGroups = () => { try { return process.getgroups(); } catch { return null; } };
 
 /** The config's fields, checked after the reader has checked the file. → the config with the runner's own paths added, or a throw. */
 export function checkRunnerConfig(c) {
@@ -100,7 +113,7 @@ export function checkRunnerConfig(c) {
     for (const k of RENDER_PATHS) if (p.render.paths[k] !== undefined && !fullPath(p.render.paths[k])) fail(`product ${name}: render.paths.${k} must be a full path in its simplest form, not / itself`);
   }
   if (c.pin !== undefined && (typeof c.pin !== 'string' || !/^\d+\.\d+\.\d+$/.test(c.pin))) fail('pin must be a Claude Code version');
-  for (const k of [...PINNED, 'dispatcherRules', 'reviewStatusFile']) if (c[k] !== undefined && !fullPath(c[k])) fail(`${k} must be a full path in its simplest form, not / itself`);
+  for (const k of [...PINNED, 'dispatcherRules', 'reviewStatusFile', 'accountCopy']) if (c[k] !== undefined && !fullPath(c[k])) fail(`${k} must be a full path in its simplest form, not / itself`);
   if (c.reviewUid !== undefined && (!Number.isInteger(c.reviewUid) || c.reviewUid < 0)) fail('reviewUid must be a uid');
   if (c.budget !== undefined) for (const k of BUDGET_NEEDS) if (c[k] === undefined) fail(`${k} must be set with budget (launch check 12 reads it)`);
   for (const k of PINNED) if (c[k] !== undefined && !insideCopy(c.installRoot, c[k])) fail(`${k} must be inside installRoot (${c.installRoot})`);
@@ -218,9 +231,9 @@ export function carriedOverProblem(c, memory, { groupGone, readSettings = sessio
 /**
  * The one lock-down runner of this runner (L969): null when the config names no claude to run a job with. The sign-in is
  * read for each save, as the start port reads it for each start (runner-ports.mjs sessionEnv, the one form), and the
- * environment is held to launch check 9 (checkRoleEnv) as the session's is; the install is given the start's own (#463 r1 m6). `who` and `base` stand in for accountInUse and process.env in a test.
+ * environment is held to launch check 9 (checkRoleEnv) as the session's is; the install is given the start's own (#463 r1 m6). `who` and `base` stand in for workerAccount and process.env in a test.
  */
-export function lockedOf(c, { make = lockedRunner, who: account = accountInUse, base = process.env } = {}) {
+export function lockedOf(c, { make = lockedRunner, who: account = () => workerAccount(c), base = process.env } = {}) {
   if (typeof c.claudeBin !== 'string' || !c.claudeBin.startsWith('/')) return null;
   return make({ claudeBin: c.claudeBin, ...(c.lockedMs !== undefined ? { ms: c.lockedMs } : {}), envOf: () => {
     const who = account({ home: c.home });
@@ -397,14 +410,16 @@ export function keepSnapshots(c, { fresh = keepSnapshotFresh, log = () => {}, re
 }
 
 /**
- * argv: [config]. opts (tests only): readConfig, lock, ports, run, log, onStop (how a SIGTERM is listened for), realpath,
+ * argv: [config]. opts (tests only): asUser (personUserProblem), readConfig, lock, ports, run, log, onStop (how a SIGTERM is listened for), realpath,
  * memory (the memory reader), folderProblem (snapshotFolderProblem).
  * → the exit code.
  */
 export async function main(argv, { readConfig = (f) => { const self = selfPath(); if (!self) throw new Error('its own script\'s path can\'t be read, so it can\'t be checked'); return readJobConfig(f, { code: [], optionalCode: ['budget'], self }); }, lock = (dir) => makeLock({ dir, timeoutMs: 2_000 }),
   ports = {}, run = runRunner, log = (s) => process.stderr.write(`${new Date().toISOString()} ${s}\n`), onStop = listenStop, fresh = keepSnapshotFresh,
-  realpath = (p) => realpathSync.native(p), memory = loadMemory, folderProblem = (dir) => snapshotFolderProblem(dir),
+  realpath = (p) => realpathSync.native(p), memory = loadMemory, asUser = () => personUserProblem(process.getuid(), readGroups()), folderProblem = (dir) => snapshotFolderProblem(dir),
   pinnedProblem = (root, files) => installProblem(root, files, { owner: 0 }), loadBudget = importBudget, readManifest = readRootFile, portsOf = realRunnerPorts } = {}) {
+  // Who it runs as comes first, before the config is read (L1079): never root, never a person's user.
+  { let who; try { who = asUser(); } catch (e) { who = `its user can't be checked (${e?.message ?? e})`; } if (who) { log(`the worker runner did not start: ${who}`); return 1; } }
   let c;
   try { c = checkRunnerConfig(readConfig(argv[0])); } catch (e) { log(`the worker runner did not start: ${e.message}`); return 1; }
   // The roots each deny is spelled from are their real paths (#378 r1 m4): the Mac's sandbox does not apply a deny reached

@@ -42,7 +42,7 @@ import { CONFIG_FIELDS, readConfig } from '../modules/M4-workshop/launcher/revie
 import { RUNNER_ROLES } from '../shared/review-roles.mjs';
 import { TOOLS_CHECKED } from '../modules/M10-rules/roles.mjs';
 import { CLAUDE_FILE, MANAGED_SOURCES_CHECKED_ON } from '../modules/M4-workshop/launcher/env-check.mjs';
-import { COPY_HOOKS, REVIEW_SNAPSHOT_FILE, WORKER_STATUS_FILE, bobPath, dispatcherRulesPath, homeOf, keysPath, mirrorPath, outboxRootPath, ownerTapsPath, privatePath, reviewCopiesPath, storePath, workerCopiesPath, workerRunnerPaths } from './layout.mjs';
+import { BUILDER, COPY_HOOKS, PRODUCT_OUTBOX_ROLES, REVIEW_SNAPSHOT_FILE, WORKER_STATUS_FILE, bobPath, dispatcherRulesPath, homeOf, keysPath, mirrorPath, outboxRootPath, ownerTapsPath, privatePath, reviewCopiesPath, storePath, workerCopiesPath, workerRunnerPaths } from './layout.mjs';
 import { installPaths } from './install.mjs';
 import { bobManifestPath } from './bob-manifest.mjs';
 
@@ -77,24 +77,26 @@ export function setupFields(cfg, { pin, userOf }) {
     return u;
   };
   const review = uid('review', 'the review runner\'s user'); const orch = uid('orchestrate', 'the Record\'s owner'); const owner = uid(cfg.owner, 'the owner');
+  const builder = uid(BUILDER, 'the worker runner\'s user, L1079');
   if (owner && !absPath(owner.home)) problems.push(`the owner's Mac user ${cfg.owner} has no home folder set`);
   if (problems.length) return { fields: null, problems };
-  // Every role of the design table has a Mac user (m-1): the review roles run as review, every other role as the owner's
-  // own user, whose outbox folders it owns (layout.mjs folderTable).
-  // The runner's roles (L722: the review roles and the plan reviewer) write as review; every other role is the owner's.
-  const uids = Object.fromEntries(Object.keys(DESIGN_PROFILES).map((r) => [r, RUNNER_ROLES.includes(r) ? review.uid : owner.uid]));
+  // Every role of the design table has a Mac user (m-1), the one whose outbox folders it owns (layout.mjs folderTable):
+  // the runner's roles (L722: the review roles and the plan reviewer) write as review; the worker runner's roles
+  // (PRODUCT_OUTBOX_ROLES: worker, script) as the builder user (L1079); every other role (the owner's own sessions) as the owner.
+  const uids = Object.fromEntries(Object.keys(DESIGN_PROFILES).map((r) => [r, RUNNER_ROLES.includes(r) ? review.uid : PRODUCT_OUTBOX_ROLES.includes(r) ? builder.uid : owner.uid]));
   const fields = {
     installRoot: P.installRoot, root: P.reviewRoot, outboxRoot: outboxRootPath(cfg), reviewHome: homeOf(cfg, 'review'),
     uids, recordUid: orch.uid, mirror: mirrorPath(cfg), hooksDir: join(P.installRoot, COPY_HOOKS), accountCopy: P.accountCopy,
     ownerHome: owner.home, ownerUid: owner.uid, ownerTaps: ownerTapsPath(cfg), wiring: join(P.installRoot, WIRING),
     snapshot: join(P.reviewRoot, REVIEW_SNAPSHOT_FILE), bobFolder: bobPath(cfg),
     // What a review session may not read: the robot keys, the private data and the owner's home folder (a Mac home is
-    // readable by the staff group, which review is in). The workers' copies are denied whole by review-settings itself.
+    // readable by its group, staff; review is not in it, so this is the slip-catcher). The workers' copies are denied
+    // whole by review-settings itself.
     deny: [keysPath(cfg), privatePath(cfg), owner.home],
     reviewCopies: reviewCopiesPath(cfg), workerCopies: workerCopiesPath(cfg),
-    // Launch check 12 (L1001): M11's budget module, in the copy, and the worker runner's status file and user (the owner's
-    // own, as the Dispatcher's workerUid), which its running count reads.
-    budget: join(P.installRoot, BUDGET_MODULE), workerStatusFile: join(workerRunnerPaths(cfg).state, WORKER_STATUS_FILE), workerUid: owner.uid,
+    // Launch check 12 (L1001): M11's budget module, in the copy, and the worker runner's status file and user (the builder
+    // user, L1079, as the Dispatcher's workerUid), which its running count reads.
+    budget: join(P.installRoot, BUDGET_MODULE), workerStatusFile: join(workerRunnerPaths(cfg).state, WORKER_STATUS_FILE), workerUid: builder.uid,
   };
   return { fields, problems };
 }

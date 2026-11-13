@@ -93,7 +93,7 @@ const SIZE_FIELDS = Object.freeze(['tokens', 'compactions', 'turnEnded', 'endedA
 
 const plainOwned = (st, uid, what) => {
   if (st.isSymbolicLink()) throw new Error(`the worker runner's ${what} is a link`);
-  if (st.uid !== uid) throw new Error(`the worker runner's ${what} is not owned by the owner's user`);
+  if (st.uid !== uid) throw new Error(`the worker runner's ${what} is not owned by the worker runner's user (workerUid)`);
   if (st.mode & 0o022) throw new Error(`the worker runner's ${what} can be written by others`);
 };
 

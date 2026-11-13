@@ -15,7 +15,7 @@
 // pass whose own product's reader state is ok or last_good, the Dispatcher writes the whole product list, and every
 // product's usable rules text with its reviewed commit and blob and when it was last fetched, into its product's
 // snapshot (setup/layout.mjs dispatcherRulesPath: products/<p>/rules, orchestrate's, 0700, an access list giving read to
-// the review user and the owner only; L1002). It writes even when nothing changed, so `written_at` stays fresh; a reader
+// the review user and the worker runner's user, builder, only; L1002, L1079). It writes even when nothing changed, so `written_at` stays fresh; a reader
 // that could not reach GitHub stops the writes, and the snapshot then goes stale; any other deny_all (the rules file
 // deleted, say) removes it, so the runners refuse at once, as the Dispatcher does (PR-2 r2 M1). budget builds M10's engine over that, as the
 // Dispatcher's own is built (dispatcher-wiring.mjs recordAndRules): every product listed, one with no usable rules read

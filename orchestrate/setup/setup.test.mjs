@@ -31,6 +31,17 @@ const run = (mac, args, raw = RAW) => {
   return { code, text: s.lines.join('\n') };
 };
 const applied = () => { const mac = fakeMac(); const r = run(mac, ['users-folders']); assert.equal(r.code, 0, r.text); return mac; };
+// The proofs' Mac (L1079): set up, with the owner's home (0750, its own) holding a production file the installed review.json's
+// rules name, so every proof has something to try. `files`: what the rules name (default the one there).
+const SECRET = '/Users/sam/app/.env.production';
+const proven = ({ files = [SECRET], mac = applied() } = {}) => {
+  const sam = { uid: uidOf(mac, 'sam'), gid: 20 };
+  for (const [d, mode] of [['/Users', 0o755], ['/Users/sam', 0o750], ['/Users/sam/app', 0o755]]) { mkdirSync(mac.at(d), { recursive: true }); chmodSync(mac.at(d), mode); mac.owners.set(d, d === '/Users' ? { uid: mac.rootUid, gid: 80 } : sam); }
+  writeFileSync(mac.at(SECRET), 'x'); chmodSync(mac.at(SECRET), 0o600); mac.owners.set(SECRET, sam);
+  const root = P('install/orchestrate'); mkdirSync(mac.at(root), { recursive: true });
+  writeFileSync(mac.at(`${root}/review.json`), JSON.stringify({ rules: { production: { env_files: files }, secrets: { paths: [] } } }));
+  return mac;
+};
 const fails = (mac) => check(mac, cfg).filter((r) => !r.ok);
 const isDarwin = process.platform === 'darwin';
 const P = (s) => `${cfg.base}/${s}`;
@@ -38,7 +49,7 @@ const uidOf = (mac, u) => Number(mac.users.get(u).UniqueID);
 
 test('the setup\'s review user is the launcher\'s', () => {
   assert.ok(USERS.includes(REVIEW_USER));
-  assert.deepEqual([...USERS], ['orchestrate', 'pages', 'review']);
+  assert.deepEqual([...USERS], ['orchestrate', 'pages', 'review', 'builder']);   // L1079
 });
 
 test('config: refusals', () => {
@@ -76,7 +87,7 @@ test('the folder table: parents first, exact modes and owners, one outbox root w
   assert.deepEqual([by('private').owner, by('private').mode], ['orchestrate', 0o700]);
   assert.deepEqual([by('products/alpha/store').owner, by('products/alpha/store').mode], ['orchestrate', 0o755]);
   assert.deepEqual([by('products/alpha/pages').owner], ['pages']);
-  assert.deepEqual([by('worker-copies').owner], ['owner']);
+  assert.deepEqual([by('worker-copies').owner], ['builder']);   // L1079
   assert.deepEqual([by('review').owner, by('review-copies').owner], ['review', 'review']);
   for (const u of USERS) assert.equal(by(`home/${u}`).path, homeOf(cfg, u));
   // L71 / L90 M1: the outbox root is root's 0755; reviewer/ and auditor/ are review's; every other role's is the workers' user's
@@ -151,13 +162,13 @@ test('apply as root: every check passes, ids are 600-699 and all different, then
   assert.deepEqual(fails(mac), []);
   for (const u of USERS) {
     const a = mac.users.get(u);
-    assert.equal(a.UserShell, '/usr/bin/false'); assert.equal(a.IsHidden, '1'); assert.equal(a.Password, '*');
+    assert.equal(a.UserShell, u === 'builder' ? '/bin/zsh' : '/usr/bin/false'); assert.equal(a.IsHidden, '1');   // #487 r5 m1: builder's shell is zsh assert.equal(a.Password, '*');
     assert.equal(a.UniqueID, a.PrimaryGroupID); assert.equal(a.NFSHomeDirectory, homeOf(cfg, u));
     assert.ok(Number(a.UniqueID) >= USER_ID_RANGE.low && Number(a.UniqueID) <= USER_ID_RANGE.high);
     assert.equal(mac.groups.get(u).PrimaryGroupID, a.UniqueID);
   }
   assert.deepEqual([USER_ID_RANGE.low, USER_ID_RANGE.high], [600, 699]);
-  assert.equal(new Set(USERS.map((u) => mac.users.get(u).UniqueID)).size, 3, 'three different ids');
+  assert.equal(new Set(USERS.map((u) => mac.users.get(u).UniqueID)).size, USERS.length, 'all different ids');
   const n = mac.log.length;
   const second = run(mac, ['users-folders']);
   assert.equal(second.code, 0, second.text);
@@ -173,7 +184,7 @@ test('every folder ends with the table\'s owner, group and mode, and its exact a
   for (const row of folderTable(cfg)) {
     const st = mac.lstat(row.path);
     assert.equal(st.uid, ids[row.owner].uid, `${row.path} owner`);
-    assert.equal(st.gid, ids[row.owner].gid, `${row.path} group`);
+    assert.equal(st.gid, ids[row.group ?? row.owner].gid, `${row.path} group`);   // a row may name another user's group (L1079 outboxes)
     assert.equal(st.mode & 0o7777, row.mode, `${row.path} mode`);
     assert.deepEqual(aclEntries(mac, row.path).entries, row.acl.map(aclText).sort(), `${row.path} access list`);
   }
@@ -184,7 +195,7 @@ test('users skip ids already taken by a user OR a group (K10)', () => {
   mac.groups.set('stray', { PrimaryGroupID: '602' });
   assert.equal(run(mac, ['users-folders']).code, 0);
   const ids = USERS.map((u) => Number(mac.users.get(u).UniqueID));
-  assert.deepEqual(ids, [603, 604, 605]);
+  assert.deepEqual(ids, [603, 604, 605, 606]);
 });
 
 test('PLANT a half-made user whose group id another GROUP uses → refused naming it (K10: ids are checked against /Groups)', () => {
@@ -336,7 +347,7 @@ test('PLANT wrong home → caught by "home is"', () => {
 test('PLANT P3: review has the owner\'s own id → caught: the ids must all differ, and the id must be in range', () => {
   const mac = applied(); mac.users.get('review').UniqueID = mac.users.get('sam').UniqueID;
   const w = fails(mac).map((f) => f.what);
-  assert.ok(w.includes('the three users, the owner and root all have different ids'), w.join(' | '));
+  assert.ok(w.includes(`${USERS.join(', ')}, the owner and root all have different ids`), w.join(' | '));
   assert.ok(w.includes(`user review's id is in 600-699`));
   assert.ok(run(mac, ['check']).code === 1);
 });
@@ -344,7 +355,7 @@ test('PLANT P3: review has the owner\'s own id → caught: the ids must all diff
 test('PLANT P4: orchestrate and review share one id → caught by "belongs to no other user" and "all have different ids"', () => {
   const mac = applied(); mac.users.get('orchestrate').UniqueID = mac.users.get('review').UniqueID;
   const f = fails(mac); const w = f.map((x) => x.what);
-  assert.ok(w.includes('the three users, the owner and root all have different ids'), w.join(' | '));
+  assert.ok(w.includes(`${USERS.join(', ')}, the owner and root all have different ids`), w.join(' | '));
   assert.ok(w.includes(`user orchestrate's id belongs to no other user`)); assert.ok(w.includes(`user review's id belongs to no other user`));
 });
 
@@ -352,7 +363,7 @@ test('PLANT two of the three share one GROUP id → caught by "have different gr
   const mac = applied();
   mac.groups.get('pages').PrimaryGroupID = mac.groups.get('review').PrimaryGroupID; mac.users.get('pages').PrimaryGroupID = mac.groups.get('review').PrimaryGroupID;
   const w = fails(mac).map((x) => x.what);
-  assert.ok(w.includes('the three users have different groups'), w.join(' | ')); assert.ok(w.includes(`group review's id belongs to no other group`));
+  assert.ok(w.includes(`${USERS.join(', ')} have different groups`), w.join(' | ')); assert.ok(w.includes(`group review's id belongs to no other group`));
 });
 
 test('PLANT another account has the same id as a robot user → caught by "belongs to no other user"', () => {
@@ -393,9 +404,9 @@ test('PLANT a folder with the wrong GROUP → caught ("group is"); the plan\'s s
   assert.equal(run(mac, ['users-folders']).code, 0); assert.equal(mac.owners.get(P('keys')).gid, 600); assert.deepEqual(fails(mac), []);
 });
 
-test('PLANT worker-copies owned by root instead of the owner → caught by the owner column', () => {
+test('PLANT worker-copies owned by root instead of the builder → caught by the owner column', () => {
   const mac = applied(); mac.owners.set(P('worker-copies'), { uid: mac.rootUid, gid: 0 });
-  assert.match(fails(mac)[0].why, /want 65001/);
+  assert.match(fails(mac)[0].why, new RegExp(`want ${uidOf(mac, 'builder')}`));
 });
 
 test('PLANT L722: the plan reviewer\'s outbox made the workers\' user\'s (as a worker role\'s is) → caught by the owner and mode; apply refuses to take it over and changes nothing', () => {
@@ -702,47 +713,50 @@ test('REAL: this Mac\'s Homebrew node is NOT one root may run (the check says so
 });
 
 // m8: the proofs
-test('proofs: the owner\'s user cannot write the record, hooks, settings, launcher, lead-main, claude-code copies or read the keys; the controls pass first', () => {
-  const mac = applied(); const res = runProofs(mac, cfg);
+test('proofs (L1079): the builder cannot write the record, hooks, settings, launcher, lead-main, claude-code copies, read the keys, the owner\'s home or its production files; the controls pass first', () => {
+  const mac = proven(); const res = runProofs(mac, cfg);
   assert.deepEqual(res.filter((r) => !r.ok), [], JSON.stringify(res.filter((r) => !r.ok)));
   const w = res.map((r) => r.what);
   for (const d of ['hooks', 'settings', 'launcher', 'lead-main', 'claude-code', 'worker-runner']) assert.ok(w.some((x) => x.includes(`cannot write ${P(d)}`)), d);  // worker-runner: #433 r1 m2
   assert.ok(w.some((x) => x.includes(`cannot write the record ${P('products/alpha/store')}`)));
   assert.ok(w.some((x) => x.includes('cannot read the robot keys')));
-  assert.match(run(mac, ['proofs']).text, /all \d+ proofs PASS/);
+  assert.ok(w.some((x) => x === 'builder cannot list the owner\'s home /Users/sam'));
+  assert.ok(w.some((x) => x === `builder cannot read ${SECRET}`));
+  assert.ok(w.some((x) => /builder's groups are its own/.test(x)));
+  assert.match(run(mac, ['proofs']).text, /all \d+ proofs PASS: containment is proven/);
 });
 
-test('PLANT a folder the owner can write (hooks is the owner\'s) → the proof FAILs; a broken control makes every proof FAIL', () => {
-  const mac = applied(); mac.owners.set(P('hooks'), { uid: uidOf(mac, 'sam'), gid: 20 });
+test('PLANT a folder the builder can write (hooks is the builder\'s) → the proof FAILs; a broken control makes every proof FAIL', () => {
+  const mac = proven(); mac.owners.set(P('hooks'), { uid: uidOf(mac, 'builder'), gid: 20 });
   const bad = runProofs(mac, cfg).filter((r) => !r.ok); assert.equal(bad.length, 1); assert.match(bad[0].what, /cannot write .*hooks/); assert.match(bad[0].why, /CAN do this/);
   assert.equal(run(mac, ['proofs']).code, 1);
-  const mac2 = applied(); mac2.owners.set(P('worker-copies'), { uid: mac2.rootUid, gid: 0 });   // the control: the owner must be able to write its own folder
-  const all = runProofs(mac2, cfg); assert.equal(all[1].ok, false); assert.ok(all.slice(2).every((r) => !r.ok && /not proven/.test(r.why)));
+  const mac2 = proven(); mac2.owners.set(P('worker-copies'), { uid: mac2.rootUid, gid: 0 });   // the control: the builder must be able to write its own folder
+  const all = runProofs(mac2, cfg); assert.equal(all[1].ok, false); assert.ok(all.slice(2, -2).every((r) => !r.ok && /not proven/.test(r.why)));
 });
 
-test('L836 proofs: per product, the owner CAN write its copies folder and its worker runner outbox folders (controls), and can NOT write its outbox folder', () => {
-  const list = proofList(cfg); const res = runProofs(applied(), cfg);
+test('L836 proofs: per product, the builder CAN write its copies folder and its worker runner outbox folders (controls), and can NOT write its outbox folder', () => {
+  const list = proofList(cfg); const res = runProofs(proven(), cfg);
   assert.deepEqual(res.filter((r) => !r.ok), [], JSON.stringify(res.filter((r) => !r.ok)));
   const lastControl = list.map((x) => !!x.control).lastIndexOf(true);
   assert.ok(list.slice(0, lastControl + 1).every((x) => x.control), 'every control comes before every proof it guards');
   for (const prod of cfg.products) {
     for (const d of [`worker-copies/${prod}`, `outboxes/${prod}/worker`, `outboxes/${prod}/script`]) {
-      const x = list.find((y) => y.args.at(-1) === P(d)); assert.ok(x, d); assert.equal(x.control, true, d); assert.equal(x.expect, 'ok', d); assert.deepEqual(x.args, ['/bin/test', '-w', P(d)]);
+      const x = list.find((y) => y.args?.at(-1) === P(d)); assert.ok(x, d); assert.equal(x.control, true, d); assert.equal(x.expect, 'ok', d); assert.deepEqual(x.args, ['/bin/test', '-w', P(d)]);
     }
-    const no = list.find((y) => y.args.at(-1) === P(`outboxes/${prod}`)); assert.ok(no, prod); assert.equal(no.expect, 'fail'); assert.ok(!no.control);
+    const no = list.find((y) => y.args?.at(-1) === P(`outboxes/${prod}`)); assert.ok(no, prod); assert.equal(no.expect, 'fail'); assert.ok(!no.control);
     assert.match(no.what, new RegExp(`cannot write ${prod}'s outbox folder`));
   }
 });
 
-test('L836 PLANT: a product\'s outbox folder the owner can write → that proof FAILs; its copies folder not the owner\'s → its control fails and nothing after counts', () => {
-  const mac = applied(); mac.owners.set(P('outboxes/beta'), { uid: uidOf(mac, 'sam'), gid: 20 });
+test('L836 PLANT: a product\'s outbox folder the builder can write → that proof FAILs; its copies folder not the builder\'s → its control fails and nothing after counts', () => {
+  const mac = proven(); mac.owners.set(P('outboxes/beta'), { uid: uidOf(mac, 'builder'), gid: 20 });
   const bad = runProofs(mac, cfg).filter((r) => !r.ok); assert.equal(bad.length, 1, JSON.stringify(bad));
   assert.match(bad[0].what, /cannot write beta's outbox folder/); assert.match(bad[0].why, /CAN do this/);
   assert.equal(run(mac, ['proofs']).code, 1);
-  const mac2 = applied(); mac2.owners.set(P('worker-copies/alpha'), { uid: mac2.rootUid, gid: 0 });
+  const mac2 = proven(); mac2.owners.set(P('worker-copies/alpha'), { uid: mac2.rootUid, gid: 0 });
   const all = runProofs(mac2, cfg); const at = all.findIndex((r) => r.what.includes(`write ${P('worker-copies/alpha')} `));
   assert.ok(at > 1 && all[at].ok === false, JSON.stringify(all[at]));
-  assert.ok(all.slice(at + 1).length > 0 && all.slice(at + 1).every((r) => !r.ok && /not proven/.test(r.why)), JSON.stringify(all.slice(at + 1)));
+  assert.ok(all.slice(at + 1, -2).length > 0 && all.slice(at + 1, -2).every((r) => !r.ok && /not proven/.test(r.why)), JSON.stringify(all.slice(at + 1)));
 });
 
 test('L836 check: the workers\' copies folder holds only the config\'s product folders; a flat copy from before, or a dropped product\'s, FAILs by name and is not removed', () => {
@@ -851,9 +865,9 @@ test('L921: the worker runner\'s requests, own and snapshots folders: each apart
   assert.deepEqual(Object.keys(w), ['requests', 'state', 'snapshots']);
   assert.deepEqual(Object.keys(WORKER_RUNNER_FOLDERS), Object.keys(w));
   assert.deepEqual([row(workerRunnerPath(cfg)).owner, row(workerRunnerPath(cfg)).mode, row(workerRunnerPath(cfg)).acl], ['root', 0o755, []]);
-  assert.deepEqual([row(w.requests).owner, row(w.requests).mode, row(w.requests).acl, row(w.requests).group], ['owner', 0o700, [WORKER_REQUESTS_ACL], 'root']);
-  assert.deepEqual([row(w.state).owner, row(w.state).mode, row(w.state).acl], ['owner', 0o755, []]);
-  assert.deepEqual([row(w.snapshots).owner, row(w.snapshots).mode, row(w.snapshots).acl], ['owner', 0o755, []]);
+  assert.deepEqual([row(w.requests).owner, row(w.requests).mode, row(w.requests).acl, row(w.requests).group], ['builder', 0o700, [WORKER_REQUESTS_ACL], undefined]);   // L1079
+  assert.deepEqual([row(w.state).owner, row(w.state).mode, row(w.state).acl], ['builder', 0o755, []]);
+  assert.deepEqual([row(w.snapshots).owner, row(w.snapshots).mode, row(w.snapshots).acl], ['builder', 0o755, []]);
   // orchestrate only goes in and adds a file (owner-status.mjs requestWriter writes exclusively): no list, read, delete or inherit.
   assert.deepEqual([...WORKER_REQUESTS_ACL.perms].sort(), ['add_file', 'search']);
   assert.equal(WORKER_REQUESTS_ACL.who, 'user:orchestrate');
@@ -886,14 +900,40 @@ test('L921: the worker runner\'s requests, own and snapshots folders: each apart
   const after = mac.lstat(w.state); assert.deepEqual([after.uid, after.gid, after.mode], [before.uid, before.gid, before.mode]);
 });
 
-test('PLANT the keys folder readable by the owner (mode 755) → the proof FAILs', () => {
-  const mac = applied(); chmodSync(mac.at(P('keys')), 0o755);
+test('PLANT the keys folder readable by the builder (mode 755) → the proof FAILs', () => {
+  const mac = proven(); chmodSync(mac.at(P('keys')), 0o755);
   assert.ok(runProofs(mac, cfg).some((r) => !r.ok && /read the robot keys/.test(r.what)));
+});
+
+test('L1079 PLANTs: the owner\'s home or a production file the builder can read → FAIL; the builder in staff, or groups unreadable → FAIL', () => {
+  const one = (mac, re) => { const bad = runProofs(mac, cfg).filter((r) => !r.ok); assert.equal(bad.length, 1, JSON.stringify(bad)); assert.match(bad[0].what, re); return bad[0]; };
+  let mac = proven(); chmodSync(mac.at('/Users/sam'), 0o755); one(mac, /cannot list the owner's home/);
+  mac = proven(); chmodSync(mac.at('/Users/sam'), 0o751); chmodSync(mac.at(SECRET), 0o644); one(mac, /cannot read \/Users\/sam\/app/);   // the home passable, not listable: only the file's own mode stops it
+  mac = proven(); mac.groupNames = { builder: ['builder', 'everyone', 'staff'] }; assert.match(one(mac, /groups are its own/).why, /in staff/);
+  mac = proven(); mac.groupNames = { builder: { status: 1, stderr: 'id: no' } }; assert.match(one(mac, /groups are its own/).why, /could not be read/);
+  mac = proven(); mac.groupNames = { builder: [] }; assert.match(one(mac, /groups are its own/).why, /empty/, 'an empty list is never "no bad groups"');
+  // #487 r5 m1: the builder's shell is zsh; bash or none → FAIL.
+  for (const sh of ['/bin/bash', '/usr/bin/false']) { mac = proven(); mac.users.get('builder').UserShell = sh; assert.match(one(mac, /builder's shell is \/bin\/zsh/).why, new RegExp(`its shell is ${sh}`)); }
+  assert.equal(run(mac, ['proofs']).code, 1);
+});
+
+test('L1079: a rules entry that names nothing on this Mac is NOT TRIED, never PASS, and the run exits 1', () => {
+  const nt = (files) => runProofs(proven({ files }), cfg).filter((r) => r.notTried);
+  assert.deepEqual(nt([]).map((r) => r.what), ['builder cannot read the product\'s production files and secrets']);
+  assert.match(nt(['.env.local'])[0].why, /relative name/);
+  assert.match(nt(['/Users/sam/app/*.env'])[0].why, /pattern/);
+  assert.match(nt(['/Users/sam/app/gone.env'])[0].why, /not on this Mac/);
+  assert.deepEqual(nt([SECRET]), []);
+  const mac = applied();   // no installed review.json, no owner home on this stand-in
+  const res = runProofs(mac, cfg).filter((r) => r.notTried);
+  assert.ok(res.some((r) => /could not be read/.test(r.why)), JSON.stringify(res));
+  assert.ok(res.some((r) => /owner's home/.test(r.what)), 'a home that is not there proves nothing');
+  const t = run(mac, ['proofs']); assert.equal(t.code, 1); assert.match(t.text, /NOT TRIED: containment is not proven/);
 });
 
 test('proofs: dry run prints the commands and runs none; without root it is refused', () => {
   const mac = fakeMac({ euid: 501 });
-  const d = run(mac, ['proofs', '--dry-run']); assert.equal(d.code, 0); assert.match(d.text, /would run: sudo -n -u sam \/bin\/test -w \/Library\/orch-test\/hooks   \(must fail\)/);
+  const d = run(mac, ['proofs', '--dry-run']); assert.equal(d.code, 0); assert.match(d.text, /would run: sudo -n -H -u builder \/bin\/test -w \/Library\/orch-test\/hooks   \(must fail\)/);
   const r = run(mac, ['proofs']); assert.equal(r.code, 2); assert.match(r.text, /must run as root/);
 });
 
@@ -995,7 +1035,7 @@ test('REAL plan with a real throwaway prefix on this Mac: reads only; a user tha
   const made = p.ops.map((o) => /dscl \. -create \/Users\/(\w+) UniqueID (\d+)/.exec(o.text)).filter(Boolean).map((m) => [m[1], Number(m[2])]);
   assert.deepEqual(made.map(([n]) => n).sort(), USERS.filter((n) => users[n] === null).sort(), 'only a missing user is made');
   const ids = USERS.map((n) => users[n]?.uid ?? Object.fromEntries(made)[n]);
-  assert.equal(new Set(ids).size, 3);
+  assert.equal(new Set(ids).size, USERS.length);
   assert.ok(ids.every((n) => n >= 600 && n <= 699), ids.join(','));
   assert.equal(existsSync(join(prefix, base.slice(1))), false, 'a plan makes nothing');
   const wrong = plan(io, { ...cfg, base: '/Library/orch-other', owner: 'root' });
@@ -1019,15 +1059,78 @@ test('L836: each product has its own worker copies folder and outbox folder, mad
   const shape = (r) => r && [r.owner, r.mode, JSON.stringify(r.acl)];
   for (const prod of cfg.products) {
     const places = runnerPlaces({ copiesRoot: workerCopiesPath(cfg), outboxRoot: outboxRootPath(cfg), product: prod });
-    assert.deepEqual(shape(row(places.copies)), ['owner', 0o755, JSON.stringify([COPIES_CLEANUP_ACL])], `${prod} copies`);
+    assert.deepEqual(shape(row(places.copies)), ['builder', 0o755, JSON.stringify([COPIES_CLEANUP_ACL])], `${prod} copies`);
     assert.deepEqual(shape(row(places.copies)), shape(row(workerCopiesPath(cfg))), `${prod} copies as the copies folder`);
     assert.deepEqual(shape(row(places.outboxes)), shape(row(outboxRootPath(cfg))), `${prod} outboxes as the outbox root`);
     for (const r of PRODUCT_OUTBOX_ROLES) {
-      assert.deepEqual(shape(row(join(places.outboxes, r))), shape(row(join(outboxRootPath(cfg), 'lead'))), `${prod} ${r} as a flat worker role's folder`);
       assert.equal(row(join(outboxRootPath(cfg), r)), undefined, `no flat ${r} folder (L914)`);
-      assert.deepEqual(shape(row(join(places.outboxes, r))), ['owner', 0o750, JSON.stringify([ORCHESTRATE_READ_ACL])], `${prod} ${r}`);
+      // L1079: the builder writes a product's worker outboxes; orchestrate reads them through its group and the access list.
+      assert.deepEqual(shape(row(join(places.outboxes, r))), ['builder', 0o750, JSON.stringify([ORCHESTRATE_READ_ACL])], `${prod} ${r}`);
+      assert.equal(row(join(places.outboxes, r)).group, 'orchestrate', `${prod} ${r} group`);
     }
   }
   // A product named as a role would share that role's outbox folder.
   for (const r of ['worker', 'script', 'lead']) assert.throws(() => parseConfig({ ...RAW, products: ['alpha', r] }), /may not be named as a role/, r);
+});
+
+// ---- L1079: the builder user ----
+
+const BUILDER_ROWS = () => folderTable(cfg).filter((r) => r.owner === 'builder').map((r) => r.path);
+// A Mac set up before L1079: every folder the builder now owns is still the owner's own.
+const beforeBuilder = () => { const mac = applied(); const sam = { uid: uidOf(mac, 'sam'), gid: 20 }; for (const p of BUILDER_ROWS()) mac.owners.set(p, sam); return mac; };
+
+test('L1079: the builder owns what the worker runner writes; each product\'s worker and script outbox folder is builder:orchestrate 0750 with the robot\'s read entry', () => {
+  const mac = applied(); const b = uidOf(mac, 'builder'); const orchGid = Number(mac.users.get('orchestrate').PrimaryGroupID);
+  for (const d of ['worker-copies', 'worker-copies/alpha', 'worker-runner/requests', 'worker-runner/runner', 'worker-runner/snapshots']) assert.equal(mac.owners.get(P(d)).uid, b, d);
+  for (const prod of cfg.products) for (const role of PRODUCT_OUTBOX_ROLES) {
+    const d = P(`outboxes/${prod}/${role}`);
+    assert.deepEqual(mac.owners.get(d), { uid: b, gid: orchGid }, d);
+    assert.equal(statSync(mac.at(d)).mode & 0o777, 0o750, d);
+    assert.deepEqual(aclEntries(mac, d).entries, [aclText(ORCHESTRATE_READ_ACL)], d);
+  }
+  for (const role of FLAT_OUTBOX_ROLES) assert.equal(mac.owners.get(P(`outboxes/${role}`)).uid, uidOf(mac, 'sam'), `${role}: the owner's own interactive role`);
+  assert.deepEqual(fails(mac), []);
+});
+
+test('L1079 PLANT: a builder folder left the owner\'s, or the outbox group left the owner\'s, FAILs check', () => {
+  let mac = applied(); mac.owners.set(P('worker-copies/alpha'), { uid: uidOf(mac, 'sam'), gid: 20 });
+  assert.ok(fails(mac).some((r) => r.what.includes(P('worker-copies/alpha'))), JSON.stringify(fails(mac)));
+  mac = applied(); mac.owners.set(P('outboxes/alpha/worker'), { uid: uidOf(mac, 'builder'), gid: 20 });
+  assert.ok(fails(mac).some((r) => r.what.includes(P('outboxes/alpha/worker')) && /group is 20/.test(r.why)), JSON.stringify(fails(mac)));
+});
+
+test('L1079 start clean: owner-owned builder folders holding only the table\'s own folders are handed to the builder', () => {
+  const mac = beforeBuilder();
+  const r = run(mac, ['users-folders']); assert.equal(r.code, 0, r.text);
+  for (const p of BUILDER_ROWS()) assert.equal(mac.owners.get(p).uid, uidOf(mac, 'builder'), p);
+  assert.deepEqual(fails(mac), []);
+});
+
+test('L1079 start clean PLANT: a copy left in an owner-owned builder folder → refused by name, nothing changed, nothing moved', () => {
+  const mac = beforeBuilder(); mkdirSync(mac.at(P('worker-copies/alpha/card-7')));
+  const before = new Map(BUILDER_ROWS().map((p) => [p, mac.owners.get(p)]));
+  const r = run(mac, ['users-folders']); assert.notEqual(r.code, 0, r.text);
+  assert.match(r.text, new RegExp(`${P('worker-copies/alpha')} is still the owner's .* holds an entry from then: ${P('worker-copies/alpha/card-7')}`));
+  assert.match(r.text, /Moving the workers to the builder user/);
+  for (const [p, o] of before) assert.deepEqual(mac.owners.get(p), o, `${p} was changed`);
+  assert.ok(existsSync(mac.at(P('worker-copies/alpha/card-7'))), 'never moved or removed');
+});
+
+test('L1079 PLANT: users-folders refuses while the worker runner\'s status lists a live session, or can\'t be read; an ended one passes that check and is left to start clean', () => {
+  const status = P('worker-runner/runner/status.json');
+  const at = (text) => { const mac = beforeBuilder(); writeFileSync(mac.at(status), text); return mac; };
+  for (const [text, re] of [
+    [JSON.stringify({ sessions: [{ id: 's-1', alive: true }] }), /lists 1 live session \(s-1\)/],
+    [JSON.stringify({ sessions: [{ id: 's-2' }] }), /lists 1 live session/],
+    [JSON.stringify({ nope: 1 }), /is not what the runner writes/],
+    ['{', /is not what the runner writes/],
+  ]) {
+    const mac = at(text); const sam = uidOf(mac, 'sam');
+    const r = run(mac, ['users-folders']); assert.notEqual(r.code, 0, r.text); assert.match(r.text, re);
+    for (const p of BUILDER_ROWS()) assert.equal(mac.owners.get(p).uid, sam, `${p} was changed`);
+  }
+  // Ended sessions pass the live check, but start clean still names the old status file: setup moves nothing, so it is moved by hand.
+  const ended = at(JSON.stringify({ sessions: [{ id: 's-3', alive: false }, { id: 's-4', ended: true }] }));
+  const r = run(ended, ['users-folders']); assert.notEqual(r.code, 0, r.text);
+  assert.doesNotMatch(r.text, /live session/); assert.match(r.text, new RegExp(`holds an entry from then: ${status}`));
 });

@@ -50,7 +50,7 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
     nodeProblemText: null,      // a test sets this to make the node program look like one root must not run
     // Access-list names that exist only on the always-on Mac are stood in for by a real user here: orchestrate, and the review
     // user and the owners the tests name, for the rules-in-force folder (L1002).
-    aclPrincipals: { orchestrate: 'daemon', review: 'nobody', sam: '_www', joe: '_ftp' },
+    aclPrincipals: { orchestrate: 'daemon', review: 'nobody', sam: '_www', joe: '_ftp', builder: '_uucp' },
     privacyBlocked: new Set(),  // paths macOS's privacy protection refuses whatever the permissions say (a cloud folder): /bin/cat fails with EPERM
   };
   const at = (p) => join(prefix, p);
@@ -113,6 +113,12 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
     if (prog === '/bin/test' && rest[0] === '-w') return { status: can(rest[1], true) ? 0 : 1, stdout: '', stderr: '' };
     if (prog === '/bin/test' && rest[0] === '-r') return { status: can(rest[1], false) ? 0 : 1, stdout: '', stderr: '' };
     if (prog === '/bin/test' && rest[0] === '-x') return { status: can(rest[1], false, true) ? 0 : 1, stdout: '', stderr: '' };
+    // `head -c 1 <file>` (the proofs' read, L1079) is a read as `cat` is: the folder walk, then the file's read bits.
+    if (prog === '/usr/bin/head' && rest[0] === '-c' && rest[1] === '1') {
+      const f = rest[2];
+      for (let d = dirname(f); d !== '/'; d = dirname(d)) if (!can(d, false, true)) return { status: 1, stdout: '', stderr: `head: ${f}: Permission denied` };
+      return can(f, false) ? { status: 0, stdout: readFileSync(at(f), 'utf8').slice(0, 1), stderr: '' } : { status: 1, stdout: '', stderr: `head: ${f}: Permission denied` };
+    }
     if (prog === '/bin/cat' && mac.privacyBlocked.has(rest[0])) return { status: 1, stdout: '', stderr: `cat: ${rest[0]}: Operation not permitted` };
     // A real open needs search (x) on every folder above the file: the stand-in checks that too, below the stand-in's own
     // '/' (the throwaway prefix folder, private to this test process; the real '/' lets everyone search it).
@@ -148,6 +154,14 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
       if (cmd === '/usr/sbin/dseditgroup') {
         const who = args[args.indexOf('-m') + 1];
         return mac.admins.has(who) ? { status: 0, stdout: `yes ${who} is a member of admin\n`, stderr: '' } : { status: 67, stdout: `no ${who} is NOT a member of admin\n`, stderr: '' };
+      }
+      // `id -Gn <user>`: its own group's name and the groups every local user is in, unless a test sets mac.groupNames[user]
+      // (a list, or a { status, stderr } answer).
+      if (cmd === '/usr/bin/id' && args[0] === '-Gn') {
+        const who = args[1]; const set = mac.groupNames?.[who];
+        if (set && !Array.isArray(set)) return { stdout: '', ...set };
+        if (!mac.users.get(who)) return { status: 1, stdout: '', stderr: `id: ${who}: no such user` };
+        return { status: 0, stdout: `${(set ?? [who, 'everyone', 'localaccounts', '_lpoperator', 'com.apple.sharepoint.group.1']).join(' ')}\n`, stderr: '' };
       }
       if (cmd === '/usr/bin/sudo') {
         if (mac.as !== 0) return { status: 1, stdout: '', stderr: 'sudo: a password is required' };

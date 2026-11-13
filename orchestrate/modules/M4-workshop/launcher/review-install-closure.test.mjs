@@ -100,7 +100,7 @@ const JOB_BUILDERS = Object.freeze({
     config: join(SAMPLE_BASE, 'sensors.json'), path: '/usr/bin:/bin', logDir: join(SAMPLE_BASE, 'logs'), workDir: SAMPLE_BASE })],
   // L874: the worker runner's LaunchAgent is built the same way, through loginJobPlist (#364, #378).
   'wiring/runner-job.mjs': () => [workerRunnerPlist({ label: LABEL, node: join(SAMPLE_ROOT, NODE), script: join(SAMPLE_ROOT, RUNNER_MAIN),
-    config: join(SAMPLE_BASE, 'runner.json'), path: '/usr/bin:/bin', logDir: join(SAMPLE_BASE, 'logs'), workDir: SAMPLE_BASE, home: join(SAMPLE_BASE, 'owner-home') })],
+    config: join(SAMPLE_BASE, 'runner.json'), path: '/usr/bin:/bin', logDir: join(SAMPLE_BASE, 'logs'), workDir: SAMPLE_BASE, home: join(SAMPLE_BASE, 'home', 'builder') })],
 });
 /** The one script of the copy a job file starts: the .mjs file under the copy's link in its start command. */
 function startedScript(text) {
