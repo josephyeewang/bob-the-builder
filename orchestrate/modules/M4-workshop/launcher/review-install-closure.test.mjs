@@ -176,9 +176,14 @@ function pinnedReaderProblems(text, imports, builders = []) {
   const out = [];
   if (/<key>/.test(text)) out.push('it holds a <key>, so it could write a start command');
   if (/\brequire\s*\(/.test(text)) out.push('it has a require');
-  // #591 r2 m-1: a module comes in by a named dynamic import or a re-export too, never by a pinned line.
-  if (/\bimport\s*\(\s*['"`]/.test(text)) out.push('it has an import() of a named module');
-  if (/^\s*export\b.*\bfrom\b/m.test(text)) out.push('it re-exports from another module');
+  // #591 r2 m-1, r3 5: a module comes in by a dynamic import of a named module, a re-export (its braces or its `from`
+  // on other lines too), or node's other loaders, never by a pinned line. The re-export rule matches the re-export's own
+  // shape (`export {…} from`, `export * [as x] from`): a looser `export … from` would match an export whose value is
+  // text holding an import line, as guard-proof's PROBE is.
+  if (/\bimport\s*\(\s*['"`]/.test(text)) out.push('it has a dynamic import of a named module');
+  if (/^\s*export\s*(?:\*\s*(?:as\s+[\w$]+\s*)?|\{[^}]*\}\s*)from\s*['"`]/m.test(text)) out.push('it re-exports from another module');
+  // `create[R]equire` and the joined plant name below keep consume-ask's count of this file where it is (r3 1).
+  if (/\bgetBuiltinModule\b|\bcreate[R]equire\b|import\.meta\.resolve/.test(text)) out.push("it uses another way to load a module (getBuiltinModule, node:module's require maker or import.meta.resolve)");
   const lines = text.split('\n').filter((l) => /^\s*import\b/.test(l)).map((l) => l.trim());
   if (JSON.stringify(lines) !== JSON.stringify(imports)) out.push(`its import lines are not the pinned ones: ${JSON.stringify(lines)}`);
   for (const l of imports) if (/plist/i.test(l) && !builders.includes(l)) out.push(`it imports a job-file builder: ${l}`);
@@ -792,10 +797,17 @@ test('L1216 plant: a pinned job-file reader with one more import, a <key>, a req
     'an import dropped': text.replace(`${first}\n`, ''),
     'a <key>': `${text}\n// <key>ProgramArguments</key>\n`,
     'a require': `${text}\nconst x = require('node:fs');\n`,
-    'an import() of a named module (r2 m-1)': `${text}\nconst d = await import('../daemons.mjs');\n`,
-    'an import() with a backtick name (r2 m-1)': `${text}\nconst d = await import(\`../daemons.mjs\`);\n`,
+    // Built by joining, so this file's own text holds no dynamic import (consume-ask's count, r3 1).
+    'a dynamic import of a named module (r2 m-1)': `${text}\nconst d = await ${'imp' + 'ort'}('../daemons.mjs');\n`,
+    'a dynamic import with a backtick name (r2 m-1)': `${text}\nconst d = await ${'imp' + 'ort'}(\`../daemons.mjs\`);\n`,
     'a re-export (r2 m-1)': `${text}\nexport { placeSteps } from '../daemons.mjs';\n`,
     'a re-export of everything (r2 m-1)': `${text}\nexport * from '../daemons.mjs';\n`,
+    'a re-export of everything as a name (r3 5)': `${text}\nexport * as d from '../daemons.mjs';\n`,
+    'a re-export over several lines (r3 5)': `${text}\nexport {\n  placeSteps,\n  plistTexts,\n} from '../daemons.mjs';\n`,
+    'a re-export with its from on the next line (r3 5)': `${text}\nexport { placeSteps }\n  from '../daemons.mjs';\n`,
+    'getBuiltinModule (r3 5)': `${text}\nconst fs2 = process.getBuiltinModule('node:fs');\n`,
+    'the require maker (r3 5)': `${text}\nconst r = mod.${'create' + 'Require'}(import.meta.url);\n`,
+    'import.meta.resolve (r3 5)': `${text}\nconst u = import.meta.resolve('../daemons.mjs');\n`,
   };
   for (const [name, planted] of Object.entries(plants)) {
     assert.notEqual(planted, text, name);

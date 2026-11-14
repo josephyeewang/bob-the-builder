@@ -166,7 +166,8 @@ const row = (job, result, why) => ({ job, result, why });
 
 /**
  * One job's verdict. io: { exists, isLink(file), readPlist(file) → object, built(job) → the job file the installer writes
- * for it, as an object, currentCopy(installRoot) → install-check's answer, realpath, idOf(name) → { uid, gid } | null,
+ * for it, as an object, builtText(job) → that file's text, readBytes(file) → the placed file's bytes,
+ * currentCopy(installRoot) → install-check's answer, realpath, idOf(name) → { uid, gid } | null,
  * chain(path) → problem | null, runChild({ node, uid, gid, env, cwd }) → spawnSync's answer, myUid }.
  */
 export function judgeJob(job, { cfg, io, ownerUid, loadWrites = LOAD_WRITES }) {
@@ -206,6 +207,11 @@ export function judgeJob(job, { cfg, io, ownerUid, loadWrites = LOAD_WRITES }) {
     if (!Object.hasOwn(p, k)) return row(job, 'FAIL', `its job file has no ${k}, which the installer writes for it; not loaded`);
     if (!sameValue(p[k], want[k])) return row(job, 'FAIL', `its job file's ${k} is not what the installer writes for it (${JSON.stringify(p[k]).slice(0, 200)}); not loaded`);
   }
+  // r3 4: and the file is the installer's text byte for byte, as daemons check holds it (daemons.mjs:475). Parsed values
+  // can match while the file differs (a <real> for an <integer>, a key given twice, a binary file); launchd reads the file.
+  let bytes; let text;
+  try { bytes = io.readBytes(file); text = io.builtText(job); } catch (e) { return row(job, 'FAIL', `its job file or the installer's text for it can't be read (${e?.message ?? e}); not loaded`); }
+  if (!Buffer.isBuffer(bytes) || typeof text !== 'string' || !bytes.equals(Buffer.from(text, 'utf8'))) return row(job, 'FAIL', 'its job file is not, byte for byte, the text the installer writes for it (daemons check holds it to the same); not loaded');
   if (Object.hasOwn(loadWrites, job)) return row(job, 'NOT TRIED', `its script is not loaded here: ${loadWrites[job]}`);
   // The user: a job file with no UserName runs as root.
   const user = p.UserName === undefined ? 'root' : p.UserName;
@@ -277,7 +283,9 @@ export const liveIo = (cfg) => ({
   exists: (f) => { try { lstatSync(f); return true; } catch { return false; } },   // a dangling link is placed too
   isLink: (f) => lstatSync(f).isSymbolicLink(),
   // The installer's own builder (daemons.mjs plistTexts), built in memory from this config and the Mac's users: nothing is written.
-  built: (job) => { const b = plistTexts(realIo(), cfg); if (!Object.hasOwn(b.plists, job)) throw new Error(b.problems.join('; ') || 'not a job of this config'); return plistObject(b.plists[job]); },
+  builtText: (job) => { const b = plistTexts(realIo(), cfg); if (!Object.hasOwn(b.plists, job)) throw new Error(b.problems.join('; ') || 'not a job of this config'); return b.plists[job]; },
+  built(job) { return plistObject(this.builtText(job)); },
+  readBytes: (f) => readFileSync(f),
   currentCopy: (root) => currentCopy(root),
   readPlist: (f) => {
     const r = spawnSync('/usr/bin/plutil', ['-convert', 'json', '-o', '-', '--', f], { encoding: 'utf8', timeout: 10_000 });

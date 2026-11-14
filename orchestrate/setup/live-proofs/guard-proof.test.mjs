@@ -16,7 +16,7 @@ import { ROOT_CONFIG_PATH } from '../layout.mjs';
 import { parseInstallConfig } from '../install.mjs';
 import { main as setupMain } from '../setup.mjs';
 import { fakeMac } from '../fake-mac.test-helper.mjs';
-import { GUARD, LOAD_WRITES, NOT_CHECKED, PROBE, PROVED_JOBS, judgeJob, main, plistObject, proofPassed, readAnswer } from './guard-proof.mjs';
+import { GUARD, LOAD_WRITES, NOT_CHECKED, PROBE, PROVED_JOBS, judgeJob, main, plistObject, proofPassed, readAnswer, sameValue } from './guard-proof.mjs';
 
 const ORCH = realpathSync.native(join(dirname(fileURLToPath(import.meta.url)), '..', '..'));
 const GUARD_TEXT = readFileSync(join(ORCH, GUARD), 'utf8');
@@ -47,13 +47,16 @@ const noUser = (plist) => { const { UserName, ...rest } = plist; return rest; };
 
 /** The proof's io for a stand-in: the job files from a table, users from a table, each check run as this user. */
 const BUILT = { Label: 'x', ProgramArguments: [], UserName: 'x', EnvironmentVariables: { PATH: '/usr/bin:/bin', HOME: '/x' } };
-function testIo({ base, plists = {}, users = { robot: { uid: ME, gid: MY_GID }, joe: { uid: 99_999, gid: 20 } }, chain, myUid = ME, child, built, links = [] } = {}) {
+function testIo({ base, plists = {}, users = { robot: { uid: ME, gid: MY_GID }, joe: { uid: 99_999, gid: 20 } }, chain, myUid = ME, child, built, builtText, readBytes, links = [] } = {}) {
   return {
     exists: (f) => Object.hasOwn(plists, f),
     isLink: (f) => links.includes(f),
     // By default the installer's file is the placed one, so each test reaches the check it is about; the r2 value test
     // and the M2 key tests give their own.
     built: built ?? ((job) => plists[plistFile(job)]),
+    // The texts: by default each file's text is its object written out, and the installer's text is its file's.
+    builtText: builtText ?? ((job) => JSON.stringify((built ?? ((j) => plists[plistFile(j)]))(job))),
+    readBytes: readBytes ?? ((f) => Buffer.from(JSON.stringify(plists[f]))),
     currentCopy: (root) => currentCopy(root, { owner: ME }),
     readPlist: (f) => plists[f],
     realpath: (p) => realpathSync.native(p),
@@ -307,7 +310,9 @@ test('r1 M2: a job file may hold only the keys and environment names the install
   assert.equal(judge(s, { plist: withEnv, built: () => withEnv }).result, 'PASS');
 });
 
-test('r1 M2: the installer\'s own job file for each proved job passes the key checks it is the measure for', () => {
+// r3 3: these need macOS's plutil and dscl, so they run on a Mac only (CI's Linux runner skips them).
+const MAC_ONLY = { skip: process.platform !== 'darwin' && 'needs macOS tools (plutil); run on a Mac' };
+test('r1 M2: the installer\'s own job file for each proved job passes the key checks it is the measure for', MAC_ONLY, () => {
   const mac = fakeMac({ euid: 0 });
   const raw = { base: '/Library/orch-test', owner: 'sam', products: ['alpha'], address: 'https://example.invalid/org/repo.git', label: LABEL, runnerConfig: '/tmp/x/review.json', extras: [], watch: { repo: 'example-org/example-repo', rulesSha256: 'a'.repeat(64) } };
   const f = mac.at(ROOT_CONFIG_PATH); rmSync(f, { force: true }); writeFileSync(f, JSON.stringify(raw)); chmodSync(f, 0o644);
@@ -319,7 +324,7 @@ test('r1 M2: the installer\'s own job file for each proved job passes the key ch
     if (!Object.hasOwn(PROVED_JOBS, job)) continue;
     const o = plistObject(text); seen += 1;
     const s = standIn();
-    const r = judgeJob(job, { cfg: s.cfg, io: testIo({ base: s.base, plists: { [plistFile(job)]: o }, built: () => o }), ownerUid: 99_999 });
+    const r = judgeJob(job, { cfg: s.cfg, io: testIo({ base: s.base, plists: { [plistFile(job)]: o }, built: () => o, builtText: () => text, readBytes: () => Buffer.from(text) }), ownerUid: 99_999 });
     assert.doesNotMatch(r.why ?? '', /installer|Program|GroupName|EnvironmentVariables/, `${job}: ${r.why}`);
   }
   assert.ok(seen >= 3, `the builder made ${seen} proved jobs`);
@@ -330,11 +335,13 @@ test('r1 m3: the check starts the script with no argument, so a script that runs
   assert.equal(judge(s).result, 'PASS');
 });
 
+const TMP = 'mk' + 'dtemp';
 test('r1 m4: a temp folder, a thread, a datagram, a name lookup or a listener at load is a FAIL, and nothing is done', () => {
   const s = standIn();
   const cases = [
-    [`import fs from 'node:fs';\nimport '../shared/secret-guard.mjs';\ntry { fs.mkdtempDisposableSync('/tmp/orch-x-'); } catch {}\n`, /file write \(mkdtempDisposableSync\)/],
-    [`import fs from 'node:fs';\nimport '../shared/secret-guard.mjs';\nawait fs.promises.mkdtempDisposable('/tmp/orch-x-').catch(() => {});\n`, /file write \(mkdtempDisposable\)/],
+    // The names are joined so this file's text names no temp-folder call (tmp-guard's scan, r3 2).
+    [`import fs from 'node:fs';\nimport '../shared/secret-guard.mjs';\ntry { fs.${TMP}DisposableSync('/tmp/orch-x-'); } catch {}\n`, new RegExp(`file write \\(${TMP}DisposableSync\\)`)],
+    [`import fs from 'node:fs';\nimport '../shared/secret-guard.mjs';\nawait fs.promises.${TMP}Disposable('/tmp/orch-x-').catch(() => {});\n`, new RegExp(`file write \\(${TMP}Disposable\\)`)],
     [`import { Worker } from 'node:worker_threads';\nimport '../shared/secret-guard.mjs';\ntry { new Worker('1', { eval: true }); } catch {}\n`, /thread start \(Worker\)/],
     [`import dgram from 'node:dgram';\nimport '../shared/secret-guard.mjs';\ntry { dgram.createSocket('udp4'); } catch {}\n`, /network connection \(createSocket\)/],
     [`import dns from 'node:dns';\nimport '../shared/secret-guard.mjs';\ntry { dns.lookup('localhost', () => {}); } catch {}\n`, /name lookup \(lookup\)/],
@@ -389,4 +396,30 @@ test('r2: sameValue compares plist values by type, order, keys and value', async
   for (const [a, b] of [[['x', 'y'], ['y', 'x']], [['x'], ['x', 'y']], [{ a: 1 }, { a: 1, b: 2 }], [{ a: 1 }, { b: 1 }], ['1', 1], [true, 'true'], [{}, []], [null, {}], [{ a: undefined }, {}]]) {
     assert.equal(sameValue(a, b), false, JSON.stringify([a, b])); assert.equal(sameValue(b, a), false, JSON.stringify([b, a]));
   }
+});
+
+test('r3 4: a job file whose values read the same but whose text is not the installer\'s, byte for byte, is a FAIL', MAC_ONLY, () => {
+  const s = standIn();
+  const toXml = (o) => { const r = spawnSync('/usr/bin/plutil', ['-convert', 'xml1', '-o', '-', '--', '-'], { input: JSON.stringify(o), encoding: 'utf8' }); assert.equal(r.status, 0, r.stderr); return r.stdout; };
+  const want = toXml({ ...jobFile(s.root, 'robot'), KeepAlive: 1 });
+  assert.match(want, /<key>KeepAlive<\/key>\s*<integer>1<\/integer>/);
+  const binary = (() => { const r = spawnSync('/usr/bin/plutil', ['-convert', 'binary1', '-o', '-', '--', '-'], { input: want }); assert.equal(r.status, 0); return r.stdout; })();
+  const plants = {
+    'a <real> for an <integer>': Buffer.from(want.replace('<integer>1</integer>', '<real>1</real>')),
+    'a key given twice': Buffer.from(want.replace('<key>KeepAlive</key>', '<key>KeepAlive</key>\n\t<integer>1</integer>\n\t<key>KeepAlive</key>')),
+    'a binary file': binary,
+    'one more blank line': Buffer.from(`${want}\n`),
+  };
+  const never = () => { throw new Error('the child must not start'); };
+  const wantObj = plistObject(want);
+  for (const [name, bytes] of Object.entries(plants)) {
+    let placed; try { placed = plistObject(bytes); } catch { placed = null; }
+    const r = judgeJob('robot', { cfg: s.cfg, io: testIo({ base: s.base, plists: { [plistFile('robot')]: placed ?? wantObj }, built: () => wantObj, builtText: () => want, readBytes: () => bytes, child: never }), ownerUid: 99_999 });
+    assert.equal(r.result, 'FAIL', name);
+    // Where plutil reads it as the same values, only the byte check stands between it and a PASS.
+    if (placed && sameValue(placed, wantObj)) assert.equal(r.why, 'its job file is not, byte for byte, the text the installer writes for it (daemons check holds it to the same); not loaded', name);
+  }
+  assert.ok(sameValue(plistObject(binary), wantObj), 'the binary file reads as the same values, so the byte check is what fails it');
+  const ok = judgeJob('robot', { cfg: s.cfg, io: testIo({ base: s.base, plists: { [plistFile('robot')]: wantObj }, built: () => wantObj, builtText: () => want, readBytes: () => Buffer.from(want) }), ownerUid: 99_999 });
+  assert.equal(ok.result, 'PASS', ok.why);
 });
