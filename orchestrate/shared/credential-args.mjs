@@ -53,8 +53,13 @@
 //                                  what it is called on and given; node's path, os and url functions (PURE_IMPORT), and a
 //                                  function whose name says it answers with a path, a name, a count or a yes or no
 //                                  (`tokenPath(cfg)`, `isRoot()`), pass; not one ending env, vars, file or source, nor one
-//                                  named for reading (`readFile`, `loadKey`, `getSecret`, r5 M2). `Object.entries(x)`/
+//                                  named for reading (READ_VERBS: read, load, get, fetch, cat, decrypt, retrieve, unseal,
+//                                  open, in any case, after any _ or $: `readFile`, `READ_TOKEN_PATH`, r5 M2, r7 M4), nor
+//                                  a require or a dynamic import, whose value is a module's (r7 M2). `Object.entries(x)`/
 //                                  `values(x)` read x's values, so a name like `env` does not pass there.
+//                                Destructuring is read with its brackets balanced (`const { env = {} } = X`, r7 M1), and
+//                                process under any spelling (required or imported from node:process, its default import,
+//                                `(process)`, `globalThis.process`) is process (r7 M2, M3, M5).
 //                                Anything else (a program's answer, a file's text, an `await` of an object's method, a
 //                                name given no value here) is listed.
 //   everything else              listed as `unread`: a list or word from a helper exported or called as a method (its
@@ -276,6 +281,52 @@ function firstArray(call) {
 }
 
 /** The top-level arguments of a call's parentheses, as text. */
+/**
+ * Every destructuring declaration (`const { a, b: c = {} } = X`, `let [d] = X`) found in `code` (the source with its
+ * strings blanked), its pattern read with brackets balanced, so a default that is itself an object or list (`{ env = {} }`,
+ * `{ env: e = {} }`) does not end it (#556 r7 M1): { at, end, open, parts: [{ key, name, rest }], rhs }. `rhs` is where the
+ * value starts. A part that is itself a pattern has no name (nested destructuring is listed, not read).
+ */
+function destructuresIn(code) {
+  const out = [];
+  for (const m of code.matchAll(/(?<![\w$.])(?:const|let|var)\s*(?=[{[])/g)) {
+    const open = m.index + m[0].length;
+    const pat = balanced(code, open);
+    if (!pat) continue;
+    const eq = /^\s*=(?![=>])\s*/.exec(code.slice(open + pat.length));
+    if (!eq) continue;
+    const parts = callArgs(pat).map((part, i) => {
+      const rest = part.startsWith('...');
+      const body = rest ? part.slice(3).trim() : part;
+      if (pat[0] === '[') { const x = /^([A-Za-z_$][\w$]*)\s*(?:=[\s\S]*)?$/.exec(body); return { key: String(i), name: x?.[1] ?? null, rest }; }
+      const x = /^([A-Za-z_$][\w$]*)\s*(?::\s*([\s\S]*))?$/.exec(body.replace(/^([A-Za-z_$][\w$]*)\s*=[\s\S]*$/, '$1'));
+      if (!x) return { key: null, name: null, rest };
+      if (x[2] === undefined) return { key: x[1], name: x[1], rest };
+      const t = /^([A-Za-z_$][\w$]*)\s*(?:=[\s\S]*)?$/.exec(x[2].trim());
+      return { key: x[1], name: t?.[1] ?? null, rest };
+    });
+    out.push({ at: m.index, start: open, end: open + pat.length, open: pat[0], parts, rhs: open + pat.length + eq[0].length });
+  }
+  return out;
+}
+
+/**
+ * A copied value with its process spellings made plain (#556 r7 M2, M5, c3): process or node:process
+ * required, imported dynamically or awaited, and `globalThis.process`, are `process`, and brackets around a plain
+ * name or chain are dropped (`(process)`, a bracketed require of process with `.env` after it). Spaces are removed first.
+ */
+export function plainProcess(expr) {
+  let x = String(expr).replace(/\s+/g, '')
+    .replace(/(?:await)?(?:require|import)\((['"])(?:node:)?process\1\)/g, 'process')
+    .replace(/(?<![\w$.])globalThis\.process(?![\w$])/g, 'process');
+  for (let i = 0; i < 8; i++) {
+    const y = x.replace(/\(([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\)/g, (all, inner, at) => (at > 0 && /[\w$\])]/.test(x[at - 1]) ? all : inner));
+    if (y === x) break;
+    x = y;
+  }
+  return x;
+}
+
 function callArgs(call) {
   const args = []; let depth = 0; let start = 1;
   for (let i = 1; i < call.length - 1; i++) {
@@ -471,9 +522,12 @@ function pureFunction(f) {
 const safeCall = (f) => (SAFE_END.test(f) && !/(?:env|vars?|files?|source)$/i.test(f) && !READ_START.test(f)) || /^(?:max|min|num|no|has|is)(?=[A-Z_])/.test(f);
 /**
  * A function named for reading or fetching (`readFile`, `loadKey`, `getSecret`, `fetchToken`, `catFile`, `ReadTokenPath`,
- * `decryptKey`, `unsealVault`) answers with what it read (#556 r5 M2, r6 4). The first letter may be either case.
+ * `READ_TOKEN_PATH`, `_readTokenPath`, `decryptKey`, `unsealVault`, `openTokenPath`) answers with what it read (#556 r5 M2,
+ * r6 4, r7 M4). The verb is matched in any case, after any leading _ or $, and must be followed by a character that is not
+ * a lowercase letter, or by the end: so `reader` and `category` are not verbs, and `READTokenPath` is.
  */
-const READ_START = /^(?:[Rr]ead|[Ll]oad|[Gg]et|[Ff]etch|[Cc]at|[Dd]ecrypt|[Rr]etrieve|[Uu]nseal|[Oo]pen)(?![a-z])/;
+export const READ_VERBS = Object.freeze(['read', 'load', 'get', 'fetch', 'cat', 'decrypt', 'retrieve', 'unseal', 'open']);
+const READ_START = new RegExp(`^[_$]*(?:${READ_VERBS.map((v) => [...v].map((ch) => `[${ch.toUpperCase()}${ch}]`).join('')).join('|')})(?![a-z])`);
 /** Methods that take nothing and answer with a place, a time, an id or a number. */
 const NOARG_SAFE = /^(?:tmpdir|homedir|cwd|now|hostname|platform|arch|getuid|getgid|geteuid|getegid|randomUUID|uptime|toISOString|getTime|toJSON)$/;
 /** Global functions that reshape their argument. */
@@ -636,22 +690,23 @@ export function credentialArgFindings(text) {
     .sort((a, b) => (a.end - a.start) - (b.end - b.start))[0] ?? null;
   /** Every value a name is given in this module (`const X = …`, `X = …`), with where: { at, expr }. */
   const assignCache = new Map();
+  const patterns = destructuresIn(code);
   const assigns = (n) => {
     if (!assignCache.has(n)) {
+      // A default inside a pattern (`const { env = {} } = X`) is not a value given to the name here (#556 r7 M1).
       assignCache.set(n, [...code.matchAll(new RegExp(`(?<![\\w$.])${escape(n)}\\s*=(?![=>])\\s*`, 'g'))]
+        .filter((m) => !patterns.some((p) => p.start <= m.index && m.index < p.end))
         .map((m) => { const s = m.index + m[0].length; return { at: m.index, expr: src.slice(s, exprEnd(src, s)).trim() }; }).filter((x) => x.expr));
       // `const { a, b: n = d } = X` gives n X.b; `const [n] = X` and `for (const n of X)` give n what X holds (read as X).
-      for (const m of src.matchAll(/(?:const|let|var)\s*(\{[^{}]*\}|\[[^[\]]*\])\s*=(?![=>])\s*/g)) {
-        const parts = m[1].slice(1, -1).split(',').map((x) => x.trim()).filter(Boolean);
-        for (const part of parts) {
-          const x = /^(?:\.\.\.)?([A-Za-z_$][\w$]*)(?:\s*:\s*([A-Za-z_$][\w$]*))?\s*(?:=.*)?$/s.exec(part);
-          if (!x || (x[2] ?? x[1]) !== n) continue;
-          const s = m.index + m[0].length; const rhs = src.slice(s, exprEnd(src, s)).trim();
+      for (const p of patterns) {
+        for (const part of p.parts) {
+          if (part.name !== n) continue;
+          const rhs = src.slice(p.rhs, exprEnd(src, p.rhs)).trim();
           // A plain chain keeps its parts (`const { env } = process` gives env process.env, r6 1); `const [n] = X` is X[0] (r6 5).
           const chain = CHAIN_RE.test(rhs);
-          const expr = m[1].startsWith('{') ? (part.startsWith('...') ? rhs : chain ? `${rhs}.${x[1]}` : `(${rhs}).${x[1]}`)
-            : (!part.startsWith('...') && chain ? `${rhs}[0]` : rhs);
-          if (rhs) assignCache.get(n).push({ at: m.index, expr });
+          const expr = p.open === '{' ? (part.rest ? rhs : chain ? `${rhs}.${part.key}` : `(${rhs}).${part.key}`)
+            : (!part.rest && chain ? `${rhs}[0]` : rhs);
+          if (rhs) assignCache.get(n).push({ at: p.at, expr });
         }
       }
       for (const m of src.matchAll(new RegExp(`for\\s*(?:await\\s*)?\\(\\s*(?:const|let|var)\\s*(?:${escape(n)}|\\[[^\\]]*\\b${escape(n)}\\b[^\\]]*\\]|\\{[^}]*\\b${escape(n)}\\b[^}]*\\})\\s+of\\s+`, 'g'))) {
@@ -753,17 +808,20 @@ export function credentialArgFindings(text) {
   // Names for process and process.env (r6 1, 2): imported from node:process, required, or given process or a part of it.
   const PROC_FROM = `['"](?:node:)?process['"]`;
   const procNames = new Map();
-  for (const m of src.matchAll(new RegExp(`import\\s*\\{([^}]*)\\}\\s*from\\s*${PROC_FROM}`, 'g'))) {
-    for (const x of m[1].split(',')) { const [a, b] = x.trim().split(/\s+as\s+/); if (a) procNames.set(b ?? a, `process.${a}`); }
+  // `import { default as p }` is process itself (r7 M3); `import proc, { env } from` gives both names (r7 c3).
+  for (const m of src.matchAll(new RegExp(`import\\s*(?:[A-Za-z_$][\\w$]*\\s*,\\s*)?\\{([^}]*)\\}\\s*from\\s*${PROC_FROM}`, 'g'))) {
+    for (const x of m[1].split(',')) { const [a, b] = x.trim().split(/\s+as\s+/); if (a) procNames.set(b ?? a, a === 'default' ? 'process' : `process.${a}`); }
   }
-  for (const m of src.matchAll(new RegExp(`import\\s+(?:\\*\\s*as\\s+)?([A-Za-z_$][\\w$]*)\\s*from\\s*${PROC_FROM}`, 'g'))) procNames.set(m[1], 'process');
-  for (const m of src.matchAll(new RegExp(`(?:const|let|var)\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*(?:require|await\\s+import)\\s*\\(\\s*${PROC_FROM}\\s*\\)`, 'g'))) procNames.set(m[1], 'process');
+  for (const m of src.matchAll(new RegExp(`import\\s+(?:\\*\\s*as\\s+)?([A-Za-z_$][\\w$]*)\\s*(?:,\\s*\\{[^}]*\\}\\s*)?from\\s*${PROC_FROM}`, 'g'))) procNames.set(m[1], 'process');
+  // A name given process by a require (and `.env` after it) is read through its value by plainProcess (r7 M2).
   const processChain = (c, at, depth = 0) => {
+    if (c[0] === 'globalThis' && c[1] === 'process') return processChain(c.slice(1), at, depth + 1);
     if (c[0] === 'process' || depth > 4) return c;
     if (procNames.has(c[0])) return processChain([...procNames.get(c[0]).split('.'), ...c.slice(1)], at, depth + 1);
     if (declaring(at, c[0])) return c;
     const as = assigns(c[0]);
-    const named = as.map((a) => a.expr.replace(/\s+/g, '')).filter((x) => CHAIN_RE.test(x));
+    // A require or dynamic import of process, `(process)` and the like are read as process (r7 M2, M5).
+    const named = as.map((a) => plainProcess(a.expr)).filter((x) => CHAIN_RE.test(x));
     // Only a name for process or process.env itself: `const t = process.env.X` is read through its value as before.
     for (const x of named) {
       const r = processChain(x.split('.'), at, depth + 1);
@@ -780,6 +838,8 @@ export function credentialArgFindings(text) {
   const leaf = (expr, at, level, label, env, seen) => {
     let e = expr.trim().replace(/^\.\.\.\s*/, '');
     if (!e || isFunction(e)) return undefined;
+    // A require or awaited dynamic import of process, then `.env.X`, is process.env.X (r7 M2, c3).
+    if (/(?:require|import)\s*\(\s*['"](?:node:)?process['"]\s*\)/.test(e) && CHAIN_RE.test(plainProcess(e))) e = plainProcess(e);
     if (e.startsWith('(') && balanced(e, 0)?.length === e.length) return leaf(e.slice(1, -1), at, level, label, env, seen);
     const t = ternary(e);
     if (t) { leaf(t[0], at, level, label, env, seen); return leaf(t[1], at, level, label, env, seen); }
@@ -825,7 +885,8 @@ export function credentialArgFindings(text) {
         return rets.forEach((r) => word(r.expr, r.at, level + 1, label, bind, new Set()));
       }
       if (SAFE_CALL.test(f) || (QUIET.test(f) && f !== 'process') || imported(f) && PURE_IMPORT.test(f)) return argLeaves(false);
-      if (safeCall(f)) return undefined;   // its name says what it returns (`tokenPath(cfg)`)
+      // A module's value (a require of cfg.json, then `.value`; a dynamic import) is never a safe call, though require ends in re (r7 M2).
+      if (f !== 'require' && f !== 'import' && safeCall(f)) return undefined;   // its name says what it returns (`tokenPath(cfg)`)
       return unreadLeaf(at, label, `${short(callText)} is a call whose answer is not read`, callText);
     }
     const last = before.at(-1);
@@ -836,6 +897,8 @@ export function credentialArgFindings(text) {
       if (/^(?:entries|values)$/.test(last.name) && recv.trim() === 'Object' && args.length === 1 && NAME_RE.test(args[0].trim())) {
         return nameChain([args[0].trim()], at, level, label, env, seen, true);
       }
+      // One of a list of tokens picked by a method (`tokens.at(0)`, `tokens.find(…)`, r7 c1).
+      if (/^(?:at|find|findLast|filter)$/.test(last.name) && /tokens$/i.test(recv.trim())) return unreadLeaf(at, label, `${short(callText)} is one of a list of tokens`, callText);
       if (TRANSFORM.test(last.name) && !isNew) { leaf(recv, at, level, label, env, seen); return argLeaves(CALLBACK_OK.test(last.name)); }
       if (NOARG_SAFE.test(last.name) && !args.length) return undefined;
       if (DIGEST.test(last.name) || safeCall(last.name)) return undefined;
@@ -1041,9 +1104,13 @@ export function credentialArgFindings(text) {
   // what it read, or sits in a function that does, is a reader site too.
   let top = src; for (const d of defs) top = top.slice(0, d.start) + ' '.repeat(d.end - d.start) + top.slice(d.end);
   // `const t = …`, `t = …` after `let t;`, and `const { v } = …` (r6 m-a).
-  const topReads = [...top.matchAll(/(?<![\w$.])(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*|\{[^{}]*\}|\[[^[\]]*\])\s*=(?![=>])\s*/g)]
-    .map((m) => ({ names: /^[{[]/.test(m[1]) ? [...m[1].slice(1, -1).matchAll(/([A-Za-z_$][\w$]*)\s*(?=,|$|=)/g)].map((x) => x[1]) : [m[1]], start: m.index, end: exprEnd(src, m.index + m[0].length) }))
-    .filter((r) => readsCredential(src.slice(r.start, r.end)));
+  const topPatterns = patterns.filter((p) => !defs.some((d) => d.start <= p.at && p.at < d.end));
+  const topReads = [
+    ...[...top.matchAll(/(?<![\w$.])(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=(?![=>])\s*/g)]
+      .filter((m) => !patterns.some((p) => p.start <= m.index && m.index < p.end))
+      .map((m) => ({ names: [m[1]], start: m.index, end: exprEnd(src, m.index + m[0].length) })),
+    ...topPatterns.map((p) => ({ names: p.parts.map((x) => x.name).filter(Boolean), start: p.at, end: exprEnd(src, p.rhs) })),
+  ].filter((r) => readsCredential(src.slice(r.start, r.end)));
   const readNames = topReads.flatMap((r) => r.names);
   const usesRead = (t) => readNames.some((n) => new RegExp(`(?<![\\w$.])${escape(n)}(?![\\w$])`).test(t));
   for (const x of found) {

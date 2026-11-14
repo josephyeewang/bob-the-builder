@@ -168,6 +168,7 @@ const REVIEWED = {
   "setup/builder-wall.mjs unread planWall's io reaches run(…, ['bootstrap', 'system', io.at(wallPlistPath(cfg))]), and planWall is called from other modules @e64a91b9": SETUP_IO,
   "setup/builder-wall.mjs reader step(…, ['-X', ref]): io.readText(tokenPath(cfg)) is a call whose answer is not read (in wayOut, which reads a credential) @e28f722b": "ref is pf's enable reference, the number pfctl -E printed and wallDir's pf-token file keeps (root's 0700 folder); it is checked to be digits before pfctl -X takes it. pf calls it a token; it is a count, not a credential",
   "setup/builder-wall.mjs unread spawn(…, [...as(user), '-e', LISTENER, proto, host]): net.addresses() is a call whose answer is not read @b0bde14e": "net.addresses() is this Mac's own non-loopback IP address, for the listener and client probes",
+  "setup/builder-wall.mjs unread spawn(…, [...as(user), '-e', CLIENT, proto, host, String(port)]): port is given no value here that is read @c2fb59ea": "port is the number the probe's own listener printed (PORT n, read as Number), handed to the client probe; it is a port number. Until r7 the scan passed it by reading the CLIENT script's text as code",
   "setup/builder-wall.mjs unread planWall(…, io): realIo() is a call whose answer is not read @58a4416a": SETUP_IO,
   "setup/daemons.mjs unread planLoad's io reaches launchctl(…, ['bootstrap', 'system', io.at(plistPath(cfg, job))]), and planLoad is called from other modules @e2d8b091": SETUP_IO,
   "setup/daemons.mjs unread planReloadAccount's io reaches launchctl(…, ['bootstrap', 'system', io.at(plistPath(cfg, job))]), and planReloadAccount is called from other modules @cc90dfc9": SETUP_IO,
@@ -475,6 +476,51 @@ test('R-0b-179 (b, #556 r6): other names for process, an index into an environme
   // Still quiet: an element of a list of files, a plain variable through another name for process.
   assert.deepEqual(said(H + "const files = ['/a', '/b'];\nfor (const f of files) spawnSync('/bin/cat', [f]);"), []);
   assert.deepEqual(said(H + `const { env } = ${P};\nspawnSync('/bin/x', [env.HOME]);`), []);
+});
+
+test('R-0b-179 (b, #556 r7): destructuring with defaults, process from require and import, the read verb in any case, a bracketed copy', () => {
+  const H = "import { spawnSync } from 'node:child_process';\nimport { readFileSync } from 'node:fs';\n";
+  const P = 'pro' + 'cess';
+  const plants = {
+    'M1 const { env = {} } = process': `const { env = {} } = ${P};\nspawnSync('x', ['--', env.GH_PAT]);`,
+    'M1 const { env: e = {} } = process': `const { env: e = {} } = ${P};\nspawnSync('x', ['--', e.GH_PAT]);`,
+    "M2 const { env } = require('node:process')": `const { env } = require('node:${P}');\nspawnSync('x', ['--', env.GH_PAT]);`,
+    "M2 const { env: E } = require('process')": `const { env: E } = require('${P}');\nspawnSync('x', ['--', E.GH_PAT]);`,
+    "M2 require('node:process').env.X in place": `spawnSync('x', ['--', require('node:${P}').env.GH_PAT]);`,
+    "M2 const e = require('node:process').env": `const e = require('node:${P}').env;\nspawnSync('x', ['--', e.GH_PAT]);`,
+    "M2 require('./cfg.json').value": "spawnSync('x', ['--', require('./cfg.json').value]);",
+    "M3 import { default as proc } from 'node:process'": `import { default as proc } from 'node:${P}';\nspawnSync('x', ['--', proc.env.GH_PAT]);`,
+    'M4 READ_TOKEN_PATH()': "import { READ_TOKEN_PATH } from './k.mjs';\nspawnSync('x', ['--', READ_TOKEN_PATH()]);",
+    'M4 READTokenPath()': "import { READTokenPath } from './k.mjs';\nspawnSync('x', ['--', READTokenPath()]);",
+    'M4 DECRYPT_PATH()': "import { DECRYPT_PATH } from './k.mjs';\nspawnSync('x', ['--', DECRYPT_PATH()]);",
+    'M4 GET_NAME()': "import { GET_NAME } from './k.mjs';\nspawnSync('x', ['--', GET_NAME()]);",
+    'M4 vault.READ_TOKEN_PATH()': "export function f(vault) { spawnSync('x', ['--', vault.READ_TOKEN_PATH()]); }",
+    'M4 vault.UNSEAL_PATH()': "export function f(vault) { spawnSync('x', ['--', vault.UNSEAL_PATH()]); }",
+    'm1 _readTokenPath()': "import { _readTokenPath } from './k.mjs';\nspawnSync('x', ['--', _readTokenPath()]);",
+    'M5 const p = (process)': `const p = (${P});\nspawnSync('x', ['--', p.env.GH_PAT]);`,
+    "c3 import proc, { env } from 'node:process' (default)": `import proc, { env } from 'node:${P}';\nspawnSync('x', ['--', proc.env.GH_PAT]);`,
+    "c3 import proc, { env } from 'node:process' (named)": `import proc, { env } from 'node:${P}';\nspawnSync('x', ['--', env.GH_PAT]);`,
+    "c3 const p = await import('node:process')": `const p = await import('node:${P}');\nspawnSync('x', ['--', p.env.GH_PAT]);`,
+    'c3 globalThis.process': `spawnSync('x', ['--', globalThis.${P}.env.GH_PAT]);`,
+    'c1 tokens.at(0)': "export function f(tokens) { spawnSync('x', ['--', tokens.at(0)]); }",
+    'c1 tokens.find(…)': "export function f(tokens) { spawnSync('x', ['--', tokens.find((t) => t.ok)]); }",
+  };
+  for (const [what, src] of Object.entries(plants)) assert.ok(said(H + src).length > 0, `${what} passed in silence`);
+  // Each name for process.env reads its variable as process.env's: a finding, not only a listing.
+  for (const k of Object.keys(plants).filter((x) => /^(?:M[1235]|c3) /.test(x) && !/cfg\.json/.test(x))) assert.ok(said(H + plants[k]).includes(`value:${P}.env.GH_PAT`), k);
+  for (const k of ['c1 tokens.at(0)', 'c1 tokens.find(…)']) assert.ok(said(H + plants[k]).some((x) => x.includes('one of a list of tokens')), k);
+  // m-a: a top-level destructured read with a default object is a reader site.
+  const readerOf = (src) => said(H + src).filter((x) => x.startsWith('reader:'));
+  assert.equal(readerOf("const tokenPath = '/k/t';\nconst { v = {} } = JSON.parse(readFileSync(tokenPath, 'utf8'));\nexport function f(io, w) { return io.run('x', ['--', w, v ? 'a' : 'b']); }").length, 1);
+  // Still quiet: a plain variable through these names, verbs that are not verbs, a path from a helper named for one.
+  for (const quiet of [
+    `const { env = {} } = ${P};\nspawnSync('/bin/x', [env.HOME]);`,
+    `const { env } = require('node:${P}');\nspawnSync('/bin/x', [env.HOME]);`,
+    "import { readerPath, categoryPath, openingPath } from './k.mjs';\nspawnSync('/bin/x', [readerPath(), categoryPath(), openingPath()]);",
+    "const { a = {}, b: { c } = {} } = JSON.parse('{}');\nspawnSync('/bin/x', ['--', 'y']);",
+    // A default inside a pattern is not a value the name is given, so it is not read as one (r7 M1).
+    "const { dest = pick() } = JSON.parse('{}');\nspawnSync('/bin/x', [dest]);",
+  ]) assert.deepEqual(said(H + quiet), [], quiet);
 });
 
 test('R-0b-179 (b): the safe ways pass: the environment, a file, a kind or a name, a count, a switch, and an options object after the list', () => {
