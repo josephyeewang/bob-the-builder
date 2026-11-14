@@ -22,10 +22,10 @@ import { RUN_DEADLINE_MS } from '../modules/M12-sensors/loop.mjs';
 import { NODE, installProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { CONFIG_KEYS, checkConfig } from '../wiring/sensors-wiring.mjs';
 import { ANSWER_FILE } from '../wiring/owner-answer.mjs';
-import { homeOf, ownerAnswerPath } from './layout.mjs';
+import { JOB_PATH as PATH, homeOf, ownerAnswerPath } from './layout.mjs';
 import { installPaths, keepsNotWarning } from './install.mjs';
 import { readUser } from './users-folders.mjs';
-import { DISPATCHER_OFF, DISPATCHER_USER, checkDispatcherConfig, copyKeeps, dispatcherConfigFor, dispatcherKeysProblem, fileProblem, planDispatcherConfig, writeAside } from './dispatcher-setup.mjs';
+import { DISPATCHER_OFF, DISPATCHER_USER, checkDispatcherConfig, configRows, copyConfigProblem, copyKeeps, copyNotRootsStop, dispatcherConfigFor, dispatcherKeysProblem, fileProblem, keepsNotText, planDispatcherConfig, writeAside } from './dispatcher-setup.mjs';
 
 export const SENSORS_JOB = 'sensors';
 export const SENSORS_CONFIG = 'sensors.json';
@@ -39,7 +39,6 @@ export const sensorsSourcePath = (cfg) => join(cfg.base, SENSORS_CONFIG);
 export const answerFileOf = (cfg) => join(ownerAnswerPath(cfg), ANSWER_FILE);
 // The keys the Sensors share with the Dispatcher: taken from its config, never worked out a second way.
 const FROM_DISPATCHER = Object.freeze(['installRoot', 'product', 'recordRoot', 'ownerUid', 'productsFile', 'rulesStateDir', 'tokenFile']);
-const PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
 
 /**
  * The Sensors' config as the job will see it (every path through io.at), in CONFIG_KEYS order. → { config, problems }. Built from
@@ -78,7 +77,7 @@ export function sensorsPlist(cfg) {
   });
 }
 
-const KEEPS_NOT = `the installed copy was made before the Sensors were set up, so its updater does not keep ${SENSORS_CONFIG} and would drop it on the next update: install again (README, part 6)`;
+const KEEPS_NOT = keepsNotText('the Sensors were', SENSORS_CONFIG);
 
 /**
  * The writes `dispatcher-config` adds for sensors.json: { ops, problems, warnings }, the base file, and the copy's when the copy
@@ -94,7 +93,7 @@ export function planSensorsConfig(io, cfg) {
   if (fileProblem(io, src, text) !== null) ops.push(write(src));
   if (keeps === true && fileProblem(io, inCopy, text, { inCopy: true }) !== null) {
     const P = installPaths(cfg); const bad = installProblem(io.at(P.installRoot), [], { owner: io.rootUid, top: io.prefix || '/' });
-    if (bad) { const why = `the installed copy is not root's alone (${bad}), so root won't write in it; install the copy again (unload the jobs, remove ${P.install}, run install), which carries ${src} into it`; ops.push({ text: `stop: ${why}`, run: () => { throw new Error(why); } }); }
+    if (bad) { const why = copyNotRootsStop(bad, P.install, src); ops.push({ text: `stop: ${why}`, run: () => { throw new Error(why); } }); }
     else ops.push(write(inCopy));
   }
   return { ops, problems: [], warnings: keeps === false ? [keepsNotWarning(cfg, [SENSORS_CONFIG])] : [] };
@@ -118,28 +117,14 @@ export const checkDispatcherAndSensors = (io, cfg) => [...checkDispatcherConfig(
 export function sensorsConfigProblem(io, cfg) {
   const { config, problems } = sensorsConfigFor(io, cfg);
   if (problems.length) return problems.join('; ');
-  const P = installPaths(cfg); const root = io.at(P.installRoot); const file = join(P.installRoot, SENSORS_CONFIG);
-  const keeps = copyKeeps(io, cfg, SENSORS_CONFIG);
-  if (keeps === null) return 'the install is not there yet (run the install first)';
-  let here = true; try { io.lstatReal(join(root, SENSORS_CONFIG)); } catch { here = false; }
-  if (!here) return keeps ? `${file} is not in the copy (run dispatcher-config)` : KEEPS_NOT;
-  const bad = installProblem(root, [join(root, SENSORS_CONFIG)], { owner: io.rootUid, top: io.prefix || '/' });
-  if (bad) return `${SENSORS_CONFIG} in the copy is not root's alone: ${bad}`;
-  const why = fileProblem(io, file, sensorsConfigText(config), { inCopy: true });
-  if (why) return why;
-  return keeps ? null : KEEPS_NOT;
+  return copyConfigProblem(io, cfg, SENSORS_CONFIG, sensorsConfigText(config), KEEPS_NOT);
 }
 
 /** The rows the writer's closing check adds for sensors.json: the base file, and, once there is a copy, the copy's. */
 export function checkSensorsConfig(io, cfg) {
   const { config, problems } = sensorsConfigFor(io, cfg);
   if (problems.length) return [{ ok: false, what: 'the Sensors\' config can be built from this setup', why: problems.join('; ') }];
-  const src = sensorsSourcePath(cfg); const a = fileProblem(io, src, sensorsConfigText(config));
-  const b = sensorsConfigProblem(io, cfg);
-  return [
-    { ok: a === null, what: `${src} is root's 0644 and the config this setup writes`, ...(a ? { why: a } : {}) },
-    ...(copyKeeps(io, cfg, SENSORS_CONFIG) === null ? [] : [{ ok: b === null, what: `the copy's ${SENSORS_CONFIG} is that config, and the copy keeps it`, ...(b ? { why: b } : {}) }]),
-  ];
+  return configRows(io, cfg, { src: sensorsSourcePath(cfg), name: SENSORS_CONFIG, text: sensorsConfigText(config), copyProblem: sensorsConfigProblem(io, cfg) });
 }
 
 /** Why the Sensors job may not be loaded now, or null: its config, then check-dispatcher's FAILs (the Record, rules and token are the Dispatcher's). */

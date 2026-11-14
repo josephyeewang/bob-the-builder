@@ -62,7 +62,7 @@ test('step 6, check 2: the copy\'s setup files are main\'s exactly; one changed,
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
 
-// claude as its Bash tool runs a command (#463 r2 M3, claude 2.1.322): detached, in a process group of its own, so claude's
+// claude as its Bash tool runs a command (#463 r2 M3, claude 2.1.322; checked: claude-code 2.1.316): detached, in a process group of its own, so claude's
 // group is not the command's; claude ends when the command does.
 const bashTool = (cmd, opts) => childSpawn(process.execPath, ['-e',
   "const c = require('node:child_process').spawn('/bin/sh', ['-c', process.argv[1]], { detached: true, stdio: 'ignore' }); c.on('exit', (x) => process.exit(x ?? 1));", cmd], opts);
@@ -197,6 +197,10 @@ test('#456 r1 m3: save-work and check 4 are both on or both off: one runLocked f
   const got = envOf({ account: 'a', env: { CLAUDE_CONFIG_DIR: '/cfg' } })();
   assert.deepEqual([got.HOME, got.PATH, got.CLAUDE_CONFIG_DIR], [c.home, c.path, '/cfg']);
   assert.throws(() => envOf({ account: 'a', env: { SOME_API_TOKEN: 't' } })(), /key-like variables/, 'a key-like variable fails check 9 here too');
+  // R-0b-156: a session variable of the runner's own never reaches the job; one handed in by the sign-in refuses.
+  const clean = envOf({ account: 'a', env: {} }, { PATH: '/x', CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 's', CODEX_THREAD_ID: 't' })();
+  assert.deepEqual(Object.keys(clean).sort(), ['HOME', 'PATH']);
+  assert.throws(() => envOf({ account: 'a', env: { CLAUDE_CODE_NEW_THING: '1' } })(), /allow-list.*CLAUDE_CODE_NEW_THING/);
 });
 
 test('step 6, check 11 (#369 M2): the smoke runs first; a worker\'s baseline runs only once it passes, and must exit 0', async () => {

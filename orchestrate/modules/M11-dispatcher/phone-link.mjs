@@ -14,10 +14,10 @@
 // - minibase-running false with the network up: start it again through the launcher, at most once
 //   every 5 min.
 // - The Front Door itself gone from the session list (audit MAT-10): restart it under its fixed name
-//   with its last handoff, at most once every 5 min; an alert if the restart fails, once until it
-//   runs again (L63 m4).
+//   with its last handoff, at most once every 5 min; an alert if the restart fails, then daily until it
+//   runs again (L63 m4; I3, L1157).
 // - Two accounts (L63 m2): while it runs on the account in use, a Front Door left on another account
-//   is stopped, checked at most once every 5 min; an alert, once, if it can't be stopped.
+//   is stopped, checked at most once every 5 min; an alert if it can't be stopped, then daily while it can't.
 // - A reading older than 5 min counts as unknown (audit MIN-10).
 // The step's memory is the fact `phone-link`. A reading counts once (by its observed_at).
 import { KEYS, minutes } from './keys.mjs';
@@ -25,11 +25,11 @@ import { note } from './moves.mjs';
 import { sensorsFact } from './sensor-facts.mjs';
 import { READING_FUTURE_MS } from '../M12-sensors/facts.mjs';
 import { tellThen, clearCause, writeFrom } from './alerts.mjs';
-import { pastTime } from '../../shared/still-waiting.mjs';
+import { pastTime, stillWaiting } from '../../shared/still-waiting.mjs';
 import { refusalReport } from './pass.mjs';
 
 export const LINK_FACT = 'phone-link';
-// Once-per-cause marks (L63): a failed Front Door restart, and a Front Door left on another account that won't stop.
+// Per-cause marks (L63): a failed Front Door restart, and a Front Door left on another account that won't stop.
 export const FD_RESTART_FACT = 'phone-link-restart';
 export const FD_STRAY_FACT = 'phone-link-stray';
 export const FACTS = Object.freeze({ network: 'network-up', reachable: 'frontdoor-reachable', minibase: 'minibase-running' });
@@ -39,7 +39,16 @@ export const ALERT_AFTER_FAILURES = 3;
 export const REMOTE_CONTROL = '/remote-control';
 export const READING_MAX_AGE_MS = 5 * 60_000;
 const iso = (ms) => new Date(ms).toISOString();
-const toldOn = (rec, fact) => rec.read('fact', fact)?.doc?.told === true;
+// A cause still failing is told through stillWaiting (I3, L1157): at once, then every STILL_WAITING_MS while it lasts.
+// Its mark is the fact's `told` field ({ told_at }), written only once a copy is delivered (tellThen) and reset to false
+// when the cause clears (clearTold, clearCause), so the next time it happens it is told at once. A `true` from before
+// L1157 has no told_at, so it is told once more and then daily.
+const remind = ({ now, alert, read, fact, text, kind }) => stillWaiting({
+  now, waiting: true, read,
+  tell: (mark) => tellThen(alert, text, { fact, fields: { told: mark }, kind }),
+  clear: () => {},
+});
+const markOn = (rec, fact) => rec.read('fact', fact)?.doc?.told || null;
 // The cause cleared: its mark is reset, so the next time it happens the owner is told again. Written when a mark shows
 // or something of the cause was queued (L354 item 1, L449 m2): changed_at moves the fact's version (the Record refuses a
 // write that changes nothing), so a mark already on its way conflicts, looks again and finds its alert gone. With
@@ -47,7 +56,7 @@ const toldOn = (rec, fact) => rec.read('fact', fact)?.doc?.told === true;
 function clearTold(rec, now, fact, report) {
   clearCause(rec, fact, (moved) => {
     const c = rec.read('fact', fact);
-    if (!moved && c?.doc?.told !== true) return;
+    if (!moved && !c?.doc?.told) return;
     const doc = { ...c?.doc, told: false, changed_at: iso(now) };
     const r = writeFrom(rec, fact, c?.doc, doc, 'phone_link', { force: ['told'] });
     if (r?.ok !== true) report(`${fact} could not be cleared (${r?.reason ?? 'no answer'})`, fact);
@@ -106,7 +115,7 @@ export async function phoneLinkStep({ rec, rules, now, startsHeld = null, send, 
   }
 
   // The Front Door gone: restart it, whether or not anything was sent to it (audit MAT-10). A failed restart is told
-  // once per cause (L63 m4), not every 5 minutes; the cause clears when a restart works or it runs again.
+  // at once and then daily (L63 m4; I3), not every 5 minutes; the cause clears when a restart works or it runs again.
   const alive = frontDoorAlive();
   if (alive === true) clearTold(rec, now, FD_RESTART_FACT, report);
   if (alive === false) {
@@ -118,7 +127,7 @@ export async function phoneLinkStep({ rec, rules, now, startsHeld = null, send, 
       st.fd_restarted_at = iso(now);
       writeNote('the Front Door was not running; restarted under its fixed name');
       if (r?.ok) clearTold(rec, now, FD_RESTART_FACT, report);
-      else if (!toldOn(rec, FD_RESTART_FACT)) tellThen(alert, `the Front Door was not running and did not restart: ${r?.reason ?? 'no answer'}`, { fact: FD_RESTART_FACT, fields: { told: true }, kind: 'front_door_restart' });
+      else remind({ now, alert, read: () => markOn(rec, FD_RESTART_FACT), fact: FD_RESTART_FACT, text: `the Front Door was not running and did not restart: ${r?.reason ?? 'no answer'}`, kind: 'front_door_restart' });
       done.push(r?.ok ? 'Front Door was missing; restarted' : 'Front Door was missing; restart failed');
       save();
       return done;
@@ -126,7 +135,7 @@ export async function phoneLinkStep({ rec, rules, now, startsHeld = null, send, 
   }
 
   // Two accounts (L63 m2): while it runs on the account in use, one left running on another account is stopped, checked
-  // at most once every 5 minutes. A stop that fails, or an account that can't be told about, is told once per cause.
+  // at most once every 5 minutes. A stop that fails, or an account that can't be told about, is told at once and then daily (I3).
   if (alive === true && strayFrontDoor && !recent(st.stray_checked_at, RETRY_MS)) {
     let r;
     try { r = await strayFrontDoor(); } catch (e) { r = { ok: false, stopped: [], reason: e.message }; }
@@ -137,7 +146,7 @@ export async function phoneLinkStep({ rec, rules, now, startsHeld = null, send, 
     }
     if (r?.ok) clearTold(rec, now, FD_STRAY_FACT, report);
     else {
-      if (!toldOn(rec, FD_STRAY_FACT)) tellThen(alert, `a Front Door may still run on the other account: ${r?.reason ?? 'no answer'}; two under the one name can confuse the phone`, { fact: FD_STRAY_FACT, fields: { told: true }, kind: 'front_door_stray' });
+      remind({ now, alert, read: () => markOn(rec, FD_STRAY_FACT), fact: FD_STRAY_FACT, text: `a Front Door may still run on the other account: ${r?.reason ?? 'no answer'}; two under the one name can confuse the phone`, kind: 'front_door_stray' });
       done.push('Front Door on another account: not stopped');
     }
   }
@@ -186,9 +195,9 @@ export async function phoneLinkStep({ rec, rules, now, startsHeld = null, send, 
 
   if (st.last_try_at && recent(st.last_try_at, RETRY_MS)) { save(); return [...done, 'waiting to try again']; }
   if (st.attempts > 0) st.failures += 1; // the last try did not bring the link back
-  // Told only once sent (audit 0b-6 r5 MAT-2).
-  if (st.failures >= ALERT_AFTER_FAILURES && !st.told) {
-    tellThen(alert, `the phone cannot reach the Front Door; ${st.failures} tries to reconnect it failed`, { fact: LINK_FACT, fields: { told: true }, kind: 'phone_link' });
+  // Marked only once sent (audit 0b-6 r5 MAT-2); told again daily while the link stays down (I3).
+  if (st.failures >= ALERT_AFTER_FAILURES) {
+    remind({ now, alert, read: () => st.told || null, fact: LINK_FACT, text: `the phone cannot reach the Front Door; ${st.failures} tries to reconnect it failed`, kind: 'phone_link' });
   }
   const r = await send(REMOTE_CONTROL);
   st.attempts += 1;

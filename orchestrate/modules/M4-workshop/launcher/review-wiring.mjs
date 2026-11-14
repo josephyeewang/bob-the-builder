@@ -31,11 +31,16 @@ import { DESIGN_PROFILES } from './role-profiles.mjs';
 import { reviewPackage } from '../../M5-review-audit/review-package.mjs';
 import { reviewerPrompt } from '../../M5-review-audit/reviewer-prompt.mjs';
 import { launchReview, sessionArgs, spawnClaude } from './review-launch.mjs';
+import { startEnv } from './env-check.mjs';
 
 const refuse = (reason) => ({ ok: false, reason });
 
-// The session's whole environment: the same object the launch checks read (check 9) and claude gets.
-const sessionEnv = (x) => ({ PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: process.env.HOME, ...x.env });
+// The session's whole environment: the same object the launch checks read (check 9) and claude gets. Built by startEnv,
+// the one builder every start path calls (R-0b-156, #530 r1 m1), from the HOME the runner names (its config's
+// reviewHome), never the review runner's own process environment, plus the sign-in folder's name (accounts.mjs).
+const sessionEnv = (x) => (typeof x.home === 'string' && x.home.startsWith('/')
+  ? startEnv({ HOME: x.home }, { path: '/usr/bin:/bin:/usr/sbin:/sbin', extra: x.env ?? {} })
+  : refuse('the session\'s home was not named by the runner'));
 
 export async function start(x) {
   const profile = DESIGN_PROFILES[x?.role];
@@ -51,7 +56,9 @@ export async function start(x) {
   const s = x.settingsFor(x.copy);
   if (!s?.ok) return no(`the settings: ${s?.reason ?? 'not made'}`);
   const args = sessionArgs({ profile, settingsFile: s.file, sessionId: x.sessionId, prompt: text, earlier: x.earlier });
-  const env = sessionEnv(x);
+  const built = sessionEnv(x);
+  if (!built.ok) return no(`the environment: ${built.reason}`);
+  const { env } = built;
   const li = x.launchInputs ?? {};
   let r;
   try {

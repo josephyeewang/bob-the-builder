@@ -16,13 +16,21 @@ import { dirname, join } from 'node:path';
 import { REFUSED_ENV, SETTINGS as S, HOOK_FIELDS as H, HOOK_EVENTS as E } from './settings-names.mjs';
 import { checkSettings } from './render-settings.mjs';
 import { MANAGED_FILE } from '../hooks/lib.mjs';
-import { ACCOUNT_NAMES, accountDir } from './accounts.mjs';
+import { ACCOUNT_NAMES, CONFIG_VAR, accountDir } from './accounts.mjs';
 
 const refuse = (reason) => ({ ok: false, reason });
 
 // Plain variables a role may inherit. Everything else is dropped.
 export const PASS_ENV = Object.freeze(['HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'TERM', 'TMPDIR', 'SHELL', 'TZ']);
-// Names that look like a key for some service, on top of the refused list.
+// Variables the launcher itself sets for a role (R-0b-156): the second account's sign-in folder (accounts.mjs accountEnv).
+export const LAUNCHER_ENV = Object.freeze([CONFIG_VAR]);   // accounts.mjs's one name for it (I7, #530 r1 m2)
+// The allow-list (R-0b-156, L1060): the only names a role's environment may hold. It is the guard, not a list of refused
+// names: a session variable of whatever started the launcher (CLAUDECODE, CLAUDE_CODE_SESSION_ID, CODEX_THREAD_ID, a
+// name a newer claude adds) is off it, so it never reaches a role. CAPABILITY NOTE: the leaking names were seen on claude
+// 2.1.322 (13 Nov, R-0b-155's check); the allow-list does not depend on them, but the planted test lists them; RECHECK
+// at every pin change (checked: claude-code 2.1.322, open until 2027-01-20 (R-0b-156)).
+export const ROLE_ENV_ALLOWED = Object.freeze([...PASS_ENV, 'PATH', ...LAUNCHER_ENV]);
+// Names that look like a key for some service: named as such when refused, so the reason says what slipped in.
 const KEYISH = /(^|_)(TOKEN|API_KEY|SECRET|PASSWORD|PRIVATE_KEY|ACCESS_KEY)(_|$)|^(GH|GITHUB)_|^GIT_ASKPASS$|^SSH_AUTH_SOCK$/;
 
 export function roleEnv(base, { path, extra = {} } = {}) {
@@ -30,21 +38,39 @@ export function roleEnv(base, { path, extra = {} } = {}) {
   for (const k of PASS_ENV) if (typeof base[k] === 'string') env[k] = base[k];
   for (const [k, v] of Object.entries(extra)) env[k] = v;
   if (path) env.PATH = path;
-  for (const k of REFUSED_ENV) delete env[k];
+  // Nothing is quietly dropped from `extra` (#530 r1 m3): a refused name in it stays, so check 9 refuses the start. The
+  // base gives only PASS_ENV names, none of them refused, so the allow-list is the one gate.
   return env;
 }
 
+// Launch check 9: every name in the role's environment is on the allow-list. `extra` may carry only allowed names.
 export function checkRoleEnv(env) {
   const left = REFUSED_ENV.filter((k) => Object.hasOwn(env, k));
   if (left.length) return refuse(`refused variables in the role's environment: ${left.join(', ')}`);
-  const keyish = Object.keys(env).filter((k) => KEYISH.test(k));
+  const off = Object.keys(env).filter((k) => !ROLE_ENV_ALLOWED.includes(k));
+  const keyish = off.filter((k) => KEYISH.test(k));
   if (keyish.length) return refuse(`key-like variables in the role's environment: ${keyish.join(', ')}`);
+  if (off.length) return refuse(`variables not on the role's allow-list (${ROLE_ENV_ALLOWED.join(', ')}): ${off.join(', ')}`);
   return { ok: true };
+}
+
+/**
+ * The one check every start path calls to build a session's environment (R-0b-156): roleEnv, held to check 9.
+ * → { ok: true, env } | { ok: false, reason }. R-0b-155d's resume form and R-0b-174's tmux server call it too.
+ */
+export function startEnv(base, opts = {}) {
+  const plain = (o) => o !== null && typeof o === 'object' && !Array.isArray(o);
+  // On purpose, with a reason (#530 r1 cosmetic), never by roleEnv throwing on what it was handed.
+  if (!plain(base)) return refuse('the base environment is not an object, so no environment was built');
+  if (opts.extra !== undefined && !plain(opts.extra)) return refuse('the extra environment is not an object, so no environment was built');
+  const env = roleEnv(base, opts);
+  const nine = checkRoleEnv(env);
+  return nine.ok ? { ok: true, env } : nine;
 }
 
 // MANAGED SOURCES: the managed (policy) settings sources check 10 reads, as claude reads them.
 //
-// CAPABILITY NOTE, checked on claude 2.1.316, the pin (its bundled code; and first on 2.1.322): RECHECK ON EVERY UPGRADE of the pin.
+// CAPABILITY NOTE, checked on claude 2.1.316, the pin (its bundled code; and first on 2.1.322): RECHECK ON EVERY UPGRADE of the pin (checked: claude-code 2.1.316).
 // A source a newer claude adds, moves or reorders gets past check 10 until this list follows it.
 // This build has two overrides built out, which a newer one may build in: CLAUDE_CODE_MANAGED_SETTINGS_PATH
 // (another managed file) and CLAUDE_CODE_REMOTE_SETTINGS_PATH (another remote cache). Its storage backend

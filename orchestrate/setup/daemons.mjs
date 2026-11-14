@@ -20,7 +20,7 @@ import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { reviewDaemonPlists, updaterPlist } from '../modules/M4-workshop/launcher/review-daemons.mjs';
 import { RUNNER_CONFIG, aclProblem, chainProblem, currentCopy } from '../modules/M4-workshop/launcher/install-check.mjs';
-import { homeOf, watchRulesPath } from './layout.mjs';
+import { LAUNCHCTL, homeOf, watchRulesPath } from './layout.mjs';
 import { checkInstall, installPaths } from './install.mjs';
 import { readUser } from './users-folders.mjs';
 import { watchPlist, WATCH_NO_HASH } from './watch-setup.mjs';
@@ -33,7 +33,6 @@ import { SENSORS_JOB, SENSORS_RUN_LIMIT_S, sensorsConfigProblem, sensorsLoadProb
 const WORKER_RUNNER_SCRIPT = 'wiring/runner-main.mjs';
 
 export const DAEMON_DIR = '/Library/LaunchDaemons';
-const LAUNCHCTL = '/bin/launchctl';
 export const JOBS = Object.freeze(['review-updater', 'review-account', 'review-runner']);   // load order: the updater first
 // The hourly watch-only job (watch-setup.mjs) is a fourth job only when the config's `watch` entry has the rules fingerprint (R6 M-1):
 // a repo-only entry (all prove-token needs) leaves the three review jobs exactly as before.

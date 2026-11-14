@@ -48,6 +48,7 @@ import { HOLD_FACT, putFact, writeLaunch } from './pass.mjs';
 import { lapsedRun } from './research-intake.mjs';
 import { stillWaiting } from '../../shared/still-waiting.mjs';
 import { pushReason } from '../../shared/push-reason.mjs';
+import { SHA256 } from '../../shared/plan-fingerprint.mjs';
 
 // The start of M10's one answer that is about the change itself (engine.mjs mergeDocsLane). Any other deny is about the
 // product or the rules at this moment, and passes by itself.
@@ -71,7 +72,6 @@ export const ROUTE_LIST_FACT = HOLD_FACT('proposal-routes-unread');
 export const ROUTE_BEAT = (run) => `${TAB_HEARTBEAT_FAMILY}${run}`;
 /** A blip is the next pass's to fix: the owner hears only of a push still not done after this long. */
 export const ROUTE_TELL_MS = 60 * 60_000;
-const SHA256 = /^[0-9a-f]{64}$/;
 // Where a card can be while its route is open. Anywhere else, the route is over.
 const ROUTE_STATES = Object.freeze(['ready', 'claimed', 'running']);
 
