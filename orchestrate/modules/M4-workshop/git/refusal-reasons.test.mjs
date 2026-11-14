@@ -41,7 +41,10 @@ test('scanner check: each refusal gives its own reason; the good setup passes', 
 test('scanner check: vendored rules that no longer match their hash refuse with their own reason', async () => {
   // The rules are read when the module loads, so a copy of the module gets an edited rules file.
   const here = new URL('.', import.meta.url).pathname;
-  const d = tmp();
+  // The copy keeps its place three folders under orchestrate/, so safe-git's import of shared/secret-guard.mjs resolves.
+  const top = tmp(); const d = join(top, 'modules', 'M4-workshop', 'git');
+  mkdirSync(d, { recursive: true }); mkdirSync(join(top, 'shared'));
+  copyFileSync(new URL('../../../shared/secret-guard.mjs', import.meta.url), join(top, 'shared', 'secret-guard.mjs'));
   for (const f of readdirSync(here)) if ((f.endsWith('.mjs') && !f.endsWith('.test.mjs')) || f.endsWith('.toml')) copyFileSync(join(here, f), join(d, f));
   const rules = join(d, `rules-${RULES_VERSION}.gitleaks.toml`);
   appendFileSync(rules, '\n# edited\n');

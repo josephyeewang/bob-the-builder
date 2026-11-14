@@ -19,6 +19,7 @@ import { WATCH_READS, proveWatchReads } from '../modules/M6-merge-gate/watch-onl
 import { mirrorPath, proposalRows, proposalsParentOf } from './layout.mjs';
 import { aclEntries, folderChecks, planFolders, readUser } from './users-folders.mjs';
 import { refusedWhy } from './proofs.mjs';
+import { registerSecret } from '../shared/secret-guard.mjs';
 
 const SUDO = '/usr/bin/sudo';
 const GIT = '/usr/bin/git';
@@ -152,7 +153,7 @@ export function planToken(io, cfg) {
   if (k.isSymbolicLink() || !k.isDirectory() || k.uid !== orch.uid || modeOf(k) !== 0o700) return { ops: [], problems: [`${keys} is not orchestrate's own 0700 folder (run users-folders first)`] };
   try { const st = io.lstat(f); if (st.isSymbolicLink() || !st.isFile()) return { ops: [], problems: [`${f} exists but is not a plain file; nothing was changed`] }; } catch (e) { if (e?.code !== 'ENOENT') return { ops: [], problems: [`${f} could not be read (${e?.code ?? e})`] }; }
   return { ops: [op(`read the token from the terminal (typed with the echo off, never shown), then save it as ${f} (orchestrate, 0600)`, () => {
-    let t = io.readSecret('Paste the watch-only GitHub token and press Return (nothing will show as you paste): ').trim();
+    let t = registerSecret(io.readSecret('Paste the watch-only GitHub token and press Return (nothing will show as you paste): ').trim());
     const bad = tokenProblem(t); if (bad) { t = ''; throw new Error(bad); }
     let st = null; try { st = io.lstat(f); } catch { /* not there */ }
     if (st && st.isDirectory() && !st.isSymbolicLink()) { t = ''; throw new Error(`${f} is now a folder; nothing was saved`); }
@@ -230,7 +231,7 @@ export async function proveToken(io, cfg, { proveApp = null } = {}) {
   if (looks.length) { item(false, 'the token file is orchestrate\'s own plain 0600 file', `${f}: ${looks.join('; ')}. Nothing was read; run the token step again`); return out; }
   const r = asUser(io, 'orchestrate', ['/bin/cat', f]);
   if (r.status !== 0) { item(false, 'orchestrate can read the token file', 'reading it as the orchestrate user failed, so the background job could not read it either'); return out; }
-  let token = String(r.stdout).trim();
+  let token = registerSecret(String(r.stdout).trim());
   if (tokenProblem(token)) { token = ''; item(false, 'the token file holds a token', 'it does not look like one; store it again'); return out; }
   item(true, 'orchestrate can read the token file (read as the orchestrate user)');
   const call = async (path, init = {}) => {
