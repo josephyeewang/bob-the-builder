@@ -19,34 +19,43 @@ function sources(dir, out = []) {
 const said = (src) => credentialArgFindings(src).map((x) => `${x.kind}:${x.what}`);
 
 /**
- * The spawn calls the scan can not read, each looked at by hand (#556 r1): every one is a runner handed its list by its
- * callers, and those lists are read where they are built. A new one fails the test below until it is looked at and added.
+ * The lists the scan can not read, each looked at by hand (#556 r1, r2): a list passed in from another module, built
+ * from a list another module holds, or spread from a name this module never fills. A new one fails the test below until
+ * it is looked at and added here with the true reason it is safe.
  */
 const REVIEWED_UNREAD = {
-  'modules/M12-sensors/probes/launchd.mjs spawn(…, args)': "runLaunchctl; its one caller, launchdProbe, passes ['print', <domain>/<label>], both checked against fixed patterns",
-  'modules/M12-sensors/record-scan.mjs execFileSync(…, args)': "runGitleaks' runner; its one call writes the list out: detect, --no-git, --source <dir> and fixed report flags",
-  'modules/M12-sensors/shell-guard/selfcheck.mjs spawnSync(…, argv[1])': "runShell; its one caller passes [-f], -c and a self-check case's command from the guard's own case table",
-  'modules/M4-workshop/git/gitleaks.mjs spawn(…, args)': "gitleaks.mjs's run; each call writes its list out (version, git, dir, stdin, and common()'s report flags), read there",
-  'modules/M4-workshop/git/safe-git.mjs spawn(…, argv)': "runChild, the git runner; both calls write their list out, and a token goes in GIT_CONFIG_* (the env), never argv",
-  'modules/M4-workshop/launcher/hooks-check.mjs execFileSync(…, a)': "checkVersion's runner; its one call is run(claudeBin, [FLAGS.version])",
-  'modules/M4-workshop/launcher/review-runner-main.mjs spawnSync(…, args)': "the runner's own probes; each call writes its list out (dseditgroup -o checkmember, ps -U/-p), read there",
+  'modules/M12-sensors/probes/launchd.mjs runLaunchctl passes its list on, and is called from other modules': "exported, but its only use is launchdProbe's default runner, which passes ['print', <domain>/<label>], both checked against fixed patterns",
+  'modules/M12-sensors/shell-guard/selfcheck.mjs spawnSync(…, argv[1])': "runShell builds argv as [perl, ['-e', GROUP, sh, ...args]] or [sh, args]; its one caller passes -c and a case's command from the guard's own case table",
+  "modules/M4-workshop/git/safe-git.mjs runChild(…, ['--no-pager', ...withNoPrograms(args)]): withNoPrograms spreads add": "add is NO_PROGRAMS (fixed git flags) less those already in the list; args itself is read through withNoPrograms, and git is read at every call in the tree",
+  'modules/M4-workshop/launcher/hooks-check.mjs run(…, [script, ...argv])': "argv is the hook command's own words from the role settings file, and the script is checked to be the hooks folder's",
+  'modules/M4-workshop/launcher/install-check.mjs lsShowsAcl(…, batch)': 'batch is a slice of the install paths whose access lists are read (ls -led -- <paths>)',
+  "modules/M4-workshop/launcher/review-updater.mjs git(…, ['ls-tree', '-r', '-z', '--full-tree', commit, '--', ...OUTS)": 'OUTSIDE_FILES is an imported constant of file paths',
+  'setup/bob-manifest.mjs run(…, argv)': "argv is sudo's flags, ENV, GIT_ENV (PATH, LC_ALL, GIT_TERMINAL_PROMPT, GIT_CONFIG_NOSYSTEM; no token) and the command; the closure's one call is git(['cat-file', '--batch'], input)",
   'setup/install.mjs spawnSync(…, c.args)': "spawnUpdater; updaterCommand writes the list out: the script, the config, --first and the seed, all paths",
-  'setup/mac.mjs spawnSync(…, args)': "realIo.run: every setup command goes through it, and each list is read at its io.run call",
+  "setup/proofs.mjs run(…, ['-n', '-H', '-u', BUILDER, ...pr.args])": "pr comes from proofList, whose args: [...] lists (ls, test -w/-x, head -c 1, true, on paths) the scan reads as lists",
+  "wiring/review-ports.mjs run(…, ['-i', ...Object.entries(env).map(([k, v]) => `${k}=${v}`), )": "env -i K=V: both callers pass safeGitEnv() with no extraConfig, so only fixed PATH, HOME, LANG and the fixed safe settings; a token could come only through extraConfig, and none is passed (#556 r2 m6)",
+  "wiring/review-ports.mjs git(…, withNoPrograms(['diff-tree', '-r', '-z', '--name-only', '--n)": 'the list is written out inside withNoPrograms, which only adds the fixed NO_PROGRAMS flags',
+};
+/** Findings looked at and not a credential: what the scan took for one, and why it is not. */
+const REVIEWED_FOUND = {
+  'setup/users-folders.mjs value key': "census's read(path, key): key is a dscl attribute name, 'UniqueID' or 'PrimaryGroupID' at its one caller",
 };
 
 test('R-0b-179 (b): no module outside the tests puts a credential on a command line, and every list the scan can not read has been looked at', () => {
   const files = sources(ROOT);
   assert.ok(files.length > 100, `only ${files.length} modules were found to read`);
-  const found = []; const unread = [];
+  const found = []; const unread = []; const seenFound = [];
   for (const f of files) {
     for (const x of credentialArgFindings(readFileSync(f, 'utf8'))) {
       if (x.kind === 'unread') unread.push(`${relative(ROOT, f)} ${x.what}`);
-      else found.push(`${relative(ROOT, f)}:${x.line} ${x.kind} ${x.what}: ${x.list}`);
+      else if (!REVIEWED_FOUND[`${relative(ROOT, f)} ${x.kind} ${x.what}`]) found.push(`${relative(ROOT, f)}:${x.line} ${x.kind} ${x.what}: ${x.list}`);
+      else seenFound.push(`${relative(ROOT, f)} ${x.kind} ${x.what}`);
     }
   }
   assert.deepEqual(found, [], `pass a credential in the child's environment, a file it reads, or its stdin, never its arguments:\n${found.join('\n')}`);
   assert.deepEqual(unread.filter((u) => !REVIEWED_UNREAD[u]), [], 'a spawn call whose list the scan can not read: look at what reaches it, then add it to REVIEWED_UNREAD with why it is safe');
   assert.deepEqual(Object.keys(REVIEWED_UNREAD).filter((u) => !unread.includes(u)), [], 'a reviewed entry no longer met: take it out');
+  assert.deepEqual(Object.keys(REVIEWED_FOUND).filter((u) => !seenFound.includes(u)), [], 'a reviewed finding no longer met: take it out');
 });
 
 test('R-0b-179 (b): a planted credential flag, value, header or URL is caught, however the argument list is written', () => {
@@ -67,6 +76,31 @@ test('R-0b-179 (b): a planted credential flag, value, header or URL is caught, h
   for (const [src, want] of Object.entries(caught)) assert.ok(said(src).includes(want), `${JSON.stringify(src)} → ${JSON.stringify(said(src))}`);
   // One finding per line and kind, though a job file's arr([...]) is met twice (as a call and after ProgramArguments).
   assert.deepEqual(said("`<key>ProgramArguments</key>${arr([node, run, '--secret', s])}`"), ['flag:--secret']);
+});
+
+test('R-0b-179 (b, #556 r2 A, B): the auditor\'s plants: lists passed through helpers, lists helpers return, and a URL built in a variable', () => {
+  const caught = {
+    'E1: a helper that spreads its list parameter': "function asUser(io, user, args) { return io.run('/usr/bin/sudo', ['-n', '-u', user, ...args]); }\nasUser(io, 'orchestrate', ['/bin/cat', f, cfg.watch.token]);",
+    'E1: rest parameters': "const asUser = (io, user, ...args) => io.run('/usr/bin/sudo', ['-n', '-u', user, ...args]);\nasUser(io, 'orchestrate', '/bin/cat', f, cfg.watch.token);",
+    'E2: two helpers deep': "function inner(io, args) { return spawnSync('/usr/bin/sudo', ['-n', ...args]); }\nfunction asDispatcher(io, args) { return inner(io, ['-u', 'd', ...args]); }\nasDispatcher(io, ['x', apiKey]);",
+    'E3: a list a helper returns': "function appArgs(cfg) { return ['--app', cfg.id, secret]; }\nspawn(bin, appArgs(cfg));",
+    "E4: wayOut's step": "export function wayOut(io, cfg) {\n  const step = (what, cmd, args) => { const r = io.run(cmd, args); };\n  step('x', PFCTL, ['-a', A, cfg.secret]);\n}",
+    'a helper that hands its parameter back': "function wrap(a) { return a; }\nconst xs = ['--x', token];\nspawn(b, wrap(xs));",
+    'an arrow that hands its parameter back': "const wrap = (a) => a;\nconst xs = [token];\nspawn(b, wrap(xs));",
+    'a helper that spreads a slice of its parameter': "function w(args) { return ['-n', ...args.slice(1)]; }\nspawn(b, w(['x', token]));",
+    'B: an x-access-token URL in a variable': "const url = `https://x-access-token:${tok}@example.com/o/r.git`;\nrun(['push', url]);",
+    'B: a URL with a password in a variable': "const u = `https://me:${pw}@example.com/r.git`;\nspawn(bin, ['push', u]);",
+    'shape: [...base]': "const base = ['--x', token];\nspawn(bin, [...base]);",
+    "shape: ['x'].concat(token)": "spawn(bin, ['x'].concat(token));",
+    'shape: args[0] = token': "const args = ['x'];\nargs[0] = token;\nspawn(bin, args);",
+    'shape: a require alias': "const { spawn: sp } = require('node:child_process');\nsp(bin, ['--token', t]);",
+  };
+  for (const [what, src] of Object.entries(caught)) assert.ok(said(src).some((x) => /^(flag|value|text):/.test(x)), `${what}: ${JSON.stringify(said(src))}`);
+  // A list passed in that the scan can not follow is listed, never passed: a helper called only from other modules.
+  assert.deepEqual(said('export function f(io, list) { return io.run(BIN, list); }'), ['unread:f passes its list on, and is called from other modules']);
+  assert.ok(said("function wrap(a) { return a.map(String); }\nspawn(b, wrap(x));").some((x) => x.startsWith('unread:')));
+  // Safe shapes stay quiet: a token in the child's environment, literal lists through a helper, a Bearer header in env.
+  for (const src of ["spawn(bin, ['push'], { env: { GH_TOKEN: token } });", "function asUser(io, user, args) { return io.run('/usr/bin/sudo', ['-n', '-u', user, ...args]); }\nasUser(io, 'o', ['/bin/ls', dir]);", "const env = { H: `Bearer ${t}` };\nspawn(bin, ['x'], { env });"]) assert.deepEqual(said(src), [], src);
 });
 
 test('R-0b-179 (b, #556 r1 M3, M4, m10/11): the auditor\'s plants: lists built by push or under any name, scripts in strings, more names and flags', () => {

@@ -3,7 +3,7 @@
 // connection from the rules it holds, so a wrong rule shows up twice: in what the check reads back, and in the traffic.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync, symlinkSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { fakeMac } from './fake-mac.test-helper.mjs';
@@ -11,7 +11,7 @@ import { tempDir } from '../shared/test-tmp.mjs';
 import { ROOT_CONFIG_PATH } from './layout.mjs';
 import { chainProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
 import {
-  ANCHOR, ANCHOR_DIR, ANCHOR_FILE, FAMILIES, PROTOS, TAG, anchorText, bootScript, checkWall, loadedRulesProblem, main, otherAddresses,
+  ALL_ADDRESSES, ANCHOR, ANCHOR_DIR, ANCHOR_FILE, FAMILIES, PROTOS, TAG, anchorText, bootScript, checkWall, loadedRulesProblem, main, otherAddresses,
   planWall, tokenPath, unreadPath, waitForFirstRun, wallLabel, wallPlistPath, wallDir,
 } from './builder-wall.mjs';
 
@@ -20,8 +20,9 @@ const LABEL = 'com.example.orch';
 const BUILDER_UID = 65002;
 const OWNER_UID = 65001;   // sam, the stand-in Mac's own user
 const LAN = '192.168.1.20';   // the stand-in Mac's one address that is not loopback
-/** Every place the read-back probes, as its rows name them. */
-const PLACES = [...FAMILIES, ["this Mac's own address", LAN]];
+/** Every place the read-back probes: [family, the address probed, how its rows name it]. */
+const PLACES = [...FAMILIES.map(([f, h]) => [f, h, `${f} (${h})`]), ...ALL_ADDRESSES.map(([f, h, b]) => [f, h, `${f} (${h}, listening on ${b})`]),
+  ["this Mac's own address", LAN, `this Mac's own address (${LAN})`]];
 const ROWS_CHECK = 5 + PROTOS.length * PLACES.length * 4;   // the settings half, then v, ii, i, ii-again per protocol and place
 const FAST = { sleep: async () => {}, limitMs: 15_000, stepMs: 500 };
 
@@ -84,12 +85,13 @@ function fakePf(mac, { mainAnchor = true } = {}) {
 function fakeNet(pf, { twist = null, addresses = null } = {}) {
   const uidOf = (user) => (user === 'builder' ? BUILDER_UID : user === 'sam' ? OWNER_UID : -1);
   const listeners = new Map(); let port = 50000;
-  const log = [];
+  const log = []; const binds = [];
   return {
     log,
+    binds,
     addresses: () => (addresses ? [...addresses] : [LAN]),
     listen: async ({ user, proto, host }) => {
-      const p = port++; const l = { user, proto, host, got: 0 }; listeners.set(p, l);
+      const p = port++; const l = { user, proto, host, got: 0 }; listeners.set(p, l); binds.push(`${user} ${proto} ${host}`);
       return { port: p, received: () => l.got, settle: async () => {}, close: () => listeners.delete(p) };
     },
     connect: async ({ user, proto, host, port: p }) => {
@@ -166,6 +168,8 @@ test('R-0b-179: place writes the rules for the builder\'s uid read from this Mac
   // Both directions in each protocol and place, every run (L1150), with one address that is not loopback (r1 m4).
   for (const p of PROTOS) for (const [, host] of PLACES) for (const who of ['builder→builder', 'sam→sam', 'builder→sam']) assert.ok(w.net.log.includes(`${who} ${p} ${host}`), `${who} ${p} ${host} was not tried`);
   assert.equal(rows.length, ROWS_CHECK);
+  // An owner service bound to every address is a place of its own (#556 r2 m5): the owner's listener is bound to 0.0.0.0 and ::.
+  for (const p of PROTOS) for (const [, , b] of ALL_ADDRESSES) assert.ok(w.net.binds.includes(`sam ${p} ${b}`), `the owner never listened on ${b} (${p})`);
   assert.equal(rows.filter((r) => /\((i|ii|v)(;|\))/.test(r.what)).length, PROTOS.length * PLACES.length * 4);
   // Twice: nothing is rewritten, the job is reloaded, and it holds the same token (no second reference).
   const again = planWall(w.mac, w.cfg).ops.map((o) => o.text);
@@ -263,8 +267,8 @@ test('R-0b-179 plants (L1150): each wrong rule is refused, by what pf holds and 
 test('R-0b-179 plant: a one-direction read-back (no controls) is not this one: every (i) row stands on its (ii) and (v) in the same protocol and family', async () => {
   const w = world();
   const rows = await placed(w);
-  for (const p of PROTOS) for (const [fam, host] of PLACES) {
-    const where = `${p.toUpperCase()} ${fam} (${host})`;
+  for (const p of PROTOS) for (const [, , named] of PLACES) {
+    const where = `${p.toUpperCase()} ${named}`;
     const at = (re) => rows.findIndex((r) => r.what.includes(where) && re.test(r.what));
     const v = at(/\(v;/); const ii = at(/reaches its own listener on [^)]*\) \(ii\)$/); const i = at(/\(i\)$/); const again = at(/after \(i\) \(ii\)/);
     assert.ok(v >= 0 && ii >= 0 && i > v && i > ii && again > ii, `${where}: v ${v}, ii ${ii}, i ${i}, ii again ${again}`);
@@ -302,6 +306,9 @@ test('R-0b-179: loadedRulesProblem reads OpenBSD\'s print or a list not split, i
   assert.match(loadedRulesProblem(asPrinted.map((l) => l.replace(`user != ${u}`, `user = ${u}`)).join('\n'), u), /block-in/, '`=` is never read as `!=`');
   assert.match(loadedRulesProblem(asPrinted.map((l) => l.replace(`${u}`, '501')).join('\n'), u), /missing/, 'another uid');
   assert.match(loadedRulesProblem('', u), /holds no rules/);
+  // #556 r2 m4: a `!` belongs to the word after it; moved to another word, it is another rule.
+  assert.match(String(loadedRulesProblem(asPrinted.map((l) => l.replace('from any to', 'from ! any to')).join('\n'), u)), /not the wall's|missing/, '`from ! any` passed');
+  assert.match(String(loadedRulesProblem(asPrinted.map((l) => l.replace('on ! lo0', '! on lo0')).join('\n'), u)), /not the wall's|missing/, '`! on lo0` passed');
 });
 
 test('R-0b-179: a failed read-back takes the wall out again (job unloaded, its file gone, rules emptied, token released)', async () => {
@@ -481,4 +488,48 @@ test('R-0b-179 (r1 m7): the read-back refuses while a pfctl -E answer could not 
   writeFileSync(w.mac.at(unreadPath(w.cfg)), 'pf enabled, somehow\n');
   const f = fails(await checkWall(w.mac, w.cfg, { net: w.net }));
   assert.ok(f.some((x) => /is held \(iii\).* — pfctl -E answered in a way no token could be read from/.test(x)), f.join('\n'));
+});
+
+test('R-0b-179 (#556 r2 m1): the wait for the job\'s first run refuses while pf is off or the job\'s token is not held, though the job exited 0', async () => {
+  for (const [why, spoil] of [[/it ran and exited 0, but pf is off/, (w) => { w.pf.enabled = false; }], [/it ran and exited 0, but its token is not held/, (w) => { w.pf.refs.clear(); w.pf.refs.set(99, true); }]]) {
+    const w = world();
+    runPlan(planWall(w.mac, w.cfg));
+    assert.equal((await waitForFirstRun(w.mac, w.cfg, FAST)).ok, true, 'the control: the job ran, pf on, token held');
+    spoil(w);
+    let t = 0;
+    const row = await waitForFirstRun(w.mac, w.cfg, { limitMs: 2_000, stepMs: 500, sleep: async (ms) => { t += ms; }, now: () => t });
+    assert.equal(row.ok, false); assert.match(row.why, why);
+  }
+});
+
+test('R-0b-179 (#556 r2 m2): an anchor folder that is not root\'s alone (writable by others, or a link) refuses, and nothing is placed', () => {
+  // (Another owner is chainProblem's own check of the real owner, pinned in install-check's tests; a test cannot chown.)
+  const spoils = [
+    ['writable by others', (w) => chmodSync(w.mac.at(ANCHOR_DIR), 0o777)],
+    ['a link', (w) => { const real = w.mac.at('/private/etc/elsewhere'); mkdirSync(real, { recursive: true }); w.mac.owners.set('/private/etc/elsewhere', { uid: w.mac.rootUid, gid: 0 }); rmSync(w.mac.at(ANCHOR_DIR), { recursive: true }); symlinkSync(real, w.mac.at(ANCHOR_DIR)); }],
+  ];
+  for (const [what, spoil] of spoils) {
+    const w = world(); spoil(w);
+    const p = planWall(w.mac, w.cfg);
+    assert.deepEqual(p.ops, [], what);
+    assert.match(p.problems.join(' '), new RegExp(`${ANCHOR_DIR} is not safe for root to write in`), what);
+    assert.equal(existsSync(w.mac.at(ANCHOR_FILE)), false, `${what}: the anchor file was written`);
+  }
+});
+
+test('R-0b-179 (#556 r2 m3): an anchor file that is not the wall\'s rules refuses the read-back (the job reloads it), and place writes it back', async () => {
+  const w = world();
+  await placed(w);
+  // The loaded rules are still right; only the file the job reloads every few minutes differs.
+  writeFileSync(w.mac.at(ANCHOR_FILE), anchorText(BUILDER_UID).replace('block return in', 'pass in'));
+  const f = fails(await checkWall(w.mac, w.cfg, { net: w.net }));
+  assert.deepEqual(f.map((x) => x.split(' — ')[0]), [`${ANCHOR_FILE} is the wall's rules for uid ${BUILDER_UID}, root's 0644`], f.join('\n'));
+  assert.match(f[0], /not the rules for this uid/);
+  const p = planWall(w.mac, w.cfg);
+  assert.ok(p.ops.some((o) => o.text.startsWith(`write ${ANCHOR_FILE}`)), 'place did not write the rules back');
+  runPlan(p);
+  assert.equal(readFileSync(w.mac.at(ANCHOR_FILE), 'utf8'), anchorText(BUILDER_UID));
+  // The right text with the wrong mode refuses too.
+  chmodSync(w.mac.at(ANCHOR_FILE), 0o666);
+  assert.ok(fails(await checkWall(w.mac, w.cfg, { net: w.net })).some((x) => x.startsWith(`${ANCHOR_FILE} is the wall's rules`)));
 });

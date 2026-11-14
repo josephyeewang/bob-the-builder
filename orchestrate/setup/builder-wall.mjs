@@ -73,6 +73,8 @@ export const ANCHOR_FILE = `${ANCHOR_DIR}/orchestrate.builder`;
 export const TAG = 'ORCH_BUILDER';
 export const PROTOS = Object.freeze(['tcp', 'udp']);
 export const FAMILIES = Object.freeze([['IPv4', '127.0.0.1'], ['IPv6', '::1']]);
+/** Listeners bound to every address, probed through loopback: [what, the address probed, the address bound]. */
+export const ALL_ADDRESSES = Object.freeze([['IPv4', '127.0.0.1', '0.0.0.0'], ['IPv6', '::1', '::']]);
 export const DAEMON_DIR = '/Library/LaunchDaemons';
 export const RECHECK_EVERY_S = 300;
 export const FIRST_RUN_WAIT_MS = 15_000;
@@ -122,7 +124,8 @@ function perProto(line) {
   const m = /\bproto\s+\{\s*([a-z0-9 ,]+?)\s*\}/.exec(line);
   return m ? m[1].split(/[\s,]+/).filter(Boolean).map((p) => line.replace(m[0], `proto ${p}`)) : [line];
 }
-const sorted = (s) => s.trim().split(/\s+/).sort().join(' ');
+// A `!` belongs to the word after it, so `from ! any` and `! from any` are different word sets.
+const sorted = (s) => s.trim().replace(/!\s+/g, '!').split(/\s+/).sort().join(' ');
 /** The words of a printed rule as the wall's are written: `from any to any` as `all`, the user as `user = N` / `user != N`. */
 function normal(line, uid, anyAddress) {
   let s = ` ${line} `.replace(/\s+/g, ' ').replace(/ from any to any /, ' all ')
@@ -237,8 +240,9 @@ export function wayOut(io, cfg) {
   step(`unload ${wallLabel(cfg)}`, LAUNCHCTL, ['bootout', `system/${wallLabel(cfg)}`], (r) => r.status === 3);
   try { io.unlink(wallPlistPath(cfg)); lines.push(`done: removed ${wallPlistPath(cfg)} (so it does not start at boot)`); } catch (e) { done = false; lines.push(`NOT done: remove ${wallPlistPath(cfg)} (${e?.code ?? e})`); }
   step(`empty ${ANCHOR}`, PFCTL, ['-a', ANCHOR, '-F', 'rules']);
-  let tok = null; try { tok = io.readText(tokenPath(cfg)).trim(); } catch { /* none kept */ }
-  if (tok && /^\d+$/.test(tok)) { step(`release pf token ${tok}`, PFCTL, ['-X', tok]); try { io.unlink(tokenPath(cfg)); } catch { /* said by the next check */ } }
+  // pf's reference number for the wall's enable (pfctl -s References lists them to root); not a secret.
+  let ref = null; try { ref = io.readText(tokenPath(cfg)).trim(); } catch { /* none kept */ }
+  if (ref && /^\d+$/.test(ref)) { step(`release pf token ${ref}`, PFCTL, ['-X', ref]); try { io.unlink(tokenPath(cfg)); } catch { /* said by the next check */ } }
   else lines.push('no pf token was kept, so none was released');
   if (lstatOr(io, unreadPath(cfg))) { done = false; lines.push(`NOT done: pfctl -E once answered in a way no token could be read from (kept in ${unreadPath(cfg)}); find that reference with sudo pfctl -s References and release it with sudo pfctl -X <token>`); }
   return { done, lines };
@@ -314,12 +318,14 @@ export async function trafficChecks(cfg, net) {
   const out = [];
   const other = net.addresses().slice(0, 1);
   if (!other.length) out.push({ ok: true, what: 'this Mac has no address but loopback, so only 127.0.0.1 and ::1 were probed' });
-  const places = [...FAMILIES, ...other.map((a) => [`this Mac's own address`, a])];
-  for (const proto of PROTOS) for (const [fam, host] of places) {
-    const where = `${proto.toUpperCase()} ${fam} (${host})`;
+  // [what, the address probed, the address the listeners bind]: an owner service bound to every address (`*` or `::`)
+  // is reached through loopback too, so it is probed as its own place.
+  const places = [...FAMILIES.map(([f, h]) => [f, h, h]), ...ALL_ADDRESSES, ...other.map((a) => [`this Mac's own address`, a, a])];
+  for (const proto of PROTOS) for (const [fam, host, bind] of places) {
+    const where = `${proto.toUpperCase()} ${fam} (${host}${bind === host ? '' : `, listening on ${bind}`})`;
     let mine = null; let theirs = null;
     try {
-      try { mine = await net.listen({ user: BUILDER, proto, host }); theirs = await net.listen({ user: cfg.owner, proto, host }); } catch (e) {
+      try { mine = await net.listen({ user: BUILDER, proto, host: bind }); theirs = await net.listen({ user: cfg.owner, proto, host: bind }); } catch (e) {
         out.push({ ok: false, what: `the probes could listen on ${where}`, why: `${e?.message ?? e}: nothing about ${where} was proven` });
         continue;
       }

@@ -563,8 +563,12 @@ test('L136 m1: the programs to start come from every job-file builder of the cop
       assert.ok(!args.includes(SAMPLE_ROOT) && !/\.mjs\b/.test(args), `${f}: its job starts no script of the copy, so it belongs on JOB_BUILDERS if it ever does`);
     }
   }
+  // A reader writes no job file however the key is spelled (#556 r2 c1): it holds no `<key>` at all, and it imports
+  // nothing, so it has no way to write a file or build one through a helper.
   for (const f of Object.keys(READS_JOB_FILES)) {
-    assert.ok(!/<key>ProgramArguments<\/key>/.test(readFileSync(join(REPO, SOURCE, f), 'utf8')), `${f} writes no start command`);
+    const text = readFileSync(join(REPO, SOURCE, f), 'utf8');
+    assert.ok(!/<key>/.test(text), `${f} writes no start command (it holds a <key>)`);
+    assert.ok(!/^\s*import\b|\bimport\s*\(|\brequire\s*\(\s*['"]/m.test(text), `${f} imports nothing, so it writes no job file`);
   }
   // Builders through another builder, found from their real import lines (L734 self-review M1, m1).
   const users = tracked([SOURCE]).filter((f) => f.endsWith('.mjs')).map((f) => f.slice(SOURCE.length + 1))
