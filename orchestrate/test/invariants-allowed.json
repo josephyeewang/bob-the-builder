@@ -127,11 +127,6 @@
    "why": "baseline (L1078)"
   },
   {
-   "file": "modules/M11-dispatcher/tick.mjs",
-   "line": "const seen = Date.parse(d.observed_at ?? '');",
-   "why": "baseline (L1078)"
-  },
-  {
    "file": "modules/M11-dispatcher/transcript.mjs",
    "line": "const at = turnEnded ? Date.parse(tail.timestamp ?? '') : NaN;",
    "why": "baseline (L1078)"

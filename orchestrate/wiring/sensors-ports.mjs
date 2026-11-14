@@ -49,7 +49,7 @@ import { aclProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { ANSWER_VERSION } from './owner-answer.mjs';
 import { USAGE_FACT } from '../modules/M11-dispatcher/usage.mjs';
 import { knownDoc } from '../modules/M12-sensors/facts.mjs';
-import { FUTURE_SKEW_MS, pastTime } from '../shared/still-waiting.mjs';
+import { pastTime } from '../shared/still-waiting.mjs';
 
 /**
  * The `stored` reader over a Record: the usage fact it holds for the account, or null when it holds none. A failed read
@@ -63,7 +63,6 @@ const SOURCE = 'claude /usage';
 // the rules' stale_after_min (L728 m5): M11 applies that itself, counting from the answer's own time.
 export const ANSWER_STALE_MS = 10 * 60_000;
 export const SAME_WINDOW_MS = 60_000;            // reset times this close are one window (the server's times carry ms)
-export const ANSWER_AHEAD_MS = 2 * 60_000;       // clock drift allowed; later than this is refused as a future time
 // The longest a window can still run from the reading's own time (L746 r3 self-review): a reset time further out is refused,
 // so one bad reading can't hold usage unknown for longer than a real window would.
 export const WINDOW_MS = { h5: 5 * 3600e3, week: 7 * 86400e3 };
@@ -121,11 +120,10 @@ export function answerFileProblem(st, ownerUid, file) {
 export function answerProblem(a, nowMs, staleMs = ANSWER_STALE_MS) {
   const bad = shapeProblem(a);
   if (bad) return bad;
-  // Read through pastTime (I4), with this answer's own allowance: null is a time more than ANSWER_AHEAD_MS ahead (the shape
-  // check above already refused one that can't be read).
-  const at = pastTime(a.observed_at, nowMs + ANSWER_AHEAD_MS - FUTURE_SKEW_MS);
-  if (at === null) return 'the owner\'s answer is dated in the future';
-  const age = nowMs - at;
+  // One clock (L1099 I4, I7): pastTime's 60 s skew allowance. The shape check has read the time, so null means ahead.
+  const t = pastTime(a.observed_at, nowMs);
+  if (t === null) return 'the owner\'s answer is dated in the future';
+  const age = nowMs - t;
   if (age > staleMs) return `the owner's answer is ${Math.round(age / 60_000)} min old (the owner's job may be failing to write; see its log)`;
   return null;
 }
