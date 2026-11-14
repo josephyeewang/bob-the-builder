@@ -384,12 +384,12 @@
   },
   {
    "file": "modules/M13-ledger/alerts.mjs",
-   "line": "const seen = Math.max(Date.parse(at.f.told) || 0, Date.parse(/ · last seen (\\S+) · /.exec(lastSeenPart(at.i.body))?.[1]) || 0);",
+   "line": "const seen = Math.max(Date.parse(at.f.told) || 0, Date.parse(/ \u00b7 last seen (\\S+) \u00b7 /.exec(lastSeenPart(at.i.body))?.[1]) || 0);",
    "why": "baseline (L1078)"
   },
   {
    "file": "modules/M13-ledger/alerts.mjs",
-   "line": "const seen = Math.max(Date.parse(at.f.told) || 0, Date.parse(/ · last seen (\\S+) · /.exec(lastSeenPart(at.i.body))?.[1]) || 0);",
+   "line": "const seen = Math.max(Date.parse(at.f.told) || 0, Date.parse(/ \u00b7 last seen (\\S+) \u00b7 /.exec(lastSeenPart(at.i.body))?.[1]) || 0);",
    "why": "baseline (L1078)"
   },
   {
@@ -598,6 +598,11 @@
    "why": "baseline (L1078)"
   },
   {
+   "file": "modules/M4-workshop/send-safe/hook-store.mjs",
+   "line": "&& typeof h.since === 'string' && Number.isFinite(Date.parse(h.since)) && (h.sessionId === null) === (h.role === null);",
+   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
+  },
+  {
    "file": "modules/M6-merge-gate/gate.mjs",
    "line": ".filter((x) => typeof x === 'string' && Number.isFinite(Date.parse(x))).sort()[0] ?? iso();",
    "why": "baseline (L1078)"
@@ -681,6 +686,11 @@
    "file": "modules/M9-record/writer.mjs",
    "line": "} else if (d.doc.wait?.next_check && nowMs > Date.parse(d.doc.wait.next_check)) {",
    "why": "baseline (L1078)"
+  },
+  {
+   "file": "setup/host-lock-copy.mjs",
+   "line": "try { at = Date.parse(JSON.parse(io.readText(p))?.at); } catch { at = NaN; }",
+   "why": "#489 (landed after the baseline): host.lock stamp age read with Date.parse; follow-up for the lead: read it through pastTime"
   },
   {
    "file": "shared/still-waiting.mjs",
@@ -769,8 +779,8 @@
   },
   {
    "file": "wiring/sensors-ports.mjs",
-   "line": "const age = now().getTime() - Date.parse(a.observed_at);",
-   "why": "baseline (L1078)"
+   "line": "const age = nowMs - Date.parse(a.observed_at);",
+   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
   },
   {
    "file": "wiring/sensors-ports.mjs",
@@ -793,19 +803,14 @@
    "why": "baseline (L1078)"
   },
   {
-   "file": "wiring/worker-runner.mjs",
-   "line": "const asked = Date.parse(body?.asked_at ?? '');",
-   "why": "baseline (L1078)"
-  },
-  {
-   "file": "setup/host-lock-copy.mjs",
-   "line": "try { at = Date.parse(JSON.parse(io.readText(p))?.at); } catch { at = NaN; }",
-   "why": "#489 (landed after the baseline): host.lock stamp age read with Date.parse; follow-up for the lead: read it through pastTime"
-  },
-  {
    "file": "wiring/worker-ports.mjs",
    "line": "try { const d = JSON.parse(text); at = typeof d?.at === 'string' ? Date.parse(d.at) : NaN; } catch { at = NaN; }",
    "why": "#489 (landed after the baseline): host.lock stamp age read with Date.parse; follow-up for the lead: read it through pastTime"
+  },
+  {
+   "file": "wiring/worker-runner.mjs",
+   "line": "const asked = Date.parse(body?.asked_at ?? '');",
+   "why": "baseline (L1078)"
   }
  ],
  "I7": [
@@ -996,6 +1001,15 @@
   },
   {
    "kind": "definition",
+   "copy": "LAUNCHCTL = '/bin/launchctl'",
+   "files": [
+    "setup/daemons.mjs",
+    "setup/owner-answer-setup.mjs"
+   ],
+   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
+  },
+  {
+   "kind": "definition",
    "copy": "LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/",
    "files": [
     "modules/M13-ledger/alert-channel.mjs",
@@ -1066,9 +1080,10 @@
    "copy": "PATH = '/usr/bin:/bin:/usr/sbin:/sbin'",
    "files": [
     "setup/dispatcher-setup.mjs",
-    "setup/robot-setup.mjs"
+    "setup/robot-setup.mjs",
+    "setup/sensors-setup.mjs"
    ],
-   "why": "baseline (L1078)"
+   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
   },
   {
    "kind": "definition",
@@ -1215,12 +1230,39 @@
   },
   {
    "kind": "text",
+   "copy": " alert could not be queued; it is tried again next pass",
+   "files": [
+    "modules/M11-dispatcher/drain-alerts.mjs",
+    "modules/M11-dispatcher/interactive-holds.mjs"
+   ],
+   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
+  },
+  {
+   "kind": "text",
+   "copy": " and would drop it on the next update: install again (README, part 6)",
+   "files": [
+    "setup/dispatcher-setup.mjs",
+    "setup/sensors-setup.mjs"
+   ],
+   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
+  },
+  {
+   "kind": "text",
    "copy": " are not safe for root to work in (",
    "files": [
     "setup/extras.mjs",
     "setup/guard.mjs"
    ],
    "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": " can be written by its group or others",
+   "files": [
+    "setup/host-lock-copy.mjs",
+    "setup/robot-setup.mjs"
+   ],
+   "why": "#489 (landed after the baseline): the same file-permission text in two setup checks; follow-up for the lead: one shared text"
   },
   {
    "kind": "text",
@@ -1246,9 +1288,10 @@
    "copy": " in the copy is not root's alone: ",
    "files": [
     "setup/dispatcher-setup.mjs",
-    "setup/robot-setup.mjs"
+    "setup/robot-setup.mjs",
+    "setup/sensors-setup.mjs"
    ],
-   "why": "baseline (L1078)"
+   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
   },
   {
    "kind": "text",
@@ -1259,6 +1302,24 @@
     "wiring/sensors-ports.mjs"
    ],
    "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": " is not a plain file; nothing was changed",
+   "files": [
+    "setup/mac.mjs",
+    "setup/managed-settings.mjs"
+   ],
+   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
+  },
+  {
+   "kind": "text",
+   "copy": " is not in the copy (run dispatcher-config)",
+   "files": [
+    "setup/dispatcher-setup.mjs",
+    "setup/sensors-setup.mjs"
+   ],
+   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
   },
   {
    "kind": "text",
@@ -1290,6 +1351,15 @@
   },
   {
    "kind": "text",
+   "copy": " is not the owner's (its owner is uid ",
+   "files": [
+    "setup/host-lock-copy.mjs",
+    "wiring/worker-ports.mjs"
+   ],
+   "why": "#489 (landed after the baseline): the same file-permission text in two setup checks; follow-up for the lead: one shared text"
+  },
+  {
+   "kind": "text",
    "copy": " is not there (run users-folders first)",
    "files": [
     "setup/extras.mjs",
@@ -1305,6 +1375,24 @@
     "modules/M11-dispatcher/pass.mjs"
    ],
    "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": " is root's 0644 and the config this setup writes",
+   "files": [
+    "setup/dispatcher-setup.mjs",
+    "setup/sensors-setup.mjs"
+   ],
+   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
+  },
+  {
+   "kind": "text",
+   "copy": " is that config, and the copy keeps it",
+   "files": [
+    "setup/dispatcher-setup.mjs",
+    "setup/sensors-setup.mjs"
+   ],
+   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
   },
   {
    "kind": "text",
@@ -1345,6 +1433,15 @@
   },
   {
    "kind": "text",
+   "copy": "), so root won't write in it; install the copy again (unload the jobs, remove ",
+   "files": [
+    "setup/dispatcher-setup.mjs",
+    "setup/sensors-setup.mjs"
+   ],
+   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
+  },
+  {
+   "kind": "text",
    "copy": ", above the installed copy, is a link (name the copy by its real path)",
    "files": [
     "modules/M4-workshop/launcher/install-check.mjs",
@@ -1378,6 +1475,15 @@
     "setup/review-config.mjs"
    ],
    "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": ", run install), which carries ",
+   "files": [
+    "setup/dispatcher-setup.mjs",
+    "setup/sensors-setup.mjs"
+   ],
+   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
   },
   {
    "kind": "text",
@@ -1470,6 +1576,15 @@
     "modules/M11-dispatcher/gate.mjs"
    ],
    "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "config: product must be a product name (lower case letters, digits and -, a letter or digit first)",
+   "files": [
+    "wiring/dispatcher-wiring.mjs",
+    "wiring/sensors-wiring.mjs"
+   ],
+   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
   },
   {
    "kind": "text",
@@ -1616,6 +1731,24 @@
     "setup/watch-setup.mjs"
    ],
    "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "the install is not there yet (run the install first)",
+   "files": [
+    "setup/dispatcher-setup.mjs",
+    "setup/sensors-setup.mjs"
+   ],
+   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
+  },
+  {
+   "kind": "text",
+   "copy": "the installed copy is not root's alone (",
+   "files": [
+    "setup/dispatcher-setup.mjs",
+    "setup/sensors-setup.mjs"
+   ],
+   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
   },
   {
    "kind": "text",
@@ -1774,24 +1907,6 @@
     "modules/M2-approvals/payload.mjs"
    ],
    "why": "baseline (L1078)"
-  },
-  {
-   "kind": "text",
-   "copy": " can be written by its group or others",
-   "files": [
-    "setup/host-lock-copy.mjs",
-    "setup/robot-setup.mjs"
-   ],
-   "why": "#489 (landed after the baseline): the same file-permission text in two setup checks; follow-up for the lead: one shared text"
-  },
-  {
-   "kind": "text",
-   "copy": " is not the owner's (its owner is uid ",
-   "files": [
-    "setup/host-lock-copy.mjs",
-    "wiring/worker-ports.mjs"
-   ],
-   "why": "#489 (landed after the baseline): the same file-permission text in two setup checks; follow-up for the lead: one shared text"
   }
  ]
 }
