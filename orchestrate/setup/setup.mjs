@@ -22,6 +22,7 @@
 //                                       pinned file list, from that commit, together (launch check 13; bob-manifest.mjs)  (root)
 //   check-dispatcher     the review runner's launches folder, the job's dispatcher.json's outboxRoot and copiesRoot, and whether orchestrate can read the owner's host.lock, and if not why  (read only; sudo to read as orchestrate)
 //   dispatcher-config    [--dry-run]    write the Dispatcher's config, <base>/dispatcher.json (and the copy's, when the copy keeps it)  (root)
+//   worker-config        [--dry-run]    write the worker runner's config into the copy, <copy>/worker-runner.json (worker-runner-setup.mjs, L1112)  (root)
 //                                       an existing dispatcher.json without outboxRoot and copiesRoot won't start the Dispatcher until this is run again
 //   host-lock-copier     prints the owner's host.lock copier job file (a LaunchAgent of the owner's, L1029 E) on stdout and how to load it on
 //                        stderr; needs hostLockSource (read only; refused under sudo)
@@ -60,6 +61,7 @@ import { pathToFileURL } from 'node:url';
 import { ROOT_CONFIG_PATH, parseConfig } from './layout.mjs';
 import { checkDispatcherKeys, dispatcherKeysOn } from './dispatcher-check.mjs';
 import { DISPATCHER_JOB, checkDispatcherConfig, parseDispatcher, planDispatcherConfig } from './dispatcher-setup.mjs';
+import { planWorkerRunnerConfig, workerRunnerLoadProblem } from './worker-runner-setup.mjs';
 import { realIo, rootProblem } from './mac.mjs';
 import { guarded } from './guard.mjs';
 import { apply, check, plan } from './users-folders.mjs';
@@ -82,9 +84,9 @@ const TOKEN_PAGE_NOTE = [
   '  - Repository access: only the one repository named in the config;',
   '  - Permissions: Metadata = Read-only (GitHub adds it by itself; fine if absent), Contents = Read-only (GitHub may call it "code"), Pull requests = Read-only, Commit statuses = Read-only (the watch job reads it to judge a merge), and nothing else. (Not Checks: the job reads check runs with the watcher App, which holds Checks: read.)',
 ];
-const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install [--watch-only]|check-dispatcher|dispatcher-config|dispatcher-keys|host-lock-copier|review-config --pin <x.y.z> --input <file> --out <file> [--for-install]|add-to-install --pin <x.y.z> --sha256 <hex>|bob --from <Bob checkout> --commit <sha>|managed-settings|daemons place|load|unload|list|check [--only <job>]|daemons reload-account|prove-token|proposals|check-proposals|safe-directory|check-safe-directory|token|check-token|watch-rules|check-watch-rules|watch-app> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
+const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install [--watch-only]|check-dispatcher|dispatcher-config|worker-config|dispatcher-keys|host-lock-copier|review-config --pin <x.y.z> --input <file> --out <file> [--for-install]|add-to-install --pin <x.y.z> --sha256 <hex>|bob --from <Bob checkout> --commit <sha>|managed-settings|daemons place|load|unload|list|check [--only <job>]|daemons reload-account|prove-token|proposals|check-proposals|safe-directory|check-safe-directory|token|check-token|watch-rules|check-watch-rules|watch-app> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
 const DAEMON_SUBS = ['place', 'load', 'unload', 'list', 'check', 'reload-account'];
-const COMMANDS = ['users-folders', 'check', 'proofs', 'install', 'check-install', 'check-dispatcher', 'dispatcher-config', 'dispatcher-keys', 'host-lock-copier', 'review-config', 'add-to-install', 'bob', 'managed-settings', 'daemons', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app'];
+const COMMANDS = ['users-folders', 'check', 'proofs', 'install', 'check-install', 'check-dispatcher', 'dispatcher-config', 'worker-config', 'dispatcher-keys', 'host-lock-copier', 'review-config', 'add-to-install', 'bob', 'managed-settings', 'daemons', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app'];
 const READ_ONLY = ['check', 'check-install', 'check-dispatcher', 'dispatcher-keys', 'check-proposals', 'check-safe-directory', 'check-token', 'prove-token', 'check-watch-rules'];
 const PLAIN_CONFIG = ['users-folders', 'check', 'check-dispatcher', 'dispatcher-keys', 'proofs', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app', 'review-config'];
 
@@ -171,6 +173,7 @@ export function planCommand(io, cfg, o, { readSource = (p) => io.readSource(p), 
     : o.cmd === 'bob' ? planBob(io, cfg, { from: o.from, commit: o.commit, git: bobGitOf(o.from) })
     : o.cmd === 'token' ? planToken(io, cfg)
     : o.cmd === 'dispatcher-config' ? planDispatcherConfig(io, cfg, { jobLive: () => jobLive(io, cfg, DISPATCHER_JOB) })
+    : o.cmd === 'worker-config' ? planWorkerRunnerConfig(io, cfg)
     : o.sub === 'place' ? planPlace(io, cfg, o.jobs) : o.sub === 'load' ? planLoad(io, cfg, o.jobs) : o.sub === 'reload-account' ? planReloadAccount(io, cfg) : planUnload(io, cfg, o.jobs);
   return guarded(io, cfg, res);
 }
@@ -277,7 +280,9 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, bobGitOf, man
   try { apply(planned.ops, { log: (t) => out(`run: ${t}`) }); } catch (e) { const why = String(e.message).replace(/\.+$/, '');   // a message that ends in its own period gets one, not two
     err(/run: daemons load/i.test(e.message) ? `stopped: ${why}.` : `stopped: ${why}. Run it again after fixing that; it picks up where it stopped.`); return 1; }
   const after = o.cmd === 'users-folders' ? check(io, cfg, { alsoKnown: rootMadeEntries(cfg, { dispatcher: o.dispatcherOn }) }) : o.cmd === 'install' || o.cmd === 'add-to-install' ? checkInstall(io, cfg)
-    : o.cmd === 'dispatcher-config' ? checkDispatcherConfig(io, cfg) : o.cmd === 'bob' ? checkBob(io, cfg, { commit: o.commit })
+    : o.cmd === 'dispatcher-config' ? checkDispatcherConfig(io, cfg)
+    : o.cmd === 'worker-config' ? [{ ok: workerRunnerLoadProblem(io, cfg) === null, what: 'the copy\'s worker-runner.json is the config this setup writes, and the runner takes it', why: workerRunnerLoadProblem(io, cfg) ?? '' }]
+    : o.cmd === 'bob' ? checkBob(io, cfg, { commit: o.commit })
     : o.cmd === 'managed-settings' ? checkManagedSettings(io, cfg)
     : o.cmd === 'proposals' ? checkProposals(io, cfg) : o.cmd === 'safe-directory' ? checkSafeDirectory(io, cfg) : o.cmd === 'token' ? checkToken(io, cfg) : o.cmd === 'watch-rules' ? checkRulesCopy(io, cfg) : o.cmd === 'watch-app' ? checkWatchAppConfig(io, cfg, o.app, o.pin)
     : o.sub === 'place' ? checkDaemons(io, cfg, o.jobs).filter((r) => /exactly the built job file$|under another label/.test(r.what)) : o.sub === 'load' ? checkDaemons(io, cfg, o.jobs).filter((r) => /is loaded$|loaded from the job file as it is now$/.test(r.what))

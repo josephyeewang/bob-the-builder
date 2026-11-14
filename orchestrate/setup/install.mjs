@@ -30,7 +30,7 @@ import { reviewUserProblem } from '../modules/M9-record/outbox.mjs';
 import { PLAN_REVIEW_ROLE, RUNNER_ROLES } from '../shared/review-roles.mjs';
 import { COPY_CLAUDE_CODE as CLAUDE_CODE, COPY_HOOKS as HOOKS, managedGuardDir, parseConfig } from './layout.mjs';
 import { parseRobot } from './robot-setup.mjs';
-import { parseWorkerRunner } from './worker-runner-setup.mjs';
+import { WORKER_RUNNER_CONFIG, parseWorkerRunner } from './worker-runner-setup.mjs';
 import { DISPATCHER_CONFIG, dispatcherConfigFor, dispatcherConfigText, dispatcherSourcePath, parseDispatcher } from './dispatcher-setup.mjs';
 import { readUser } from './users-folders.mjs';
 import { pinProblem } from './review-config.mjs';   // a cycle (review-config reads installPaths): both are used only when called
@@ -59,7 +59,7 @@ export function parseInstallConfig(raw) {
   // A code home's name is main's alone (L257 (B)), in any case (lane 2 on #144: macOS's disk ignores case), and said so.
   const home = Array.isArray(extras) ? extras.find((e) => typeof e === 'string' && MODULE_HOMES.includes(posix.basename(e).toLowerCase())) : undefined;
   if (home) throw new Error(`config: extras must not hold ${home}: ${posix.basename(home)} is the name of a folder of the copy's own code (main's alone)`);
-  if (!Array.isArray(extras) || extras.length > 20 || extras.some((e) => !PLAIN_ABS(e) || !KEEP_NAME.test(posix.basename(e)) || [...Object.keys(MUST_KEEP), STAMP, UPDATER_CONFIG, RUNNER_CONFIG, DISPATCHER_CONFIG].map((n) => n.toLowerCase()).includes(posix.basename(e).toLowerCase()))) {
+  if (!Array.isArray(extras) || extras.length > 20 || extras.some((e) => !PLAIN_ABS(e) || !KEEP_NAME.test(posix.basename(e)) || [...Object.keys(MUST_KEEP), STAMP, UPDATER_CONFIG, RUNNER_CONFIG, DISPATCHER_CONFIG, WORKER_RUNNER_CONFIG].map((n) => n.toLowerCase()).includes(posix.basename(e).toLowerCase()))) {
     throw new Error('config: extras must be full paths of files or folders to carry into the copy (the review runner\'s claude program and its hooks), each with a plain name of its own');
   }
   // The robot job (robot-setup.mjs): on only when asked, and only with its config among the extras.
@@ -112,7 +112,7 @@ function ownTree(io, p) {
 /** The updater's own config, as the copy keeps it. Paths are the ones the updater will see (io.at). */
 export function updaterConfigFor(io, cfg) {
   const P = installPaths(cfg);
-  return { installRoot: io.at(P.installRoot), clone: io.at(P.clone), address: cfg.address, keep: ['bin', UPDATER_CONFIG, RUNNER_CONFIG, ...(cfg.dispatcher ? [DISPATCHER_CONFIG] : []), ...cfg.extras.map((e) => posix.basename(e))], gitBin: cfg.gitBin };
+  return { installRoot: io.at(P.installRoot), clone: io.at(P.clone), address: cfg.address, keep: ['bin', UPDATER_CONFIG, RUNNER_CONFIG, ...(cfg.dispatcher ? [DISPATCHER_CONFIG] : []), ...(cfg.workerRunner ? [WORKER_RUNNER_CONFIG] : []), ...cfg.extras.map((e) => posix.basename(e))], gitBin: cfg.gitBin };
 }
 
 /**
