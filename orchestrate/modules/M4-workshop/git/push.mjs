@@ -59,6 +59,9 @@ export { BRANCH };
 export const BUNDLE_CAP = 200 * 1024 * 1024;
 // A file changed this recently may still be being written. One value: the proposals intake's too.
 export const SETTLE_MS = 2000;
+/** How long a push (or the pull request it asks for) that did not go waits before it is tried again: research-intake.mjs and
+ * wiring/push-pass.mjs both use it, as RETRY_MS (I7: one home). */
+export const PUSH_RETRY_MS = 15 * 60_000;
 // A research copy refused with this reason is told to the owner at once (M11 researchCopyPass).
 export const REPORT_CHANGED = 'the report\'s bytes are not the ones the intake recorded';
 // The bits a proposals folder may not have: anything looser than 750. One value: the intake's folder check too.

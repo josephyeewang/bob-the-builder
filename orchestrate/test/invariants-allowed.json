@@ -693,16 +693,6 @@
    "why": "pastTime itself: the one home of the stored-time read (I4)"
   },
   {
-   "file": "wiring/gate-ports.mjs",
-   "line": "const byNew = [...runs].sort((a, b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0));",
-   "why": "#516 landing (L1138): lane 1b reads it through pastTime"
-  },
-  {
-   "file": "wiring/gate-ports.mjs",
-   "line": "const byNew = [...runs].sort((a, b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0));",
-   "why": "#516 landing (L1138): lane 1b reads it through pastTime"
-  },
-  {
    "file": "wiring/heartbeat-probes.mjs",
    "line": "const seen = Date.parse(at ?? '');",
    "why": "baseline (L1078)"
@@ -870,15 +860,6 @@
   },
   {
    "kind": "definition",
-   "copy": "BODY_MAX = 60_000",
-   "files": [
-    "modules/M13-ledger/alert-channel.mjs",
-    "wiring/pr-writer.mjs"
-   ],
-   "why": "#516 landing (L1138): lane 1b folds it into one home or gives its reason"
-  },
-  {
-   "kind": "definition",
    "copy": "CARD = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/",
    "files": [
     "modules/M11-dispatcher/cleanup.mjs",
@@ -932,15 +913,6 @@
     "modules/M13-ledger/outside-check/supported.mjs"
    ],
    "why": "baseline (L1078)"
-  },
-  {
-   "kind": "definition",
-   "copy": "GUARD_STEP = 'product 1 / repo-guard'",
-   "files": [
-    "modules/M12-sensors/outside-watch.mjs",
-    "wiring/gate-ports.mjs"
-   ],
-   "why": "#516 landing (L1138): lane 1b folds it into one home or gives its reason"
   },
   {
    "kind": "definition",
@@ -1083,16 +1055,6 @@
     "modules/M4-workshop/launcher/outbox.mjs"
    ],
    "why": "baseline (L1078)"
-  },
-  {
-   "kind": "definition",
-   "copy": "RETRY_MS = 15 * 60_000",
-   "files": [
-    "modules/M11-dispatcher/research-intake.mjs",
-    "modules/M4-workshop/launcher/review-runner.mjs",
-    "wiring/push-pass.mjs"
-   ],
-   "why": "#516 landing (L1138): lane 1b folds it into one home or gives its reason"
   },
   {
    "kind": "definition",
