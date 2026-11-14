@@ -10,7 +10,8 @@
 //      facts 3 and 4 into the record (L3); this file only reads them. Older than 10 minutes = shut.
 //      A product with no Vercel project says so in its rules with exactly `none` (NO_VERCEL, L1081): it has no skip
 //      command and no variables, so facts 3 and 4 hold with no fact read. Only that exact word: a missing, empty or
-//      other value is read as before (missing or empty shuts; any other name must be matched by a fresh fact).
+//      other value is read as before (missing or empty shuts; any other name must be matched by a fresh fact). So a real
+//      Vercel project named "none" can't be gated: its rules value would mean no project.
 // Anything missing, malformed, for the wrong repo or project, or stale shuts the gate. A shut
 // gate raises one GitHub issue to the owner, updated rather than opened again while it stays shut.
 //
