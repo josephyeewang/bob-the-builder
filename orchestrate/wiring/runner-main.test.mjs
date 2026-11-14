@@ -1,7 +1,7 @@
 // Part C, runner step 5: the worker runner's entry point and its LaunchAgent file. Nothing here loads a job.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { tempDir } from '../shared/test-tmp.mjs';
@@ -9,6 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { writeSnapshot } from '../modules/M4-workshop/hooks/snapshot.mjs';
 import { makeLock } from '../modules/M9-record/lock.mjs';
 import { loginJobPlist } from '../modules/M11-dispatcher/login-job.mjs';
+import { statusOf, statusText } from '../setup/builder-wall.mjs';
 import { DENY_KEYS, personUserProblem, aclWriteEntries, carriedOverProblem, checkRunnerConfig, hookStoreOf, keepSnapshots, launchInputs, readRunnerConfig, snapshotFolderProblem, startDeps, listenStop, main, readRootFile, realRunnerPorts, testProductHeld, testProductProblem } from './runner-main.mjs';
 import { RUNNER_JOB_LOG, RUNNER_JOB_UMASK, RUNNER_JOB_USER, fullPath, workerRunnerPlist } from './runner-job.mjs';
 import { BUILDER } from '../setup/layout.mjs';
@@ -17,7 +18,7 @@ const AS_BUILDER = () => null;
 
 const config = (d, over = {}) => ({ installRoot: join(d, 'install'), requestsDir: join(d, 'requests'), statusFile: join(d, 'runner', 'status.json'), orchestrateUid: 501,
   outboxRoot: join(d, 'outboxes'), copiesRoot: join(d, 'copies'), home: join(d, 'home'), path: '/usr/bin:/bin', claudeBin: join(d, 'install', 'claude'),
-  recordRoot: join(d, 'record'), recordUid: 501, claimMs: 600_000, products: { p1: { repo: 'o/p1', mirror: join(d, 'mirror'), render: { paths: { deny: DENY(d) } } } }, ...over });
+  recordRoot: join(d, 'record'), recordUid: 501, claimMs: 600_000, wallStatus: join(d, 'wall', 'wall-status.json'), products: { p1: { repo: 'o/p1', mirror: join(d, 'mirror'), render: { paths: { deny: DENY(d) } } } }, ...over });
 // The roots as setup makes them, at their real paths (#378 r1 m4: the Mac's temp folder is reached through /var).
 const roots = (d0) => { const d = realpathSync.native(d0); mkdirSync(join(d, 'copies')); mkdirSync(join(d, 'outboxes')); return d; };
 const DENY = (d) => ({ record: join(d, 'record'), ssh: join(d, 'home', '.ssh'), gh: join(d, 'home', '.config', 'gh'), claudeHome: join(d, 'home', '.claude'),
@@ -249,6 +250,10 @@ test('#369 r2 c2: a RECHECK check that throws is a failure with its reason, neve
 
 // L1125: a test whose product stands for the test product passes main's gate this way (no budget is loaded in these tests).
 const TEST_PRODUCT_OK = () => null;
+// L1193: a test whose Mac has the builder wall confirmed passes main's wall gate this way: lane A's real module (the
+// default loadWall, #585) and its own writer's line for this test's uid, written a minute before the clock.
+const WALL_OK = { wallPorts: { chain: () => null, now: () => Date.parse('2026-11-14T12:00:00.000Z'),
+    readRoot: () => statusText(statusOf([{ ok: true, what: 'pf is on' }], process.getuid(), new Date('2026-11-14T11:59:00.000Z'))) } };
 
 test('#369 r2 m2 self-review: main gives the start port its keeper, so a product whose snapshot is not kept fresh starts nothing; a die, a restart that works, a die again', async () => {
   const d = roots(tempDir('orch-rmain-'));
@@ -260,7 +265,18 @@ test('#369 r2 m2 self-review: main gives the start port its keeper, so a product
     const logs = []; let r;
     const fresh = () => { throw Object.assign(new Error('x'), { code: 'EROFS' }); };
     const go = (o) => main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: () => cfg, log: (s) => logs.push(s), onStop: () => {}, fresh, folderProblem: rootParentCheck,
-      run: async (ctx) => { r = await ctx.ports.start({ card: 'C-1', kind: 'editing', product: 'p1', sessionId: '0f8fad5b-d9cb-469f-a165-70867728950e' }); }, ...o });
+      run: async (ctx) => { r = await ctx.ports.start({ card: 'C-1', kind: 'editing', product: 'p1', sessionId: '0f8fad5b-d9cb-469f-a165-70867728950e' }); }, ...WALL_OK, ...o });
+    // L1193: the wall gate comes first: no wall confirmed (here, lane A's code is stood in for by nothing), and the start is
+    // held for the wall before the test-product gate or the snapshot is asked.
+    assert.equal(await go({ loadWall: async () => { throw new Error('Cannot find module builder-wall.mjs'); }, testProduct: TEST_PRODUCT_OK }), 0, logs.join('\n'));
+    assert.equal(r.ok, false); assert.match(r.reason, /the builder wall's code can't be loaded from the installed copy \(Cannot find module builder-wall\.mjs\), so no session starts/);
+    assert.ok(logs.some((l) => /the builder wall's code can't be loaded \(Cannot find module builder-wall\.mjs\); every start is held/.test(l)), 'told at start');
+    assert.equal(await go({ wallPorts: { ...WALL_OK.wallPorts, now: () => Date.parse('2026-11-14T12:30:00.000Z') }, testProduct: TEST_PRODUCT_OK }), 0);
+    assert.match(r.reason, /older than two of the wall job's beats/, 'a stale status holds the start');
+    assert.equal(await go({ wallPorts: { ...WALL_OK.wallPorts, chain: (p) => `${p} is not owned by root` }, testProduct: TEST_PRODUCT_OK }), 0);
+    assert.match(r.reason, /status file is not root's alone \(.*wall-status\.json is not owned by root\)/, 'main asks about the config\'s own wallStatus file');
+    assert.equal(await go({ wallPorts: { ...WALL_OK.wallPorts, readRoot: () => { throw new Error('x'); } }, testProduct: TEST_PRODUCT_OK }), 0);
+    assert.match(r.reason, /status can't be read/);
     // L1125: main's own gate, left in place: no budget is loaded, so the product is held by the gate first.
     assert.equal(await go({}), 0, logs.join('\n'));
     assert.equal(r.ok, false); assert.match(r.reason, /the Dispatcher's rules are not loaded .*only a test product runs on the worker runner/);
@@ -541,7 +557,7 @@ test('L926 (#419 r3 M1, c2): main refuses to start for a snapshot folder linked 
     rmSync(join(d, 'snapshots'), { recursive: true });
     logs.length = 0; const reasons = [];
     const start = (ctx) => ctx.ports.start({ card: 'C-1', kind: 'editing', product: 'p1', sessionId: '0f8fad5b-d9cb-469f-a165-70867728950e' });
-    const code2 = await main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: () => cfg, log: (s) => logs.push(s), onStop: () => {}, fresh, folderProblem: rootParentCheck, testProduct: TEST_PRODUCT_OK, run: async (ctx) => {
+    const code2 = await main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: () => cfg, log: (s) => logs.push(s), onStop: () => {}, fresh, folderProblem: rootParentCheck, testProduct: TEST_PRODUCT_OK, ...WALL_OK, run: async (ctx) => {
       reasons.push((await start(ctx)).reason);
       symlinkSync(card, join(d, 'snapshots'));
       reasons.push((await start(ctx)).reason);
@@ -675,6 +691,10 @@ test('L1001: the Bob file list is read only as root\'s own plain file, never thr
     chmodSync(f, 0o644);
     const l = join(d, 'l.json'); symlinkSync(f, l);
     assert.throws(() => readRootFile(l, { uid: process.getuid() }), /ELOOP|link/);
+    // L1207: a second name (a hard link) is refused by both names, and read again once it is gone.
+    const h = join(d, 'h.json'); linkSync(f, h);
+    for (const p of [f, h]) assert.throws(() => readRootFile(p, { uid: process.getuid() }), /has 2 names, not one/);
+    rmSync(h); assert.equal(readRootFile(f, { uid: process.getuid() }), '{}');
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
@@ -855,4 +875,11 @@ test('L1125 gate REAL rules: M10\'s own parser and engine (as M11 budget() build
   // Anything but true or false: M10 refuses the rules when it reads them (L1100, #550), so they never load and nothing runs.
   for (const v of ["'yes'", "'True'", '1']) assert.match(gate(withFlag(v)), /refused when read: .*product\.test_product must be true or false/, v);
   assert.match(gate(fixture), /do not say product\.test_product: true/, 'left out: held');
+});
+
+test('L1193: the config\'s wallStatus, when given, is a full path in its simplest form; left out, the config loads and every start is held', () => {
+  const d = '/T';
+  assert.doesNotThrow(() => checkRunnerConfig(config(d)));
+  assert.doesNotThrow(() => checkRunnerConfig(config(d, { wallStatus: undefined })));
+  for (const w of ['rel/status.json', '/a/../status.json', '/a//status.json', '/', '', 5]) assert.throws(() => checkRunnerConfig(config(d, { wallStatus: w })), /wallStatus must be a full path in its simplest form/, String(w));
 });
