@@ -691,7 +691,7 @@ test('L1128 m6: --restore looks in both account folders, with no account in use;
   assert.equal(r2.code, 0, r2.out); assert.ok(!existsSync(bf), r2.out);
   assert.match((await runMain(['--config', '/c.json', '--restore'], S2)).out, /Nothing to put back/);
   // Never as root.
-  const asRoot = await runMain(['--config', '/c.json', '--restore'], S2, { uid: 0, ownDirOwner: () => 0 });
+  const asRoot = await runMain(['--config', '/c.json', '--restore'], S2, { uid: 0, ownDirUidOf: () => 0 });
   assert.equal(asRoot.code, 1); assert.match(asRoot.out, /Not put back: run it as the worker runner's own user \(sudo -H -u builder/);
   // In a run: the put-back failed (the backup is left), so the command is printed before the verdict.
   const S3 = mainSetup(); const f3 = join(S3.home, '.claude', 'settings.json');

@@ -703,8 +703,8 @@ const REAL = {
   accountInUse, sessionEnv, makeLock, runAll,
   claudeVersion: (bin, env) => /^(\d+\.\d+\.\d+)/.exec(execFileSync(bin, [F.version], { encoding: 'utf8', timeout: 30_000, env: env ?? {} }).trim())?.[1] ?? null,
   makeBase: () => mkdtempSync(join(tmpdir(), 'settings-names-proof-')),
-  // The uid owning the runner's own folder, or null when it is not a plain folder.
-  ownDirOwner: (dir) => { const st = lstatSync(dir); return st.isDirectory() && !st.isSymbolicLink() ? st.uid : null; },
+  // The uid owning the runner's own folder, or null when it is not a plain folder or can't be read.
+  ownDirUidOf: (dir) => { try { const st = lstatSync(dir); return st.isDirectory() && !st.isSymbolicLink() ? st.uid : null; } catch { return null; } },
 };
 
 export async function main(argv, { print = (t) => process.stdout.write(t), uid = process.getuid?.(), now = () => Date.now(), home = homedir(), deps = {} } = {}) {
@@ -720,7 +720,7 @@ export async function main(argv, { print = (t) => process.stdout.write(t), uid =
     print(`${r.verdict}\n`); return 1;
   };
   let c; try { c = d.readConfig(arg(argv, '--config')); } catch (e) { return stop(`the worker runner's config can't be read (${e?.message ?? e})`); }
-  let ownDirUid; try { ownDirUid = d.ownDirOwner(c.ownDir); } catch { ownDirUid = null; }
+  const ownDirUid = d.ownDirUidOf(c.ownDir);
   if (restoring) {
     // --restore (L1124 m4, L1128 m6): puts back the user settings file of each account folder a cut-off run left a
     // backup beside, whichever account is in use now. It runs as the same user.
