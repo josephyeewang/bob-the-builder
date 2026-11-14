@@ -55,6 +55,7 @@ import { plainFd } from '../../M9-record/unsent.mjs';
 import { researchPath, researchFileName, RESEARCH_ID } from '../../M2-approvals/research-ask.mjs';
 import { intakeFactId } from '../../M11-dispatcher/intake-facts.mjs';
 import { SHA256 } from '../../../shared/plan-fingerprint.mjs';
+import { registerSecret } from '../../../shared/secret-guard.mjs';
 
 export { BRANCH };
 export const BUNDLE_CAP = 200 * 1024 * 1024;
@@ -130,7 +131,8 @@ export const PUSH_FACT = (card, att) => `push.${card}.${att}`;
 export const PROPOSAL_ATTEMPT = (sha) => `p-${sha.slice(0, 12)}`;
 export const githubUrl = (repo) => `https://github.com/${repo}.git`;
 export const bundleName = (card) => `bundle-${card}.bundle`;
-const tokenConfig = (token) => [['http.https://github.com/.extraHeader', `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`]];
+// The header's base64 form is its own secret (the token can't be seen in it as text), so it is registered too (secret-guard).
+export const tokenConfig = (token) => [['http.https://github.com/.extraHeader', `Authorization: Basic ${registerSecret(Buffer.from(`x-access-token:${registerSecret(token)}`).toString('base64'))}`]];
 
 /** The folder a file is taken from: a plain folder, not a link, owned by `folderUid` when that is given. */
 function checkFolder(folder, folderUid) {
