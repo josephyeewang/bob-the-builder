@@ -12,27 +12,31 @@
 // The paths are layout.mjs's scannerPaths(cfg), the one place both this file and the push step's wiring read them (I7):
 // no config key names them.
 //
-// The pin: gitleaks 8.30.1, darwin arm64 (the always-on Mac is Apple silicon). The tarball's hash is the one gitleaks
-// publishes in gitleaks_8.30.1_checksums.txt; that file lists archives only, so the program's own hash was taken from
-// the program inside that verified tarball (13 Nov 2026). A program of any other build or machine type FAILs, which is
-// the point: a new pin takes a new version's rules too (gitleaks.mjs header) and both hashes again.
+// The pin: gitleaks 8.30.1, darwin arm64 (the always-on Mac is Apple silicon). The program's hash lives beside the rules'
+// version in gitleaks.mjs, so the push step checks the same pin (L1123 m5); the tarball's hash, which only setup reads,
+// is here. The tarball's is the one gitleaks publishes in gitleaks_8.30.1_checksums.txt; that file lists archives only,
+// so the program's own hash was taken from the program inside that verified tarball (13 Nov 2026). A program of any
+// other build or machine type FAILs, which is the point: a new pin takes a new version's rules too (gitleaks.mjs
+// header) and both hashes again. A test holds the README to these pins (L1123 m6).
 
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 import { scannerDir, scannerPaths } from './layout.mjs';
 import { aclProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
-import { DO_PLANE_TOML, RULES_VERSION, checkScanner } from '../modules/M4-workshop/git/gitleaks.mjs';
+import { DO_PLANE_TOML, RULES_VERSION, SCANNER_BIN_SHA256, SCANNER_MAX_BYTES, checkScanner, readPlainFile } from '../modules/M4-workshop/git/gitleaks.mjs';
 
 export const SCANNER_VERSION = RULES_VERSION;
 export const SCANNER_TARBALL = `gitleaks_${SCANNER_VERSION}_darwin_arm64.tar.gz`;
 export const SCANNER_TARBALL_SHA256 = 'b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5';
-export const SCANNER_BIN_SHA256 = 'ba52fb1bfabbcde42f032afad3d6e0b19dff8ed105229a16e7caa338bbc0e84f';
-// Far above the program's 21 MB; a file past it is not read.
-const MAX_BIN_BYTES = 64 * 1024 * 1024;
+export { SCANNER_BIN_SHA256 };
+const MAX_BIN_BYTES = SCANNER_MAX_BYTES;
+/** The pins the README must carry, word for word (scanner-setup.test.mjs; L1123 m6). */
+export const scannerPins = () => ({ version: SCANNER_VERSION, tarball: SCANNER_TARBALL, tarball_sha256: SCANNER_TARBALL_SHA256, program_sha256: SCANNER_BIN_SHA256 });
 
 const sha = (b) => createHash('sha256').update(b).digest('hex');
 const short = (h) => h.slice(0, 12);
 const op = (text, run) => ({ text, run });
+/** The access-list reader's answer; one that throws is a problem too, never a pass (L1123 m3). */
+const aclOf = (acl, paths) => { try { return acl(paths); } catch (e) { return `the access lists (ACL) could not be read: ${e?.message ?? e}`; } };
 
 /** The three files, each with the mode and the bytes it must hold. `binSha` is the program's pin (a port for tests). */
 function wanted(cfg, binSha) {
@@ -53,8 +57,13 @@ function fileProblem(io, w) {
   if ((st.mode & 0o7777) !== w.mode) return `has mode ${(st.mode & 0o7777).toString(8)}, want ${w.mode.toString(8)}`;
   if (st.nlink !== 1) return `has ${st.nlink} names (a second name could be changed apart from setup)`;
   if (st.size > MAX_BIN_BYTES) return 'is too big to be the pinned file';
-  let got; try { got = sha(readFileSync(io.at(w.path))); } catch (e) { return `can't be read (${e?.code ?? e.message})`; }
+  let got; try { got = sha(readPlainFile(io.at(w.path), { max: MAX_BIN_BYTES }).bytes); } catch (e) { return `can't be read (${e?.code ?? e.message})`; }
   return got === w.sha ? null : `hashes to ${short(got)}…, want ${short(w.sha)}…`;
+}
+
+/** An empty real folder of root's (any group, any mode): what a cut-off `scanner` run leaves. */
+function ownEmptyFolder(io, dir) {
+  try { const st = io.lstat(dir); return !st.isSymbolicLink() && st.isDirectory() && st.uid === io.rootUid && io.list(dir).length === 0; } catch { return false; }
 }
 
 function folderProblem(io, dir) {
@@ -71,31 +80,38 @@ function folderProblem(io, dir) {
  * `readFrom(path)` reads the named program (a real path, outside the prefix; a port for tests). The program's bytes are
  * read once, hashed, and those same bytes are written: a file swapped after the hash is never the one copied.
  */
-export function planScanner(io, cfg, { from, readFrom = (p) => readFileSync(p), binSha = SCANNER_BIN_SHA256 } = {}) {
+export function planScanner(io, cfg, { from, binSha = SCANNER_BIN_SHA256, acl = aclProblem } = {}) {
   if (typeof from !== 'string' || !from.startsWith('/')) return { ops: [], problems: ['--from must be the full path of the gitleaks program taken out of the checked download'] };
-  let st; try { st = io.lstatReal(from); } catch (e) { return { ops: [], problems: [`${from} can't be looked at (${e?.code ?? e.message})`] }; }
-  if (st.isSymbolicLink() || !st.isFile()) return { ops: [], problems: [`${from} is not a plain file (a link is not taken: name the program itself)`] };
-  if (st.size > MAX_BIN_BYTES) return { ops: [], problems: [`${from} is too big to be the gitleaks program; nothing was read`] };
-  let bytes; try { bytes = readFrom(from); } catch (e) { return { ops: [], problems: [`${from} can't be read (${e?.code ?? e.message})`] }; }
+  // One handle, opened without following a link and capped at the size limit: what is checked is what is read (L1123 c1).
+  let bytes;
+  try { ({ bytes } = readPlainFile(from, { max: MAX_BIN_BYTES })); } catch (e) {
+    const why = e?.code === 'ELOOP' || e?.code === 'ENOTFILE' ? 'is not a plain file (a link is not taken: name the program itself)'
+      : e?.code === 'EFBIG' ? 'is too big to be the gitleaks program; nothing was read' : `can't be looked at (${e?.code ?? e?.message ?? e})`;
+    return { ops: [], problems: [`${from} ${why}`] };
+  }
   const got = sha(bytes);
   if (got !== binSha) return { ops: [], problems: [`${from} hashes to ${short(got)}…, but the pinned gitleaks ${SCANNER_VERSION} (darwin arm64) program is ${short(binSha)}…; nothing was changed. Take it out of ${SCANNER_TARBALL} after checking that file's hash (README)`] };
   const dir = scannerDir(cfg);
   const ops = [];
   const fp = folderProblem(io, dir);
-  if (fp === 'is missing') ops.push(op(`make ${dir}   (root:wheel 0755)`, () => { io.mkdir(dir, 0o700); io.secure(dir, { uid: io.rootUid, gid: 0, mode: 0o755 }); }));
+  const secureDir = op(`set ${dir} to root:wheel 0755`, () => io.secure(dir, { uid: io.rootUid, gid: 0, mode: 0o755 }));
+  if (fp === 'is missing') ops.push(op(`make ${dir}`, () => io.mkdir(dir, 0o700)), secureDir);
+  // A run cut off between making the folder and securing it leaves an empty folder of root's: this step's own, so it is
+  // secured again rather than left for Joe to move by hand (L1123 m4; as users-folders and install do).
+  else if (fp && ownEmptyFolder(io, dir)) ops.push(secureDir);
   else if (fp) return { ops: [], problems: [`${dir} ${fp}; move it away and run this again (nothing was changed)`] };
   for (const w of wanted(cfg, binSha)) {
-    if (fp === null && fileProblem(io, w) === null && aclProblem([io.at(w.path)]) === null) continue;
+    if (fp === null && fileProblem(io, w) === null && aclOf(acl, [io.at(w.path)]) === null) continue;
     const data = w.text ?? bytes;
     ops.push(op(`write ${w.path}   (root:wheel ${w.mode.toString(8)}, hash ${short(w.sha)}…)`, () => { io.unlink(w.path); io.writeOwned(w.path, data, { uid: io.rootUid, gid: 0, mode: w.mode }); }));
   }
   // The folder's own access list is never cleared here: one that is there was put there by hand, and someone should look.
-  if (fp === null) { const acl = aclProblem([io.at(dir)]); if (acl) return { ops: [], problems: [`${acl}; nothing was changed`] }; }
+  if (fp === null) { const a = aclOf(acl, [io.at(dir)]); if (a) return { ops: [], problems: [`${a}; nothing was changed`] }; }
   return { ops, problems: [] };
 }
 
 /** The files alone, read only → [{ ok, what, why? }]: the folder, each file, and no access list on any of them. */
-export function checkScannerFiles(io, cfg, { binSha = SCANNER_BIN_SHA256 } = {}) {
+export function checkScannerFiles(io, cfg, { binSha = SCANNER_BIN_SHA256, acl = aclProblem } = {}) {
   const dir = scannerDir(cfg);
   const fp = folderProblem(io, dir);
   const rows = [{ ok: fp === null, what: `${dir} is root:wheel 0755`, ...(fp ? { why: `it ${fp} (sudo node setup.mjs scanner --from <the program>, README)` } : {}) }];
@@ -105,8 +121,8 @@ export function checkScannerFiles(io, cfg, { binSha = SCANNER_BIN_SHA256 } = {})
     rows.push({ ok: p === null, what: `${w.path}: ${w.name}, root:wheel ${w.mode.toString(8)}, hash ${short(w.sha)}…`, ...(p ? { why: `it ${p}` } : {}) });
   }
   if (rows.every((r) => r.ok)) {
-    const acl = aclProblem([dir, ...ws.map((w) => w.path)].map((p) => io.at(p)));
-    rows.push({ ok: acl === null, what: `${dir} and its files have no access list (ACL)`, ...(acl ? { why: acl } : {}) });
+    const a = aclOf(acl, [dir, ...ws.map((w) => w.path)].map((p) => io.at(p)));
+    rows.push({ ok: a === null, what: `${dir} and its files have no access list (ACL)`, ...(a ? { why: a } : {}) });
   }
   return rows;
 }
@@ -115,11 +131,12 @@ export function checkScannerFiles(io, cfg, { binSha = SCANNER_BIN_SHA256 } = {})
  * `check-scanner`: the files, then the push step's own check on them (checkScanner, which runs the program once with
  * `version`). Never as root: it runs a downloaded program. → Promise<[{ ok, what, why? }]>.
  */
-export async function checkScannerSetup(io, cfg, { binSha = SCANNER_BIN_SHA256, gate = checkScanner } = {}) {
-  const rows = checkScannerFiles(io, cfg, { binSha });
+export async function checkScannerSetup(io, cfg, { binSha = SCANNER_BIN_SHA256, gate = checkScanner, acl } = {}) {
+  const rows = checkScannerFiles(io, cfg, { binSha, acl });
   const what = `the push step's own check passes: gitleaks reports ${SCANNER_VERSION}, the config is the Do-plane's byte for byte, the ignore file is empty`;
   if (!rows.every((r) => r.ok)) return [...rows, { ok: false, what, why: 'not run: put the files right first' }];
   const p = scannerPaths(cfg);
-  let r; try { r = await gate({ bin: io.at(p.bin), version: SCANNER_VERSION, config: io.at(p.config), ignoreFile: io.at(p.ignoreFile) }); } catch (e) { r = { ok: false, reason: e?.message ?? 'it threw' }; }
+  // The pin the push checks: the same hash, and root's (io.rootUid) as the owner.
+  let r; try { r = await gate({ bin: io.at(p.bin), version: SCANNER_VERSION, config: io.at(p.config), ignoreFile: io.at(p.ignoreFile) }, { sha: binSha, uid: io.rootUid }); } catch (e) { r = { ok: false, reason: e?.message ?? 'it threw' }; }
   return [...rows, { ok: r?.ok === true, what, ...(r?.ok === true ? {} : { why: r?.reason ?? 'no answer' }) }];
 }

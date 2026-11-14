@@ -87,6 +87,13 @@ const TOKEN_PAGE_NOTE = [
   '  - Permissions: Metadata = Read-only (GitHub adds it by itself; fine if absent), Contents = Read-only (GitHub may call it "code"), Pull requests = Read-only, Commit statuses = Read-only (the watch job reads it to judge a merge), and nothing else. (Not Checks: the job reads check runs with the watcher App, which holds Checks: read.)',
 ];
 const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install [--watch-only]|check-dispatcher|dispatcher-config|dispatcher-keys|host-lock-copier|scanner --from <the gitleaks program>|check-scanner (without sudo)|review-config --pin <x.y.z> --input <file> --out <file> [--for-install]|add-to-install --pin <x.y.z> --sha256 <hex>|bob --from <Bob checkout> --commit <sha>|managed-settings|daemons place|load|unload|list|check [--only <job>]|daemons reload-account|prove-token|proposals|check-proposals|safe-directory|check-safe-directory|token|check-token|watch-rules|check-watch-rules|watch-app> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
+// Tests only, refused outside them: a stand-in gitleaks' hash in place of the real pin, so a whole `scanner` run, its
+// after-run check included, can be tried (L1123 m4). Nothing a config or an argument can set.
+const scannerPin = (sha) => {
+  if (sha === undefined) return {};
+  if (!process.env.NODE_TEST_CONTEXT) throw new Error('setup: testScannerSha is for tests only');
+  return { binSha: sha };
+};
 const DAEMON_SUBS = ['place', 'load', 'unload', 'list', 'check', 'reload-account'];
 const COMMANDS = ['users-folders', 'check', 'proofs', 'install', 'check-install', 'check-dispatcher', 'dispatcher-config', 'dispatcher-keys', 'host-lock-copier', 'scanner', 'check-scanner', 'review-config', 'add-to-install', 'bob', 'managed-settings', 'daemons', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app'];
 const READ_ONLY = ['check', 'check-scanner', 'check-install', 'check-dispatcher', 'dispatcher-keys', 'check-proposals', 'check-safe-directory', 'check-token', 'prove-token', 'check-watch-rules'];
@@ -165,14 +172,14 @@ function report(res, out) {
  * every one of them starts with the same wall (L90 M3): the folders above the base must be root's alone, checked now (a
  * problem gives no steps at all) and again as the FIRST step of the run.
  */
-export function planCommand(io, cfg, o, { readSource = (p) => io.readSource(p), runUpdater = spawnUpdater, bobGitOf = (from) => bobGit(io, cfg, from), managed = {} } = {}) {
+export function planCommand(io, cfg, o, { readSource = (p) => io.readSource(p), runUpdater = spawnUpdater, bobGitOf = (from) => bobGit(io, cfg, from), managed = {}, testScannerSha } = {}) {
   if (o.cmd === 'users-folders') return plan(io, cfg);   // carries the wall itself
   if (o.cmd === 'proposals') return guarded(io, cfg, planProposals(io, cfg));   // the base wall first (L150 m3), then its own wall for the parent (extras.mjs)
   if (o.cmd === 'watch-app') return guarded(io, cfg, planWatchApp(io, cfg, { raw: o.raw, text: o.text, app: o.app, rulesSha256: o.pin, dry: o.dry }));
   if (o.cmd === 'watch-rules') return guarded(io, cfg, planWatchRules(io, cfg, { source: o.rulesSource, readSource: (p) => io.readRules(p) }));
   if (o.cmd === 'safe-directory') return planSafeDirectory(io, cfg);   // root writes nothing: git runs as the owner
   if (o.cmd === 'managed-settings') return guarded(io, cfg, planManagedSettings(io, cfg, { readSource, ...managed }));
-  if (o.cmd === 'scanner') return guarded(io, cfg, planScanner(io, cfg, { from: o.from }));
+  if (o.cmd === 'scanner') return guarded(io, cfg, planScanner(io, cfg, { from: o.from, ...scannerPin(testScannerSha) }));
   const res = o.cmd === 'install' ? planInstall(io, cfg, { readSource, runUpdater })
     : o.cmd === 'add-to-install' ? planAddToInstall(io, cfg, { pin: o.claudePin, sha256: o.sha256, readSource })
     : o.cmd === 'bob' ? planBob(io, cfg, { from: o.from, commit: o.commit, git: bobGitOf(o.from) })
@@ -183,7 +190,7 @@ export function planCommand(io, cfg, o, { readSource = (p) => io.readSource(p), 
 }
 
 /** Runs one command. `io`, `runUpdater`, `bobGitOf` and `managed` (managed-settings' nodeBin and guard) are ports for tests. → exit code. */
-export function main(argv, { io: given, runUpdater = spawnUpdater, bobGitOf, managed = {}, out = (s) => process.stdout.write(`${s}\n`), err = (s) => process.stderr.write(`${s}\n`) } = {}) {
+export function main(argv, { io: given, runUpdater = spawnUpdater, bobGitOf, managed = {}, testScannerSha, out = (s) => process.stdout.write(`${s}\n`), err = (s) => process.stderr.write(`${s}\n`) } = {}) {
   let o; let cfg;
   try { o = parseArgs(argv); } catch (e) { err(`${e.message}\n${USAGE}`); return 2; }
   const io = given ?? realIo({ prefix: o.prefix });
@@ -269,7 +276,7 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, bobGitOf, man
   if (!o.dry) { const p = rootProblem(io); if (p) { err(`refused: ${p}`); return 2; } }
   // The machine-wide guard blocks every session on the Mac if it breaks: the way out is said first, every run (L1031 guard c).
   if (o.cmd === 'managed-settings') out(WAY_OUT);
-  const planned = planCommand(io, cfg, o, { runUpdater, managed, ...(bobGitOf ? { bobGitOf } : {}) });
+  const planned = planCommand(io, cfg, o, { runUpdater, managed, testScannerSha, ...(bobGitOf ? { bobGitOf } : {}) });
   for (const n of planned.notes ?? []) out(`uses ${n}`);
   for (const w of planned.warnings ?? []) out(`WARNING  ${w}`);
   for (const p of planned.problems) err(`PROBLEM  ${p}`);
@@ -290,7 +297,7 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, bobGitOf, man
   const after = o.cmd === 'users-folders' ? check(io, cfg, { alsoKnown: rootMadeEntries(cfg, { dispatcher: o.dispatcherOn }) }) : o.cmd === 'install' || o.cmd === 'add-to-install' ? checkInstall(io, cfg)
     : o.cmd === 'dispatcher-config' ? checkDispatcherConfig(io, cfg) : o.cmd === 'bob' ? checkBob(io, cfg, { commit: o.commit })
     : o.cmd === 'managed-settings' ? checkManagedSettings(io, cfg)
-    : o.cmd === 'proposals' ? checkProposals(io, cfg) : o.cmd === 'safe-directory' ? checkSafeDirectory(io, cfg) : o.cmd === 'token' ? checkToken(io, cfg) : o.cmd === 'watch-rules' ? checkRulesCopy(io, cfg) : o.cmd === 'scanner' ? checkScannerFiles(io, cfg) : o.cmd === 'watch-app' ? checkWatchAppConfig(io, cfg, o.app, o.pin)
+    : o.cmd === 'proposals' ? checkProposals(io, cfg) : o.cmd === 'safe-directory' ? checkSafeDirectory(io, cfg) : o.cmd === 'token' ? checkToken(io, cfg) : o.cmd === 'watch-rules' ? checkRulesCopy(io, cfg) : o.cmd === 'scanner' ? checkScannerFiles(io, cfg, scannerPin(testScannerSha)) : o.cmd === 'watch-app' ? checkWatchAppConfig(io, cfg, o.app, o.pin)
     : o.sub === 'place' ? checkDaemons(io, cfg, o.jobs).filter((r) => /exactly the built job file$|under another label/.test(r.what)) : o.sub === 'load' ? checkDaemons(io, cfg, o.jobs).filter((r) => /is loaded$|loaded from the job file as it is now$/.test(r.what))
     : o.sub === 'reload-account' ? checkDaemons(io, cfg).filter((r) => /review-account (is loaded|was loaded from the job file as it is now)$/.test(r.what)) : null;
   if (!after) { out('done.'); return 0; }

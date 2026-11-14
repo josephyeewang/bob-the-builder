@@ -7,12 +7,12 @@ import { createHash } from 'node:crypto';
 import { chmodSync, linkSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
-import { ROOT_CONFIG_PATH, parseConfig, scannerDir, scannerPaths } from './layout.mjs';
+import { ROOT_CONFIG_PATH, parseConfig, scannerDir, scannerPaths, scannerSetting } from './layout.mjs';
 import { rootMadeEntries } from './install.mjs';
 import { check } from './users-folders.mjs';
-import { SCANNER_BIN_SHA256, SCANNER_TARBALL_SHA256, SCANNER_VERSION, checkScannerFiles, checkScannerSetup, planScanner } from './scanner-setup.mjs';
-import { main, parseArgs } from './setup.mjs';
-import { DO_PLANE_TOML, RULES_VERSION, checkScanner } from '../modules/M4-workshop/git/gitleaks.mjs';
+import { SCANNER_BIN_SHA256, SCANNER_TARBALL_SHA256, SCANNER_VERSION, checkScannerFiles, checkScannerSetup, planScanner, scannerPins } from './scanner-setup.mjs';
+import { main, parseArgs, planCommand } from './setup.mjs';
+import { DO_PLANE_TOML, RULES_VERSION, SCANNER_BIN_SHA256 as PUSH_PIN, checkScanner } from '../modules/M4-workshop/git/gitleaks.mjs';
 import { fakeMac, macTest as test } from './fake-mac.test-helper.mjs';
 import { tempDir } from '../shared/test-tmp.mjs';
 
@@ -27,11 +27,11 @@ function world({ version } = {}) {
   const mac = fakeMac({ euid: 0 });
   const ext = tempDir('orch-scanner-setup-');
   const from = join(ext, 'gitleaks'); writeFileSync(from, program(version)); chmodSync(from, 0o755);
-  const run = (args, { as = 0 } = {}) => {
+  const run = (args, { as = 0, testScannerSha } = {}) => {
     mac.as = as;
     const f = mac.at(ROOT_CONFIG_PATH); rmSync(f, { force: true }); writeFileSync(f, JSON.stringify(RAW)); chmodSync(f, 0o644);
     const cfgFile = join(ext, 'c.json'); writeFileSync(cfgFile, JSON.stringify(RAW));
-    const s = sink(); const r = main(as === 0 ? args : [...args, '--config', cfgFile], { io: mac, out: s.out, err: s.err });
+    const s = sink(); const r = main(as === 0 ? args : [...args, '--config', cfgFile], { io: mac, out: s.out, err: s.err, testScannerSha });
     return Promise.resolve(r).then((code) => ({ code, text: s.lines.join('\n') }));
   };
   const f = mac.at(ROOT_CONFIG_PATH); writeFileSync(f, JSON.stringify(RAW)); chmodSync(f, 0o644);
@@ -62,7 +62,7 @@ test('L1083 the args: scanner needs --from; --from is for bob and scanner only; 
 test('L1083 scanner: puts the program, the Do-plane config and the empty ignore file in place, root:wheel; again is nothing to do', async () => {
   const w = world();
   const p = applyPlan(w);
-  assert.equal(p.ops.length, 4, p.ops.map((o) => o.text).join('\n'));
+  assert.equal(p.ops.length, 5, p.ops.map((o) => o.text).join('\n'));
   const P = scannerPaths(w.cfg);
   assert.deepEqual(readFileSync(w.mac.at(P.bin)), readFileSync(w.from));
   assert.equal(readFileSync(w.mac.at(P.config), 'utf8'), DO_PLANE_TOML);
@@ -205,4 +205,124 @@ test('L1083 PLANT an access list on a file: check-scanner FAILs it, and scanner 
   assert.equal(again.length, 1); assert.match(again[0], /gitleaks\.toml/);
   applyPlan(w);
   assert.deepEqual(failing(await checkScannerSetup(w.mac, w.cfg, { binSha: w.pin, gate: async () => ({ ok: true }) })), []);
+});
+
+test('L1123 m1 PLANT a file or the folder owned by another uid, even in group wheel, is refused (check FAILs, scanner writes the file again or stops)', async () => {
+  const P = scannerPaths(parseConfig(RAW));
+  const w = world(); applyPlan(w);
+  const other = w.mac.rootUid + 1;
+  w.mac.owners.set(P.bin, { uid: other, gid: 0 });
+  const rows = await checkScannerSetup(w.mac, w.cfg, { binSha: w.pin, gate: async () => ({ ok: true }) });
+  assert.match(failing(rows).map((r) => r.why).join('\n'), new RegExp(`is not root:wheel's \\(it is ${other}:0\\)`));
+  assert.match(planScanner(w.mac, w.cfg, { from: w.from, binSha: w.pin }).ops.map((o) => o.text).join(), /scanner\/gitleaks /);
+  const v = world(); applyPlan(v);
+  writeFileSync(join(v.mac.at(scannerDir(v.cfg)), 'x'), '');   // not empty, so not taken as a cut-off run's own
+  v.mac.owners.set(scannerDir(v.cfg), { uid: other, gid: 0 });
+  assert.match(planScanner(v.mac, v.cfg, { from: v.from, binSha: v.pin }).problems[0], new RegExp(`is not root:wheel's \\(it is ${other}:0\\); move it away`));
+  assert.match(failing(checkScannerFiles(v.mac, v.cfg, { binSha: v.pin }))[0].why, new RegExp(`is not root:wheel's \\(it is ${other}:0\\)`));
+});
+
+test('L1123 m2 PLANT an access list on the scanner folder itself: scanner refuses (never clears it), check-scanner FAILs', async () => {
+  const w = world(); applyPlan(w);
+  const r = spawnSync('/bin/chmod', ['+a', 'everyone allow add_file', w.mac.at(scannerDir(w.cfg))], { encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  const plan = planScanner(w.mac, w.cfg, { from: w.from, binSha: w.pin });
+  assert.deepEqual(plan.ops, []);
+  assert.match(plan.problems[0], /scanner has an access list \(ACL\).*; nothing was changed/);
+  const rows = await checkScannerSetup(w.mac, w.cfg, { binSha: w.pin, gate: async () => ({ ok: true }) });
+  assert.match(failing(rows).map((x) => `${x.what} — ${x.why}`).join('\n'), /and its files have no access list \(ACL\) — .*scanner has an access list/);
+  assert.equal(rows.at(-1).ok, false);
+});
+
+test('L1123 m3 PLANT an answer that is not a yes is a FAIL: a gate giving {}, nothing or a throw; an access-list reader that errors', async () => {
+  const w = world(); applyPlan(w);
+  for (const [name, gate] of [['{}', async () => ({})], ['undefined', async () => undefined], ['throws', async () => { throw new Error('gate boom'); }], ['ok "true"', async () => ({ ok: 'true' })]]) {
+    const rows = await checkScannerSetup(w.mac, w.cfg, { binSha: w.pin, gate });
+    assert.equal(rows.at(-1).ok, false, name);
+    assert.equal(typeof rows.at(-1).why, 'string', name);
+  }
+  assert.match((await checkScannerSetup(w.mac, w.cfg, { binSha: w.pin, gate: async () => { throw new Error('gate boom'); } })).at(-1).why, /gate boom/);
+  for (const [name, acl] of [['says it could not read', () => 'the access lists (ACL) of x could not be read: ls failed'], ['throws', () => { throw new Error('ls boom'); }]]) {
+    const rows = await checkScannerSetup(w.mac, w.cfg, { binSha: w.pin, acl, gate: async () => ({ ok: true }) });
+    const row = rows.find((r) => /no access list/.test(r.what));
+    assert.equal(row.ok, false, name); assert.match(row.why, /could not be read/, name);
+    assert.equal(rows.at(-1).ok, false, `${name}: the program is not run`);
+    const plan = planScanner(w.mac, w.cfg, { from: w.from, binSha: w.pin, acl });
+    assert.deepEqual(plan.ops, [], name); assert.match(plan.problems[0], /could not be read.*nothing was changed/, name);
+  }
+});
+
+test('L1123 m4 PLANT a run cut off after making the folder: the empty folder of root\'s is secured again, not left for Joe', async () => {
+  const w = world();
+  const p = planScanner(w.mac, w.cfg, { from: w.from, binSha: w.pin });
+  p.ops[0].run();   // made, then the run is killed before it is secured
+  const dir = scannerDir(w.cfg);
+  w.mac.owners.set(dir, { uid: w.mac.rootUid, gid: 20 });
+  const again = planScanner(w.mac, w.cfg, { from: w.from, binSha: w.pin });
+  assert.deepEqual(again.problems, []);
+  assert.match(again.ops[0].text, /set .*scanner to root:wheel 0755/);
+  for (const o of again.ops) o.run();
+  const st = w.mac.lstat(dir);
+  assert.equal(st.mode & 0o7777, 0o755); assert.equal(st.gid, 0);
+  assert.deepEqual(failing(await checkScannerSetup(w.mac, w.cfg, { binSha: w.pin })), []);
+});
+
+test('L1123 m4 PLANT the folder\'s mode is exactly 0755: 0750 or 0775 FAILs and is refused', async () => {
+  for (const mode of [0o750, 0o775, 0o1755]) {
+    const w = world(); applyPlan(w);
+    chmodSync(w.mac.at(scannerDir(w.cfg)), mode);
+    const m = mode.toString(8);
+    assert.match(failing(checkScannerFiles(w.mac, w.cfg, { binSha: w.pin }))[0].why, new RegExp(`has mode ${m}, want 755`), m);
+    assert.match(planScanner(w.mac, w.cfg, { from: w.from, binSha: w.pin }).problems[0] ?? '', new RegExp(`has mode ${m}, want 755`), m);
+  }
+});
+
+test('L1123 m4 PLANT the base wall: a folder above the base writable by others stops scanner at the plan, and at the run', async () => {
+  const w = world();
+  const lib = w.mac.at('/Library');
+  // Changed between the plan and the run: the first step (the wall) stops it before anything is made.
+  const plan = planCommand(w.mac, w.cfg, { cmd: 'scanner', from: w.from }, { testScannerSha: w.pin });
+  assert.match(plan.ops[0].text, /check that every folder above \/Library\/orch-test is root's alone/, 'the wall is the first step');
+  chmodSync(lib, 0o777);
+  assert.throws(() => { for (const o of plan.ops) o.run(); }, /folders above \/Library\/orch-test are not safe for root/);
+  assert.throws(() => w.mac.lstat(scannerDir(w.cfg)), /ENOENT/, 'nothing was made');
+  // Already so at the plan: the wall gives no steps at all, and a whole run is refused before any step.
+  const again = planCommand(w.mac, w.cfg, { cmd: 'scanner', from: w.from }, { testScannerSha: w.pin });
+  assert.deepEqual(again.ops, []);
+  assert.match(again.problems.join('\n'), /the folders above \/Library\/orch-test are not safe for root.*Nothing was changed/);
+  const r = await w.run(['scanner', '--from', w.from], { testScannerSha: w.pin });
+  assert.notEqual(r.code, 0, r.text);
+  assert.match(r.text, /\/Library can be written by others than root/);
+  assert.doesNotMatch(r.text, /run: /);
+  chmodSync(lib, 0o755);
+});
+
+test('L1123 m4 PLANT a whole scanner run through main ends with its after-run check, which reads the files it wrote', async () => {
+  const w = world();
+  const ok = await w.run(['scanner', '--from', w.from], { testScannerSha: w.pin });
+  assert.equal(ok.code, 0, ok.text);
+  assert.match(ok.text, /run: make \/Library\/orch-test\/scanner\nrun: set \/Library\/orch-test\/scanner to root:wheel 0755\n/);
+  assert.match(ok.text, /done: all 5 items PASS\.$/, 'the after-run check ran (it reports 5 items), not a bare "done."');
+  // The after-run check reads what the run wrote: a file spoiled after it is a FAIL on the next run's check, not a pass.
+  writeFileSync(w.mac.at(scannerPaths(w.cfg).config), 'spoiled\n');
+  assert.equal(failing(checkScannerFiles(w.mac, w.cfg, { binSha: w.pin })).length, 1);
+  assert.throws(() => planCommand(w.mac, w.cfg, { cmd: 'scanner', from: w.from }, { testScannerSha: 'x'.repeat(64), ...(delete process.env.NODE_TEST_CONTEXT, {}) }), /for tests only/);
+});
+
+test('L1123 m5 the push step\'s pin is setup\'s: one home (gitleaks.mjs), and the gate gets it with root as the owner', async () => {
+  assert.equal(SCANNER_BIN_SHA256, PUSH_PIN);
+  const w = world(); applyPlan(w);
+  let pin;
+  await checkScannerSetup(w.mac, w.cfg, { binSha: w.pin, gate: async (s, p) => { pin = p; return { ok: true }; } });
+  assert.deepEqual(pin, { sha: w.pin, uid: w.mac.rootUid });
+  assert.deepEqual({ ...scannerSetting(w.cfg) }, { ...scannerPaths(w.cfg), version: RULES_VERSION });
+});
+
+test('L1123 m6 the README carries the code\'s pins word for word, and no other gitleaks version', () => {
+  const readme = readFileSync(new URL('./README.md', import.meta.url), 'utf8');
+  const pins = scannerPins();
+  for (const [k, v] of Object.entries(pins)) assert.ok(readme.includes(v), `README is missing ${k} ${v}`);
+  const versions = new Set([...readme.matchAll(/gitleaks[ _](\d+\.\d+\.\d+)/g)].map((m) => m[1]));
+  assert.deepEqual([...versions], [pins.version]);
+  for (const h of readme.matchAll(/`([0-9a-f]{12})…`/g)) assert.ok([pins.tarball_sha256, pins.program_sha256].some((x) => x.startsWith(h[1])), `a short hash ${h[1]} that is no pin`);
 });
