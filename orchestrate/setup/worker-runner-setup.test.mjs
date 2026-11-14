@@ -3,8 +3,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseInstallConfig } from './install.mjs';
-import { jobsFor, onlyJobs, OPTIONAL_JOBS } from './daemons.mjs';
-import { WORKER_CLAIM_MS, WORKER_RUNNER_CONFIG, WORKER_RUNNER_JOB, parseWorkerRunner, workerRunnerConfigFor, workerRunnerConfigText, workerRunnerJobPlist, workerRunnerLoadProblem } from './worker-runner-setup.mjs';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { jobsFor, onlyJobs, OPTIONAL_JOBS, planLoad, planPlace, runRows, startChecks } from './daemons.mjs';
+import { WORKER_CLAIM_MS, WORKER_RUNNER_CONFIG, WORKER_RUNNER_JOB, parseWorkerRunner, planWorkerRunnerConfig, workerRunnerConfigFor, workerRunnerConfigText, workerRunnerJobPlist, workerRunnerLoadCheck, workerRunnerLoadProblem } from './worker-runner-setup.mjs';
+import { fakeMac, macTest } from './fake-mac.test-helper.mjs';
 import { updaterConfigFor } from './install.mjs';
 import { checkRunnerConfig } from '../wiring/runner-main.mjs';
 import { NODE } from '../modules/M4-workshop/launcher/install-check.mjs';
@@ -149,4 +152,110 @@ test('worker-config: the copy\'s updater keeps worker-runner.json once the entry
   assert.ok(updaterConfigFor(io, cfgOn()).keep.includes(WORKER_RUNNER_CONFIG));
   assert.ok(!updaterConfigFor(io, parseInstallConfig(RAW)).keep.includes(WORKER_RUNNER_CONFIG));
   assert.throws(() => parseInstallConfig({ ...RAW, extras: ['/Users/sam/x/worker-runner.json'] }), /extras must be full paths/);
+});
+
+// ── #537 r1 (L1187) ──────────────────────────────────────────────────────────────────────────────────────────────────
+// A Mac with no copy (the install check fails for every job, as it should) and one file of the copy: enough for the gate.
+const NO_COPY = '/nonexistent-orch-537';
+const gateIo = (files, { euid = 0, deny = null } = {}) => ({
+  rootUid: 0, prefix: NO_COPY, at: (p) => `${NO_COPY}${p}`, euid: () => euid, list: () => [],
+  lstat(f) { if (deny) throw Object.assign(new Error(deny), { code: deny }); if (!Object.hasOwn(files, f)) throw Object.assign(new Error('no'), { code: 'ENOENT' }); return { isFile: () => true, isSymbolicLink: () => false, uid: 0, mode: 0o100644 }; },
+  readText(f) { if (!Object.hasOwn(files, f)) throw Object.assign(new Error('no'), { code: 'ENOENT' }); return files[f]; },
+  run: () => ({ status: 113, stdout: '', stderr: '' }),
+});
+const WF = `${R}/${WORKER_RUNNER_CONFIG}`;
+
+test('#537 r1 m1: worker-config writes only into a copy that is there, keeps the file, and is root\'s alone', () => {
+  const cfg = cfgOn(); const built = () => ({ config: GOOD, problems: [] });
+  const plan = (o = {}, files = {}) => planWorkerRunnerConfig(ioOf(files), cfg, { built, keepsOf: () => true, copyProblem: () => null, ...o });
+  const ok = plan(); assert.deepEqual(ok.problems, []); assert.equal(ok.ops.length, 1);
+  assert.ok(ok.ops[0].text.startsWith(`write ${WF} `), ok.ops[0].text); assert.match(ok.ops[0].text, /root:wheel 0644; the runner reads it once, at start/);
+  assert.deepEqual(plan({}, { [WF]: workerRunnerConfigText(GOOD) }).ops, [], 'twice does nothing');
+  for (const [o, why] of [[{ keepsOf: () => null }, /the install is not there yet \(run the install first\)/], [{ keepsOf: () => false }, /the installed copy's updater does not keep worker-runner\.json/],
+    [{ keepsOf: () => 'updater.json is not readable' }, /the installed copy's updater does not keep worker-runner\.json/],
+    [{ copyProblem: () => 'x is uid 501\'s' }, /the installed copy is not root's alone \(x is uid 501's\), so root won't write in it/]]) {
+    const p = plan(o); assert.deepEqual(p.ops, [], String(why)); assert.match(p.problems.join('\n'), why);
+  }
+  assert.deepEqual(plan({ copyProblem: () => false }).problems, [], 'no reason is no problem');
+  assert.deepEqual(plan({ built: () => ({ config: null, problems: ['no review.json'] }) }), { ops: [], problems: ['no review.json'] });
+});
+
+test('#537 r1 m2: place and load refuse the worker runner while the copy\'s worker-runner.json is missing or not one setup writes', () => {
+  const cfg = cfgOn();
+  for (const [files, why] of [[{}, /worker-runner\.json is not there \(run worker-config first\), so the worker runner's job would not start/],
+    [{ [WF]: '{' }, /worker-runner\.json is not valid JSON, so the worker runner's job would not start/],
+    [{ [WF]: workerRunnerConfigText({ ...GOOD, products: {} }) }, /worker-runner\.json is one the runner refuses/]]) {
+    for (const plan of [planPlace, planLoad]) {
+      const p = plan(gateIo(files), cfg, [WORKER_RUNNER_JOB]);
+      assert.deepEqual(p.ops, [], plan.name); assert.match(p.problems.join('\n'), why, plan.name);
+    }
+  }
+});
+
+test('#537 r1 m3: a uid of 0 is no user, and orchestrate, review, the owner and builder each have their own uid', () => {
+  for (const n of ['orchestrate', 'review', 'builder', 'sam']) {
+    const r = workerRunnerConfigFor(ioOf(FILES()), cfgOn(), { userOf: (x) => (x === n ? { exists: true, uid: 0, home: '/var/root' } : userOf(x)) });
+    assert.equal(r.config, null, n); assert.match(r.problems.join('; '), new RegExp(`the Mac user ${n} \\(.*\\) does not exist`), n);
+  }
+  for (const [n, uid] of [['builder', 401], ['builder', 402], ['builder', 501], ['review', 401]]) {
+    const r = workerRunnerConfigFor(ioOf(FILES()), cfgOn(), { userOf: (x) => (x === n ? { ...userOf(x), uid } : userOf(x)) });
+    assert.equal(r.config, null, `${n} ${uid}`); assert.match(r.problems.join('; '), /orchestrate, review, sam and builder must each have their own uid/);
+  }
+});
+
+test('#537 r1 m4: the worker runner is a loop: loaded and alive passes at any age; no process FAILs; other jobs keep their limit', () => {
+  const cfg = cfgOn();
+  const ps = (s) => ({ run: () => ({ status: s ? 0 : 1, stdout: s ? `${s}\n` : '', stderr: '' }) });
+  for (const etime of ['00:01', '31:00', '05:00:00', '3-00:00:00']) {
+    for (const lastExit of ['(never exited)', '0', '1']) {
+      const rows = runRows(ps(etime), cfg, WORKER_RUNNER_JOB, { loaded: true, pid: 42, lastExit });
+      assert.equal(rows.length, 1); assert.equal(rows[0].ok, true, `${etime} ${lastExit}: ${JSON.stringify(rows)}`); assert.match(rows[0].what, /is running \(a loop that does not end/);
+    }
+  }
+  const dead = runRows(ps(''), cfg, WORKER_RUNNER_JOB, { loaded: true, pid: null, lastExit: '1' });
+  assert.equal(dead[0].ok, false); assert.match(dead[0].why, /no running process \(last exit code 1\); launchd starts it again within a minute/);
+  const other = runRows(ps('31:00'), cfg, 'review-runner', { loaded: true, pid: 42, lastExit: '(never exited)' });
+  assert.match(other.filter((r) => !r.ok).map((r) => r.why).join(), /first run has been going for 31 minutes/);
+});
+
+test('#537 r1 m5: a review.json with no budget is refused at worker-config, since every start would be held', () => {
+  const r = workerRunnerConfigFor(ioOf(FILES({ ...RC, budget: undefined })), cfgOn(), { userOf });
+  assert.equal(r.config, null); assert.match(r.problems.join('; '), /review\.json names no budget \(launch check 12's module\), so every start would be held: .*run review-config and add-to-install first/);
+});
+
+macTest('#537 r1 m6: worker-config reads review.json and products.json by their plain paths on the Mac (io.readText adds the prefix itself)', () => {
+  const mac = fakeMac();
+  const rc = { ...RC, installRoot: mac.at(R), recordRoot: mac.at(`${BASE}/products/alpha/store`), budget: mac.at(RC.budget) };
+  for (const [f, t] of Object.entries(FILES(rc))) { mkdirSync(dirname(mac.at(f)), { recursive: true }); writeFileSync(mac.at(f), t); }
+  const r = workerRunnerConfigFor(mac, cfgOn(), { userOf });
+  assert.deepEqual(r.problems, []);
+  assert.equal(r.config.installRoot, mac.at(R), 'what is written into the config is the real place');
+  assert.equal(r.config.products.alpha.repo, 'example-org/alpha-repo');
+});
+
+test('#537 r1 m7: without root, a read refused is not known (L1043): never a reason to unload; as root, it is a refusal', () => {
+  const cfg = cfgOn();
+  for (const code of ['EACCES', 'EPERM']) {
+    const c = workerRunnerLoadCheck(gateIo({}, { euid: 501, deny: code }), cfg);
+    assert.equal(c.unknown, true); assert.match(c.why, new RegExp(`can't be checked without root \\(it can't be looked at, ${code}; run with sudo to check it\\), so whether the worker runner's job would start is not known`));
+    const g = startChecks(gateIo({}, { euid: 501, deny: code }), cfg, [WORKER_RUNNER_JOB]);
+    assert.ok(g.problems.includes(c.why)); assert.ok(!g.known.includes(c.why), 'not known: place does not say to unload for it');
+    const asRoot = workerRunnerLoadCheck(gateIo({}, { euid: 0, deny: code }), cfg);
+    assert.equal(asRoot.unknown, false); assert.match(asRoot.why, new RegExp(`can't be looked at \\(${code}\\), so the worker runner's job would not start`));
+    assert.ok(startChecks(gateIo({}, { euid: 0, deny: code }), cfg, [WORKER_RUNNER_JOB]).known.includes(asRoot.why), 'as root it is known');
+  }
+  // A source the config is built from refused (products.json is root's): not known without root, a refusal as root.
+  const good = { [WF]: workerRunnerConfigText(GOOD) };
+  const denied = () => ({ config: null, problems: ['products.json can\'t be used (EACCES)'], denied: true });
+  const u = workerRunnerLoadCheck(gateIo(good, { euid: 501 }), cfg, { built: denied });
+  assert.equal(u.unknown, true); assert.match(u.why, /a file the config is built from can't be read: products\.json can't be used \(EACCES\)/);
+  const k = workerRunnerLoadCheck(gateIo(good, { euid: 0 }), cfg, { built: denied });
+  assert.equal(k.unknown, false); assert.match(k.why, /can't be compared with the config setup builds/);
+  assert.equal(workerRunnerLoadCheck(gateIo(good, { euid: 501 }), cfg, { built: () => ({ config: null, problems: ['x'], denied: false }) }).unknown, false, 'a missing file is known');
+  // workerRunnerConfigFor says which reads were refused.
+  const files = FILES();
+  const refuse = (which) => ({ ...ioOf(files), readText(f) { if (f === which) throw Object.assign(new Error('no'), { code: 'EACCES' }); return files[f]; } });
+  assert.equal(workerRunnerConfigFor(refuse(DISP.productsFile), cfgOn(), { userOf }).denied, true);
+  assert.equal(workerRunnerConfigFor(refuse(`${R}/review.json`), cfgOn(), { userOf }).denied, true);
+  assert.equal(workerRunnerConfigFor(ioOf({ [`${R}/review.json`]: JSON.stringify(RC) }), cfgOn(), { userOf }).denied, false, 'ENOENT is known');
 });

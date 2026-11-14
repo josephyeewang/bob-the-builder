@@ -321,7 +321,7 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, bobGitOf, man
     err(/run: daemons load/i.test(e.message) ? `stopped: ${why}.` : `stopped: ${why}. Run it again after fixing that; it picks up where it stopped.`); return 1; }
   const after = o.cmd === 'users-folders' ? check(io, cfg, { alsoKnown: rootMadeEntries(cfg, { dispatcher: o.dispatcherOn }) }) : o.cmd === 'install' || o.cmd === 'add-to-install' ? checkInstall(io, cfg)
     : o.cmd === 'dispatcher-config' ? checkDispatcherAndSensors(io, cfg)
-    : o.cmd === 'worker-config' ? [{ ok: workerRunnerLoadProblem(io, cfg) === null, what: 'the copy\'s worker-runner.json is the config this setup writes, and the runner takes it', why: workerRunnerLoadProblem(io, cfg) ?? '' }]
+    : o.cmd === 'worker-config' ? ((why) => [{ ok: why === null, what: 'the copy\'s worker-runner.json is the config this setup writes, and the runner takes it', why: why ?? '' }])(workerRunnerLoadProblem(io, cfg))
     : o.cmd === 'bob' ? checkBob(io, cfg, { commit: o.commit })
     : o.cmd === 'managed-settings' ? checkManagedSettings(io, cfg)
     : o.cmd === 'proposals' ? checkProposals(io, cfg) : o.cmd === 'safe-directory' ? checkSafeDirectory(io, cfg) : o.cmd === 'token' ? checkToken(io, cfg) : o.cmd === 'watch-rules' ? checkRulesCopy(io, cfg) : o.cmd === 'scanner' ? checkScannerFiles(io, cfg, scannerPin(testScannerSha)) : o.cmd === 'watch-app' ? checkWatchAppConfig(io, cfg, o.app, o.pin)

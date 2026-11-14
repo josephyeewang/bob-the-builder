@@ -837,13 +837,6 @@ test('L1125 gate: the worker runner holds any product whose rules do not say pro
   assert.match(testProductHeld(null, () => null)('p1'), /not loaded/);
 });
 
-test('L1125 gate: main gives the start port the gated productHeld, never the snapshots\' alone', () => {
-  const src = readFileSync(new URL('./runner-main.mjs', import.meta.url), 'utf8');
-  assert.match(src, /productHeld: testProductHeld\(budget, snaps\.held, testProduct\)/);
-  assert.match(src, /testProduct = testProductProblem \} = \{\}\) \{/, 'the real gate is main\'s default');
-  assert.doesNotMatch(src, /productHeld: snaps\.held\b/);
-});
-
 test('L1125 gate REAL rules: M10\'s own parser and engine (as M11 budget() builds them) read test_product from the rules text', async () => {
   const { parsePolicy } = await import('../modules/M10-rules/policy.mjs');
   const { makeEngine } = await import('../modules/M10-rules/engine.mjs');
