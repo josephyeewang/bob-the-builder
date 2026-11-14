@@ -116,9 +116,7 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
     const reach = (f) => { for (let d = dirname(f); d !== '/'; d = dirname(d)) if (!can(d, false, true)) return false; return true; };
     if (prog === '/bin/test' && rest[0] === '-w') return { status: reach(rest[1]) && can(rest[1], true) ? 0 : 1, stdout: '', stderr: '' };
     if (prog === '/bin/test' && rest[0] === '-r') return { status: reach(rest[1]) && can(rest[1], false) ? 0 : 1, stdout: '', stderr: '' };
-    // `test -O`: is it this user's own (its link followed, as macOS's test does; the owners table stands in for the owner).
-    // A link's own owner is never asked here (#528 r5 M-1): the proofs ask root for that, without following it.
-    if (prog === '/bin/test' && rest[0] === '-O') { let r; try { r = realpathSync(at(rest[1])); } catch { return { status: 1, stdout: '', stderr: '' }; } const lp = r === prefix ? '/' : r.slice(prefix.length); return { status: reach(rest[1]) && (mac.owners.get(lp)?.uid ?? -1) === uid ? 0 : 1, stdout: '', stderr: '' }; }
+    // No `test -O` (#528 r6 M-A, M-B): who owns a place is root's own look in the proofs, never a test run as the user.
     if (prog === '/bin/test' && rest[0] === '-x') return { status: reach(rest[1]) && can(rest[1], false, true) ? 0 : 1, stdout: '', stderr: '' };
     // `head -c 1 <file>` (the proofs' read, L1079) is a read as `cat` is: the folder walk, then the file's read bits; a folder it can read answers "Error reading", as macOS's head does.
     if (prog === '/usr/bin/head' && rest[0] === '-c' && rest[1] === '1') {

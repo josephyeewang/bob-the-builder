@@ -28,6 +28,11 @@
 // name's way and the real one's, which the builder must neither write nor own, so it can't swap a place mid-run.
 // The way is every place met, one link at a time (#528 r5 M-2): a middle link's folder counts. In a shared (sticky) folder
 // root itself looks at who owns the name there, its link not followed (#528 r5 M-1): `test -O` would follow it.
+// Who owns a place is always root's look, never `test -O` (#528 r6 M-A, M-B, L1168): every place on the way, every folder
+// above, and the real place itself; the builder owning one is a FAIL (it could chmod a secret it owns, mode 000 or not, and
+// `test -O` answers a silent no for a place the builder owns but can't reach). Root checks it is still the very thing the
+// list saw (its inode, m-1), with one name only, and reads its access list: an entry for the builder or a group it is in
+// that lets it write, delete, rename or change who may is a FAIL too (m-2).
 // And the builder's groups are an allowed list: its own group and the groups macOS gives every local user, nothing else
 // (so no later membership, staff above all, quietly opens the owner's home, which macOS makes 0750 to staff). A group
 // list that can't be read is a FAIL, never an empty list.
@@ -38,7 +43,7 @@ import { runnerPlaces } from '../shared/product-paths.mjs';
 import { BUILDER, BUILDER_SHELL, FLAT_OUTBOX_ROLES, PRODUCT_OUTBOX_ROLES, USERS, WORKER_RUNNER_CONFIG, baseMarkerPath, proposalRows, homeOf, outboxRootPath, workerCopiesPath } from './layout.mjs';
 import { RUNNER_CONFIG } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { installPaths } from './install.mjs';
-import { readUser } from './users-folders.mjs';
+import { aclEntries, readUser } from './users-folders.mjs';
 
 const SUDO = '/usr/bin/sudo';
 const TEST = '/bin/test';
@@ -87,7 +92,7 @@ export function proofInputs(io, cfg) {
 /** The proofs: [{ what, args, expect: 'ok' | 'fail', control?, notTried? }]. `args` are what follows `sudo -n -H -u builder`.
  *  A "cannot write" proof shows the state now; that the builder cannot gain write (own it and chmod it) is check's job:
  *  it wants each folder owned by root, orchestrate or review (never the builder), with the exact mode and access list. */
-export function proofList(cfg, { ownerHome = null, rules = { files: [], why: 'not read' }, kindOf = () => null, walkOf = () => ({ error: 'not walked' }), stickyOf = () => false } = {}) {
+export function proofList(cfg, { ownerHome = null, rules = { files: [], why: 'not read' }, kindOf = () => null, walkOf = () => ({ error: 'not walked' }), stickyOf = () => false, identOf = () => null } = {}) {
   const p = (...s) => join(cfg.base, ...s);
   const B = BUILDER;
   const places = cfg.products.map((prod) => [prod, runnerPlaces({ copiesRoot: workerCopiesPath(cfg), outboxRoot: outboxRootPath(cfg), product: prod })]);
@@ -103,14 +108,22 @@ export function proofList(cfg, { ownerHome = null, rules = { files: [], why: 'no
   // The name in a shared folder is judged by root, as it is (#528 r5 M-1): `test -O` follows a link, so a link the
   // builder owns there, leading to a folder it doesn't, would read "does not own"; the link's owner can re-point it.
   // Every place on the way is taken (#528 r5 M-2, c-1): each folder met, a middle link's among them, as root found
-  // them one link at a time (`steps`), never the name as written (`..` and links in it are followed first).
+  // them one link at a time (`steps`), never the name as written: a `..` that comes after a link goes up from where the
+  // link leads, not from the folder the link sits in, as the Mac goes.
+  // Who owns each of them, and the place itself, is root's own look (#528 r6 M-A, M-B): `ident` is what root saw when the
+  // list was made (m-1), checked again just before.
+  const owner = (x) => {
+    const d = dirname(x); const shared = x !== '/' && stickyOf(d);
+    return { what: `${B} does not own ${x} (root looks, a link not followed, at its owner and its access list${shared ? `; in the shared folder ${d}, the owner of a name can move it, or re-point it if it is a link` : ''})`, ownerOf: x, ident: identOf(x), expect: 'fail', above: true };
+  };
   const above = (q) => {
     const out = [];
-    for (let c = q, d = dirname(q); c !== '/'; c = d, d = dirname(d)) {
-      out.push({ what: `${B} does not own ${d} (a folder above a place it must not reach)`, args: [TEST, '-O', d], expect: 'fail', above: true });
-      out.push(stickyOf(d)
-        ? { what: `${B} does not own the name ${c} itself (in the shared folder ${d}, the owner of a name can move it, or re-point it if it is a link; root looks without following it)`, ownerOf: c, expect: 'fail', above: true }
-        : { what: `${B} cannot write ${d} (a folder above a place it must not reach)`, args: [TEST, '-w', d], expect: 'fail', above: true });
+    for (let c = q; ; c = dirname(c)) {
+      out.push(owner(c));
+      if (c === '/') break;
+      // In a shared (sticky) folder everyone may write; there the owner look on the name is the proof.
+      const d = dirname(c);
+      if (!stickyOf(d)) out.push({ what: `${B} cannot write ${d} (a folder above a place it must not reach)`, args: [TEST, '-w', d], expect: 'fail', above: true });
     }
     return out;
   };
@@ -208,13 +221,35 @@ export function groupsProblem(r) {
 export function runProofs(io, cfg) {
   const inputs = proofInputs(io, cfg);
   const kindOf = kindOn(io); const walkOf = walkOn(io);
-  const out = proveList(io, proofList(cfg, { ...inputs, kindOf, walkOf, stickyOf: stickyOn(io) }), kindOf, walkOf);
+  const out = proveList(io, proofList(cfg, { ...inputs, kindOf, walkOf, stickyOf: stickyOn(io), identOf: identOn(io) }), kindOf, walkOf);
   // Its shell is zsh (#487 r5 m1): the production guard's message shapes are safe as zsh reads them, not as bash 3.2 does.
   const u = readUser(io, BUILDER);
   out.push({ ok: u.exists && u.shell === BUILDER_SHELL, what: `${BUILDER}'s shell is ${BUILDER_SHELL} (its sessions' Bash tool runs it)`, ...(u.exists && u.shell === BUILDER_SHELL ? {} : { why: u.exists ? `its shell is ${u.shell || 'unset'}` : `${BUILDER} is not a user on this Mac` }) });
   const g = groupsProblem(io.run(ID, ['-Gn', BUILDER]));
   out.push({ ok: g === null, what: `${BUILDER}'s groups are its own and the ones macOS gives every local user (${BUILDER_GROUPS_ALLOWED.join(', ')})`, ...(g ? { why: g } : {}) });
   return out;
+}
+
+/** What an access-list entry may grant that lets its holder change a place, or swap it: write into it, remove it or
+ *  what is in it, change its attributes, or change who may (macOS's own words, as `ls -le` shows them). */
+export const ACL_CHANGE = Object.freeze(['write', 'append', 'add_file', 'add_subdirectory', 'delete', 'delete_child', 'writeattr', 'writeextattr', 'writesecurity', 'chown']);
+/**
+ * Null, why an access list on `p` lets the builder change it (#528 r6 m-2), or { notTried } when root could not read the
+ * list. Root reads it with `ls -led`, which looks at a link itself, never through it. An allow entry for the builder, its
+ * own group, or a group macOS gives every local user (its only others: groupsProblem) that grants any of ACL_CHANGE.
+ */
+export function builderAclWhy(io, p) {
+  let a; try { a = aclEntries(io, p); } catch (e) { return { notTried: `root could not read its access list (${String(e?.message ?? e).slice(0, 80)})` }; }
+  if (a.error) return { notTried: `root ${a.error}` };
+  const who = new Set([`user:${BUILDER}`, `group:${BUILDER}`, ...BUILDER_GROUPS_ALLOWED.map((g) => `group:${g}`)]);
+  for (const e of a.entries) {
+    if (e.startsWith('unreadable entry')) return { notTried: `root could not read an access-list entry (${e.slice(18, 80)})` };
+    const m = /^(\S+)(?: inherited)? (allow|deny) (\S+)$/.exec(e);
+    if (!m || m[2] !== 'allow' || !who.has(m[1])) continue;
+    const bad = m[3].split(',').filter((x) => ACL_CHANGE.includes(x));
+    if (bad.length) return `an access-list entry lets ${BUILDER} change it (${m[1]} allow ${bad.join(',')}), and must not`;
+  }
+  return null;
 }
 
 /** Null, or why a place is no longer what the list was made from (#528 r3 m1): its kind or its real place changed. */
@@ -237,13 +272,19 @@ export function proveList(io, list, kindOf = kindOn(io), walkOf = walkOn(io), { 
     if (pr.notTried) { out.push({ ok: false, notTried: true, what: pr.what, why: pr.notTried }); continue; }
     if (pr.bad) { out.push({ ok: false, what: pr.what, why: pr.bad }); continue; }
     if (!controlsHold) { out.push({ ok: false, what: pr.what, why: 'not proven: a control above failed' }); continue; }   // one way of asking is already broken
-    // A name's owner, as root sees it, its link not followed (#528 r5 M-1).
+    // A place's owner and access list, as root sees them, its link not followed (#528 r5 M-1, r6 M-A, M-B, m-1, m-2).
     if (pr.ownerOf) {
+      const no = (why) => out.push({ ok: false, notTried: true, what: pr.what, why: `${why}: nothing was proven` });
       const b = uidNow();
-      if (b === null) { out.push({ ok: false, notTried: true, what: pr.what, why: `${BUILDER}'s id could not be read: nothing was proven` }); continue; }
-      let st; try { st = io.lstat(pr.ownerOf); } catch (e) { out.push({ ok: false, notTried: true, what: pr.what, why: `root could not look at it now (${e?.code ?? 'unknown'}): nothing was proven` }); continue; }
-      const mine = Number(st.uid) === b;
-      out.push({ ok: !mine, what: pr.what, ...(mine ? { why: `${BUILDER} owns it${st.isSymbolicLink?.() ? ' (a link it can re-point)' : ''}, and must not` } : {}) });
+      if (b === null) { no(`${BUILDER}'s id could not be read`); continue; }
+      if (!pr.ident || pr.ident.ino === undefined) { no('root could not look at it when the list was made'); continue; }
+      let st; try { st = io.lstat(pr.ownerOf); } catch (e) { no(`root could not look at it now (${e?.code ?? 'unknown'})`); continue; }
+      if (st.ino !== pr.ident.ino || st.dev !== pr.ident.dev) { no('it is not the very thing root saw when the list was made (it was replaced)'); continue; }
+      if (!st.isDirectory() && Number(st.nlink ?? 1) > 1) { no(`it has another name (${st.nlink} in all), which may sit where ${BUILDER} can go`); continue; }
+      if (Number(st.uid) === b) { out.push({ ok: false, what: pr.what, why: `${BUILDER} owns it${st.isSymbolicLink?.() ? ' (a link it can re-point)' : ''}, and must not: it can give itself any access` }); continue; }
+      const acl = builderAclWhy(io, pr.ownerOf);
+      if (acl?.notTried) { no(acl.notTried); continue; }
+      out.push({ ok: !acl, what: pr.what, ...(acl ? { why: acl } : {}) });
       continue;
     }
     if (pr.look) {
@@ -303,7 +344,8 @@ export const kindOn = (io) => (f) => {
 /**
  * The way to `f`, one name at a time, as the Mac goes (#528 r5 M-2): → { real, steps }. `steps`: every place met, real
  * (each in a folder already followed), a link's own place among them, in order. A link is read (readlink) and what it
- * says is followed in turn, so a link in the middle of a chain is met, and so is the folder that holds it. Throws as
+ * says is followed in turn, so a link in the middle of a chain is met, and so is the folder that holds it. A `..` after a
+ * link goes up from where the link leads, not from the link's own folder (#528 r6 cosmetic). Throws as
  * the Mac would: ENOENT, ENOTDIR, ELOOP (more than MAX_HOPS links).
  */
 export const MAX_HOPS = 32;
@@ -368,8 +410,10 @@ const walkSig = (w) => JSON.stringify(w);
 /** Is `d` a shared folder (the sticky bit), as root sees it, its link followed? Not known → false: the plain "cannot write" proof. */
 export const stickyOn = (io) => (d) => { try { return (io.stat(d).mode & 0o1000) !== 0; } catch { return false; } };
 
+/** What root sees at `p` itself, a link not followed (#528 r6 m-1): { dev, ino }, or null when it can't look. */
+export const identOn = (io) => (p) => { try { const s = io.lstat(p); return s.ino === undefined ? null : { dev: s.dev, ino: s.ino }; } catch { return null; } };
 /** What `--dry-run` prints: the commands, not run, and what will not be tried. */
 export const proofCommands = (io, cfg) => {
   const inputs = proofInputs(io, cfg);
-  return [...proofList(cfg, { ...inputs, kindOf: kindOn(io), walkOf: walkOn(io), stickyOf: stickyOn(io) }).map((pr) => (pr.ownerOf ? `root looks at who owns ${pr.ownerOf} itself, a link not followed   (must not be ${BUILDER})` : pr.args ? `sudo -n -H -u ${BUILDER} ${pr.args.join(' ')}   (${pr.expect === 'ok' ? 'must work' : pr.expect === 'denied' ? 'must be refused: Permission denied' : 'must fail'})` : `not tried: ${pr.what} (${pr.notTried ?? pr.bad})`)), `${ID} -Gn ${BUILDER}   (its own group and the allowed ones only)`];
+  return [...proofList(cfg, { ...inputs, kindOf: kindOn(io), walkOf: walkOn(io), stickyOf: stickyOn(io), identOf: identOn(io) }).map((pr) => (pr.ownerOf ? `root looks at who owns ${pr.ownerOf} and at its access list, a link not followed   (must not be ${BUILDER}, nor let it change it)` : pr.args ? `sudo -n -H -u ${BUILDER} ${pr.args.join(' ')}   (${pr.expect === 'ok' ? 'must work' : pr.expect === 'denied' ? 'must be refused: Permission denied' : 'must fail'})` : `not tried: ${pr.what} (${pr.notTried ?? pr.bad})`)), `${ID} -Gn ${BUILDER}   (its own group and the allowed ones only)`];
 };
