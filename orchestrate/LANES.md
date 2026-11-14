@@ -10,6 +10,7 @@ Set 29 Oct 2026 for the parallel build. One writer per folder. A lane that needs
 | 4. Mini setup kit (started 1 Nov, LEAD-CALLS L86) | `orchestrate/setup/` | R-0b-05, the install and background jobs, the owner folders and keys, then R-0b-122 (watch-only week) |
 | 7. Screen reading, the herdr harvest (LEAD-CALLS L1052, L1064) | `orchestrate/modules/M12-sensors/screen/`, `orchestrate/modules/M12-sensors/third_party/herdr/` (new files only; see the exception below) | 0b-herdr-harvest, then 0b-herdr-relay |
 | Lead (the ORCHESTRATE lead session) | `orchestrate/modules/M3-lead`, `orchestrate/modules/M5-review-audit`, `orchestrate/modules/M7-live-check`, `orchestrate/modules/M14-learning`, `orchestrate/test/`, this file | the cutover kit and the first cutover's runbook; the build rows; fresh audits |
+| Wiring (shared; owners per file below) | `orchestrate/wiring/` | none of its own: each file is wired for the milestone of the lane that owns it |
 
 Exception (LEAD-CALLS L65, for the review runner, #50): lane 2 may edit M9's verdict intake (`M9-record/outbox.mjs` and the verdict matching in `writer.mjs`) and its tests, add the one new file `orchestrate/shared/review-roles.mjs` (no existing shared file changes), and (L65 addendum 2) edit M6 `gather.mjs`, `refusals.mjs` and the M6 tests, so the Merge Gate reads the review runner's launch records through M9's one check and never the Record's copy.
 
@@ -22,5 +23,22 @@ More exceptions (1 Nov 2026), each limited to the files named:
 - **Lane 4, CI (L109):** the one macOS job in `.github/workflows/scripts-ci.yml` that runs the setup tests, and its guard test. The other jobs stay the lead's.
 - **Lane 4, M4 `launcher/review-daemons.mjs` (L113):** an export-only change (`plist`, `str`, `arr`, `LABEL`, `ABS`), with no behaviour change, as its own commit with lane 2 told, so the watch-only week's hourly job reuses the one plist builder. The rest of M4 stays lane 2's.
 - **Lane 7, M12 screen reading (L1052, L1064):** new files only, `M12-sensors/screen/` and `M12-sensors/third_party/herdr/`, for the herdr harvest (R-0b-149 to 153). `screen/waiting.mjs` is M4's decision, kept here until R-0b-153a wires it into sendSafe. Existing M12 and M4 files stay their lanes'.
+
+**`orchestrate/wiring/`, the shared folder (lead call, 14 Nov 2026).** Each lane adds the files that connect its module to the real Mac, so this folder has one writer per file, not per folder. The owners below are taken from git history (the source pull request of every commit). A shared file is edited the way AGENTS.md's "Who changes what" table says: pull first and keep edits small. The guard tests are `orchestrate/test/wired.test.mjs` and `orchestrate/wiring/*.test.mjs`; run them before a change here.
+- **One owner** (that lane added the file; any other lane edited it at most once):
+  - Lane N: `push-pass`, `pr-writer`, `gate-ports`, and `robot-push` once #536 lands.
+  - Lane 4: `heartbeat-probes`, `not-wired`, `phone-ports`, `runner-job`, `runner-launch`, `sensors-wiring`.
+  - Lane 3: `private-folder`.
+  - Lane 5: `owner-answer`, `sensors-ports`.
+  - Lane A: `claude-folder-name`.
+  - Lanes N, 5 and A are not in the table above.
+  - Each name covers the `.mjs` file and its test.
+- **Shared** (the entry points that every lane's pass is added to): `robot-wiring`, `robot-main`, `dispatcher-wiring`, `README.md` and `fake-github.test-helper.mjs`. Lanes 1 to 5 have edited them.
+- **Lead decides** (mixed history; the lane with the most edits is given first):
+  - mostly lane 2: `review-ports`, `worker-ports`, `worker-runner`, `owner-ports`;
+  - mostly lane 4: `runner-ports`, `runner-main`, `runner-loop`, `runner-files`, `owner-status`;
+  - about even between lanes 2 and 4: `owner-asks`, `script-outbox.test`;
+  - even between lanes 2 and A: `runner-locked`;
+  - lanes 2, 3, 4 and A: `runner-checks`.
 
 Only rows tagged `cutover: first` are built before the first cutover. Rows tagged `cutover: second` wait until after it.
