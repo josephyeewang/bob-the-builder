@@ -71,6 +71,39 @@ test('a short value is not registered (it would match ordinary text), and a Buff
   assert.throws(() => refuseSecretArgs('a program (test)', ['ok', Buffer.from(s)]), refusedWithout(s));
 });
 
+test('a registered value in its common encodings is refused too: base64 (standard, URL-safe, any alignment, padded or not), hex, percent (L1191)', () => {
+  // Three lengths, one per byte alignment of the value's end; the last has bytes whose base64 holds + and /, so the
+  // URL-safe form differs from the standard one.
+  const values = [fresh(), fresh('gho_x'), `pat~~~${randomBytes(6).toString('hex')}ûÿþ?>/`];
+  assert.ok(values.map((v) => Buffer.byteLength(v) % 3).sort().join() === '0,1,2', 'one value per alignment of its end');
+  assert.match(Buffer.from(values[2]).toString('base64'), /[+/]/);
+  for (const raw of values) {
+    const s = registerSecret(raw);
+    const forms = [];
+    // the value after 0, 1 or 2 other bytes, and before 0, 1 or 2: every alignment of its start and end in the run
+    for (const pre of ['', 'a', 'ab']) for (const post of ['', 'z', 'zy']) {
+      const b = Buffer.from(`${pre}${s}${post}`);
+      const std = b.toString('base64');
+      forms.push(std, std.replace(/=+$/, ''), b.toString('base64url'), `${b.toString('base64url')}==`);
+    }
+    // a header made from it (`Basic base64(user:token)`), as push.mjs makes one
+    forms.push(`Authorization: Basic ${Buffer.from(`x-access-token:${s}`).toString('base64')}`);
+    const hex = Buffer.from(s).toString('hex');
+    forms.push(hex, hex.toUpperCase(), `0x${hex.slice(0, 8).toUpperCase()}${hex.slice(8)}`);
+    forms.push(encodeURIComponent(s), hex.replace(/../g, '%$&'), hex.toUpperCase().replace(/../g, '%$&'), `https://h/?t=${encodeURIComponent(s)}`);
+    for (const f of forms) {
+      assert.equal(holdsSecret(`--x=${f}`), true, `${JSON.stringify(f)} of a value ${Buffer.byteLength(s)} bytes long`);
+      assert.throws(() => spawnSync('/bin/echo', ['ok', `--x=${f}`]), refusedWithout(s));
+    }
+  }
+  // Another value's encodings, and ordinary encoded text, still start.
+  const other = fresh();
+  for (const f of [Buffer.from(other).toString('base64'), Buffer.from(other).toString('hex'), encodeURIComponent(other), Buffer.from('plain text, nothing secret').toString('base64')]) {
+    assert.equal(holdsSecret(f), false, f);
+    assert.equal(spawnSync('/bin/echo', [f]).status, 0);
+  }
+});
+
 test('limitedSync checks for itself: a spawnSync taken before the guard loaded is never called with a secret', () => {
   const s = registerSecret(fresh());
   const calls = [];

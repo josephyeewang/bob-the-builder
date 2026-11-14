@@ -20,8 +20,10 @@
 // Limits, said plainly: a start function taken off the module object before this module loaded (a `const { spawn } =
 // require(...)`, or a reference stored at load time) is not wrapped, so the files that start programs with a token
 // import this module themselves, and sync-limit, which is handed its spawnSync, checks for itself. A worker thread has
-// its own copy of this module and of child_process. The value is checked as text: a secret re-encoded on the way (other
-// than the forms registered) is not seen.
+// its own copy of this module and of child_process. The value is looked for as written and in its common encodings
+// (base64 standard and URL-safe at any byte alignment, with or without padding; hex in either case; percent-encoding,
+// L1191), the class of re-spelling a source scan can't close. Another encoding (base32, a cipher, a compressed form) is
+// not seen.
 
 import cp from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
@@ -29,9 +31,35 @@ import { syncBuiltinESMExports } from 'node:module';
 /** Shorter values are not registered: they would match ordinary text, and no token or key is this short. */
 export const MIN_SECRET = 12;
 const SECRETS = new Set();
+// What is looked for in a command line: EXACT as written (the value, its base64 forms), LOWER in the text lowercased
+// (hex and percent forms, whose letters may be either case).
+const EXACT = new Set(); const LOWER = new Set();
+
+/**
+ * The value's base64 at each of the three byte alignments it can sit at inside a longer encoded run, standard and
+ * URL-safe. Only the characters made wholly of the value's own bits are kept: the ones at either end mix in the bytes
+ * around it or the padding, so the run is found with or without padding and whatever is next to it (#556 r10, L1191).
+ */
+function base64Forms(bytes) {
+  const out = [];
+  for (let k = 0; k < 3; k++) {
+    const enc = Buffer.concat([Buffer.alloc(k), bytes]).toString('base64');
+    const core = enc.slice(Math.ceil((8 * k) / 6), Math.floor((8 * (k + bytes.length)) / 6));
+    out.push(core, core.replace(/\+/g, '-').replace(/\//g, '_'));
+  }
+  return out;
+}
 
 export function registerSecret(value) {
-  if (typeof value === 'string' && value.length >= MIN_SECRET) SECRETS.add(value);
+  if (typeof value !== 'string' || value.length < MIN_SECRET || SECRETS.has(value)) return value;
+  SECRETS.add(value);
+  const bytes = Buffer.from(value, 'utf8');
+  EXACT.add(value);
+  for (const f of base64Forms(bytes)) EXACT.add(f);
+  const hex = bytes.toString('hex');
+  LOWER.add(hex);                                   // hex, either case
+  LOWER.add(hex.replace(/../g, '%$&'));             // every byte percent-encoded, either case
+  LOWER.add(encodeURIComponent(value).toLowerCase());   // percent-encoded as a URL part would be
   return value;
 }
 
@@ -39,7 +67,9 @@ export function holdsSecret(text) {
   if (!SECRETS.size || text === undefined || text === null) return false;
   let s;
   try { s = typeof text === 'string' ? text : Buffer.isBuffer(text) ? text.toString('utf8') : String(text); } catch { return true; }
-  for (const x of SECRETS) if (s.includes(x)) return true;
+  for (const x of EXACT) if (s.includes(x)) return true;
+  const low = s.toLowerCase();
+  for (const x of LOWER) if (low.includes(x)) return true;
   return false;
 }
 
