@@ -8,8 +8,8 @@
 //
 // Network: the run asks for 2 GETs to api.github.com and 4 to example.com (GETS), plain public pages; on an honest run
 // 2 and 2 reach them (the sandbox's proxy refuses the other two); a retry, which voids its side, can add a few more
-// within the turn limit; no other host; plus Claude's own API traffic. The receipt carries both: the asked-for GETs
-// and the ones the transcripts show were sent, per host.
+// within the turn limit; no other host; plus Claude's own API traffic. The receipt carries both: gets.asked, the
+// asked-for GETs (GETS), and gets.sent: GETs the session tried, per host (refused ones included).
 //
 // It prints one line per name: PASS, FAIL or NOT TRIED, with how it was proven or why not. A name no test ran is NOT
 // TRIED, never PASS. The receipt, settings-names-proof-<time>.jsonl in the user's home, holds the pin and one line per
@@ -117,7 +117,7 @@ export function runArgs(o) {
 
 // A run fed its messages on stdin (`o.input`, stream-json lines) ends with these words instead of a prompt, and has
 // claude echo each message it takes into the conversation (a `user` line with isReplay and the message's uuid; 2.1.316
-// requires stream-json both ways for it). The launcher never feeds a session this way, so both flags are the proof's
+// requires stream-json both ways for it; checked: claude-code 2.1.316). The launcher never feeds a session this way, so both flags are the proof's
 // own, not launcher names (crossSessionInbound's pair).
 export const INPUT_FORMAT = '--input-format';
 export const REPLAY_USER_MESSAGES = '--replay-user-messages';
@@ -184,14 +184,14 @@ export const unbuildable = (dir) => join(dir, 'out', 'bad\u0000path');
 // to example.com (GETS); on an honest run 2 and 2 reach them, as the proxy refuses example.com on strictAllowlist's on
 // side and allowedDomains' off side; a retry, which voids its side, can add a few more within the turn limit; no other
 // host; plus Claude's own API traffic (L1169 M4, L1171 M-1). This is what is asked for, not a ceiling: `sentGets`
-// counts what was sent.
+// counts what was tried.
 export const HOST = Object.freeze({ a: 'api.github.com', b: 'example.com' });
 const got = (dir, k) => join(dir, 'work', `got-${k}`);
 const fetchHost = (dir, k) => `curl -sSf -o ${got(dir, k)} https://${HOST[k]}`;
 /** Every GET the run asks claude to make, by host (L1169 M4); the test counts them from the pairs' own prompts. */
 export const GETS = Object.freeze({ 'api.github.com': 2, 'example.com': 4 });
-/** The GETs a run's transcript shows its tool calls sent, by host (L1171 M-1): each http(s) address in a call's input.
- * One the proxy refused counts too, as it left the call; a retry's counts, though it voids its side. */
+/** The GETs a run's transcript shows its tool calls tried, by host (L1171 M-1, L1172): each http(s) address in a call's
+ * input. Tried, not reached: one the proxy refused counts too; a retry's counts, though it voids its side. */
 export const sentGets = (out, into = {}) => {
   for (const u of toolUses(out)) for (const [, h] of JSON.stringify(u.input ?? {}).matchAll(/https?:\/\/([a-z0-9.-]+)/gi)) into[h] = (into[h] ?? 0) + 1;
   return into;
@@ -206,7 +206,8 @@ export const fetched = (dir, k) => holds(got(dir, k), PAGE[k]);
 const fetchOne = (dir) => `curl -sSf -o ${join(dir, 'work', 'got')} https://${HOST.b}`;
 // crossSessionInbound: the message as another session's arrives, in the envelope 2.1.316 reads as one, fed on stdin.
 // Each line carries its own uuid, so claude's echo of it (REPLAY_USER_MESSAGES) is read for that line only. 2.1.316
-// drops a refused peer message before it is queued, so it is never echoed; an accepted one is echoed when its turn runs.
+// drops a refused peer message before it is queued, so it is never echoed; an accepted one is echoed when its turn runs
+// (checked: claude-code 2.1.316).
 export const PEER_WORD = 'peer-heard-7c';
 export const PEER_FROM = 'uds:orch-names-proof';
 export const userLine = (content, uuid) => JSON.stringify({ type: 'user', ...(uuid ? { uuid } : {}), message: { role: 'user', content } });
