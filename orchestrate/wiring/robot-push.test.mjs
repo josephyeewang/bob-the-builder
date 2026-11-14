@@ -14,7 +14,7 @@ import { WATCHDOG_MARGIN_MS } from '../modules/M11-dispatcher/main.mjs';
 import { RETRY_MS } from './push-pass.mjs';
 import { ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
 import { memoryRecord } from '../shared/record.mjs';
-import { BUILDER, keysPath, mirrorPath, outboxRootPath, privatePath } from '../setup/layout.mjs';
+import { BUILDER, keysPath, mirrorPath, outboxRootPath, privatePath, scannerSetting } from '../setup/layout.mjs';
 import { isRefusing, notWiredText } from './not-wired.mjs';
 import { OWNER_FILE } from '../modules/M12-sensors/outside-watch.mjs';
 import { GUARD_STEP } from './gate-ports.mjs';
@@ -57,9 +57,11 @@ test('L1115: each part the push needs refuses by name when missing, and the pass
     const refusal = (over) => { const p = wiring(base, over); assert.ok(isRefusing(p), JSON.stringify(Object.keys(over))); return thrown(p); };
     assert.equal(refusal({ tokenFor: null }), notWiredText(PUSH_NOT_WIRED.app));
     assert.equal(refusal({ c: Object.fromEntries(OUTSIDE_KEYS.map((k) => [k, undefined])) }), notWiredText(PUSH_NOT_WIRED.outside));
-    // The scanner port's default is null until lane 4's paths land (#525): no paths, no push.
-    assert.equal(SCANNER_AT, null);
-    assert.equal(refusal({ scannerAt: SCANNER_AT }), notWiredText(PUSH_NOT_WIRED.scanner));
+    // The scanner port's default is lane 4's one setting (#525): the layout's paths under this base, and the rules version.
+    assert.deepEqual(SCANNER_AT(base), scannerSetting({ base }));
+    assert.ok(SCANNER_AT(base).bin.startsWith(base));
+    // A port that is not a function (none given) still refuses as not wired.
+    assert.equal(refusal({ scannerAt: null }), notWiredText(PUSH_NOT_WIRED.scanner));
     assert.match(refusal({ scannerAt: () => ({ ...fakeScanner(), version: '' }) }), /scanner's paths are incomplete/);
     assert.match(refusal({ scannerAt: () => { throw new Error('gone'); } }), /scanner's paths could not be read \(gone\)/);
     // The base is found from the key folder only where layout.mjs puts it.

@@ -910,10 +910,11 @@ test('L1115: the push pass refuses until every part is there; some outside check
     const w = world({ extra: { ...APP, ...OUTSIDE, hostLockUid: uid } });
     await assert.rejects(wire(w.config, { fetchFn: fakeGitHubFetch(w.fake), log: () => {} }), /config: hostLockUid is/);
   }
-  // With it too: the next missing part is the scanner's paths (lane 4, #525), still refusing.
+  // With it too: the scanner's paths are lane 4's setting by default (#525), so the next missing part is the builder user
+  // (made absent here, so this holds on a Mac that has one), still refusing.
   const both = world({ extra: { ...APP, ...OUTSIDE, hostLockUid: process.getuid() + 2 } });
-  const b = await wire(both.config, { fetchFn: fakeGitHubFetch(both.fake), log: () => {} });
-  assert.throws(() => b.passes.push(), /not wired yet: robot\.push: the secret scanner's paths are not wired/);
+  const b = await wire(both.config, { fetchFn: fakeGitHubFetch(both.fake), log: () => {}, push: { userOf: () => ({ exists: false }) } });
+  assert.throws(() => b.passes.push(), /not wired yet: robot\.push: the builder user is not on this Mac/);
   // Some but not all, or a bad value: the job does not start.
   for (const k of Object.keys(OUTSIDE)) {
     const { [k]: _, ...three } = OUTSIDE;
