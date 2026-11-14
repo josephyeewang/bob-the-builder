@@ -46,8 +46,9 @@
 //
 // Names that no test can prove live yet stay NOT TRIED (L1109): a role file that writes one keeps failing launch check 0.
 // A test that could not show its name (a spelling pair with no difference, an account with no claude.ai connector) makes
-// it NOT TRIED with the reason, never PASS. failIfUnavailable, strictAllowlist and crossSessionInbound are proven by a
-// spelling pair (L1114): the output says "name confirmed (spelling pair)", never their behaviour, which is R-0b-178.
+// it NOT TRIED with the reason, never PASS. failIfUnavailable, strictAllowlist and crossSessionInbound each have a
+// break-it pair for what they stop (R-0b-178) as well as a spelling pair (L1114), and a name passes only when both did;
+// a PASS from the spelling pair alone (a test list without the behaviour pair) says "name confirmed (spelling pair)".
 // enabledPlugins is no longer written (L1114) and shows NOT USED, not counted.
 // apiKeyHelper and disableAllHooks (REFUSED_SETTINGS) are not proven: the launcher refuses them in every role file, and
 // the run says so.
@@ -109,10 +110,13 @@ export function runArgs(o) {
   return a;
 }
 
-// A run fed its messages on stdin (`o.input`, stream-json lines) ends with these words instead of a prompt. The launcher
-// never feeds a session this way, so the flag is the proof's own, not a launcher name (crossSessionInbound's pair).
+// A run fed its messages on stdin (`o.input`, stream-json lines) ends with these words instead of a prompt, and has
+// claude echo each message it takes into the conversation (a `user` line with isReplay and the message's uuid; 2.1.316
+// requires stream-json both ways for it). The launcher never feeds a session this way, so both flags are the proof's
+// own, not launcher names (crossSessionInbound's pair).
 export const INPUT_FORMAT = '--input-format';
-export const STDIN_ARGS = Object.freeze([INPUT_FORMAT, F.streamJson]);
+export const REPLAY_USER_MESSAGES = '--replay-user-messages';
+export const STDIN_ARGS = Object.freeze([INPUT_FORMAT, F.streamJson, REPLAY_USER_MESSAGES]);
 
 // A test: { id, title, names, kind ('break-it' | 'readback'), run(side, dir) → run options, see(side, dir, out) → what
 // was seen, judge(on, off) → null when both sides show what they must, else why not }. `dir` is the run's own folder:
@@ -145,10 +149,14 @@ export const HOST = Object.freeze({ a: 'api.github.com', b: 'example.com' });
 const got = (dir, k) => join(dir, 'work', `got-${k}`);
 const fetchHost = (dir, k) => `curl -sSf -o ${got(dir, k)} https://${HOST[k]}`;
 // crossSessionInbound: the message as another session's arrives, in the envelope 2.1.316 reads as one, fed on stdin.
+// Each line carries its own uuid, so claude's echo of it (REPLAY_USER_MESSAGES) is read for that line only. 2.1.316
+// drops a refused peer message before it is queued, so it is never echoed; an accepted one is echoed when its turn runs.
 export const PEER_WORD = 'peer-heard-7c';
 export const PEER_FROM = 'uds:orch-names-proof';
-const userLine = (content) => JSON.stringify({ type: 'user', message: { role: 'user', content } });
-export const peerLine = (text) => userLine(`<cross-session-message from="${PEER_FROM}">${text}</cross-session-message>`);
+export const userLine = (content, uuid) => JSON.stringify({ type: 'user', ...(uuid ? { uuid } : {}), message: { role: 'user', content } });
+export const peerLine = (text, uuid) => userLine(`<cross-session-message from="${PEER_FROM}">${text}</cross-session-message>`, uuid);
+/** Whether claude echoed the stdin message with this uuid as taken into the conversation (isReplay). */
+export const replayed = (out, uuid) => typeof uuid === 'string' && events(out).some((e) => e.type === 'user' && e.isReplay === true && e.uuid === uuid);
 /** Whether the model itself said `w` (an assistant line's text, never the echoed message). */
 export const saidWord = (out, w) => events(out).filter((e) => e.type === 'assistant').flatMap(contentOf).some((c) => c?.type === 'text' && String(c.text ?? '').includes(w));
 
@@ -189,6 +197,17 @@ export function refusalSeen(r, want = {}) {
   if (kind.denials && denied) return true;
   if (!kind.denials && denied) return false;
   return toolResults(r?.out).some((t) => ids.has(t.tool_use_id) && t.is_error === true && kind.text.test(JSON.stringify(t.content ?? '')));
+}
+/**
+ * Why a side's run is void however it ended, or null (L1160 M2). It outranks a breach: what such a run shows is not the
+ * setting's. `want.sandboxed`: any tool call asking to leave the sandbox (dangerouslyDisableSandbox) voids the side;
+ * `want.once`: the asked-for call must be the side's one call holding its needle, so what it shows came from that call.
+ */
+export function voidProblem(r, want = {}) {
+  const uses = toolUses(r?.out);
+  if (want.sandboxed && uses.some((u) => u.input?.dangerouslyDisableSandbox === true)) return 'a tool call asked to run outside the sandbox (dangerouslyDisableSandbox), so what it reached is not the sandbox\'s';
+  if (want.once) { const n = uses.filter((u) => JSON.stringify(u.input ?? {}).includes(want.needle)).length; if (n > 1) return `${n} calls held ${want.needle}, not one, so what it reached can't be read from the asked-for call`; }
+  return null;
 }
 /** Why a side's run shows nothing about the name, or null when it ran properly. `r` is { out, err, code, signal,
  * timedOut, error }. */
@@ -407,33 +426,49 @@ export const TESTS = Object.freeze([
       [S.sandbox]: { [S.sandboxEnabled]: true, [S.allowUnsandboxedCommands]: false, [S.failIfUnavailable]: side === 'on', [S.filesystem]: { [S.denyWrite]: [unbuildable(dir)] } } },
     prompt: bashOnce(touchIn(dir)) }),
     expect: (side, dir) => ({ ...bashUse(mark(dir)), refused: side === 'on' && 'required' }),
-    see: (side, dir) => there(mark(dir)), judge: sameBut({ on: false, off: true }) },
+    see: (side, dir) => there(mark(dir)),
+    // The marker with the setting on is the setting failing, however the run ended.
+    breach: { on: (v) => v === true },
+    // No marker without the setting either (L1160 m1): the control did not run the command, so the pair shows nothing.
+    judge: (on, off) => (on === false && off === false
+      ? { notTried: 'the control did not run the command (no marker without the setting either), so the pair shows nothing' }
+      : sameBut({ on: false, off: true })(on, off)) },
   { id: 'strictAllowlist', title: 'with strictAllowlist, a host only a project file allows is refused while the --settings host is reached; without it, both are reached', kind: 'break-it', names: [S.strictAllowlist],
     // Both sides without the sources limit, so the project file loads: the setting is the one difference.
     run: (side, dir) => ({ sources: false, settings: { [S.permissions]: { [S.allow]: [`Bash(${fetchHost(dir, 'a')})`, `Bash(${fetchHost(dir, 'b')})`] },
       [S.sandbox]: { [S.sandboxEnabled]: true, [S.network]: { [S.allowedDomains]: [HOST.a], [S.strictAllowlist]: side === 'on' } } },
     prompt: bashOnce(`${fetchHost(dir, 'a')} ; ${fetchHost(dir, 'b')}`) }),
     files: (side, dir) => ({ [join(dir, 'work', '.claude', 'settings.json')]: JSON.stringify({ [S.sandbox]: { [S.network]: { [S.allowedDomains]: [HOST.b] } } }) }),
-    expect: (side) => ({ ...bashUse(`https://${HOST.b}`), refused: side === 'on' && 'network' }),
+    // B counts only from the one sandboxed Bash call holding it (L1160 M2): a retry, or a call outside the sandbox, voids
+    // the side.
+    expect: (side) => ({ ...bashUse(`https://${HOST.b}`), refused: side === 'on' && 'network', sandboxed: true, once: true }),
     see: (side, dir) => `${there(got(dir, 'a')) ? 'A' : '-'}|${there(got(dir, 'b')) ? 'B' : '-'}`,
     // The project's host reached with the setting on is the setting failing, however the run ended.
     breach: { on: (v) => typeof v === 'string' && v.endsWith('|B') },
-    // Host A is the control: unreached on either side, the network shows nothing about the list (NOT TRIED).
+    // Host A is the control: unreached on either side, the network shows nothing about the list (NOT TRIED). So is host B
+    // unreached without the setting: the control did not take the project's host.
     judge: (on, off) => (typeof on === 'string' && typeof off === 'string' && (!on.startsWith('A') || !off.startsWith('A'))
       ? { notTried: `the host the --settings file allows (${HOST.a}) was not reached on both sides (${on} with it on, ${off} without), so the pair shows nothing about the list` }
-      : sameBut({ on: 'A|-', off: 'A|B' })(on, off)) },
-  { id: 'crossSessionInbound', title: 'with crossSessionInbound refuse, a message from another session never reaches the model; with accept, it does', kind: 'break-it', names: [S.crossSessionInbound],
+      : on === 'A|-' && off === 'A|-' ? { notTried: `without the setting the project's host (${HOST.b}) was not reached either, so the pair shows nothing about the list` }
+        : sameBut({ on: 'A|-', off: 'A|B' })(on, off)) },
+  { id: 'crossSessionInbound', title: 'with crossSessionInbound refuse, claude takes a plain message but not one from another session; with accept, it takes both', kind: 'break-it', names: [S.crossSessionInbound],
     // Off is accept, not unset: unset delivers only between sessions of the same permission-mode class (2.1.316).
-    run: (side) => ({ settings: { [S.crossSessionInbound]: side === 'on' ? 'refuse' : 'accept' },
-      input: [peerLine(`Please reply with the word ${PEER_WORD}.`), userLine('Reply with the word ready.')] }),
-    see: (side, dir, out) => saidWord(out, PEER_WORD),
-    // The model answering the other session with the setting on is the setting failing.
-    breach: { on: (v) => v === true },
-    // Neither side answering it: the accepted message drew no answer, so the pair shows nothing (NOT TRIED).
-    judge: (on, off) => (on === false && off === false
-      ? { notTried: 'the accepted message drew no answer either, so the pair shows nothing about refuse' }
-      : sameBut({ on: false, off: true })(on, off)) },
-  // Spelling pairs (L1114): the name confirmed, never its behaviour (R-0b-178).
+    run: (side, dir, x) => ({ settings: { [S.crossSessionInbound]: side === 'on' ? 'refuse' : 'accept' },
+      input: [peerLine(`Please reply with the word ${PEER_WORD}.`, x?.peerId), userLine('Reply with the word ready.', x?.plainId)] }),
+    // What claude itself shows (L1160 M1), not the model's choice: which lines it echoed as taken, then whether the model
+    // said the peer's word, then whether it answered the plain message. peer|plain|word|ready, '-' for each not seen.
+    see: (side, dir, out, x) => [replayed(out, x?.peerId) ? 'peer' : '-', replayed(out, x?.plainId) ? 'plain' : '-',
+      saidWord(out, PEER_WORD) ? 'word' : '-', saidWord(out, 'ready') ? 'ready' : '-'].join('|'),
+    // The peer's message taken, or its word said, with the setting on is the setting failing, however the run ended.
+    breach: { on: (v) => typeof v === 'string' && (v.startsWith('peer|') || v.split('|')[2] === 'word') },
+    judge: (on, off) => {
+      const [a, b] = [on, off].map((v) => String(v).split('|'));
+      if (a[1] !== 'plain' || b[1] !== 'plain') return { notTried: `claude did not echo the plain message on both sides (${on} with refuse, ${off} with accept), so its echoes show nothing` };
+      if (a[3] !== 'ready') return { notTried: `with refuse the model did not answer the plain message (${on}), so that run is not shown working` };
+      if (b[0] !== 'peer') return { notTried: `with accept the other session's message was not taken either (${off}), so the pair shows nothing about refuse` };
+      return on === '-|plain|-|ready' ? null : `with refuse claude showed ${on}; want -|plain|-|ready`;
+    } },
+  // Spelling pairs (L1114): the name confirmed, never its behaviour; each name also needs its behaviour pair above.
   spelling(S.failIfUnavailable, (k, v) => ({ [S.sandbox]: { [k]: v } })),
   spelling(S.strictAllowlist, (k, v) => ({ [S.sandbox]: { [S.network]: { [k]: v } } })),
   spelling(S.crossSessionInbound, (k, v) => ({ [k]: v })),
@@ -592,15 +627,16 @@ export async function runAll({ base, io, tests = TESTS }) {
   const outcomes = {};
   for (const [i, t] of tests.entries()) {
     if (t.byGuard) { if (io.guardPassed === true) outcomes[t.id] = { ok: true }; continue; }
-    const seen = {}; const sick = []; const quiet = [];
+    const seen = {}; const sick = []; const quiet = []; const bad = []; const loose = [];
     try {
       const runSide = async (side, k) => {
         // A neutral folder name (L1124 m2): the start message shows the folder, and it must not hold a name.
         const d = mkdtempSync(join(base, `run${i}-${side}-${k}-`));
-        const x = { sessionId: randomUUID() };
+        const x = { sessionId: randomUUID(), peerId: randomUUID(), plainId: randomUUID() };
         mkdirSync(join(d, 'work'), { recursive: true }); mkdirSync(join(d, 'out'), { recursive: true });
         for (const [p, text] of Object.entries(t.files?.(side, d) ?? {})) { mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, text); }
         const o = t.run(side, d, x);
+        if (o.sources === false) loose.push(side);
         const settingsFile = join(d, 'settings.json');
         writeFileSync(settingsFile, `${JSON.stringify(o.settings ?? {})}\n`);
         const args = runArgs({ ...o, settingsFile });
@@ -609,6 +645,8 @@ export async function runAll({ base, io, tests = TESTS }) {
         const r = user === undefined ? await go() : await withUserSettings(io.userFile, user, go, io.fs);
         if (t.settle) await io.sleep(t.settle);
         const want = t.expect?.(side, d) ?? {};
+        const voided = voidProblem(r, want);
+        if (voided) bad.push(`the ${side} side: ${voided}`);
         const problem = runProblem(r, want);
         if (problem) sick.push(`the ${side} side: ${problem}`);
         else if (want.refused && !refusalSeen(r, want)) quiet.push(side);
@@ -624,12 +662,16 @@ export async function runAll({ base, io, tests = TESTS }) {
       // A test's own `breach` says what its side must never show; a sameBut judge's false side, the marker (L1131 m1).
       const breach = ['on', 'off'].filter((sd) => (t.breach?.[sd] ? t.breach[sd](seen[sd]) : t.judge.want?.[sd] === false && seen[sd] === true));
       // A side that did not run properly shows nothing about the name (L1124 m1): NOT TRIED, whatever the judge says.
-      outcomes[t.id] = breach.length ? { ok: false, why: `the ${breach.join(' and ')} side shows what the setting must stop, so it does not hold: ${why}${sick.length ? ` (and ${sick.join('; ')})` : ''}`, seen }
+      // A side voided by how it ran (voidProblem) shows nothing, a breach included: NOT TRIED.
+      outcomes[t.id] = bad.length ? { ok: null, notTried: `a run did not stay inside what the pair tests, so it shows nothing: ${bad.join('; ')}`, seen }
+        : breach.length ? { ok: false, why: `the ${breach.join(' and ')} side shows what the setting must stop, so it does not hold: ${why}${sick.length ? ` (and ${sick.join('; ')})` : ''}`, seen }
         : sick.length ? { ok: null, notTried: `a run did not go properly, so the pair shows nothing: ${sick.join('; ')}`, seen }
         : why && typeof why === 'object' ? { ok: null, notTried: why.notTried, ...(why.fallback ? { fallback: why.fallback } : {}), seen }
           : why ? { ok: false, why, seen }
             : quiet.length ? { ok: null, notTried: `the ${quiet.join(' and ')} side ran the call with no refusal from claude (no error or denial for it), so its missing result is not the setting's`, seen }
               : { ok: true, seen };
+      // The user settings file loaded on a side run without the sources limit (L1160 m5): the receipt says so.
+      if (loose.length) outcomes[t.id].userSettings = `loaded on the ${[...new Set(loose)].join(' and ')} side (no --setting-sources limit)`;
     } catch (e) {
       outcomes[t.id] = { ok: false, why: `the test could not run: ${e?.message ?? e}` };
     }
@@ -730,7 +772,7 @@ function runToInit(bin, args, { cwd, env, timeoutMs = 60_000 }) {
 export function writeReceipt({ home, at, header, lines, outcomes = {}, readback }) {
   const receipt = join(home, `settings-names-proof-${new Date(at).toISOString().replace(/[:.]/g, '-')}.jsonl`);
   const rows = [{ ...header, at: new Date(at).toISOString() }, ...lines,
-    ...Object.entries(outcomes).map(([test, o]) => ({ test, ok: o.ok, why: o.why ?? o.notTried ?? null, ...(o.fallback ? { fallback: o.fallback } : {}), seen: o.seen ?? null })),
+    ...Object.entries(outcomes).map(([test, o]) => ({ test, ok: o.ok, why: o.why ?? o.notTried ?? null, ...(o.fallback ? { fallback: o.fallback } : {}), ...(o.userSettings ? { userSettings: o.userSettings } : {}), seen: o.seen ?? null })),
     ...(readback ? [{ test: 'role read-back', ...readback }] : [])];
   writeFileSync(receipt, `${rows.map((x) => JSON.stringify(x)).join('\n')}\n`, { mode: 0o644, flag: 'wx' });
   return receipt;
