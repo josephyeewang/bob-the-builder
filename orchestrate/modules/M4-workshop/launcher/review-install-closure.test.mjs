@@ -149,7 +149,8 @@ const JOB_FILE_FNS = Object.freeze({ loginJobPlist: 'modules/M11-dispatcher/logi
   reviewDaemonPlists: 'modules/M4-workshop/launcher/review-daemons.mjs', updaterPlist: 'modules/M4-workshop/launcher/review-daemons.mjs',
   sensorsJobPlist: 'modules/M12-sensors/sensors-job.mjs', robotPlist: 'setup/robot-setup.mjs', dispatcherPlist: 'setup/dispatcher-setup.mjs', workerRunnerPlist: 'wiring/runner-job.mjs', copierPlist: 'setup/host-lock-copy.mjs' });
 const USES_JOB_FILES = Object.freeze({ 'setup/daemons.mjs': 'places the job files the listed builders make; it builds none of its own',
-  'setup/setup.mjs': 'prints the copier\'s job file (host-lock-copier, L1029 E) for the owner to place; it builds none of its own' });
+  'setup/setup.mjs': 'prints the copier\'s job file (host-lock-copier, L1029 E) for the owner to place; it builds none of its own',
+  'setup/worker-runner-setup.mjs': 'passes the layout to runner-job.mjs\'s workerRunnerPlist (a listed builder) for the worker runner\'s job; it builds none of its own' });
 /**
  * The job-file functions module `r`'s real imports bring in, each with the module (copy-relative) it imports them
  * from. An `import * as` or an `import()` of a builder's module brings in every function that module exports.

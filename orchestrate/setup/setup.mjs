@@ -22,8 +22,8 @@
 //                                       pinned file list, from that commit, together (launch check 13; bob-manifest.mjs)  (root)
 //   check-dispatcher     the review runner's launches folder, the job's dispatcher.json's outboxRoot and copiesRoot, and whether orchestrate can read the owner's host.lock, and if not why  (read only; sudo to read as orchestrate)
 //   dispatcher-config    [--dry-run]    write the Dispatcher's config, <base>/dispatcher.json, and the Sensors', <base>/sensors.json (and the copy's, when the copy keeps them)  (root)
-//   worker-config        [--dry-run]    write the worker runner's config into the copy, <copy>/worker-runner.json (worker-runner-setup.mjs, L1112)  (root)
 //                                       an existing dispatcher.json without outboxRoot and copiesRoot won't start the Dispatcher until this is run again
+//   worker-config        [--dry-run]    write the worker runner's config into the copy, <copy>/worker-runner.json (worker-runner-setup.mjs, L1112)  (root)
 //   host-lock-copier     prints the owner's host.lock copier job file (a LaunchAgent of the owner's, L1029 E) on stdout and how to load it on
 //                        stderr; needs hostLockSource (read only; refused under sudo)
 //   dispatcher-keys      prints the Dispatcher config's reviewRoot, mirror, sealRoot, outboxRoot, copiesRoot, hostLockPath and hostLockUid as JSON (read only)

@@ -1,7 +1,7 @@
 // Part C, runner step 5: the worker runner's entry point and its LaunchAgent file. Nothing here loads a job.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { tempDir } from '../shared/test-tmp.mjs';
@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { writeSnapshot } from '../modules/M4-workshop/hooks/snapshot.mjs';
 import { makeLock } from '../modules/M9-record/lock.mjs';
 import { loginJobPlist } from '../modules/M11-dispatcher/login-job.mjs';
-import { DENY_KEYS, personUserProblem, aclWriteEntries, carriedOverProblem, checkRunnerConfig, hookStoreOf, keepSnapshots, snapshotFolderProblem, startDeps, listenStop, main, readRootFile, realRunnerPorts } from './runner-main.mjs';
+import { aclWriteEntries, carriedOverProblem, checkRunnerConfig, DENY_KEYS, hookStoreOf, keepSnapshots, listenStop, main, personUserProblem, readRootFile, realRunnerPorts, snapshotFolderProblem, startDeps, testProductHeld, testProductProblem } from './runner-main.mjs';
 import { RUNNER_JOB_LOG, RUNNER_JOB_UMASK, RUNNER_JOB_USER, fullPath, workerRunnerPlist } from './runner-job.mjs';
 import { BUILDER } from '../setup/layout.mjs';
 // The tests run as a person's user; main's own check of that is tested apart (L1079).
@@ -247,6 +247,9 @@ test('#369 r2 c2: a RECHECK check that throws is a failure with its reason, neve
   assert.equal(await of({ 1: ok, 2: ok, 3: ok }), 'check 8 has no port');
 });
 
+// L1125: a test whose product stands for the test product passes main's gate this way (no budget is loaded in these tests).
+const TEST_PRODUCT_OK = () => null;
+
 test('#369 r2 m2 self-review: main gives the start port its keeper, so a product whose snapshot is not kept fresh starts nothing; a die, a restart that works, a die again', async () => {
   const d = roots(tempDir('orch-rmain-'));
   try {
@@ -256,9 +259,13 @@ test('#369 r2 m2 self-review: main gives the start port its keeper, so a product
     const cfg = config(d, { products: { p1: { repo: 'o/p1', mirror: join(d, 'mirror'), rules, render: { paths: { deny: DENY(d), snapshot: join(d, 'snapshots', 'rules-p1.json') } } } } });
     const logs = []; let r;
     const fresh = () => { throw Object.assign(new Error('x'), { code: 'EROFS' }); };
-    const code = await main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: () => cfg, log: (s) => logs.push(s), onStop: () => {}, fresh, folderProblem: rootParentCheck,
-      run: async (ctx) => { r = await ctx.ports.start({ card: 'C-1', kind: 'editing', product: 'p1', sessionId: '0f8fad5b-d9cb-469f-a165-70867728950e' }); } });
-    assert.equal(code, 0, logs.join('\n'));
+    const go = (o) => main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: () => cfg, log: (s) => logs.push(s), onStop: () => {}, fresh, folderProblem: rootParentCheck,
+      run: async (ctx) => { r = await ctx.ports.start({ card: 'C-1', kind: 'editing', product: 'p1', sessionId: '0f8fad5b-d9cb-469f-a165-70867728950e' }); }, ...o });
+    // L1125: main's own gate, left in place: no budget is loaded, so the product is held by the gate first.
+    assert.equal(await go({}), 0, logs.join('\n'));
+    assert.equal(r.ok, false); assert.match(r.reason, /the Dispatcher's rules are not loaded .*only a test product runs on the worker runner/);
+    // A test product (the gate passes): the snapshot's own hold.
+    assert.equal(await go({ testProduct: TEST_PRODUCT_OK }), 0, logs.join('\n'));
     assert.equal(r.ok, false); assert.match(r.reason, /p1's rules snapshot is not kept fresh \(EROFS\)/);
   } finally { rmSync(d, { recursive: true, force: true }); }
   // The cycle: dies, a restart works (told), dies again (told again), a restart fails (held, told once).
@@ -534,7 +541,7 @@ test('L926 (#419 r3 M1, c2): main refuses to start for a snapshot folder linked 
     rmSync(join(d, 'snapshots'), { recursive: true });
     logs.length = 0; const reasons = [];
     const start = (ctx) => ctx.ports.start({ card: 'C-1', kind: 'editing', product: 'p1', sessionId: '0f8fad5b-d9cb-469f-a165-70867728950e' });
-    const code2 = await main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: () => cfg, log: (s) => logs.push(s), onStop: () => {}, fresh, folderProblem: rootParentCheck, run: async (ctx) => {
+    const code2 = await main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: () => cfg, log: (s) => logs.push(s), onStop: () => {}, fresh, folderProblem: rootParentCheck, testProduct: TEST_PRODUCT_OK, run: async (ctx) => {
       reasons.push((await start(ctx)).reason);
       symlinkSync(card, join(d, 'snapshots'));
       reasons.push((await start(ctx)).reason);
@@ -764,4 +771,43 @@ test('R-0b-175a: hookStoreOf refuses a hook folder that is a link or another use
       assert.match(logs.join('\n'), /hook store can't be read .*no Lead, Front Door or Mini Base session is typed into until it is fixed by hand/);
     } finally { rmSync(r, { recursive: true, force: true }); }
   } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test('L1125 gate: the worker runner holds any product whose rules do not say product.test_product: true', () => {
+  const rulesOf = (v) => ({ rules: { flag: (k, o) => { assert.equal(k, 'product.test_product'); assert.deepEqual(o, { product: 'p1' }); if (v instanceof Error) throw v; return v; } } });
+  assert.equal(testProductProblem(rulesOf(true), 'p1'), null);
+  for (const v of [false, undefined, null, 'true', 1]) assert.match(testProductProblem(rulesOf(v), 'p1'), /p1's rules do not say product\.test_product: true; only a test product runs/, String(v));
+  assert.match(testProductProblem(rulesOf(new Error('snapshot is stale')), 'p1'), /can't be read \(snapshot is stale\)/);
+  for (const b of [null, {}, { rules: {} }]) assert.match(testProductProblem(b, 'p1'), /rules are not loaded .*no budget/);
+  // In front of the snapshots' own hold: the gate's reason first; a test product gets the snapshots' answer.
+  const seen = [];
+  const held = testProductHeld(rulesOf(true), (p) => { seen.push(p); return p === 'p1' ? null : 'x'; });
+  assert.equal(held('p1'), null); assert.deepEqual(seen, ['p1']);
+  assert.match(testProductHeld(rulesOf(false), () => null)('p1'), /test_product/);
+  assert.match(testProductHeld(null, () => null)('p1'), /not loaded/);
+});
+
+test('L1125 gate: main gives the start port the gated productHeld, never the snapshots\' alone', () => {
+  const src = readFileSync(new URL('./runner-main.mjs', import.meta.url), 'utf8');
+  assert.match(src, /productHeld: testProductHeld\(budget, snaps\.held, testProduct\)/);
+  assert.match(src, /testProduct = testProductProblem \} = \{\}\) \{/, 'the real gate is main\'s default');
+  assert.doesNotMatch(src, /productHeld: snaps\.held\b/);
+});
+
+test('L1125 gate REAL rules: M10\'s own parser and engine (as M11 budget() builds them) read test_product from the rules text', async () => {
+  const { parsePolicy } = await import('../modules/M10-rules/policy.mjs');
+  const { makeEngine } = await import('../modules/M10-rules/engine.mjs');
+  const { makeRules } = await import('../shared/rules.mjs');
+  const fixture = readFileSync(new URL('../modules/M10-rules/fixtures/policy.yaml', import.meta.url), 'utf8');
+  assert.match(fixture, /^product:\n  cutover_stage: first\n/m, 'the fixture\'s product block, which the plants add to');
+  const gate = (text) => {
+    const p = parsePolicy(text); assert.equal(p.ok, true, p.reason);
+    const engine = makeEngine({ products: ['p1'], rulesState: () => ({ status: 'ok', policy: p.policy, commit: 'a'.repeat(40), blob: 'b'.repeat(40) }), productState: () => null, running: () => 0, rolesDir: new URL('../roles', import.meta.url).pathname, clock: Date.now });
+    return testProductProblem({ rules: makeRules(engine) }, 'p1');
+  };
+  const withFlag = (v) => fixture.replace(/^product:\n/m, `product:\n  test_product: ${v}\n`);
+  assert.equal(gate(withFlag("'true'")), null, 'the orchestrate-test rules\' own spelling');
+  assert.equal(gate(withFlag('true')), null);
+  for (const v of ["'false'", "'yes'", "'True'", '1']) assert.match(gate(withFlag(v)), /do not say product\.test_product: true/, v);
+  assert.match(gate(fixture), /do not say product\.test_product: true/, 'left out: held');
 });
