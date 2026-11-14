@@ -26,6 +26,8 @@
 // own place, proven the same way; root walks it, and a walk that can't finish is NOT TRIED); a file's other names (a file
 // with more than one is NOT TRIED: another name may sit where the builder can go); and the folders above it, on the
 // name's way and the real one's, which the builder must neither write nor own, so it can't swap a place mid-run.
+// The way is every place met, one link at a time (#528 r5 M-2): a middle link's folder counts. In a shared (sticky) folder
+// root itself looks at who owns the name there, its link not followed (#528 r5 M-1): `test -O` would follow it.
 // And the builder's groups are an allowed list: its own group and the groups macOS gives every local user, nothing else
 // (so no later membership, staff above all, quietly opens the owner's home, which macOS makes 0750 to staff). A group
 // list that can't be read is a FAIL, never an empty list.
@@ -98,17 +100,24 @@ export function proofList(cfg, { ownerHome = null, rules = { files: [], why: 'no
   // way, while the proofs run) and owns none (an owner can give itself write). In a shared folder everyone may write
   // (the sticky bit: /private/tmp, /Users/Shared) a name can be renamed only by its owner or the folder's, so there the
   // proof is that the builder owns neither. Each folder is proven once (the list drops repeats).
+  // The name in a shared folder is judged by root, as it is (#528 r5 M-1): `test -O` follows a link, so a link the
+  // builder owns there, leading to a folder it doesn't, would read "does not own"; the link's owner can re-point it.
+  // Every place on the way is taken (#528 r5 M-2, c-1): each folder met, a middle link's among them, as root found
+  // them one link at a time (`steps`), never the name as written (`..` and links in it are followed first).
   const above = (q) => {
     const out = [];
     for (let c = q, d = dirname(q); c !== '/'; c = d, d = dirname(d)) {
       out.push({ what: `${B} does not own ${d} (a folder above a place it must not reach)`, args: [TEST, '-O', d], expect: 'fail', above: true });
       out.push(stickyOf(d)
-        ? { what: `${B} does not own ${c} (in the shared folder ${d} only its owner can move it)`, args: [TEST, '-O', c], expect: 'fail', above: true }
+        ? { what: `${B} does not own the name ${c} itself (in the shared folder ${d}, the owner of a name can move it, or re-point it if it is a link; root looks without following it)`, ownerOf: c, expect: 'fail', above: true }
         : { what: `${B} cannot write ${d} (a folder above a place it must not reach)`, args: [TEST, '-w', d], expect: 'fail', above: true });
     }
     return out;
   };
-  const walked = new Set();
+  // A place's proofs by what is there (a folder: list and pass through; else: read); a link inside a folder is proven
+  // so, by its target's kind (#528 r5 m-3).
+  const readMake = (q, k) => (k === 'dir' ? folderProofs(`${B} cannot list ${q}`, q) : [{ what: `${B} cannot read ${q}`, args: [HEAD, '-c', '1', q], expect: 'denied' }]);
+  const walks = new Map();   // each real folder's walk, kept (#528 r5 m-1): a walk that failed stays NOT TRIED for every name that reaches it
   const reach = (what, f, make, { missing = 'not on this Mac: nothing was tried', folderOnly = null, walk = false } = {}) => {
     const l = kindOf(f);
     if (!l) return [notTried(what, missing)];
@@ -120,22 +129,28 @@ export function proofList(cfg, { ownerHome = null, rules = { files: [], why: 'no
     // same way; a file in it with another name can't be proven. A walk that can't finish is NOT TRIED. Each real folder is
     // walked once, so links that lead back and forth end.
     let inner = []; let w;
-    if (walk && l.kind === 'dir' && !walked.has(l.real)) {
-      walked.add(l.real); w = walkOf(l.real);
+    if (walk && l.kind === 'dir') {
+      const first = !walks.has(l.real);
+      if (first) walks.set(l.real, walkOf(l.real));
+      w = walks.get(l.real);
       if (!w || w.error) return [notTried(what, `root could not look through what is inside it (${w?.error ?? 'no answer'}): nothing was tried`)];
-      const inside = (q, k) => make(q, k).map((pr) => ({ ...pr, what: `${pr.what} (a link inside ${f})` }));
-      inner = [...w.links.flatMap((x) => reach(`${B} cannot read ${x.at} (a link inside ${f})`, x.at, inside, { walk: true })),
-        ...w.named.map((x) => notTried(`${B} cannot read ${x} (inside ${f})`, 'another name for this file exists: through a folder the builder can enter it would read the same file, so nothing was proven'))];
+      const inside = (q, k) => readMake(q, k).map((pr) => ({ ...pr, what: `${pr.what} (a link inside ${f})` }));
+      if (first) {
+        inner = [...w.links.flatMap((x) => reach(`${B} cannot read ${x.at} (a link inside ${f})`, x.at, inside, { walk: true })),
+          ...w.named.map((x) => notTried(`${B} cannot read ${x} (inside ${f})`, 'another name for this file exists outside this folder: through a folder the builder can enter it would read the same file, so nothing was proven'))];
+      }
     }
-    const look = { at: f, kind: l.kind, real: l.real, ...(w ? { walk: walkSig(w) } : {}) };
+    const look = { at: f, kind: l.kind, real: l.real, ...(l.steps ? { steps: l.steps } : {}), ...(w ? { walk: walkSig(w) } : {}) };
     const at = (q, via) => make(q, l.kind).map((pr) => ({ ...pr, what: via ? `${pr.what} (where ${f} leads)` : pr.what, look }));
-    return [...(l.real === f ? at(f) : [...at(f), ...at(l.real, true)]), ...above(f), ...(l.real === f ? [] : above(l.real)), ...inner];
+    // The folders above: every place on the way (steps, from root's look), or, from a look that gives none, the name and the real place.
+    const way = [...(l.steps ?? [f]), l.real];
+    return [...(l.real === f ? at(f) : [...at(f), ...at(l.real, true)]), ...way.flatMap(above), ...inner];
   };
   const readProof = (f) => {
     const what = `${B} cannot read ${f}`;
     if (!f.startsWith('/')) return notTried(what, 'a relative name, not a place on this Mac: nothing was tried');
     if (/[*?[\]{}]/.test(f)) return notTried(what, 'a pattern, not one file: nothing was tried');
-    return reach(what, f, (q, k) => (k === 'dir' ? folderProofs(`${B} cannot list ${q}`, q) : [{ what: `${B} cannot read ${q}`, args: [HEAD, '-c', '1', q], expect: 'denied' }]), { walk: true });
+    return reach(what, f, readMake, { walk: true });
   };
   // A folder: it can't be listed (the Mac's own refusal) and it can't be passed through (#528 r1 M1, m3).
   const folderProofs = (what, d) => [{ what, args: [LS, d], expect: 'denied' }, { what: `${B} cannot pass through ${d}`, args: [TEST, '-x', d], expect: 'fail' }];
@@ -176,7 +191,7 @@ export function proofList(cfg, { ownerHome = null, rules = { files: [], why: 'no
   ];
   // A folder above many places is proven once (r4 m4).
   const once = new Set();
-  return list.filter((pr) => { if (!pr.above) return true; const k = pr.args.join('\0'); if (once.has(k)) return false; once.add(k); return true; });
+  return list.filter((pr) => { if (!pr.above) return true; const k = pr.ownerOf ? `owner\0${pr.ownerOf}` : pr.args.join('\0'); if (once.has(k)) return false; once.add(k); return true; });
 }
 
 /** Null, or why the builder's groups are not its own and the allowed ones (L1079). `out`: `id -Gn builder`'s answer. */
@@ -208,17 +223,29 @@ export function changedWhy(look, now) {
   if (!now) return `it was ${was} when the list was made and is gone now: nothing was proven`;
   if (now.kind !== look.kind || now.real !== look.real) return `it was ${was} when the list was made and is ${now.kind} at ${now.real ?? 'no known place'} now: nothing was proven`;
   if (now.kind === 'file' && now.names > 1) return `another name for this file exists now (it has ${now.names}): nothing was proven`;   // r4 m3
+  if (look.steps && JSON.stringify(now.steps) !== JSON.stringify(look.steps)) return `the way to it changed since the list was made (a link on the way now goes elsewhere): nothing was proven`;   // r5 M-2
   return null;
 }
 
 /** Runs a proof list as the builder → [{ ok, what, why?, notTried? }]. A failed control makes every later proof FAIL as
  *  well, since it would prove nothing. Each proof made from a look at a place looks again first (#528 r3 m1). */
-export function proveList(io, list, kindOf = kindOn(io), walkOf = walkOn(io)) {
+export function proveList(io, list, kindOf = kindOn(io), walkOf = walkOn(io), { builderUid } = {}) {
   const out = []; let controlsHold = true;
+  let uid = builderUid;
+  const uidNow = () => { if (uid === undefined) { try { const u = readUser(io, BUILDER); uid = u.exists && Number.isInteger(u.uid) ? u.uid : null; } catch { uid = null; } } return uid; };
   for (const pr of list) {
     if (pr.notTried) { out.push({ ok: false, notTried: true, what: pr.what, why: pr.notTried }); continue; }
     if (pr.bad) { out.push({ ok: false, what: pr.what, why: pr.bad }); continue; }
     if (!controlsHold) { out.push({ ok: false, what: pr.what, why: 'not proven: a control above failed' }); continue; }   // one way of asking is already broken
+    // A name's owner, as root sees it, its link not followed (#528 r5 M-1).
+    if (pr.ownerOf) {
+      const b = uidNow();
+      if (b === null) { out.push({ ok: false, notTried: true, what: pr.what, why: `${BUILDER}'s id could not be read: nothing was proven` }); continue; }
+      let st; try { st = io.lstat(pr.ownerOf); } catch (e) { out.push({ ok: false, notTried: true, what: pr.what, why: `root could not look at it now (${e?.code ?? 'unknown'}): nothing was proven` }); continue; }
+      const mine = Number(st.uid) === b;
+      out.push({ ok: !mine, what: pr.what, ...(mine ? { why: `${BUILDER} owns it${st.isSymbolicLink?.() ? ' (a link it can re-point)' : ''}, and must not` } : {}) });
+      continue;
+    }
     if (pr.look) {
       const ch = changedWhy(pr.look, kindOf(pr.look.at))
         ?? (pr.look.walk !== undefined && walkSig(walkOf(pr.look.real)) !== pr.look.walk ? 'what is inside it changed since the list was made (a link or a file\'s other name came or went): nothing was proven' : null);   // r4 m2
@@ -264,10 +291,41 @@ export const kindOn = (io) => (f) => {
   const error = (e, ifGone) => ({ kind: gone(e) ? ifGone : `error:${e?.code ?? 'unknown'}`, real: null });
   let st; try { st = io.lstat(f); } catch (e) { return gone(e) ? null : error(e); }
   let real; try { real = io.realpath(f); } catch (e) { return error(e, 'error:a link that leads nowhere'); }
+  // Every place on the way, one link at a time (#528 r5 M-2): a middle link's folder is on the way too.
+  let h; try { h = hopsOn(io)(f); } catch (e) { return error(e, 'error:a link that leads nowhere'); }
+  if (h.real !== real) return { kind: 'error:the way there could not be followed one link at a time', real: null };
   // `names`: how many names a file has (its link count, #528 r4 m3). Each name reaches the same file through its own folders.
-  const of = (s) => (s.isDirectory() ? { kind: 'dir', real } : { kind: 'file', real, names: Number(s.nlink ?? 1) });
+  const of = (s) => (s.isDirectory() ? { kind: 'dir', real, steps: h.steps } : { kind: 'file', real, names: Number(s.nlink ?? 1), steps: h.steps });
   if (real === f && !st.isSymbolicLink()) return of(st);
   try { return of(io.stat(real)); } catch (e) { return error(e, 'error:a link that leads nowhere'); }
+};
+
+/**
+ * The way to `f`, one name at a time, as the Mac goes (#528 r5 M-2): → { real, steps }. `steps`: every place met, real
+ * (each in a folder already followed), a link's own place among them, in order. A link is read (readlink) and what it
+ * says is followed in turn, so a link in the middle of a chain is met, and so is the folder that holds it. Throws as
+ * the Mac would: ENOENT, ENOTDIR, ELOOP (more than MAX_HOPS links).
+ */
+export const MAX_HOPS = 32;
+export const hopsOn = (io) => (f) => {
+  const strip = (t) => (io.prefix && t.startsWith(`${io.prefix}/`) ? t.slice(io.prefix.length) : t);   // a stand-in Mac's links name real places
+  const steps = []; let hops = 0; let cur = '/'; let rest = String(f).split('/').filter(Boolean);
+  while (rest.length) {
+    const n = rest.shift();
+    if (n === '.') continue;
+    if (n === '..') { cur = dirname(cur); continue; }
+    const p = join(cur, n); const st = io.lstat(p); steps.push(p);
+    if (st.isSymbolicLink()) {
+      if (++hops > MAX_HOPS) throw Object.assign(new Error('too many links'), { code: 'ELOOP' });
+      const t = strip(String(io.readlink(p)));
+      if (t.startsWith('/')) cur = '/';
+      rest = [...t.split('/').filter(Boolean), ...rest];
+    } else {
+      if (rest.length && !st.isDirectory()) throw Object.assign(new Error('not a folder'), { code: 'ENOTDIR' });
+      cur = p;
+    }
+  }
+  return { real: cur, steps };
 };
 
 /**
@@ -278,18 +336,31 @@ export const kindOn = (io) => (f) => {
  */
 export const WALK_MAX = 5000;
 export const walkOn = (io) => (d) => {
-  const links = []; const named = []; let seen = 0;
+  const links = []; const named = []; const many = new Map(); let seen = 0;
   const inside = (r) => r === d || r.startsWith(d === '/' ? '/' : `${d}/`);
+  const aboveD = (s) => s === '/' || d.startsWith(`${s}/`);
+  const hops = hopsOn(io);
   const down = (dir) => {
     for (const n of io.list(dir)) {
       if (++seen > WALK_MAX) throw Object.assign(new Error(`more than ${WALK_MAX} things inside`), { code: 'too many' });
       const p = join(dir, n); const st = io.lstat(p);
-      if (st.isSymbolicLink()) { let r = null; try { r = io.realpath(p); } catch { /* leads nowhere: kept, with no real place */ } if (r === null || !inside(r)) links.push({ at: p, real: r }); }
-      else if (st.isDirectory()) down(p);
-      else if (Number(st.nlink ?? 1) > 1) named.push(p);
+      if (st.isSymbolicLink()) {
+        // It stays in only when every place on its way is inside (#528 r5 M-2): one that leaves through a folder
+        // outside and comes back is a way out, and is proven as its own place. The folders above `d` itself are on
+        // `d`'s own way (an absolute link goes down through them) and are proven with it.
+        let h = null; try { h = hops(p); } catch { /* leads nowhere: kept, with no real place */ }
+        if (h === null || !inside(h.real) || !h.steps.every((s) => inside(s) || aboveD(s))) links.push({ at: p, real: h?.real ?? null });
+      } else if (st.isDirectory()) down(p);
+      else if (Number(st.nlink ?? 1) > 1) {
+        // A file with other names (#528 r5 m-4): fine when all its names are inside this folder; else NOT TRIED.
+        const k = st.ino === undefined ? `?${p}` : `${st.dev}:${st.ino}`;
+        if (!many.has(k)) many.set(k, { want: Number(st.nlink), at: [] });
+        many.get(k).at.push(p);
+      }
     }
   };
   try { down(d); } catch (e) { return { error: e?.code ?? e?.message ?? 'unknown' }; }
+  for (const { want, at } of many.values()) if (at.length < want) named.push(...at);
   return { links, named };
 };
 /** The same walk as one line of text, to see whether it changed between the list and the proof. */
@@ -300,5 +371,5 @@ export const stickyOn = (io) => (d) => { try { return (io.stat(d).mode & 0o1000)
 /** What `--dry-run` prints: the commands, not run, and what will not be tried. */
 export const proofCommands = (io, cfg) => {
   const inputs = proofInputs(io, cfg);
-  return [...proofList(cfg, { ...inputs, kindOf: kindOn(io), walkOf: walkOn(io), stickyOf: stickyOn(io) }).map((pr) => (pr.args ? `sudo -n -H -u ${BUILDER} ${pr.args.join(' ')}   (${pr.expect === 'ok' ? 'must work' : pr.expect === 'denied' ? 'must be refused: Permission denied' : 'must fail'})` : `not tried: ${pr.what} (${pr.notTried ?? pr.bad})`)), `${ID} -Gn ${BUILDER}   (its own group and the allowed ones only)`];
+  return [...proofList(cfg, { ...inputs, kindOf: kindOn(io), walkOf: walkOn(io), stickyOf: stickyOn(io) }).map((pr) => (pr.ownerOf ? `root looks at who owns ${pr.ownerOf} itself, a link not followed   (must not be ${BUILDER})` : pr.args ? `sudo -n -H -u ${BUILDER} ${pr.args.join(' ')}   (${pr.expect === 'ok' ? 'must work' : pr.expect === 'denied' ? 'must be refused: Permission denied' : 'must fail'})` : `not tried: ${pr.what} (${pr.notTried ?? pr.bad})`)), `${ID} -Gn ${BUILDER}   (its own group and the allowed ones only)`];
 };

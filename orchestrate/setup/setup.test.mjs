@@ -14,7 +14,7 @@ import { RUNNER_ROLES } from '../shared/review-roles.mjs';
 import { BASE_MARKER, FLAT_OUTBOX_ROLES, ORCHESTRATE_READ_ACL, PRODUCT_OUTBOX_ROLES, ROOT_CONFIG_PATH, USERS, USER_ID_RANGE, WORKER_ROLES, aclText, folderTable, homeOf, parseConfig } from './layout.mjs';
 import { nodeProblemOf, realIo, secureFolder } from './mac.mjs';
 import { aclEntries, adminAnswer, apply, check, parseDscl, plan, readUser } from './users-folders.mjs';
-import { WALK_MAX, changedWhy, groupsProblem, kindOn, proofInputs, proofList, proveList, refusedWhy, runProofs, stickyOn, walkOn } from './proofs.mjs';
+import { WALK_MAX, changedWhy, groupsProblem, hopsOn, kindOn, proofCommands, proofInputs, proofList, proveList, refusedWhy, runProofs, stickyOn, walkOn } from './proofs.mjs';
 import { main } from './setup.mjs';
 import { parseDispatcher } from './dispatcher-setup.mjs';
 import { fakeMac, macTest as test } from './fake-mac.test-helper.mjs';
@@ -964,7 +964,8 @@ test('#528 r2 M1 REAL: a rules entry that is a link to a folder one may pass thr
   mkdirSync(dir); writeFileSync(join(dir, 'key'), 'k'); symlinkSync(dir, link); chmodSync(dir, 0o100);   // pass through, no listing (0100: this user's own, as 0711 is to others)
   try {
     const io = realIo();
-    assert.deepEqual(kindOn(io)(link), { kind: 'dir', real: realpathSync(dir) }, 'judged by what it leads to');
+    const k = kindOn(io)(link); assert.deepEqual([k.kind, k.real], ['dir', realpathSync(dir)], 'judged by what it leads to');
+    assert.ok(k.steps.includes(link.replace(/^\/var\//, '/private/var/')) && k.steps.at(-1) === realpathSync(dir), 'r5: the link and where it leads are on the way');
     // The bug, shown on this Mac as this user: the old file proof reads as refused, though the file inside reads.
     const head = spawnSync('/usr/bin/head', ['-c', '1', link], { encoding: 'utf8' });
     assert.equal(refusedWhy({ args: ['/usr/bin/head', '-c', '1', link], expect: 'denied' }, head), null, 'the old proof would PASS');
@@ -978,21 +979,28 @@ test('#528 r2 M1 REAL: a rules entry that is a link to a folder one may pass thr
 });
 
 test('#528 r2 m8 PLANTs: kindOn tells an error from "not there" and a link by what it leads to; an error is NOT TRIED, never a file proof', () => {
-  const io = (lstat, stat = () => { throw new Error('no stat'); }, realpath = (f) => f) => ({ lstat, stat, realpath });
+  // The stand-in: the name asked about answers `lstat`; a place in `links` is a link that says where it goes (#528 r5:
+  // kindOn follows the way one link at a time too); any other place is a plain folder.
+  const dirSt = { isSymbolicLink: () => false, isDirectory: () => true };
+  const io = (lstat, stat = () => { throw new Error('no stat'); }, realpath = (f) => f, links = { '/x': '/y' }) => ({
+    lstat: (p) => (p === '/x' || p === '/home/proj/d' ? lstat(p) : links[p] ? link : dirSt), stat, realpath, readlink: (p) => links[p] });
   const err = (code) => () => { throw Object.assign(new Error(code), { code }); };
   const link = { isSymbolicLink: () => true, isDirectory: () => false };
   const plain = (dir) => () => ({ isSymbolicLink: () => false, isDirectory: () => dir });
-  assert.deepEqual(kindOn(io(err('EACCES')))('/x'), { kind: 'error:EACCES', real: null }, 'P4: EACCES is not "not there"');
+  const kr = (x) => (x ? Object.fromEntries(Object.entries(x).filter(([k]) => k !== 'steps')) : x);   // kind and real place; the steps are checked below
+  assert.deepEqual(kr(kindOn(io(err('EACCES')))('/x')), { kind: 'error:EACCES', real: null }, 'P4: EACCES is not "not there"');
   assert.equal(kindOn(io(err('ENOENT')))('/x'), null);
-  assert.deepEqual(kindOn(io(plain(true)))('/x'), { kind: 'dir', real: '/x' });
-  assert.deepEqual(kindOn(io(plain(false)))('/x'), { kind: 'file', real: '/x', names: 1 });
-  assert.deepEqual(kindOn(io(() => link, () => ({ isDirectory: () => true }), () => '/y'))('/x'), { kind: 'dir', real: '/y' }, 'M1: a link to a folder');
-  assert.deepEqual(kindOn(io(() => link, () => ({ isDirectory: () => false }), () => '/y'))('/x'), { kind: 'file', real: '/y', names: 1 });
-  assert.deepEqual(kindOn(io(() => link, () => ({ isDirectory: () => true }), err('ENOENT')))('/x'), { kind: 'error:a link that leads nowhere', real: null });
-  assert.deepEqual(kindOn(io(() => link, () => ({ isDirectory: () => true }), err('EACCES')))('/x'), { kind: 'error:EACCES', real: null });
-  assert.deepEqual(kindOn(io(() => link, err('EACCES'), () => '/y'))('/x'), { kind: 'error:EACCES', real: null });
+  assert.deepEqual(kr(kindOn(io(plain(true)))('/x')), { kind: 'dir', real: '/x' });
+  assert.deepEqual(kr(kindOn(io(plain(false)))('/x')), { kind: 'file', real: '/x', names: 1 });
+  assert.deepEqual(kindOn(io(() => link, () => ({ isDirectory: () => true }), () => '/y'))('/x'), { kind: 'dir', real: '/y', steps: ['/x', '/y'] }, 'M1: a link to a folder (r5: the link and where it leads, both on the way)');
+  assert.deepEqual(kr(kindOn(io(() => link, () => ({ isDirectory: () => false }), () => '/y'))('/x')), { kind: 'file', real: '/y', names: 1 });
+  assert.deepEqual(kr(kindOn(io(() => link, () => ({ isDirectory: () => true }), err('ENOENT')))('/x')), { kind: 'error:a link that leads nowhere', real: null });
+  assert.deepEqual(kr(kindOn(io(() => link, () => ({ isDirectory: () => true }), err('EACCES')))('/x')), { kind: 'error:EACCES', real: null });
+  assert.deepEqual(kr(kindOn(io(() => link, err('EACCES'), () => '/y'))('/x')), { kind: 'error:EACCES', real: null });
   // #528 r3 M1: a link higher up the path (the name itself is no link): the real place and the real target's kind.
-  assert.deepEqual(kindOn(io(plain(false), () => ({ isDirectory: () => true }), () => '/elsewhere/d'))('/home/proj/d'), { kind: 'dir', real: '/elsewhere/d' });
+  assert.deepEqual(kindOn(io(plain(false), () => ({ isDirectory: () => true }), () => '/elsewhere/proj/d', { '/home': '/elsewhere' }))('/home/proj/d'), { kind: 'dir', real: '/elsewhere/proj/d', steps: ['/home', '/elsewhere', '/elsewhere/proj', '/elsewhere/proj/d'] });
+  // r5: a way root can't follow one link at a time the same as realpath did is an error, never a guess.
+  assert.match(kindOn(io(plain(false), () => ({ isDirectory: () => true }), () => '/elsewhere/d', {}))('/home/proj/d').kind, /could not be followed one link at a time/);
   // P5: an error is NOT TRIED with its reason, never given a file's head proof.
   const one = proofList(cfg, { ownerHome: '/Users/sam', rules: { files: ['/zz-key'] }, kindOf: (f) => (f === '/zz-key' ? { kind: 'error:EIO', real: null } : { kind: 'dir', real: f }) }).filter((x) => x.what.includes('/zz-key'));
   assert.equal(one.length, 1); assert.equal(one[0].args, null); assert.match(one[0].notTried, /root could not look at it \(EIO\)/);
@@ -1485,12 +1493,13 @@ test('#528 r4 m3: a file with another name is NOT TRIED, in the list and when lo
 test('#528 r4 m4: every folder above a place is proven not writable and not the builder\'s, once each; in a shared folder, the name in it not the builder\'s', () => {
   const kindOf = (f) => (f === '/h/a/x.cred' ? { kind: 'file', real: '/r/b/x.cred', names: 1 } : { kind: 'dir', real: f });
   const list = proofList(cfg, { ownerHome: '/Users/sam', rules: { files: ['/h/a/x.cred', '/h/a/y.cred'] }, kindOf, walkOf: EMPTY_WALK, stickyOf: (d) => d === '/r' });
-  const ab = list.filter((x) => x.above).map((x) => x.args.join(' '));
-  for (const want of ['/bin/test -w /h/a', '/bin/test -O /h/a', '/bin/test -w /h', '/bin/test -O /h', '/bin/test -w /', '/bin/test -O /', '/bin/test -w /r/b', '/bin/test -O /r', '/bin/test -O /r/b']) assert.ok(ab.includes(want), want);
+  const ab = list.filter((x) => x.above).map((x) => (x.ownerOf ? `root: owner of ${x.ownerOf}` : x.args.join(' ')));
+  for (const want of ['/bin/test -w /h/a', '/bin/test -O /h/a', '/bin/test -w /h', '/bin/test -O /h', '/bin/test -w /', '/bin/test -O /', '/bin/test -w /r/b', '/bin/test -O /r', '/bin/test -O /r/b', 'root: owner of /r/b']) assert.ok(ab.includes(want), want);
   assert.ok(!ab.includes('/bin/test -w /r'), 'a shared folder: anyone may write it, so its proof is who owns the name in it');
-  // A file right in the shared folder: the name in it is the file itself (deeper, it is a folder already proven once).
+  // A file right in the shared folder: the name in it is the file itself; root looks at its owner, not followed (r5 M-1).
   const top = proofList(cfg, { ownerHome: '/Users/sam', rules: { files: ['/r/z.cred'] }, kindOf: (f) => (f === '/r/z.cred' ? { kind: 'file', real: f, names: 1 } : { kind: 'dir', real: f }), walkOf: EMPTY_WALK, stickyOf: (d) => d === '/r' });
-  assert.deepEqual(top.find((x) => /in the shared folder \/r /.test(x.what))?.args, ['/bin/test', '-O', '/r/z.cred'], 'the shared folder\'s proof is on the name in it (plant R12)');
+  const named = top.find((x) => /in the shared folder \/r,/.test(x.what));
+  assert.equal(named?.ownerOf, '/r/z.cred', 'the shared folder\'s proof is on the name in it (plant R12)'); assert.equal(named.args, undefined, 'never test -O, which follows a link');
   assert.equal(new Set(ab).size, ab.length, 'each folder once');
   assert.ok(list.filter((x) => x.above).every((x) => x.expect === 'fail' && !x.look));
   // On a fake Mac: a rules file the builder can't read, in a folder the builder owns, FAILs.
@@ -1502,6 +1511,7 @@ test('#528 r4 m4: every folder above a place is proven not writable and not the 
   const bad = res.filter((r) => !r.ok).map((r) => r.what);   // test -O on bw is one proof (each folder once)
   assert.ok(bad.some((w) => /cannot write \/Users\/Shared\/bw \(a folder above/.test(w)), bad.join('\n'));
   assert.ok(bad.some((w) => /does not own \/Users\/Shared\/bw \(a folder above/.test(w)), bad.join('\n'));
+  assert.match(res.find((r) => /does not own the name \/Users\/Shared\/bw itself/.test(r.what))?.why ?? '', /builder owns it/, 'root\'s look at the name in the shared folder FAILs');
   assert.ok(stickyOn(mac)('/Users/Shared') && !stickyOn(mac)('/Users') && !stickyOn(mac)('/no/such'));
 });
 
@@ -1537,10 +1547,133 @@ test('#528 r4 m3 REAL HARD: a file in a shut folder with another name in an open
 
 test('#528 r4 m4 REAL: the folders above are proven as the asking user: a system folder is refused, one this user owns FAILs', REAL_MAC, () => {
   const io = realIo(); const me = { run: (c, a) => io.run(a[4], a.slice(5)) };
-  const sys = proofList(cfg, { ownerHome: '/Users/sam', rules: { files: ['/usr/bin/true'] }, kindOf: kindOn(io), walkOf: walkOn(io), stickyOf: stickyOn(io) }).filter((x) => x.above && /^\/usr/.test(x.args.at(-1)));
+  const sys = proofList(cfg, { ownerHome: '/Users/sam', rules: { files: ['/usr/bin/true'] }, kindOf: kindOn(io), walkOf: walkOn(io), stickyOf: stickyOn(io) }).filter((x) => x.above && x.args && /^\/usr/.test(x.args.at(-1)));
   assert.ok(sys.length >= 4); assert.ok(proveList(me, sys).every((r) => r.ok), 'test -w and -O on /usr and /usr/bin: a plain no');
   const T = realpathSync(tempDir('orch-r4a-')); writeFileSync(join(T, 'x'), 'x');
   const mine = proofList(cfg, { ownerHome: '/Users/sam', rules: { files: [join(T, 'x')] }, kindOf: kindOn(io), walkOf: walkOn(io), stickyOf: stickyOn(io) }).filter((x) => x.above && x.args.at(-1) === T);
   assert.equal(mine.length, 2); assert.ok(proveList(me, mine).every((r) => !r.ok && /CAN do this/.test(r.why)));
   assert.equal(stickyOn(io)('/private/tmp'), true, 'the real shared folder');
+});
+
+// ── #528 r5 (L1159) ──────────────────────────────────────────────────────────────────────────────────────────────────
+
+test('#528 r5 M-1 REAL: a link this user owns in /private/tmp, leading to a shut folder, FAILs "does not own the name itself" (test -O would follow it and pass)', REAL_MAC, () => {
+  const T = realpathSync(tempDir('orch-r5s-')); mkdirSync(join(T, 'sec')); writeFileSync(join(T, 'sec/k'), 'S');
+  const L = `/private/tmp/orch-r5-${process.pid}`; symlinkSync(join(T, 'sec'), L);
+  try {
+    const io = realIo(); const entry = `${L}/k`;
+    const list = proofList(cfg, { ownerHome: '/Users/sam', rules: { files: [entry] }, kindOf: kindOn(io), walkOf: walkOn(io), stickyOf: stickyOn(io) }).filter((x) => x.ownerOf === L);
+    assert.equal(list.length, 1, 'root looks at the link in the shared folder');
+    const asMe = { lstat: (p) => io.lstat(p), run: () => { throw new Error('no program runs for this proof'); } };
+    const [r] = proveList(asMe, list, kindOn(io), walkOn(io), { builderUid: process.getuid() });
+    assert.equal(r.ok, false); assert.match(r.why, /owns it \(a link it can re-point\)/);
+    // The bug, on this Mac: test -O follows the link to the folder, whose owner is this user too here, so ask about one it does not own.
+    const [other] = proveList(asMe, list, kindOn(io), walkOn(io), { builderUid: process.getuid() + 4242 });
+    assert.equal(other.ok, true, 'someone else\'s link: PASS');
+  } finally { rmSync(L); }
+});
+
+test('#528 r5 M-1: on a fake Mac, a link the builder owns in /Users/Shared FAILs; the name is never asked with test -O', () => {
+  const mac = proven({ files: [SECRET, '/Users/Shared/bl/k.cred'] });
+  mkdirSync(mac.at('/opt/s'), { recursive: true }); chmodSync(mac.at('/opt/s'), 0o700); mac.owners.set('/opt/s', { uid: uidOf(mac, 'sam'), gid: 20 });
+  writeFileSync(mac.at('/opt/s/k.cred'), 'k'); chmodSync(mac.at('/opt/s/k.cred'), 0o600); mac.owners.set('/opt/s/k.cred', { uid: uidOf(mac, 'sam'), gid: 20 });
+  symlinkSync(mac.at('/opt/s'), mac.at('/Users/Shared/bl')); mac.owners.set('/Users/Shared/bl', { uid: uidOf(mac, 'builder'), gid: 20 });
+  const res = runProofs(mac, cfg);
+  const r = res.find((x) => /does not own the name \/Users\/Shared\/bl itself/.test(x.what));
+  assert.equal(r?.ok, false, res.filter((x) => /bl/.test(x.what)).map((x) => `${x.ok} ${x.what}`).join('\n')); assert.match(r.why, /builder owns it \(a link it can re-point\)/);
+  assert.ok(!proofCommands(mac, cfg).some((c) => /test -O \/Users\/Shared\/bl$/.test(c.split('   ')[0])), 'never test -O on the name');
+  assert.ok(proofCommands(mac, cfg).some((c) => c.startsWith('root looks at who owns /Users/Shared/bl itself')));
+});
+
+test('#528 r5 M-1: the builder\'s id unknown, or the name gone when looked at, is NOT TRIED', () => {
+  const pr = { what: 'w', ownerOf: '/r/n', expect: 'fail', above: true };
+  const io = { lstat: () => ({ uid: 7, isSymbolicLink: () => true }) };
+  assert.equal(proveList(io, [pr], () => null, EMPTY_WALK, { builderUid: null })[0].notTried, true);
+  const gone = proveList({ lstat: () => { throw Object.assign(new Error('x'), { code: 'ENOENT' }); } }, [pr], () => null, EMPTY_WALK, { builderUid: 7 })[0];
+  assert.equal(gone.notTried, true); assert.match(gone.why, /ENOENT/);
+  assert.equal(proveList(io, [pr], () => null, EMPTY_WALK, { builderUid: 7 })[0].ok, false);
+  assert.equal(proveList(io, [pr], () => null, EMPTY_WALK, { builderUid: 8 })[0].ok, true);
+});
+
+test('#528 r5 M-2: a 2-link chain: the folder holding the middle link is proven, and a builder who can write it FAILs', () => {
+  // Real files: a/l1 → m/l2 → z. The way is followed one link at a time, so m is met.
+  const T = realpathSync(tempDir('orch-r5h-'));
+  for (const d of ['a', 'm', 'z']) mkdirSync(join(T, d)); writeFileSync(join(T, 'z/p'), 's');
+  symlinkSync(join(T, 'm/l2'), join(T, 'a/l1')); symlinkSync(join(T, 'z'), join(T, 'm/l2'));
+  const io = realIo(); const h = hopsOn(io)(join(T, 'a/l1/p'));
+  assert.equal(h.real, join(T, 'z/p')); assert.ok(h.steps.includes(join(T, 'm/l2')), JSON.stringify(h.steps));
+  const list = proofList(cfg, { ownerHome: '/Users/sam', rules: { files: [join(T, 'a/l1/p')] }, kindOf: kindOn(io), walkOf: walkOn(io), stickyOf: stickyOn(io) });
+  assert.ok(list.some((x) => x.args?.join(' ') === `/bin/test -w ${join(T, 'm')}`), 'the middle link\'s folder is proven');
+  // On a fake Mac: only m is the builder's to write; the proofs FAIL on it.
+  const mac = proven({ files: [SECRET, '/opt/a/l1/p'] }); const sam = { uid: uidOf(mac, 'sam'), gid: 20 };
+  for (const [d, o] of [['/opt', { uid: mac.rootUid, gid: 0 }], ['/opt/a', sam], ['/opt/m', { uid: uidOf(mac, 'builder'), gid: 20 }], ['/opt/z', sam]]) { mkdirSync(mac.at(d), { recursive: true }); chmodSync(mac.at(d), 0o755); mac.owners.set(d, o); }
+  writeFileSync(mac.at('/opt/z/p'), 's'); chmodSync(mac.at('/opt/z/p'), 0o600); mac.owners.set('/opt/z/p', sam);
+  symlinkSync(mac.at('/opt/m/l2'), mac.at('/opt/a/l1')); symlinkSync(mac.at('/opt/z'), mac.at('/opt/m/l2'));
+  const bad = runProofs(mac, cfg).filter((r) => !r.ok).map((r) => r.what);
+  assert.ok(bad.some((w) => /cannot write \/opt\/m \(a folder above/.test(w)), bad.join('\n'));
+});
+
+test('#528 r5 M-2: hopsOn follows "..", relative and absolute links, and stops a loop (ELOOP)', () => {
+  const T = realpathSync(tempDir('orch-r5l-')); mkdirSync(join(T, 'd/e'), { recursive: true }); writeFileSync(join(T, 'd/f'), 'f');
+  symlinkSync('../f', join(T, 'd/e/up')); symlinkSync(join(T, 'x2'), join(T, 'x1')); symlinkSync(join(T, 'x1'), join(T, 'x2'));
+  const io = realIo();
+  assert.equal(hopsOn(io)(join(T, 'd/e/up')).real, join(T, 'd/f'));
+  assert.equal(hopsOn(io)(`${T}/d/e/../f`).real, join(T, 'd/f'));
+  assert.ok(!hopsOn(io)(`${T}/d/e/../f`).steps.includes(`${T}/d/e/..`), 'c-1: no ".." name on the way');
+  assert.throws(() => hopsOn(io)(join(T, 'x1')), { code: 'ELOOP' });
+  assert.throws(() => hopsOn(io)(join(T, 'd/f/g')), { code: 'ENOTDIR' });
+  assert.equal(kindOn(io)(join(T, 'x1')).kind, 'error:ELOOP');
+});
+
+test('#528 r5 M-2: walkOn: a link inside that leaves through a folder outside and comes back counts as leaving', () => {
+  const T = realpathSync(tempDir('orch-r5w-')); const d = join(T, 'sec');
+  mkdirSync(join(d, 'in'), { recursive: true }); mkdirSync(join(T, 'out'));
+  symlinkSync(join(d, 'in'), join(T, 'out/back'));        // outside: out/back → sec/in
+  symlinkSync(join(T, 'out/back'), join(d, 'via'));       // inside: via → out/back → sec/in (ends inside, leaves on the way)
+  symlinkSync(join(d, 'in'), join(d, 'stay'));            // inside, straight
+  const w = walkOn(realIo())(d);
+  assert.deepEqual(w.links.map((x) => x.at), [join(d, 'via')]);
+});
+
+test('#528 r5 m-1 (probe-walked): a folder whose walk can\'t finish is NOT TRIED for every name that reaches it, in either order', () => {
+  const kindOf = (f) => (f === '/s2' ? { kind: 'dir', real: '/s' } : { kind: 'dir', real: f });
+  const walkOf = (d) => (d === '/s' ? { error: 'too many' } : { links: [], named: [] });
+  for (const files of [['/s', '/s2'], ['/s2', '/s']]) {
+    const list = proofList(cfg, { ownerHome: '/Users/sam', rules: { files }, kindOf, walkOf }).filter((x) => /cannot read \/s2?$/.test(x.what) || /\/s2?( |$)/.test(x.what) && !x.above);
+    assert.ok(list.length >= 2 && list.every((x) => x.notTried && /could not look through/.test(x.notTried)), `${files}: ${JSON.stringify(list)}`);
+  }
+});
+
+test('#528 r5 m-2: on a fake Mac, a real loop of folder links is walked once each; a link inside a linked folder is walked further', () => {
+  const mac = proven({ files: [SECRET, '/opt/k'] }); const sam = { uid: uidOf(mac, 'sam'), gid: 20 };
+  for (const d of ['/opt/k', '/opt/o/d', '/opt/far']) { mkdirSync(mac.at(d), { recursive: true }); mac.owners.set(d, sam); }
+  writeFileSync(mac.at('/opt/far/key'), 'k'); mac.owners.set('/opt/far/key', sam);
+  symlinkSync(mac.at('/opt/o/d'), mac.at('/opt/k/d'));     // k/d → o/d
+  symlinkSync(mac.at('/opt/k'), mac.at('/opt/o/d/back'));  // o/d/back → k: a loop
+  symlinkSync(mac.at('/opt/far/key'), mac.at('/opt/o/d/x'));   // inside the linked folder, a link further out
+  const walked = []; const w = walkOn(mac);
+  const list = proofList(cfg, { ...proofInputs(mac, cfg), kindOf: kindOn(mac), walkOf: (d) => (walked.push(d), w(d)), stickyOf: stickyOn(mac) });
+  assert.equal(walked.filter((d) => d === '/opt/k').length, 1, 'A6: the loop ends: /opt/k is walked once');
+  assert.equal(walked.filter((d) => d === '/opt/o/d').length, 1, 'and /opt/o/d once');
+  assert.ok(list.some((x) => x.args?.join(' ') === '/bin/ls /opt/o/d'), 'the linked folder is proven');
+  assert.ok(list.some((x) => x.args?.join(' ') === '/usr/bin/head -c 1 /opt/far/key'), 'A10: the link inside the linked folder is proven, as a file');
+});
+
+test('#528 r5 m-3: a link inside the keys folder is proven by its target\'s kind: a file is read, never listed', () => {
+  const list = proofList(cfg, { ownerHome: '/Users/sam', kindOf: (f) => (f === P('keys/k') ? { kind: 'file', real: '/open/k', names: 1 } : { kind: 'dir', real: f }), walkOf: (d) => (d === P('keys') ? { links: [{ at: P('keys/k'), real: '/open/k' }], named: [] } : { links: [], named: [] }) });
+  const mine = list.filter((x) => x.args?.at(-1) === '/open/k' && !x.above).map((x) => x.args[0]);
+  assert.deepEqual(mine, ['/usr/bin/head']);
+});
+
+test('#528 r5 m-4: a file whose names are all inside the walked folder is fine; one with a name outside is NOT TRIED', () => {
+  const T = realpathSync(tempDir('orch-r5n-')); const d = join(T, 'sec'); mkdirSync(join(d, 'sub'), { recursive: true });
+  writeFileSync(join(d, 'a'), 'a'); linkSync(join(d, 'a'), join(d, 'sub/a2'));   // both names inside
+  writeFileSync(join(d, 'b'), 'b'); linkSync(join(d, 'b'), join(T, 'b-out'));    // one name outside
+  assert.deepEqual(walkOn(realIo())(d).named, [join(d, 'b')]);
+});
+
+test('#528 r5 M-2: a link on the way that now goes elsewhere is NOT TRIED when looked at again', () => {
+  const look = { at: '/a', kind: 'dir', real: '/z', steps: ['/a', '/z'] };
+  assert.equal(changedWhy(look, { kind: 'dir', real: '/z', steps: ['/a', '/z'] }), null);
+  assert.match(changedWhy(look, { kind: 'dir', real: '/z', steps: ['/a', '/m', '/z'] }), /the way to it changed/);
 });
