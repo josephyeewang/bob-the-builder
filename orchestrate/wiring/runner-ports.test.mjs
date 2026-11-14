@@ -11,7 +11,7 @@ import { tempDir } from '../shared/test-tmp.mjs';
 import { SETTINGS as S } from '../modules/M4-workshop/launcher/settings-names.mjs';
 import { gitOk, initMirror } from '../modules/M4-workshop/git/safe-git.mjs';
 import { launch } from '../modules/M4-workshop/launcher/launch.mjs';
-import { INTAKE_DONE, chmodTree, removeAll, cardStartCommit, undoCommitProblem, drainedPort, groupThere, pauseLeadPort, liveWallProblem, productWallGap, projectFolderName, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath, workerPromptText, TRANSCRIPT_PLACE_CHECKED_AGAINST } from './runner-ports.mjs';
+import { INTAKE_DONE, chmodTree, removeAll, cardStartCommit, undoCommitProblem, drainedPort, groupThere, pauseLeadPort, liveWallProblem, productWallGap, projectFolderName, folderNameAsGiven, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath, workerPromptText, TRANSCRIPT_PLACE_CHECKED_AGAINST } from './runner-ports.mjs';
 import { roleEnv } from '../modules/M4-workshop/launcher/env-check.mjs';
 import { walledLaunchSettings } from './runner-launch.mjs';
 import { leaderStart } from './runner-loop.mjs';
@@ -65,6 +65,14 @@ test('L1134: the conversation folder name is cut as 2.1.316 cuts it: 200 charact
   const wide = `/copies/caf\u00e9-\u{1F600}-${'b'.repeat(200)}`;
   assert.equal(projectFolderName(wide), `${'-copies-caf-----'}${'b'.repeat(184)}-b6b4tn`);
   assert.equal(transcriptPath({ configDir: '/cfg', copy: over, sessionId: SID }), join('/cfg', 'projects', `-copies-${'a'.repeat(192)}-sne018`, `${SID}.jsonl`));
+  // L1141 m1: 2.1.316 puts the path in NFC before naming and hashing (realpathSync(cwd).normalize("NFC")), so an e typed
+  // with a separate accent mark names the same folder as the one-character e, short or cut.
+  assert.equal(projectFolderName('/copies/cafe\u0301'), '-copies-caf-');
+  assert.equal(folderNameAsGiven('/copies/cafe\u0301'), '-copies-cafe-', 'without the NFC step the mark is one more "-"');
+  const [nfd, nfc] = [`/copies/cafe\u0301-${'b'.repeat(200)}`, `/copies/caf\u00e9-${'b'.repeat(200)}`];
+  assert.equal(projectFolderName(nfd), projectFolderName(nfc));
+  assert.ok(projectFolderName(nfd).endsWith('-9gvujl'), 'the hash is of the NFC path');
+  assert.ok(folderNameAsGiven(nfd).endsWith('-ukv9m2'));
   // Not proved on a live session yet (L1134): it stays null until a real run finds its transcript at this path.
   assert.equal(TRANSCRIPT_PLACE_CHECKED_AGAINST, null);
   // CLAUDE_CODE_PROJECT_DIR_NAME would replace the name (with a config folder set, as the runner's is): never passed on.
