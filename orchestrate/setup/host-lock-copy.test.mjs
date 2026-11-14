@@ -8,7 +8,7 @@ import * as fs from 'node:fs';
 import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { COPY_AHEAD_MS, COPY_MAX_AGE_MS, copierPlist, copyHostLock, stampPath, stampProblem } from './host-lock-copy.mjs';
-import { parseConfig } from './layout.mjs';
+import { folderTable, hostLockCopyOf, hostLockFolderPath, parseConfig } from './layout.mjs';
 import { HOST_LOCK_MAX } from '../wiring/worker-ports.mjs';
 import { tempDir } from '../shared/test-tmp.mjs';
 
@@ -155,6 +155,30 @@ test('L1029 E: the config takes hostLockSource only with hostLockPath, as a diff
   assert.throws(() => parseConfig({ ...raw, hostLockPath: undefined, hostLockSource: '/Users/sam/Dropbox/host.lock' }), /hostLockSource needs hostLockPath/);
   assert.throws(() => parseConfig({ ...raw, hostLockSource: '/Users/sam/.orchestrate/HOST.lock' }), /two different files/);
   for (const bad of ['/Users/other/host.lock', '/Users/sam/../x/host.lock', '/Users/sam/d/', 'rel/host.lock', 7]) assert.throws(() => parseConfig({ ...raw, hostLockSource: bad }), /hostLockSource must be the full path/, String(bad));
+});
+
+test('L1210: hostLockPath may be the base\'s host-lock copy, exactly, and only with the copier; nowhere else under the base', () => {
+  const raw = { base: '/Library/orch-test', owner: 'sam', products: ['alpha'], hostLockSource: '/Users/sam/Dropbox/host.lock' };
+  const copy = '/Library/orch-test/host-lock/host.lock';
+  assert.equal(hostLockCopyOf('/Library/orch-test'), copy);
+  assert.equal(parseConfig({ ...raw, hostLockPath: copy }).hostLockPath, copy);
+  assert.equal(parseConfig({ ...raw, base: '/Library/orch-test/', hostLockPath: copy }).hostLockPath, copy, 'the base as normalized');
+  assert.throws(() => parseConfig({ ...raw, hostLockSource: undefined, hostLockPath: copy }), /may be \/Library\/orch-test\/host-lock\/host\.lock only with hostLockSource/);
+  for (const bad of ['/Library/orch-test/host-lock/other.lock', '/Library/orch-test/owner-answer/host.lock', '/Library/orch-test/host.lock',
+    '/Library/orch-test/host-lock/host.lock/', '/Library/orch-test/host-lock//host.lock', '/Library/orch-test/x/../host-lock/host.lock',
+    '/Library/orch-test/HOST-LOCK/host.lock', '/Library/orch-test/host-lock/HOST.LOCK', '/Library/other/host-lock/host.lock',
+    '/Library/orch-test/install/orchestrate/host-lock/host.lock']) {
+    assert.throws(() => parseConfig({ ...raw, hostLockPath: bad }), /hostLockPath must be the full path of a file in \/Users\/sam\/, or \/Library\/orch-test\/host-lock\/host\.lock/, bad);
+  }
+  // The folder: the owner's, 0755, made with the others by users-folders; orchestrate reads through it, never writes.
+  const cfg = parseConfig({ ...raw, hostLockPath: copy });
+  assert.equal(hostLockFolderPath(cfg), '/Library/orch-test/host-lock');
+  const row = folderTable(cfg).find((r) => r.path === hostLockFolderPath(cfg));
+  assert.deepEqual([row.path, row.owner, row.mode, row.acl, row.group], ['/Library/orch-test/host-lock', 'owner', 0o755, [], 'root'], 'no access list; group wheel');
+  // The copier takes that folder as the owner's own (its folder check is unchanged).
+  const d = tempDir('orch-hlbase-'); const from = join(d, 'host.lock'); const dir = join(d, 'host-lock'); mkdirSync(dir); chmodSync(dir, 0o755);
+  writeFileSync(from, 'host=mini\n');
+  assert.deepEqual(copyHostLock({ from, to: join(dir, 'host.lock'), now: T0 }), { ok: true, did: 'copied' });
 });
 
 test('L1041: hostLockCopierNode is the copier\'s own node in the owner\'s home, only with hostLockSource; the job runs it', () => {
