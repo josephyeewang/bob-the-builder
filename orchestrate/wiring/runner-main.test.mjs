@@ -667,22 +667,26 @@ test('L1001: the Bob file list is read only as root\'s own plain file, never thr
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
-test('L1079 (I1): the runner refuses to run as root or as a person\'s user (staff or admin), first, before its config is read', async () => {
-  assert.equal(personUserProblem(601, [601, 12, 61, 100, 701]), null, 'the builder: its own group and the Mac\'s all-users groups');
-  assert.match(personUserProblem(0, [0]), /runs as root/);
-  assert.match(personUserProblem(501, [20, 12, 80]), /in staff and admin \(a person's user\)/);
-  assert.match(personUserProblem(601, [601, 20]), /in staff/, 'the builder added to staff is a person\'s user to it');
-  assert.match(personUserProblem(601, [601, 80]), /in admin/);
-  for (const g of [null, undefined, [], ['20'], [601, NaN]]) assert.match(personUserProblem(601, g), /groups can't be read/, String(g));
+test('L1079 (I1): the runner runs as the builder user only (an allowed list, #528 r1 m1), never root or a person\'s user, checked first, before its config is read', async () => {
+  const B = 'builder';
+  assert.equal(personUserProblem(601, [601, 12, 61, 100, 701], B), null, 'the builder: its own group and the Mac\'s all-users groups');
+  assert.match(personUserProblem(0, [0], 'root'), /runs as root/);
+  // An allowed list (#528 r1 m1): any other user is refused, a setup user with none of a person's groups too.
+  for (const n of ['orchestrate', 'review', 'pages', 'sam', 'Builder', 'builder ']) assert.match(personUserProblem(602, [602, 12], n), /only the builder user may run it/, n);
+  for (const n of [null, undefined, '']) assert.match(personUserProblem(601, [601], n), /name can't be read/, String(n));
+  assert.match(personUserProblem(501, [20, 12, 80], B), /in staff and admin \(a person's user\)/);
+  assert.match(personUserProblem(601, [601, 20], B), /in staff/, 'the builder added to staff is a person\'s user to it');
+  assert.match(personUserProblem(601, [601, 80], B), /in admin/);
+  for (const g of [null, undefined, [], ['20'], [601, NaN]]) assert.match(personUserProblem(601, g, B), /groups can't be read/, String(g));
   const logs = []; let read = false;
-  const code = await main(['/cfg.json'], { asUser: () => personUserProblem(501, [20, 80]), readConfig: () => { read = true; return {}; }, log: (s) => logs.push(s) });
+  const code = await main(['/cfg.json'], { asUser: () => personUserProblem(501, [20, 80], 'builder'), readConfig: () => { read = true; return {}; }, log: (s) => logs.push(s) });
   assert.equal(code, 1);
   assert.equal(read, false, 'refused before the config is read');
   assert.match(logs.join('\n'), /did not start: it runs as a user in staff and admin/);
   assert.equal(await main(['/cfg.json'], { asUser: () => { throw new Error('no'); }, readConfig: () => { read = true; return {}; }, log: (s) => logs.push(s) }), 1);
   assert.equal(read, false);
   // The real default checks this process: a test run as a person's user is refused.
-  const me = personUserProblem(process.getuid(), process.getgroups());
+  const me = personUserProblem(process.getuid(), process.getgroups(), (await import('node:os')).userInfo().username);
   if (me) assert.equal(await main(['/cfg.json'], { readConfig: () => { read = true; return {}; }, log: () => {} }), 1);
 });
 

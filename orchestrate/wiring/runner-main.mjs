@@ -50,8 +50,9 @@ import { workerChecks } from './runner-checks.mjs';
 import { holdersOf, readFactFile, readSessionFile } from '../modules/M4-workshop/launcher/review-runner-main.mjs';
 import { keepSnapshotFresh, writeSnapshot } from '../modules/M4-workshop/hooks/snapshot.mjs';
 import { spawn as childSpawn, spawnSync } from 'node:child_process';
-import { fullPath } from './runner-job.mjs';
-import { productRoleClash } from './owner-status.mjs';
+import { RUNNER_JOB_USER as BUILDER, fullPath } from './runner-job.mjs';
+import { userInfo } from 'node:os';
+import { live as isLiveSession, productRoleClash } from './owner-status.mjs';
 import { CLAUDE_FILE, MANAGED_SOURCES_CHECKED_ON, checkRoleEnv } from '../modules/M4-workshop/launcher/env-check.mjs';
 import { LOCKED_MS, lockedRunner } from './runner-locked.mjs';
 import { apart } from '../modules/M4-workshop/launcher/render-settings.mjs';
@@ -75,15 +76,19 @@ export const RENDER_PATHS = Object.freeze(['node', 'hooksDir', 'notes', 'bobFold
 // The Mac's own groups a person's user is in: staff (every person's account, which a home folder opens to) and admin.
 // The builder is in neither (setup users-folders, L1079), so a runner in either is running as a person, never the builder.
 export const PERSON_GROUPS = Object.freeze({ staff: 20, admin: 80 });
-/** Null, or why the runner must not run as this user (L1079, I1: nothing falls back to the owner's user): root, or a user
- *  in staff or admin. `groups` is process.getgroups(); a list that can't be read is refused, never read as empty. */
-export function personUserProblem(uid, groups) {
+/** Null, or why the runner must not run as this user (L1079, I1: nothing falls back to the owner's user). An allowed list
+ *  (#528 r1 m1, I6): only the user named builder, and even it not while in staff or admin. `name` is the user's name
+ *  (os.userInfo), `groups` process.getgroups(); either one that can't be read is refused, never read as allowed. */
+export function personUserProblem(uid, groups, name) {
   if (uid === 0) return 'it runs as root; its job file must name the builder user (UserName)';
+  if (typeof name !== 'string' || !name) return 'its user\'s name can\'t be read, so it is not known to be the builder user';
+  if (name !== BUILDER) return `it runs as ${JSON.stringify(name.slice(0, 40))}; only the ${BUILDER} user may run it (L1079)`;
   if (!Array.isArray(groups) || !groups.length || !groups.every(Number.isInteger)) return 'its user\'s groups can\'t be read, so it is not known that it is not a person\'s user';
   const hit = Object.entries(PERSON_GROUPS).filter(([, g]) => groups.includes(g)).map(([n]) => n);
   return hit.length ? `it runs as a user in ${hit.join(' and ')} (a person's user); it must run as the builder user (L1079)` : null;
 }
 const readGroups = () => { try { return process.getgroups(); } catch { return null; } };
+const readName = () => { try { return userInfo().username; } catch { return null; } };
 
 /** The config's fields, checked after the reader has checked the file. → the config with the runner's own paths added, or a throw. */
 export function checkRunnerConfig(c) {
@@ -235,7 +240,7 @@ export function carriedOverProblem(c, memory, { groupGone, readSettings = sessio
   }
   const live = [];
   for (const s of Array.isArray(memory?.sessions) ? memory.sessions : []) {
-    if (!(s?.alive === true || (s?.alive !== false && s?.ended !== true))) continue;
+    if (!s || !isLiveSession(s)) continue;   // the one live-session rule (owner-status.mjs, #528 r1 m4)
     let gone = false; try { gone = groupGone(s) === true; } catch { gone = false; }
     if (!gone) live.push({ id: s.id, product: s.product });
   }
@@ -450,7 +455,7 @@ export function keepSnapshots(c, { fresh = keepSnapshotFresh, log = () => {}, re
  */
 export async function main(argv, { readConfig = (f) => { const self = selfPath(); if (!self) throw new Error('its own script\'s path can\'t be read, so it can\'t be checked'); return readJobConfig(f, { code: [], optionalCode: ['budget'], self }); }, lock = (dir) => makeLock({ dir, timeoutMs: 2_000 }),
   ports = {}, run = runRunner, log = (s) => process.stderr.write(`${new Date().toISOString()} ${s}\n`), onStop = listenStop, fresh = keepSnapshotFresh,
-  realpath = (p) => realpathSync.native(p), memory = loadMemory, asUser = () => personUserProblem(process.getuid(), readGroups()), folderProblem = (dir) => snapshotFolderProblem(dir),
+  realpath = (p) => realpathSync.native(p), memory = loadMemory, asUser = () => personUserProblem(process.getuid(), readGroups(), readName()), folderProblem = (dir) => snapshotFolderProblem(dir),
   pinnedProblem = (root, files) => installProblem(root, files, { owner: 0 }), loadBudget = importBudget, readManifest = readRootFile, portsOf = realRunnerPorts, hooksOf = hookStoreOf } = {}) {
   // Who it runs as comes first, before the config is read (L1079): never root, never a person's user.
   { let who; try { who = asUser(); } catch (e) { who = `its user can't be checked (${e?.message ?? e})`; } if (who) { log(`the worker runner did not start: ${who}`); return 1; } }

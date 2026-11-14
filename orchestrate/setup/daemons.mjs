@@ -379,6 +379,17 @@ export function checkDaemons(io, cfg, jobs = jobsFor(cfg)) {
     ...(other.length ? [`${other.map((n) => join(DAEMON_DIR, n)).join(', ')}: under another label than ${cfg.label}; check ${other.length === 1 ? 'it is' : 'they are'} setup's (a write cut off under an old label) before deleting ${other.length === 1 ? 'it' : 'them'}`] : []),
   ];
   item(sideWhy.length === 0, `no half-written job file${subset ? ` for ${jobs.join(', ')}` : ''} in ${DAEMON_DIR}`, sideWhy.join('; '));   // --only: the row names its jobs, as every row then does
+  // The worker runner's job from before L1079 (#528 r1 m9): a LaunchAgent of the owner's, in the owner's own
+  // ~/Library/LaunchAgents. Left there it starts a second runner, as the owner, at the owner's next login. Named by its
+  // file, whatever its label; a folder that can't be listed is said, never read as "none there".
+  if (!subset) {
+    const u = readUser(io, cfg.owner); const dir = u.exists && u.home ? join(u.home, 'Library', 'LaunchAgents') : null;
+    let agents = null; let why = null;
+    if (!dir) why = `the owner ${cfg.owner}'s home could not be read from this Mac, so its LaunchAgents were not looked at`;
+    else { try { agents = io.list(dir).filter((n) => /\.worker-runner\.plist$/.test(n) && !n.startsWith('.')).sort(); } catch (e) { if (e?.code !== 'ENOENT') why = `${dir} could not be listed (${e?.code ?? 'error'}), so whether the old worker runner's job is left there is not known`; else agents = []; } }
+    item(why === null && agents.length === 0, `no worker runner job left in the owner's LaunchAgents (since L1079 it runs as the builder user, never as the owner)`,
+      why ?? `${agents.map((n) => join(dir, n)).join(', ')}: the old worker runner, which would start a second runner as ${cfg.owner}. As ${cfg.owner}: launchctl bootout gui/$(id -u)/<its label>, then delete the file (README, "Moving the workers to the builder user", step 1)`);
+  }
   // Each job the config leaves off: none placed or loaded (listed only when there is one).
   const offWhy = { 'watch-only': 'the config names no rules fingerprint', [ROBOT_JOB]: 'the config does not turn the robot job on', [DISPATCHER_JOB]: 'the config has no dispatcher entry' };
   for (const off of subset ? [] : OPTIONAL_JOBS.filter((j) => !jobsFor(cfg).includes(j))) {

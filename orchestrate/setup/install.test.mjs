@@ -544,6 +544,19 @@ test('daemons check: files pass, "is loaded" items fail until the jobs are loade
   assert.equal(w.run(['daemons', 'check']).code, 1);
 });
 
+test('#528 r1 m9 PLANT: daemons check names the worker runner\'s old LaunchAgent in the owner\'s home; a LaunchAgents folder it can\'t list is never "none there"', async () => {
+  const w = await placed(); const dir = '/Users/sam/Library/LaunchAgents'; const what = /no worker runner job left in the owner's LaunchAgents/;
+  const row = () => checkDaemons(w.mac, w.cfg).find((r) => what.test(r.what));
+  assert.equal(row().ok, true, 'no such folder: nothing left');
+  mkdirSync(w.mac.at(dir), { recursive: true }); writeFileSync(w.mac.at(`${dir}/com.example.other.host-lock-copy.plist`), 'x');
+  assert.equal(row().ok, true, 'the owner\'s other jobs are not the runner');
+  writeFileSync(w.mac.at(`${dir}/com.example.old.worker-runner.plist`), 'x');
+  assert.equal(row().ok, false); assert.match(row().why, /com\.example\.old\.worker-runner\.plist: the old worker runner, which would start a second runner as sam/);
+  chmodSync(w.mac.at(dir), 0o000);
+  try { assert.equal(row().ok, false); assert.match(row().why, /could not be listed \(EACCES\)/); } finally { chmodSync(w.mac.at(dir), 0o755); }
+  assert.ok(!checkDaemons(w.mac, w.cfg, [JOBS[0]]).some((r) => what.test(r.what)), 'a check narrowed with --only leaves it out');
+});
+
 test('daemons load / list / unload: load starts all three once; a second load does nothing; unload stops them; a second unload is not an error', async () => {
   const w = await placed();
   let r = w.run(['daemons', 'load', '--dry-run']);

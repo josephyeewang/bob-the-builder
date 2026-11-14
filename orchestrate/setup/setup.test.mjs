@@ -14,7 +14,7 @@ import { RUNNER_ROLES } from '../shared/review-roles.mjs';
 import { BASE_MARKER, FLAT_OUTBOX_ROLES, ORCHESTRATE_READ_ACL, PRODUCT_OUTBOX_ROLES, ROOT_CONFIG_PATH, USERS, USER_ID_RANGE, WORKER_ROLES, aclText, folderTable, homeOf, parseConfig } from './layout.mjs';
 import { nodeProblemOf, realIo, secureFolder } from './mac.mjs';
 import { aclEntries, adminAnswer, apply, check, parseDscl, plan, readUser } from './users-folders.mjs';
-import { proofList, runProofs } from './proofs.mjs';
+import { proofList, refusedWhy, runProofs } from './proofs.mjs';
 import { main } from './setup.mjs';
 import { fakeMac, macTest as test } from './fake-mac.test-helper.mjs';
 
@@ -907,14 +907,49 @@ test('PLANT the keys folder readable by the builder (mode 755) → the proof FAI
 
 test('L1079 PLANTs: the owner\'s home or a production file the builder can read → FAIL; the builder in staff, or groups unreadable → FAIL', () => {
   const one = (mac, re) => { const bad = runProofs(mac, cfg).filter((r) => !r.ok); assert.equal(bad.length, 1, JSON.stringify(bad)); assert.match(bad[0].what, re); return bad[0]; };
-  let mac = proven(); chmodSync(mac.at('/Users/sam'), 0o755); one(mac, /cannot list the owner's home/);
-  mac = proven(); chmodSync(mac.at('/Users/sam'), 0o751); chmodSync(mac.at(SECRET), 0o644); one(mac, /cannot read \/Users\/sam\/app/);   // the home passable, not listable: only the file's own mode stops it
+  const bads = (mac) => runProofs(mac, cfg).filter((r) => !r.ok).map((r) => r.what);
+  let mac = proven(); chmodSync(mac.at('/Users/sam'), 0o755); assert.deepEqual(bads(mac), ['builder cannot list the owner\'s home /Users/sam', 'builder cannot pass through /Users/sam']);
+  // #528 r1 m3: a home that can be passed through but not listed (0751) is caught on its own, and then only the file's mode stops the read.
+  mac = proven(); chmodSync(mac.at('/Users/sam'), 0o751); assert.deepEqual(bads(mac), ['builder cannot pass through /Users/sam']);
+  chmodSync(mac.at(SECRET), 0o644); assert.deepEqual(bads(mac), ['builder cannot pass through /Users/sam', `builder cannot read ${SECRET}`]);
   mac = proven(); mac.groupNames = { builder: ['builder', 'everyone', 'staff'] }; assert.match(one(mac, /groups are its own/).why, /in staff/);
   mac = proven(); mac.groupNames = { builder: { status: 1, stderr: 'id: no' } }; assert.match(one(mac, /groups are its own/).why, /could not be read/);
   mac = proven(); mac.groupNames = { builder: [] }; assert.match(one(mac, /groups are its own/).why, /empty/, 'an empty list is never "no bad groups"');
   // #487 r5 m1: the builder's shell is zsh; bash or none → FAIL.
   for (const sh of ['/bin/bash', '/usr/bin/false']) { mac = proven(); mac.users.get('builder').UserShell = sh; assert.match(one(mac, /builder's shell is \/bin\/zsh/).why, new RegExp(`its shell is ${sh}`)); }
   assert.equal(run(mac, ['proofs']).code, 1);
+});
+
+test('#528 r1 M1 PLANT: only the Mac\'s "Permission denied" proves a read refused; a folder the rules name is proven by listing and passing through', () => {
+  // macOS's head on a folder it may read: exit 1, "Error reading" — a failure, but not a refusal.
+  assert.match(refusedWhy({ expect: 'denied' }, { status: 1, stderr: 'head: Error reading /x\n' }), /not with the Mac's "Permission denied"/);
+  assert.equal(refusedWhy({ expect: 'denied' }, { status: 1, stderr: 'head: /x: Permission denied\n' }), null);
+  assert.match(refusedWhy({ expect: 'denied' }, { status: 1, stderr: 'cat: /x: Operation not permitted\n' }), /not proven/);
+  assert.equal(refusedWhy({ expect: 'fail' }, { status: 1, stderr: '' }), null);
+  assert.match(refusedWhy({ expect: 'fail' }, { status: 2, stderr: 'test: bad' }), /did not answer a plain no/);
+  const dir = '/Users/sam/app';
+  let mac = proven({ files: [dir] });   // 0755 under a home the builder can't enter: refused on the way in
+  assert.deepEqual(runProofs(mac, cfg).filter((r) => !r.ok).map((r) => r.what), []);
+  mac = proven({ files: [dir] }); chmodSync(mac.at('/Users/sam'), 0o751);   // now the folder itself can be listed: FAIL, never PASS
+  const bad = runProofs(mac, cfg).filter((r) => !r.ok).map((r) => r.what);
+  assert.ok(bad.includes(`builder cannot list ${dir}`) && bad.includes(`builder cannot pass through ${dir}`), JSON.stringify(bad));
+  // The stand-in's head answers as macOS's: a folder it may read, read as a file, is "Error reading", which must not count.
+  const h = mac.run('/usr/bin/sudo', ['-n', '-H', '-u', 'builder', '/usr/bin/head', '-c', '1', dir]);
+  assert.equal(h.status, 1); assert.match(h.stderr, /Error reading/); assert.notEqual(refusedWhy({ expect: 'denied' }, h), null);
+});
+
+test('#528 r1 m8 and L1112 (3): a place root can\'t look at is NOT TRIED with its reason, never "not there"; the Dispatcher\'s rules state and approvals are on the cannot-read list', () => {
+  const dcfg = { ...cfg, dispatcher: { rulesStateDir: P('private/rules-state'), approvalsStateDir: P('private/approvals') } };
+  const list = proofList(dcfg, { ownerHome: '/Users/sam', rules: { files: [SECRET] }, kindOf: (f) => (f === SECRET ? 'error:EACCES' : 'dir') });
+  const nt = list.filter((x) => x.notTried);
+  assert.equal(nt.length, 1); assert.match(nt[0].notTried, /root could not look at it \(EACCES\)/); assert.doesNotMatch(nt[0].notTried, /not on this Mac/);
+  for (const d of [P('private/rules-state'), P('private/approvals')]) {
+    assert.ok(list.some((x) => x.what === `builder cannot list ${d}` && x.expect === 'denied'), d);
+    assert.ok(list.some((x) => x.what === `builder cannot pass through ${d}`), d);
+  }
+  assert.ok(!proofList(cfg, { kindOf: () => 'dir' }).some((x) => /rules-state|approvals/.test(x.what)), 'no dispatcher entry: neither exists, nothing claimed');
+  const home = proofList(cfg, { ownerHome: '/Users/sam', kindOf: () => 'error:EPERM' }).find((x) => /owner's home/.test(x.what));
+  assert.match(home.notTried, /root could not look at it \(EPERM\)/);
 });
 
 test('L1079: a rules entry that names nothing on this Mac is NOT TRIED, never PASS, and the run exits 1', () => {
@@ -1127,6 +1162,16 @@ test('L1079 PLANT: users-folders refuses while the worker runner\'s status lists
   ]) {
     const mac = at(text); const sam = uidOf(mac, 'sam');
     const r = run(mac, ['users-folders']); assert.notEqual(r.code, 0, r.text); assert.match(r.text, re);
+    for (const p of BUILDER_ROWS()) assert.equal(mac.owners.get(p).uid, sam, `${p} was changed`);
+  }
+  // #528 r1 m5, m6: a status that can't be read, is a link, or is a folder is never "no live session".
+  for (const [make, re] of [
+    [(mac) => { writeFileSync(mac.at(status), JSON.stringify({ sessions: [] })); chmodSync(mac.at(status), 0o000); }, /could not be read \(EACCES\)/],
+    [(mac) => { writeFileSync(mac.at(`${status}.real`), JSON.stringify({ sessions: [] })); symlinkSync(mac.at(`${status}.real`), mac.at(status)); }, /is a link/],
+    [(mac) => { mkdirSync(mac.at(status)); }, /is not a plain file/],
+  ]) {
+    const mac = beforeBuilder(); make(mac); const sam = uidOf(mac, 'sam');
+    const r = run(mac, ['users-folders']); assert.notEqual(r.code, 0, r.text); assert.match(r.text, re); assert.match(r.text, /not known that no session is live/);
     for (const p of BUILDER_ROWS()) assert.equal(mac.owners.get(p).uid, sam, `${p} was changed`);
   }
   // Ended sessions pass the live check, but start clean still names the old status file: setup moves nothing, so it is moved by hand.

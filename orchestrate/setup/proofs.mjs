@@ -13,6 +13,10 @@
 // user's home, the robot keys, or any production file or secret the product's rules name (the installed review.json's
 // rules.production.env_files and rules.secrets.paths). A rules entry that names no file on this Mac (none at all, a
 // relative name, a pattern, or a path that is not there) is NOT TRIED, never PASS: nothing was proven about it.
+// What counts as "cannot" is an allowed list too (#528 r1 M1): a read or a listing passes only on the Mac's own
+// "Permission denied" answer; any other failure (`head` on a folder exits 1 with "Error reading") is FAIL, never PASS. A
+// folder is proven both ways: it can't be listed, and it can't be passed through (`test -x`, so 0711 and 0751 are caught).
+// A `test -w`/`-x` proof passes only on test's plain "no" (exit 1); its error exit (2) is FAIL.
 // And the builder's groups are an allowed list: its own group and the groups macOS gives every local user, nothing else
 // (so no later membership, staff above all, quietly opens the owner's home, which macOS makes 0750 to staff). A group
 // list that can't be read is a FAIL, never an empty list.
@@ -20,7 +24,7 @@
 import { join } from 'node:path';
 import { RUNNER_ROLES } from '../shared/review-roles.mjs';
 import { runnerPlaces } from '../shared/product-paths.mjs';
-import { BUILDER, BUILDER_SHELL, PRODUCT_OUTBOX_ROLES, USERS, baseMarkerPath, homeOf, outboxRootPath, workerCopiesPath } from './layout.mjs';
+import { BUILDER, BUILDER_SHELL, FLAT_OUTBOX_ROLES, PRODUCT_OUTBOX_ROLES, USERS, baseMarkerPath, homeOf, outboxRootPath, workerCopiesPath } from './layout.mjs';
 import { RUNNER_CONFIG } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { installPaths } from './install.mjs';
 import { readUser } from './users-folders.mjs';
@@ -36,7 +40,8 @@ const ID = '/usr/bin/id';
 const NO_WRITE = ['hooks', 'settings', 'launcher', 'lead-main', 'claude-code', 'bob', 'global-rules', 'frontdoor', 'mirror', 'private', 'keys', 'review', 'review-copies', 'worker-runner', 'outboxes', 'install', ...RUNNER_ROLES.map((r) => `outboxes/${r}`)];
 /** The groups macOS gives every local user, which open nothing of the owner's (L1079): the builder may be in these and its own group only. */
 export const BUILDER_GROUPS_ALLOWED = Object.freeze(['everyone', 'localaccounts', '_lpoperator']);
-const ALLOWED_GROUP_PATTERN = /^com\.apple\.sharepoint\.group\.\d+$/;   // the Mac's own "Public Folder" group, one per person
+// The Mac's answer that a read or listing was refused for want of permission: the one failure a "cannot" proof takes (#528 r1 M1).
+const DENIED = /: Permission denied\s*$/m;
 
 /**
  * What the proofs need from this Mac besides the config: { ownerHome, rules: { files: [...], why? } }. `files`: the
@@ -58,7 +63,7 @@ export function proofInputs(io, cfg) {
 /** The proofs: [{ what, args, expect: 'ok' | 'fail', control?, notTried? }]. `args` are what follows `sudo -n -H -u builder`.
  *  A "cannot write" proof shows the state now; that the builder cannot gain write (own it and chmod it) is check's job:
  *  it wants each folder owned by root, orchestrate or review (never the builder), with the exact mode and access list. */
-export function proofList(cfg, { ownerHome = null, rules = { files: [], why: 'not read' }, exists = () => false } = {}) {
+export function proofList(cfg, { ownerHome = null, rules = { files: [], why: 'not read' }, kindOf = () => null } = {}) {
   const p = (...s) => join(cfg.base, ...s);
   const B = BUILDER;
   const places = cfg.products.map((prod) => [prod, runnerPlaces({ copiesRoot: workerCopiesPath(cfg), outboxRoot: outboxRootPath(cfg), product: prod })]);
@@ -67,9 +72,13 @@ export function proofList(cfg, { ownerHome = null, rules = { files: [], why: 'no
     const what = `${B} cannot read ${f}`;
     if (!f.startsWith('/')) return notTried(what, 'a relative name, not a place on this Mac: nothing was tried');
     if (/[*?[\]{}]/.test(f)) return notTried(what, 'a pattern, not one file: nothing was tried');
-    if (!exists(f)) return notTried(what, 'not on this Mac: nothing was tried');
-    return { what, args: [HEAD, '-c', '1', f], expect: 'fail' };
+    const k = kindOf(f);
+    if (!k) return notTried(what, 'not on this Mac: nothing was tried');
+    if (k.startsWith('error:')) return notTried(what, `root could not look at it (${k.slice(6)}): nothing was tried`);   // #528 r1 m8
+    return k === 'dir' ? folderProofs(what.replace('cannot read', 'cannot list'), f) : [{ what, args: [HEAD, '-c', '1', f], expect: 'denied' }];
   };
+  // A folder: it can't be listed (the Mac's own refusal) and it can't be passed through (#528 r1 M1, m3).
+  const folderProofs = (what, d) => [{ what, args: [LS, d], expect: 'denied' }, { what: `${B} cannot pass through ${d}`, args: [TEST, '-x', d], expect: 'fail' }];
   return [
     { what: `can run a program as ${B}`, args: [TRUE], expect: 'ok', control: true },
     { what: `${B} CAN write ${workerCopiesPath(cfg)} (the control: "cannot write" below means something)`, args: [TEST, '-w', workerCopiesPath(cfg)], expect: 'ok', control: true },
@@ -80,12 +89,19 @@ export function proofList(cfg, { ownerHome = null, rules = { files: [], why: 'no
     ...cfg.products.map((prod) => ({ what: `${B} cannot write the record ${p('products', prod, 'store')}`, args: [TEST, '-w', p('products', prod, 'store')], expect: 'fail' })),
     ...NO_WRITE.map((d) => ({ what: `${B} cannot write ${p(d)}`, args: [TEST, '-w', p(d)], expect: 'fail' })),
     ...places.map(([prod, at]) => ({ what: `${B} cannot write ${prod}'s outbox folder ${at.outboxes} (root's: its role folders can't be renamed away)`, args: [TEST, '-w', at.outboxes], expect: 'fail' })),
-    { what: `${B} cannot read the robot keys (${p('keys')})`, args: [LS, p('keys')], expect: 'fail' },
-    ...USERS.filter((u) => u !== B).map((u) => ({ what: `${B} cannot list ${u}'s home ${homeOf(cfg, u)}`, args: [LS, homeOf(cfg, u)], expect: 'fail' })),
-    !ownerHome ? { what: `${B} cannot list the owner's home`, args: null, expect: 'fail', bad: `the owner ${cfg.owner}'s home could not be read from this Mac` }
-      : !exists(ownerHome) ? notTried(`${B} cannot list the owner's home ${ownerHome}`, 'not on this Mac: a missing folder can\'t be listed by anyone, so nothing was proven')
-        : { what: `${B} cannot list the owner's home ${ownerHome}`, args: [LS, ownerHome], expect: 'fail' },
-    ...(rules.files.length ? rules.files.map(readProof) : [notTried(`${B} cannot read the product's production files and secrets`, rules.why ?? 'none named')]),
+    ...folderProofs(`${B} cannot read the robot keys (${p('keys')})`, p('keys')),
+    ...USERS.filter((u) => u !== B).flatMap((u) => folderProofs(`${B} cannot list ${u}'s home ${homeOf(cfg, u)}`, homeOf(cfg, u))),
+    ...(!ownerHome ? [{ what: `${B} cannot list the owner's home`, args: null, expect: 'fail', bad: `the owner ${cfg.owner}'s home could not be read from this Mac` }]
+      : kindOf(ownerHome) !== 'dir' ? [notTried(`${B} cannot list the owner's home ${ownerHome}`, kindOf(ownerHome)?.startsWith('error:') ? `root could not look at it (${kindOf(ownerHome).slice(6)}), so nothing was proven` : 'not a folder on this Mac: a missing folder can\'t be listed by anyone, so nothing was proven')]
+        : folderProofs(`${B} cannot list the owner's home ${ownerHome}`, ownerHome)),
+    // The owner's own sessions' outboxes (#528 r1 m9): the owner's, 0750, with one read entry for orchestrate only.
+    ...FLAT_OUTBOX_ROLES.map((r) => join(outboxRootPath(cfg), r)).map((d) => ({ what: `${B} cannot write the owner's outbox folder ${d}`, args: [TEST, '-w', d], expect: 'fail' })),
+    // The proposals folders (#528 r1 m9) get no proof of their own: no part of setup names them yet (the proposals port is
+    // not wired: review-ports.mjs NOT_WIRED_REVIEW). They are the owner's, under the owner's home, which the proof above covers.
+    // A proof that could never pass would leave containment unprovable, so the gap is named here and in the hand-in instead.
+    // The Dispatcher's rules state and approvals (L1112 (3)): orchestrate's alone. Without a dispatcher entry neither exists.
+    ...(cfg.dispatcher ? [cfg.dispatcher.rulesStateDir, cfg.dispatcher.approvalsStateDir].flatMap(readProof) : []),
+    ...(rules.files.length ? rules.files.flatMap(readProof) : [notTried(`${B} cannot read the product's production files and secrets`, rules.why ?? 'none named')]),
   ];
 }
 
@@ -95,16 +111,15 @@ export function groupsProblem(r) {
   const names = String(r.stdout).trim().split(/\s+/).filter(Boolean);
   if (!names.length) return 'its group list came back empty, which no Mac user has; not known that none opens the owner\'s home';
   if (!names.includes(BUILDER)) return `its own group ${BUILDER} is not among its groups (${names.join(' ').slice(0, 200)})`;
-  const extra = names.filter((n) => n !== BUILDER && !BUILDER_GROUPS_ALLOWED.includes(n) && !ALLOWED_GROUP_PATTERN.test(n));
+  const extra = names.filter((n) => n !== BUILDER && !BUILDER_GROUPS_ALLOWED.includes(n));
   return extra.length ? `it is in ${extra.join(', ')}, which is not its own group or one macOS gives every local user; take it out (dseditgroup -o edit -d ${BUILDER} -t user <group>)` : null;
 }
 
 /** → [{ ok, what, why?, notTried? }]. Reads only. A failed control makes every later proof FAIL as well, since it would prove nothing. */
 export function runProofs(io, cfg) {
   const inputs = proofInputs(io, cfg);
-  const exists = (f) => { try { io.lstat(f); return true; } catch { return false; } };
   const out = []; let controlsHold = true;
-  for (const pr of proofList(cfg, { ...inputs, exists })) {
+  for (const pr of proofList(cfg, { ...inputs, kindOf: kindOn(io) })) {
     if (pr.notTried) { out.push({ ok: false, notTried: true, what: pr.what, why: pr.notTried }); continue; }
     if (pr.bad) { out.push({ ok: false, what: pr.what, why: pr.bad }); continue; }
     if (!controlsHold) { out.push({ ok: false, what: pr.what, why: 'not proven: a control above failed' }); continue; }   // one way of asking is already broken
@@ -113,19 +128,33 @@ export function runProofs(io, cfg) {
     if (pr.control) {
       if (!gotOk) controlsHold = false;
       out.push({ ok: gotOk, what: pr.what, ...(gotOk ? {} : { why: `did not work (${String(r.stderr ?? '').trim().slice(0, 100) || `exit ${r.status}`})` }) });
-    } else out.push({ ok: !gotOk, what: pr.what, ...(!gotOk ? {} : { why: `${BUILDER} CAN do this, and must not` }) });
+    } else {
+      // Only the one "no" passes (#528 r1 M1): the Mac's permission refusal for a read or listing, test's exit 1 for a test.
+      const why = gotOk ? `${BUILDER} CAN do this, and must not` : refusedWhy(pr, r);
+      out.push({ ok: why === null, what: pr.what, ...(why ? { why } : {}) });
+    }
   }
   // Its shell is zsh (#487 r5 m1): the production guard's message shapes are safe as zsh reads them, not as bash 3.2 does.
   const u = readUser(io, BUILDER);
   out.push({ ok: u.exists && u.shell === BUILDER_SHELL, what: `${BUILDER}'s shell is ${BUILDER_SHELL} (its sessions' Bash tool runs it)`, ...(u.exists && u.shell === BUILDER_SHELL ? {} : { why: u.exists ? `its shell is ${u.shell || 'unset'}` : `${BUILDER} is not a user on this Mac` }) });
   const g = groupsProblem(io.run(ID, ['-Gn', BUILDER]));
-  out.push({ ok: g === null, what: `${BUILDER}'s groups are its own and the ones macOS gives every local user (${BUILDER_GROUPS_ALLOWED.join(', ')}, com.apple.sharepoint.group.N)`, ...(g ? { why: g } : {}) });
+  out.push({ ok: g === null, what: `${BUILDER}'s groups are its own and the ones macOS gives every local user (${BUILDER_GROUPS_ALLOWED.join(', ')})`, ...(g ? { why: g } : {}) });
   return out;
 }
+
+/** Null when a "must fail" proof's failure is the one "no" it takes, or why it proves nothing (#528 r1 M1). */
+export function refusedWhy(pr, r) {
+  const said = String(r?.stderr ?? '').trim().slice(0, 100);
+  if (pr.expect === 'denied') return DENIED.test(String(r?.stderr ?? '')) ? null : `it failed, but not with the Mac's "Permission denied" (${said || `exit ${r?.status}`}), so it is not proven`;
+  return r?.status === 1 ? null : `test did not answer a plain no (${said || `exit ${r?.status}`}), so it is not proven`;
+}
+
+/** What is at `f` on this Mac: 'dir', 'file' (anything else that is there), null when it is not there, or 'error:<code>'
+ *  when root could not look (#528 r1 m8: told as such, never as "not there"). */
+const kindOn = (io) => (f) => { try { return io.lstat(f).isDirectory() ? 'dir' : 'file'; } catch (e) { return e?.code === 'ENOENT' || e?.code === 'ENOTDIR' ? null : `error:${e?.code ?? 'unknown'}`; } };
 
 /** What `--dry-run` prints: the commands, not run, and what will not be tried. */
 export const proofCommands = (io, cfg) => {
   const inputs = proofInputs(io, cfg);
-  const exists = (f) => { try { io.lstat(f); return true; } catch { return false; } };
-  return [...proofList(cfg, { ...inputs, exists }).map((pr) => (pr.args ? `sudo -n -H -u ${BUILDER} ${pr.args.join(' ')}   (${pr.expect === 'ok' ? 'must work' : 'must fail'})` : `not tried: ${pr.what} (${pr.notTried ?? pr.bad})`)), `${ID} -Gn ${BUILDER}   (its own group and the allowed ones only)`];
+  return [...proofList(cfg, { ...inputs, kindOf: kindOn(io) }).map((pr) => (pr.args ? `sudo -n -H -u ${BUILDER} ${pr.args.join(' ')}   (${pr.expect === 'ok' ? 'must work' : pr.expect === 'denied' ? 'must be refused: Permission denied' : 'must fail'})` : `not tried: ${pr.what} (${pr.notTried ?? pr.bad})`)), `${ID} -Gn ${BUILDER}   (its own group and the allowed ones only)`];
 };

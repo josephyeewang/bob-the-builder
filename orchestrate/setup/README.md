@@ -29,7 +29,7 @@ A config that does not parse is reported as "not valid JSON": the file's own tex
 | Command | What it does | Root? |
 |---|---|---|
 | `node setup.mjs users-folders --config <file> --dry-run` | prints every step it would take; changes nothing (`--config` names your editable copy; there is no `--config` under `sudo`) | no |
-| `sudo /usr/local/bin/node setup.mjs users-folders` | makes the users in `USERS` (ids 600-699, all different; hidden, shell `/usr/bin/false`, password `*`, own group with no members, never admin), then the folders (owner, group, exact mode, exact access list), then runs `check` | yes |
+| `sudo /usr/local/bin/node setup.mjs users-folders` | makes the users in `USERS` (ids 600-699, all different; hidden, shell `/usr/bin/false` except `builder`'s `/bin/zsh`, which its sessions' Bash tool runs, password `*`, own group with no members, never admin), then the folders (owner, group, exact mode, exact access list), then runs `check` | yes |
 | `node setup.mjs check --config <file>` | read only: `PASS`, `FAIL` or `NEEDS ROOT` per item; exit 1 on any FAIL, exit 3 if all that could be seen passed but some items need root. Before setup it lists 56 FAILs of 60 items for one product (about 10 more for each extra product: its copies, outbox and rules folders, L836), which is expected | no |
 | `sudo /usr/local/bin/node setup.mjs check` | the same with nothing hidden: the sudo-rule and password-hash items can be read | yes |
 | `sudo /usr/local/bin/node setup.mjs proofs` | runs, as `builder` (L1079), the "cannot" proofs: the record, hooks, settings, launcher, lead-main, claude-code and install copies and the outbox folders cannot be written; the robot keys, the other users' homes, the owner's home and every production file and secret the installed `review.json`'s rules name cannot be read; and `builder` is in no group but its own and the ones macOS gives every local user (controls first). A rules entry that names nothing on this Mac (none, a relative name, a pattern, a missing file) is NOT TRIED, which fails the run like a FAIL: containment is proven only when every line is PASS | yes |
@@ -127,6 +127,12 @@ deletes anything. Steps, on the Mini, in a new Terminal app window, with your ba
 5. Sign `builder` in to Claude Code once per account it will use: paste `sudo -H -u builder /usr/local/bin/claude` (with
    `CLAUDE_CONFIG_DIR=<builder's home>/.claude-b` before `/usr/local/bin/claude` for account b), then type `/login` and
    finish in the browser. *The sign-in lives in `builder`'s home; it is never copied from yours.*
+
+**Later runs too (#528 r1 m7).** The live-session check is not only for the move: every later `users-folders` run (a new
+product, a fixed mode) refuses, changing nothing, while the worker runner's status lists a live session, and also when that
+status file can't be read, is a link or is not a plain file. To run it: let the sessions end (or stop the worker runner
+with `sudo launchctl bootout system/<label>.worker-runner`), then run `users-folders` again. `daemons check` also FAILs
+while a worker runner job is left in your own `~/Library/LaunchAgents` (step 1).
 6. Paste `sudo /usr/local/bin/node setup.mjs proofs`. *Must end "all N proofs PASS: containment is proven on this Mac";
    a FAIL or NOT TRIED line says what to fix.*
 
