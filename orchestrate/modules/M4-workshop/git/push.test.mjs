@@ -20,7 +20,7 @@ import { refusedPath } from './push-refusals.mjs';
 import { DO_PLANE_TOML, RULES_VERSION, runScanner, scanSecrets } from './gitleaks.mjs';
 import { crc32 } from './binary-files.mjs';
 import { chunk, makePng, ihdr } from './png-fixture.mjs';
-import { startGate, factId, vercelFact } from './start-gate.mjs';
+import { startGate, factId, vercelFact, NO_VERCEL } from './start-gate.mjs';
 import { drainedPort } from '../../../wiring/runner-ports.mjs';
 import { memoryRecord } from '../../../shared/record.mjs';
 import { timeLimits } from '../../M11-dispatcher/merges.mjs';
@@ -2328,6 +2328,58 @@ test('L570: no Vercel project in the rules is said as that, for a fact naming no
   assert.match(call(at(doc('prj_2', true)), 'prj_1').reason, /for another project/);
   assert.match(call(at(doc(null, false)), 'prj_1').reason, /for another project/);
   assert.equal(call(at(doc('prj_1', true)), 'prj_1').ok, true);
+});
+
+test('L1081: exactly `none` in the rules holds both Vercel facts with no fact read; only that exact word', () => {
+  const now = Date.parse('2026-11-05T12:00:00Z');
+  assert.equal(NO_VERCEL, 'none');
+  const unread = { read: () => { throw new Error('no Vercel fact may be read for a product with none'); } };
+  for (const kind of ['vercel_skip', 'vercel_env']) {
+    assert.deepEqual(vercelFact({ record: unread, kind, product: PRODUCT, vercelProject: 'none', now }), { ok: true }, kind);
+    // Near misses are project names like any other: with no fact naming them, the gate stays shut.
+    for (const near of ['None', 'NONE', ' none', 'none ', 'none\n', 'no', 'null']) {
+      const r = vercelFact({ record: { read: () => null }, kind, product: PRODUCT, vercelProject: near, now });
+      assert.equal(r.ok, false, JSON.stringify(near));
+      assert.match(r.reason, /no fact yet/, JSON.stringify(near));
+    }
+    // Missing or empty still shuts as before (I1).
+    for (const missing of [undefined, null, '']) assert.match(vercelFact({ record: unread, kind, product: PRODUCT, vercelProject: missing, now }).reason, /rules name no Vercel project/);
+  }
+});
+
+test('#519 m1: on the whole gate, `none` opens facts 3 and 4 only; facts 1 and 2 still shut it, each with its own reason', async () => {
+  const w = await world();
+  const now = Date.now();
+  const goodRun = { ...w.run, run_at: new Date(now - 1000).toISOString() };
+  const unread = { read: () => { throw new Error('no Vercel fact may be read for a product with none'); } };
+  const gate = async (over) => {
+    const issues = [];
+    const r = await startGate({ product: PRODUCT, mirror: w.mirror, record: unread, readRun: async () => goodRun, workflowPath: WF, workflowRule: async () => ({ ok: true }), vercelProject: NO_VERCEL, cache: {}, issues: { upsert: async (i) => { issues.push(i); } }, now, ...over });
+    return { r, issues };
+  };
+  // Positive control: facts 1 and 2 hold, so `none` opens the gate with no Vercel fact read.
+  const open = await gate({});
+  assert.equal(open.r.ok, true, open.r.reason);
+  // (a) Fact 1 fails: the gate shuts with fact 1's reason, once.
+  const one = await gate({ readRun: async () => ({ ...goodRun, steps: [{ product: PRODUCT, conclusion: 'failure' }] }) });
+  assert.equal(one.r.ok, false);
+  assert.match(one.r.reason, /does not show this repo's Actions default as read-only/);
+  assert.equal(one.issues.length, 1);
+  // (b) Fact 2 fails: the gate shuts with fact 2's reason, once.
+  const two = await gate({ workflowRule: async () => ({ ok: false, reason: 'writes with a broad key' }) });
+  assert.equal(two.r.ok, false);
+  assert.match(two.r.reason, /on main fails the workflow audit rule: writes with a broad key/);
+  assert.equal(two.issues.length, 1);
+});
+
+test('#519 m1: a push whose rules name no Vercel project is refused at the gate; nothing stands in for `none`', async () => {
+  const w = await world();
+  await w.commit('work', (c) => writeFileSync(join(c, 'a.txt'), 'a\n'));
+  await w.bundle();
+  // Facts 1 and 2 hold in this world, so only push.mjs's own read of the rules value decides: a default there opens it.
+  w.values['product.vercel_project'] = undefined;
+  await refusedAndUntouched(w, /^the start gate is shut: the rules name no Vercel project/);
+  assert.equal(w.issues.length, 1);
 });
 
 test('#536 r1 m1: the whole secret scan has one time limit; a scan of many commits refuses at it, never runs one limit per run', async () => {
