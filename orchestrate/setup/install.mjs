@@ -32,6 +32,7 @@ import { COPY_CLAUDE_CODE as CLAUDE_CODE, COPY_HOOKS as HOOKS, managedGuardDir, 
 import { parseRobot } from './robot-setup.mjs';
 import { WORKER_RUNNER_CONFIG, parseWorkerRunner } from './worker-runner-setup.mjs';
 import { DISPATCHER_CONFIG, dispatcherConfigFor, dispatcherConfigText, dispatcherSourcePath, parseDispatcher } from './dispatcher-setup.mjs';
+import { SENSORS_CONFIG, sensorsConfigFor, sensorsConfigText, sensorsSourcePath } from './sensors-setup.mjs';
 import { readUser } from './users-folders.mjs';
 import { pinProblem } from './review-config.mjs';   // a cycle (review-config reads installPaths): both are used only when called
 
@@ -59,7 +60,7 @@ export function parseInstallConfig(raw) {
   // A code home's name is main's alone (L257 (B)), in any case (lane 2 on #144: macOS's disk ignores case), and said so.
   const home = Array.isArray(extras) ? extras.find((e) => typeof e === 'string' && MODULE_HOMES.includes(posix.basename(e).toLowerCase())) : undefined;
   if (home) throw new Error(`config: extras must not hold ${home}: ${posix.basename(home)} is the name of a folder of the copy's own code (main's alone)`);
-  if (!Array.isArray(extras) || extras.length > 20 || extras.some((e) => !PLAIN_ABS(e) || !KEEP_NAME.test(posix.basename(e)) || [...Object.keys(MUST_KEEP), STAMP, UPDATER_CONFIG, RUNNER_CONFIG, DISPATCHER_CONFIG, WORKER_RUNNER_CONFIG].map((n) => n.toLowerCase()).includes(posix.basename(e).toLowerCase()))) {
+  if (!Array.isArray(extras) || extras.length > 20 || extras.some((e) => !PLAIN_ABS(e) || !KEEP_NAME.test(posix.basename(e)) || [...Object.keys(MUST_KEEP), STAMP, UPDATER_CONFIG, RUNNER_CONFIG, DISPATCHER_CONFIG, SENSORS_CONFIG, WORKER_RUNNER_CONFIG].map((n) => n.toLowerCase()).includes(posix.basename(e).toLowerCase()))) {
     throw new Error('config: extras must be full paths of files or folders to carry into the copy (the review runner\'s claude program and its hooks), each with a plain name of its own');
   }
   // The robot job (robot-setup.mjs): on only when asked, and only with its config among the extras.
@@ -80,9 +81,9 @@ export function installPaths(cfg) {
 }
 
 /** The entries the install and the jobs put directly under the base, so `check` does not call them strangers (r3 n4). */
-// The base dispatcher.json only with a dispatcher entry: a leftover one from a removed entry is then a stranger check names (L807 c2).
+// The base dispatcher.json and sensors.json only with a dispatcher entry: a leftover one from a removed entry is then a stranger check names (L807 c2).
 // `dispatcher`: whether the config has a dispatcher entry (check reads the config without the install's keys, so main says).
-export const rootMadeEntries = (cfg, { dispatcher = cfg.dispatcher !== undefined } = {}) => { const P = installPaths(cfg); return [P.install, P.work, P.logDir, P.accountCopy, managedGuardDir(cfg), ...(dispatcher ? [dispatcherSourcePath(cfg)] : [])]; };
+export const rootMadeEntries = (cfg, { dispatcher = cfg.dispatcher !== undefined } = {}) => { const P = installPaths(cfg); return [P.install, P.work, P.logDir, P.accountCopy, managedGuardDir(cfg), ...(dispatcher ? [dispatcherSourcePath(cfg), sensorsSourcePath(cfg)] : [])]; };
 
 const op = (text, run) => ({ text, run });
 /** Why `p` (a real path outside the prefix) cannot be carried into the copy, or null: it must exist, be a plain file or folder, and hold no link anywhere inside (the copy is root's alone and carries no links). */
@@ -112,7 +113,7 @@ function ownTree(io, p) {
 /** The updater's own config, as the copy keeps it. Paths are the ones the updater will see (io.at). */
 export function updaterConfigFor(io, cfg) {
   const P = installPaths(cfg);
-  return { installRoot: io.at(P.installRoot), clone: io.at(P.clone), address: cfg.address, keep: ['bin', UPDATER_CONFIG, RUNNER_CONFIG, ...(cfg.dispatcher ? [DISPATCHER_CONFIG] : []), ...(cfg.workerRunner ? [WORKER_RUNNER_CONFIG] : []), ...cfg.extras.map((e) => posix.basename(e))], gitBin: cfg.gitBin };
+  return { installRoot: io.at(P.installRoot), clone: io.at(P.clone), address: cfg.address, keep: ['bin', UPDATER_CONFIG, RUNNER_CONFIG, ...(cfg.dispatcher ? [DISPATCHER_CONFIG, SENSORS_CONFIG] : []), ...(cfg.workerRunner ? [WORKER_RUNNER_CONFIG] : []), ...cfg.extras.map((e) => posix.basename(e))], gitBin: cfg.gitBin };
 }
 
 /**
@@ -235,14 +236,18 @@ export function planInstall(io, cfg, { readSource, runUpdater }) {
   const nodeWhy = io.nodeBinProblem(cfg.nodeBin); if (nodeWhy) problems.push(`nodeBin ${cfg.nodeBin}: ${nodeWhy}. Leave nodeBin out of the config to use the node running this command`);
   for (const e of cfg.extras) { const why = linkProblem(io, e); if (why) problems.push(`the extra ${e}: ${why}`); }
   // The Dispatcher's config (dispatcher-setup.mjs): written first by dispatcher-config, root's in the base, and still what this setup writes.
-  let dText = null;
-  if (cfg.dispatcher) {
-    const built = dispatcherConfigFor(io, cfg); const src = dispatcherSourcePath(cfg);
+  // The Sensors' config likewise (sensors-setup.mjs, L1049): the same command writes both, and the copy carries both.
+  const seedText = (built, src, textOf) => {
     let st = null; try { st = io.lstat(src); } catch { /* below */ }
     let have = null; if (st && st.isFile() && !st.isSymbolicLink() && st.uid === io.rootUid && (st.mode & 0o7777) === 0o644 && st.nlink === 1) { try { have = io.readText(src); } catch { /* below */ } }
-    if (built.problems.length) problems.push(...built.problems);
-    else if (have !== dispatcherConfigText(built.config)) problems.push(`${src} is not there, not root's 0644, or not the config this setup writes now: run dispatcher-config first`);
-    else dText = have;
+    if (built.problems.length) { problems.push(...built.problems); return null; }
+    if (have !== textOf(built.config)) { problems.push(`${src} is not there, not root's 0644, or not the config this setup writes now: run dispatcher-config first`); return null; }
+    return have;
+  };
+  let dText = null; let sText = null;
+  if (cfg.dispatcher) {
+    dText = seedText(dispatcherConfigFor(io, cfg), dispatcherSourcePath(cfg), dispatcherConfigText);
+    if (dText !== null) sText = seedText(sensorsConfigFor(io, cfg), sensorsSourcePath(cfg), sensorsConfigText);
   }
   if (problems.length) return { ops, problems, installed: false };
 
@@ -256,6 +261,7 @@ export function planInstall(io, cfg, { readSource, runUpdater }) {
   ops.push(op(`write ${join(P.seed, UPDATER_CONFIG)}`, () => io.write(join(P.seed, UPDATER_CONFIG), `${JSON.stringify(uc, null, 1)}\n`, 0o644)), ...rootOwned(io, join(P.seed, UPDATER_CONFIG), 0o644));
   ops.push(op(`copy ${cfg.runnerConfig} → ${join(P.seed, RUNNER_CONFIG)}`, () => io.write(join(P.seed, RUNNER_CONFIG), rcText, 0o644)), ...rootOwned(io, join(P.seed, RUNNER_CONFIG), 0o644));
   if (dText !== null) ops.push(op(`copy ${dispatcherSourcePath(cfg)} → ${join(P.seed, DISPATCHER_CONFIG)}`, () => io.write(join(P.seed, DISPATCHER_CONFIG), dText, 0o644)), ...rootOwned(io, join(P.seed, DISPATCHER_CONFIG), 0o644));
+  if (sText !== null) ops.push(op(`copy ${sensorsSourcePath(cfg)} → ${join(P.seed, SENSORS_CONFIG)}`, () => io.write(join(P.seed, SENSORS_CONFIG), sText, 0o644)), ...rootOwned(io, join(P.seed, SENSORS_CONFIG), 0o644));
   for (const e of cfg.extras) { const to = join(P.seed, posix.basename(e)); ops.push(op(`copy ${e} → ${to}`, () => { io.copyTree(e, to); ownTree(io, to); })); }
   ops.push(op(`run the updater's first run as root: ${join(P.seed, NODE)} ${join(P.bootstrap, SCRIPTS.updater)} ${join(P.seed, UPDATER_CONFIG)} --first ${P.seed}`, () => {
     const r = runUpdater(io, { node: join(P.seed, NODE), script: join(P.bootstrap, SCRIPTS.updater), config: join(P.seed, UPDATER_CONFIG), seed: P.seed });

@@ -3,7 +3,7 @@
 // catches it. The last tests run the real read-only tools (dscl -read, dseditgroup, ls -led, chmod -h, stat) on this Mac.
 
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { tempDir } from '../shared/test-tmp.mjs';
@@ -14,8 +14,9 @@ import { RUNNER_ROLES } from '../shared/review-roles.mjs';
 import { BASE_MARKER, FLAT_OUTBOX_ROLES, ORCHESTRATE_READ_ACL, PRODUCT_OUTBOX_ROLES, ROOT_CONFIG_PATH, USERS, USER_ID_RANGE, WORKER_ROLES, aclText, folderTable, homeOf, parseConfig } from './layout.mjs';
 import { nodeProblemOf, realIo, secureFolder } from './mac.mjs';
 import { aclEntries, adminAnswer, apply, check, parseDscl, plan, readUser } from './users-folders.mjs';
-import { proofList, refusedWhy, runProofs } from './proofs.mjs';
+import { groupsProblem, kindOn, proofList, refusedWhy, runProofs } from './proofs.mjs';
 import { main } from './setup.mjs';
+import { parseDispatcher } from './dispatcher-setup.mjs';
 import { fakeMac, macTest as test } from './fake-mac.test-helper.mjs';
 
 const RAW = { base: '/Library/orch-test', owner: 'sam', products: ['alpha', 'beta'] };
@@ -38,6 +39,9 @@ const proven = ({ files = [SECRET], mac = applied() } = {}) => {
   const sam = { uid: uidOf(mac, 'sam'), gid: 20 };
   for (const [d, mode] of [['/Users', 0o755], ['/Users/sam', 0o750], ['/Users/sam/app', 0o755]]) { mkdirSync(mac.at(d), { recursive: true }); chmodSync(mac.at(d), mode); mac.owners.set(d, d === '/Users' ? { uid: mac.rootUid, gid: 80 } : sam); }
   writeFileSync(mac.at(SECRET), 'x'); chmodSync(mac.at(SECRET), 0o600); mac.owners.set(SECRET, sam);
+  // The proposals folders (#528 r2 m2): /Users/Shared as on a real Mac (root's, sticky), then setup's own `proposals`.
+  mkdirSync(mac.at('/Users/Shared'), { recursive: true }); chmodSync(mac.at('/Users/Shared'), 0o1777); mac.owners.set('/Users/Shared', { uid: mac.rootUid, gid: 0 });
+  const pr = run(mac, ['proposals']); assert.equal(pr.code, 0, pr.text);
   const root = P('install/orchestrate'); mkdirSync(mac.at(root), { recursive: true });
   writeFileSync(mac.at(`${root}/review.json`), JSON.stringify({ rules: { production: { env_files: files }, secrets: { paths: [] } } }));
   return mac;
@@ -922,11 +926,12 @@ test('L1079 PLANTs: the owner\'s home or a production file the builder can read 
 
 test('#528 r1 M1 PLANT: only the Mac\'s "Permission denied" proves a read refused; a folder the rules name is proven by listing and passing through', () => {
   // macOS's head on a folder it may read: exit 1, "Error reading" — a failure, but not a refusal.
-  assert.match(refusedWhy({ expect: 'denied' }, { status: 1, stderr: 'head: Error reading /x\n' }), /not with the Mac's "Permission denied"/);
-  assert.equal(refusedWhy({ expect: 'denied' }, { status: 1, stderr: 'head: /x: Permission denied\n' }), null);
-  assert.match(refusedWhy({ expect: 'denied' }, { status: 1, stderr: 'cat: /x: Operation not permitted\n' }), /not proven/);
-  assert.equal(refusedWhy({ expect: 'fail' }, { status: 1, stderr: '' }), null);
-  assert.match(refusedWhy({ expect: 'fail' }, { status: 2, stderr: 'test: bad' }), /did not answer a plain no/);
+  const hx = { args: ['/usr/bin/head', '-c', '1', '/x'], expect: 'denied' };
+  assert.match(refusedWhy(hx, { status: 1, stderr: 'head: Error reading /x\n' }), /not with the Mac's own "Permission denied"/);
+  assert.equal(refusedWhy(hx, { status: 1, stderr: 'head: /x: Permission denied\n' }), null);
+  assert.match(refusedWhy(hx, { status: 1, stderr: 'cat: /x: Operation not permitted\n' }), /not proven/);
+  assert.equal(refusedWhy({ args: ['/bin/test', '-w', '/x'], expect: 'fail' }, { status: 1, stderr: '' }), null);
+  assert.match(refusedWhy({ args: ['/bin/test', '-w', '/x'], expect: 'fail' }, { status: 2, stderr: 'test: bad' }), /did not answer a plain no/);
   const dir = '/Users/sam/app';
   let mac = proven({ files: [dir] });   // 0755 under a home the builder can't enter: refused on the way in
   assert.deepEqual(runProofs(mac, cfg).filter((r) => !r.ok).map((r) => r.what), []);
@@ -935,7 +940,7 @@ test('#528 r1 M1 PLANT: only the Mac\'s "Permission denied" proves a read refuse
   assert.ok(bad.includes(`builder cannot list ${dir}`) && bad.includes(`builder cannot pass through ${dir}`), JSON.stringify(bad));
   // The stand-in's head answers as macOS's: a folder it may read, read as a file, is "Error reading", which must not count.
   const h = mac.run('/usr/bin/sudo', ['-n', '-H', '-u', 'builder', '/usr/bin/head', '-c', '1', dir]);
-  assert.equal(h.status, 1); assert.match(h.stderr, /Error reading/); assert.notEqual(refusedWhy({ expect: 'denied' }, h), null);
+  assert.equal(h.status, 1); assert.match(h.stderr, /Error reading/); assert.notEqual(refusedWhy({ args: ['/usr/bin/head', '-c', '1', dir], expect: 'denied' }, h), null);
 });
 
 test('#528 r1 m8 and L1112 (3): a place root can\'t look at is NOT TRIED with its reason, never "not there"; the Dispatcher\'s rules state and approvals are on the cannot-read list', () => {
@@ -950,6 +955,102 @@ test('#528 r1 m8 and L1112 (3): a place root can\'t look at is NOT TRIED with it
   assert.ok(!proofList(cfg, { kindOf: () => 'dir' }).some((x) => /rules-state|approvals/.test(x.what)), 'no dispatcher entry: neither exists, nothing claimed');
   const home = proofList(cfg, { ownerHome: '/Users/sam', kindOf: () => 'error:EPERM' }).find((x) => /owner's home/.test(x.what));
   assert.match(home.notTried, /root could not look at it \(EPERM\)/);
+});
+
+test('#528 r2 M1 REAL: a rules entry that is a link to a folder one may pass through but not list is judged as a folder; head on it is refused while a file inside reads', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, () => {
+  const d = tempDir('orch-r2m1-'); const dir = join(d, 'keys'); const link = join(d, 'keys-link');
+  mkdirSync(dir); writeFileSync(join(dir, 'key'), 'k'); symlinkSync(dir, link); chmodSync(dir, 0o100);   // pass through, no listing (0100: this user's own, as 0711 is to others)
+  try {
+    const io = realIo();
+    assert.equal(kindOn(io)(link), 'dir', 'judged by what it leads to');
+    // The bug, shown on this Mac as this user: the old file proof reads as refused, though the file inside reads.
+    const head = spawnSync('/usr/bin/head', ['-c', '1', link], { encoding: 'utf8' });
+    assert.equal(refusedWhy({ args: ['/usr/bin/head', '-c', '1', link], expect: 'denied' }, head), null, 'the old proof would PASS');
+    assert.equal(readFileSync(join(link, 'key'), 'utf8'), 'k', 'yet the key reads');
+    // The fix: the folder proofs, and the pass-through one answers yes, so it FAILs.
+    const ps = proofList(cfg, { ownerHome: '/Users/sam', rules: { files: [link] }, kindOf: kindOn(io) }).filter((x) => x.what.includes(link));
+    assert.deepEqual(ps.map((x) => x.args[0]), ['/bin/ls', '/bin/test']);
+    assert.equal(spawnSync(ps[1].args[0], ps[1].args.slice(1)).status, 0, 'test -x on it says yes: the proof FAILs, never PASS');
+  } finally { chmodSync(dir, 0o700); }
+});
+
+test('#528 r2 m8 PLANTs: kindOn tells an error from "not there" and a link by what it leads to; an error is NOT TRIED, never a file proof', () => {
+  const io = (lstat, stat = () => { throw new Error('no stat'); }) => ({ lstat, stat });
+  const err = (code) => () => { throw Object.assign(new Error(code), { code }); };
+  const link = { isSymbolicLink: () => true, isDirectory: () => false };
+  assert.equal(kindOn(io(err('EACCES')))('/x'), 'error:EACCES', 'P4: EACCES is not "not there"');
+  assert.equal(kindOn(io(err('ENOENT')))('/x'), null);
+  assert.equal(kindOn(io(() => ({ isSymbolicLink: () => false, isDirectory: () => true })))('/x'), 'dir');
+  assert.equal(kindOn(io(() => ({ isSymbolicLink: () => false, isDirectory: () => false })))('/x'), 'file');
+  assert.equal(kindOn(io(() => link, () => ({ isDirectory: () => true })))('/x'), 'dir', 'M1: a link to a folder');
+  assert.equal(kindOn(io(() => link, () => ({ isDirectory: () => false })))('/x'), 'file');
+  assert.equal(kindOn(io(() => link, err('ENOENT')))('/x'), 'error:a link that leads nowhere');
+  assert.equal(kindOn(io(() => link, err('EACCES')))('/x'), 'error:EACCES');
+  // P5: an error is NOT TRIED with its reason, never given a file's head proof.
+  const one = proofList(cfg, { ownerHome: '/Users/sam', rules: { files: ['/zz-key'] }, kindOf: (f) => (f === '/zz-key' ? 'error:EIO' : 'dir') }).filter((x) => x.what.includes('/zz-key'));
+  assert.equal(one.length, 1); assert.equal(one[0].args, null); assert.match(one[0].notTried, /root could not look at it \(EIO\)/);
+  // P7: a sharing group (or any group not the allowed ones) FAILs.
+  assert.match(groupsProblem({ status: 0, stdout: 'builder everyone com.apple.sharepoint.group.1\n' }), /in com\.apple\.sharepoint\.group\.1/);
+  assert.equal(groupsProblem({ status: 0, stdout: 'builder everyone localaccounts _lpoperator\n' }), null);
+});
+
+test('#528 r2 m6: only the program\'s own refusal for this path passes; sudo\'s words, another path, or a test that speaks prove nothing', () => {
+  const ls = { args: ['/bin/ls', '/k'], expect: 'denied' }; const t = { args: ['/bin/test', '-w', '/k'], expect: 'fail' };
+  assert.equal(refusedWhy(ls, { status: 1, stderr: 'ls: /k: Permission denied\n' }), null);
+  for (const stderr of ['sudo: unable to execute /bin/ls: Permission denied', 'ls: /other: Permission denied', 'ls: /k: Permission denied\nls: /j: Permission denied', 'x\nls: /k: Permission denied'])
+    assert.notEqual(refusedWhy(ls, { status: 1, stderr }), null, stderr);
+  assert.notEqual(refusedWhy(ls, { status: 2, stderr: 'ls: /k: Permission denied' }), null);
+  assert.notEqual(refusedWhy(t, { status: 1, stderr: 'sudo: a password is required' }), null, 'a sudo error exits 1 too, but speaks');
+  assert.notEqual(refusedWhy(t, { status: 137, stderr: '' }), null, 'killed: not a no');
+});
+
+test('#528 r2 m5 REAL: a program killed by a signal is 128 + its number, never 1 (which a test proof reads as "no")', { skip: process.platform === 'win32' }, () => {
+  const r = realIo().run('/bin/sh', ['-c', 'kill -KILL $$']);
+  assert.equal(r.status, 137);
+  assert.notEqual(refusedWhy({ args: ['/bin/test', '-w', '/k'], expect: 'fail' }, r), null);
+});
+
+test('#528 r2 m2, m8: the proposals folders and the owner\'s outbox folders are on the cannot lists; one the builder can reach FAILs', () => {
+  const props = ['/Users/Shared/orchestrate-proposals', ...cfg.products.map((p) => `/Users/Shared/orchestrate-proposals/${p}`)];
+  let res = runProofs(proven(), cfg);
+  for (const d of props) for (const w of [`builder cannot write the proposals folder ${d}`, `builder cannot list the proposals folder ${d}`]) assert.ok(res.some((r) => r.what === w && r.ok), w);
+  // A proposals folder the builder can list (P): FAIL.
+  let mac = proven(); chmodSync(mac.at(props[1]), 0o755);
+  assert.deepEqual(runProofs(mac, cfg).filter((r) => !r.ok).map((r) => r.what), [`builder cannot list the proposals folder ${props[1]}`]);
+  // Not made yet: NOT TRIED, never PASS.
+  mac = proven(); rmSync(mac.at(props[1]), { recursive: true });
+  assert.ok(runProofs(mac, cfg).some((r) => r.notTried && r.what.includes(props[1]) && /not made yet/.test(r.why)));
+  // P8: an owner's outbox folder the builder can write → that proof FAILs.
+  mac = proven(); res = runProofs(mac, cfg);
+  const ob = res.filter((r) => /cannot write the owner's outbox folder/.test(r.what)); assert.equal(ob.length, FLAT_OUTBOX_ROLES.length); assert.ok(ob.every((r) => r.ok));
+  const d = ob[0].what.replace(/^.* folder /, ''); mac.owners.set(d, { uid: uidOf(mac, 'builder'), gid: 20 });
+  assert.deepEqual(runProofs(mac, cfg).filter((r) => !r.ok).map((r) => r.what), [ob[0].what]);
+});
+
+test('#528 r2 m1: proofs run through main keep the Dispatcher entry, so its rules-state and approvals folders are proven (one open to all FAILs); an entry its parser refuses is refused', () => {
+  const raw = { ...RAW, hostLockPath: '/Users/sam/host.lock', dispatcher: { product: 'alpha' } };
+  const d = parseDispatcher(raw.dispatcher, parseConfig(raw));
+  const mac = proven();
+  for (const f of [d.rulesStateDir, d.approvalsStateDir]) { mkdirSync(mac.at(f), { recursive: true }); chmodSync(mac.at(f), 0o777); mac.owners.set(f, { uid: uidOf(mac, 'orchestrate'), gid: 0 }); }
+  // Their parent (the private folder) shuts the builder out on its own; the plant opens it to pass-through too, so the
+  // proofs of the two folders are what must catch it.
+  const parent = dirname(d.rulesStateDir); const was = statSync(mac.at(parent)).mode & 0o7777; chmodSync(mac.at(parent), 0o711);
+  const t = run(mac, ['proofs'], raw); assert.equal(t.code, 1, t.text);
+  for (const f of [d.rulesStateDir, d.approvalsStateDir]) assert.match(t.text, new RegExp(`FAIL  builder cannot list ${f} `), f);
+  chmodSync(mac.at(parent), was);
+  for (const f of [d.rulesStateDir, d.approvalsStateDir]) chmodSync(mac.at(f), 0o700);
+  const ok = run(mac, ['proofs'], raw); assert.equal(ok.code, 0, ok.text);
+  for (const f of [d.rulesStateDir, d.approvalsStateDir]) assert.match(ok.text, new RegExp(`PASS  builder cannot list ${f}\n`), f);
+  assert.match(run(mac, ['proofs', '--dry-run'], raw).text, new RegExp(`/bin/ls ${d.rulesStateDir} `));
+  const bad = run(mac, ['proofs'], { ...raw, dispatcher: { product: 'nope' } }); assert.equal(bad.code, 2); assert.match(bad.text, /dispatcher entry can't be read/);
+});
+
+test('#528 r2: a rules entry that is not text gets its own NOT TRIED line, never dropped', () => {
+  const mac = proven(); writeFileSync(mac.at(P('install/orchestrate/review.json')), JSON.stringify({ rules: { production: { env_files: [SECRET, 7] }, secrets: { paths: [null] } } }));
+  const nt = runProofs(mac, cfg).filter((r) => r.notTried);
+  assert.deepEqual(nt.map((r) => r.what), ['builder cannot read the rules entry 7', 'builder cannot read the rules entry null']);
+  assert.ok(nt.every((r) => /not text/.test(r.why)));
+  assert.equal(run(mac, ['proofs']).code, 1);
 });
 
 test('L1079: a rules entry that names nothing on this Mac is NOT TRIED, never PASS, and the run exits 1', () => {
@@ -1158,6 +1259,10 @@ test('L1079 PLANT: users-folders refuses while the worker runner\'s status lists
     [JSON.stringify({ sessions: [{ id: 's-1', alive: true }] }), /lists 1 live session \(s-1\)/],
     [JSON.stringify({ sessions: [{ id: 's-2' }] }), /lists 1 live session/],
     [JSON.stringify({ nope: 1 }), /is not what the runner writes/],
+    // #528 r2 m3: an entry that is not a session is refused, never skipped as "not live".
+    [JSON.stringify({ sessions: [null] }), /is not what the runner writes/],
+    [JSON.stringify({ sessions: ['abc', { id: 's-5', ended: true }] }), /is not what the runner writes/],
+    [JSON.stringify({ sessions: [42] }), /is not what the runner writes/],
     ['{', /is not what the runner writes/],
   ]) {
     const mac = at(text); const sam = uidOf(mac, 'sam');
@@ -1166,7 +1271,7 @@ test('L1079 PLANT: users-folders refuses while the worker runner\'s status lists
   }
   // #528 r1 m5, m6: a status that can't be read, is a link, or is a folder is never "no live session".
   for (const [make, re] of [
-    [(mac) => { writeFileSync(mac.at(status), JSON.stringify({ sessions: [] })); chmodSync(mac.at(status), 0o000); }, /could not be read \(EACCES\)/],
+    [(mac) => { writeFileSync(mac.at(status), JSON.stringify({ sessions: [] })); chmodSync(mac.at(status), 0o000); }, /could not be opened \(EACCES\)/],
     [(mac) => { writeFileSync(mac.at(`${status}.real`), JSON.stringify({ sessions: [] })); symlinkSync(mac.at(`${status}.real`), mac.at(status)); }, /is a link/],
     [(mac) => { mkdirSync(mac.at(status)); }, /is not a plain file/],
   ]) {

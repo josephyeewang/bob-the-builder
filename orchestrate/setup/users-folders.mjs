@@ -250,14 +250,17 @@ function ownerLeftovers(io, row, rows) {
 export function liveSessionsProblem(io, cfg) {
   const file = `${workerRunnerPaths(cfg).state}/${WORKER_STATUS_FILE}`;
   const unknown = (why) => `the worker runner's status ${file} ${why}, so it is not known that no session is live; nothing was changed`;
-  // Never through a link (#528 r1 m5, as owner-status.mjs openRead): looked at first, then read only when a plain file.
-  let st; try { st = io.lstat(file); } catch (e) { return e?.code === 'ENOENT' ? null : unknown(`could not be looked at (${e?.code ?? e?.message})`); }
-  if (st.isSymbolicLink() || !st.isFile()) return unknown(st.isSymbolicLink() ? 'is a link' : 'is not a plain file');
-  let text;
-  try { text = io.readText(file); } catch (e) { return unknown(`could not be read (${e?.code ?? e?.message})`); }
-  let s; try { s = JSON.parse(text); } catch { s = null; }
-  if (!s || !Array.isArray(s.sessions)) return `the worker runner's status ${file} is not what the runner writes, so it is not known that no session is live; nothing was changed`;
-  const live = s.sessions.filter((x) => x && typeof x === 'object' && liveSession(x));   // the one rule (owner-status.mjs, #528 r1 m4)
+  // Through owner-status.mjs openRead (#528 r1 m5, r2 m4): one handle, never a link, never waiting, checked and read
+  // with no gap between; only a plain file with one name, of a size the runner writes, is read.
+  let got; try { got = io.openRead(file); } catch (e) { return e?.code === 'ENOENT' ? null : unknown(`could not be opened (${e?.code === 'ELOOP' ? 'it is a link' : e?.code ?? e?.message})`); }
+  if (got.text === null) return unknown(got.st?.isFile?.() ? 'is not a plain file with one name, of a size the runner writes' : 'is not a plain file');
+  let s; try { s = JSON.parse(got.text); } catch { s = null; }
+  const notRunners = `the worker runner's status ${file} is not what the runner writes, so it is not known that no session is live; nothing was changed`;
+  if (!s || !Array.isArray(s.sessions)) return notRunners;
+  // An entry that is not an object (null, "abc", 42) is refused, never skipped (#528 r2 m3, I1): skipping it would read a
+  // damaged file as "none live".
+  if (s.sessions.some((x) => !x || typeof x !== 'object' || Array.isArray(x))) return notRunners;
+  const live = s.sessions.filter((x) => liveSession(x));   // the one rule (owner-status.mjs, #528 r1 m4)
   return live.length ? `the worker runner's status lists ${live.length} live session${live.length === 1 ? '' : 's'} (${live.slice(0, 3).map((x) => String(x?.id).slice(0, 60)).join(', ')}). The builder starts clean: stop the old worker runner and let its sessions end, then run users-folders again. Nothing was changed` : null;
 }
 

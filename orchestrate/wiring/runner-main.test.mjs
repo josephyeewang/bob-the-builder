@@ -342,6 +342,8 @@ test('#378 r1 M1: a runner restart carrying over a product A session whose setti
     assert.match(carriedOverProblem(c, {}, { groupGone: () => false, listSettings: () => { throw Object.assign(new Error('x'), { code: 'EACCES' }); } }), /settings folder can't be listed \(EACCES\)/);
     // n3 (A11): a carried-over session that names no product can't be told about: the runner does not start.
     assert.match(carriedOverProblem(c, { sessions: [{ ...A, product: undefined }], requests: {} }, { groupGone: () => false }), /names no product/);
+    // #528 r2 m3: an entry that is not a session refuses the start, never skipped as "not live" (I1).
+    for (const x of [null, 'abc', 42, []]) assert.match(carriedOverProblem(c, { sessions: [x, { ...A, alive: false, ended: true }], requests: {} }, { groupGone: () => false }) ?? '', /lists a session that is not what the runner writes/, JSON.stringify(x));
     // A first run (no memory, no settings files) starts.
     rmSync(join(c.settingsDir, `${SA}.json`));
     assert.equal(carriedOverProblem(c, {}, { groupGone: () => false }), null);

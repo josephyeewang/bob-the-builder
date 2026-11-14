@@ -6,7 +6,8 @@
 // invalid, a write with no value is a bad call, a record that is not there reads as exit 56; chown needs root; mkdir
 // needs the parent and refuses an existing folder (those two are the real mkdir's own refusals, since it is the real one).
 
-import { renameSync, unlinkSync, chmodSync, cpSync, fchmodSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync } from 'node:fs';
+import { renameSync, unlinkSync, chmodSync, cpSync, fchmodSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync } from 'node:fs';
+import { openRead } from '../wiring/owner-status.mjs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
@@ -195,7 +196,9 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
       const st = lstatSync(at(p)); const o = mac.owners.get(p);
       return { isDirectory: () => st.isDirectory(), isFile: () => st.isFile(), isSymbolicLink: () => st.isSymbolicLink(), mode: st.mode, size: st.size, nlink: st.nlink, ino: st.ino, dev: st.dev, uid: o ? o.uid : -1, gid: o ? o.gid : -1 };
     },
-    mkdir(p, mode) { mac.log.push(`mkdir ${p}`); mkdirSync(at(p), { mode }); mac.owners.set(p, { uid: mac.rootUid, gid: 0 }); },
+    stat(p) { const st = statSync(at(p)); return { isDirectory: () => st.isDirectory(), isFile: () => st.isFile(), isSymbolicLink: () => false, mode: st.mode }; },
+    openRead: (p) => openRead(at(p)),
+    mkdir(p, mode) { mac.log.push(`mkdir ${p}`); mkdirSync(at(p), { mode }); mac.owners.set(p, mac.as === 0 ? { uid: mac.rootUid, gid: 0 } : { uid: mac.as, gid: 20 }); },
     // The setup's one way to change an owner and mode: the real handle-based change, with chown stood in for (a test is not root).
     secure(p, want) { secureFolder(at(p), want, ports(p)); },
     secureFile(p, want) { (mac.reopened ??= []).push(p); secureFile(at(p), want, ports(p)); },   // reopens the name: a test can see it
@@ -219,7 +222,7 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
     writeOwned(p, text, own) { mac.log.push(`write ${p}`); writeNewFile(at(p), text, own.mode, own, ports(p)); },
     unlink(p) { mac.log.push(`unlink ${p}`); try { unlinkSync(at(p)); } catch (e) { if (e?.code !== 'ENOENT') throw e; } mac.owners.delete(p); },
     rename(from, to) { mac.log.push(`rename ${from} ${to}`); renameSync(at(from), at(to)); const o = mac.owners.get(from); mac.owners.delete(from); if (o) mac.owners.set(to, o); else mac.owners.delete(to); },   // the real call
-    write(p, text, mode) { mac.log.push(`write ${p}`); writeNewFile(at(p), text, mode); mac.owners.set(p, { uid: -2, gid: -2 }); },   // no owner until the code sets one
+    write(p, text, mode) { mac.log.push(`write ${p}`); writeNewFile(at(p), text, mode); mac.owners.set(p, mac.as === 0 ? { uid: -2, gid: -2 } : { uid: mac.as, gid: 20 }); },   // root's: no owner until the code sets one; a user's is that user's
     copyFile(src, p, mode) { mac.log.push(`copy ${p}`); writeNewFile(at(p), readFileSync(src), mode); mac.owners.set(p, { uid: -2, gid: -2 }); },
     copyTree(src, p) { mac.log.push(`copytree ${p}`); cpSync(src, at(p), { recursive: true, dereference: false, errorOnExist: true, force: false }); },
     rm(p) { mac.log.push(`rm ${p}`); rmSync(at(p), { recursive: true, force: true }); for (const k of [...mac.owners.keys()]) if (k === p || k.startsWith(`${p}/`)) mac.owners.delete(k); },
@@ -232,9 +235,43 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
   // job file to be root's and not writable by group or other, and refuses a job already loaded; bootout refuses one that is
   // not loaded; print of one launchd does not know exits 113.
   mac.loaded = new Map();
+  mac.guiLoaded = new Map();   // "<uid>/<label>" → { state, lastExit }
+  mac.guiClosed = new Set();   // uids with no open login session: bootstrap in gui/<uid> fails as the real one does
+  const gui = (args) => {
+    const [verb, a, b] = args;
+    const err = (status, stderr) => ({ status, stdout: '', stderr });
+    const m = /^gui\/(\d+)(?:\/(.+))?$/.exec(a ?? ''); const uid = Number(m[1]);
+    if (verb === 'print') {
+      const key = `${uid}/${m[2]}`; const j = mac.guiLoaded.get(key);
+      if (!m[2]) return err(64, 'Usage: launchctl print <domain-target>');
+      if (!j) return err(113, `Could not find service "${m[2]}" in domain for user gui: ${uid}`);
+      return { status: 0, stdout: `gui/${key} = {\n\tstate = ${j.state}\n\tlast exit code = ${j.lastExit ?? '(never exited)'}\n}\n`, stderr: '' };
+    }
+    if (mac.as !== 0 && mac.as !== uid) return err(1, `${verb === 'bootstrap' ? 'Bootstrap' : 'Boot-out'} failed: 1: Operation not permitted`);
+    mac.log.push(`launchctl ${args.join(' ')}`);
+    if (verb === 'bootstrap') {
+      if (m[2] || !b) return err(64, 'Usage: launchctl bootstrap <domain> <path>');
+      if (mac.guiClosed.has(uid)) return err(125, 'Bootstrap failed: 125: Domain does not support specified action');
+      let st; let text;
+      try { st = lstatSync(b); text = readFileSync(b, 'utf8'); } catch { return err(5, 'Bootstrap failed: 5: Input/output error'); }
+      const logical = b.startsWith(prefix) ? b.slice(prefix.length) : b; const o = mac.owners.get(logical);
+      if (!st.isFile() || ![uid, mac.rootUid].includes(o ? o.uid : -1) || (st.mode & 0o022)) return err(5, 'Bootstrap failed: 5: Input/output error');
+      const label = /<key>Label<\/key>\s*<string>([^<]+)<\/string>/.exec(text)?.[1];
+      if (!label || mac.guiLoaded.has(`${uid}/${label}`)) return err(5, 'Bootstrap failed: 5: Input/output error');
+      mac.guiLoaded.set(`${uid}/${label}`, { state: 'running', text });
+      return { status: 0, stdout: '', stderr: '' };
+    }
+    if (verb === 'bootout') {
+      if (!m[2]) return err(64, 'Usage: launchctl bootout <domain-target>');
+      if (!mac.guiLoaded.delete(`${uid}/${m[2]}`)) return err(3, 'Boot-out failed: 3: No such process');
+      return { status: 0, stdout: '', stderr: '' };
+    }
+    return err(64, 'Usage: launchctl <subcommand>');
+  };
   mac.launchctl = (args) => {
     const [verb, a, b] = args;
     const err = (status, stderr) => ({ status, stdout: '', stderr });
+    if (['print', 'bootstrap', 'bootout'].includes(verb) && /^gui\/\d+(\/|$)/.test(a ?? '')) return gui(args);
     if (verb === 'print') {
       const m = /^system\/(.+)$/.exec(a ?? '');
       if (!m) return err(64, 'Usage: launchctl print <domain-target>');

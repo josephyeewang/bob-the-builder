@@ -2,7 +2,7 @@
 // place that builds them); this file puts them where launchd looks, and loads, lists and unloads them.
 //
 //   place    write the three plists (plus the hourly watch-only job, when the config's `watch` entry has `rulesSha256`, and the robot
-//            job, when the config says `"robot": true`, and the Dispatcher job, when it has a `dispatcher` entry) into /Library/LaunchDaemons, root:wheel 0644 (launchd refuses any other owner or mode)
+//            job, when the config says `"robot": true`, and the Dispatcher and Sensors jobs, when it has a `dispatcher` entry) into /Library/LaunchDaemons, root:wheel 0644 (launchd refuses any other owner or mode)
 //            and make each log file launchd opens for a job with a UserName, owned by that user (jobLogs)
 //            in the log folder, which it repairs, or refuses if the job's user could change it
 //   load     launchctl bootstrap system <plist>, for each job not loaded yet; a job loaded from an OLDER file is reloaded (bootout, then
@@ -21,6 +21,9 @@ import { dirname, join } from 'node:path';
 import { reviewDaemonPlists, updaterPlist } from '../modules/M4-workshop/launcher/review-daemons.mjs';
 import { RUNNER_CONFIG, aclProblem, chainProblem, currentCopy } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { homeOf } from './layout.mjs';
+
+// The worker runner's script, as its job starts it from the copy (wiring/runner-job.mjs): an old job is found by it (#528 r2 m7).
+const WORKER_RUNNER_SCRIPT = 'wiring/runner-main.mjs';
 import { checkInstall, installPaths } from './install.mjs';
 import { readUser } from './users-folders.mjs';
 import { watchPlist, WATCH_NO_HASH } from './watch-setup.mjs';
@@ -28,6 +31,8 @@ import { watchRulesPath } from './layout.mjs';
 import { ROBOT_JOB, robotAppKeyItems, robotConfigProblem, robotPlist } from './robot-setup.mjs';
 import { WORKER_RUNNER_JOB, WORKER_RUNNER_OFF, workerRunnerJobPlist, workerRunnerLoadProblem } from './worker-runner-setup.mjs';
 import { DISPATCHER_JOB, DISPATCHER_OFF, DISPATCHER_RUN_LIMIT_S, dispatcherConfigProblem, dispatcherKeysProblem, dispatcherLoadProblem, dispatcherPlist, robotMatchProblem, writeAside } from './dispatcher-setup.mjs';
+import { answerRows } from './owner-answer-setup.mjs';
+import { SENSORS_JOB, SENSORS_RUN_LIMIT_S, sensorsConfigProblem, sensorsLoadProblem, sensorsPlist } from './sensors-setup.mjs';
 
 export const DAEMON_DIR = '/Library/LaunchDaemons';
 const LAUNCHCTL = '/bin/launchctl';
@@ -36,10 +41,11 @@ export const JOBS = Object.freeze(['review-updater', 'review-account', 'review-r
 // a repo-only entry (all prove-token needs) leaves the three review jobs exactly as before.
 // The robot job (robot-setup.mjs) is one more only when the config says `"robot": true`, so a config without it places exactly what it did.
 // The Dispatcher job (dispatcher-setup.mjs) likewise, only when the config has its `dispatcher` entry; it loads before the robot job.
+// The Sensors job (sensors-setup.mjs) is on exactly when the Dispatcher is (L1049), and loads after it, before the robot job.
 // The worker runner's job (worker-runner-setup.mjs, L1092) likewise, only with the config's `workerRunner` entry; it loads last.
-export const jobsFor = (cfg) => [...JOBS, ...(cfg.watch?.rulesSha256 ? ['watch-only'] : []), ...(cfg.dispatcher ? [DISPATCHER_JOB] : []), ...(cfg.robot ? [ROBOT_JOB] : []), ...(cfg.workerRunner ? [WORKER_RUNNER_JOB] : [])];
+export const jobsFor = (cfg) => [...JOBS, ...(cfg.watch?.rulesSha256 ? ['watch-only'] : []), ...(cfg.dispatcher ? [DISPATCHER_JOB, SENSORS_JOB] : []), ...(cfg.robot ? [ROBOT_JOB] : []), ...(cfg.workerRunner ? [WORKER_RUNNER_JOB] : [])];
 /** The jobs a config may turn on or leave off. One left off must not be placed or loaded either (a full check says so). */
-export const OPTIONAL_JOBS = Object.freeze(['watch-only', DISPATCHER_JOB, ROBOT_JOB, WORKER_RUNNER_JOB]);
+export const OPTIONAL_JOBS = Object.freeze(['watch-only', DISPATCHER_JOB, SENSORS_JOB, ROBOT_JOB, WORKER_RUNNER_JOB]);
 export const ALL_JOBS = Object.freeze([...JOBS, ...OPTIONAL_JOBS]);
 const ROBOT_OFF = 'the config does not turn the robot job on: add "robot": true, with its robot.json among the extras';
 /**
@@ -49,11 +55,11 @@ const ROBOT_OFF = 'the config does not turn the robot job on: add "robot": true,
  * tests pin it, and changing it is outside this change (raised with the lead).
  */
 export function onlyJobs(cfg, name, { anyKnown = false } = {}) {
-  if (anyKnown && (name === ROBOT_JOB || name === DISPATCHER_JOB || name === WORKER_RUNNER_JOB)) return [name];
+  if (anyKnown && (name === ROBOT_JOB || name === DISPATCHER_JOB || name === SENSORS_JOB || name === WORKER_RUNNER_JOB)) return [name];
   const all = jobsFor(cfg);
   if (name === 'watch-only' && cfg.watch && !cfg.watch.rulesSha256) throw new Error(WATCH_NO_HASH);
   if (name === ROBOT_JOB && !cfg.robot) throw new Error(ROBOT_OFF);
-  if (name === DISPATCHER_JOB && !cfg.dispatcher) throw new Error(DISPATCHER_OFF);
+  if ((name === DISPATCHER_JOB || name === SENSORS_JOB) && !cfg.dispatcher) throw new Error(DISPATCHER_OFF);
   if (name === WORKER_RUNNER_JOB && !cfg.workerRunner) throw new Error(WORKER_RUNNER_OFF);
   if (!all.includes(name)) throw new Error(`--only names no job of this config: ${JSON.stringify(String(name).slice(0, 60))}; the jobs are ${all.join(', ')}`);
   return [name];
@@ -83,7 +89,7 @@ export function plistTexts(io, cfg) {
     const two = reviewDaemonPlists({ ...common, config: join(P.installRoot, RUNNER_CONFIG), reviewRoot: P.reviewRoot, reviewHome: homeOf(cfg, 'review'), accountCopy: P.accountCopy, ownerHome: owner.home, ownerUid: owner.uid });
     const plists = { 'review-runner': two.runner, 'review-account': two.accountCopy, 'review-updater': updaterPlist(common) };
     if (cfg.watch?.rulesSha256) plists['watch-only'] = watchPlist(io, cfg);
-    if (cfg.dispatcher) plists[DISPATCHER_JOB] = dispatcherPlist(cfg);
+    if (cfg.dispatcher) { plists[DISPATCHER_JOB] = dispatcherPlist(cfg); plists[SENSORS_JOB] = sensorsPlist(cfg); }
     if (cfg.robot) plists[ROBOT_JOB] = robotPlist(cfg);
     if (cfg.workerRunner) plists[WORKER_RUNNER_JOB] = workerRunnerJobPlist(cfg);
     return { plists, problems };
@@ -260,6 +266,8 @@ function startChecks(io, cfg, jobs) {
   }
   // The Dispatcher: its config in the copy, then check-dispatcher (L757), before it may start.
   if (jobs.includes(DISPATCHER_JOB)) { const why = dispatcherLoadProblem(io, cfg); if (why) problems.push(why); }
+  // The Sensors: their config in the copy, then check-dispatcher (they open the Dispatcher's Record with its rules and token).
+  if (jobs.includes(SENSORS_JOB)) { const why = sensorsLoadProblem(io, cfg); if (why && !problems.includes(why)) problems.push(why); }
   // The worker runner: its config in the copy, root's, and one its own check takes (L1092).
   if (jobs.includes(WORKER_RUNNER_JOB)) { const why = workerRunnerLoadProblem(io, cfg); if (why) problems.push(why); }
   return { problems, known: problems.filter((p) => !unknown.has(p)) };
@@ -352,7 +360,7 @@ const NEVER = '(never exited)';
 export const FIRST_RUN_LIMIT_S = 30 * 60;
 // How long one run of `job` may go before it reads as stuck: a Dispatcher pass may run to its deadline and watchdog margin
 // (self-review m5); the others, FIRST_RUN_LIMIT_S.
-const runLimitS = (job) => (job === DISPATCHER_JOB ? DISPATCHER_RUN_LIMIT_S : FIRST_RUN_LIMIT_S);
+const runLimitS = (job) => (job === DISPATCHER_JOB ? DISPATCHER_RUN_LIMIT_S : job === SENSORS_JOB ? SENSORS_RUN_LIMIT_S : FIRST_RUN_LIMIT_S);
 const UNREADABLE = 'unreadable';
 /** Seconds the process has been running (`ps -o etime=`: [[dd-]hh:]mm:ss); null if there is no such process any more (ps failed or printed nothing: it ended between the two reads); UNREADABLE if ps answered with something this cannot parse (L180 m5b). */
 function runningSeconds(io, pid) {
@@ -392,12 +400,22 @@ export function checkDaemons(io, cfg, jobs = jobsFor(cfg)) {
     const u = readUser(io, cfg.owner); const dir = u.exists && u.home ? join(u.home, 'Library', 'LaunchAgents') : null;
     let agents = null; let why = null;
     if (!dir) why = `the owner ${cfg.owner}'s home could not be read from this Mac, so its LaunchAgents were not looked at`;
-    else { try { agents = io.list(dir).filter((n) => /\.worker-runner\.plist$/.test(n) && !n.startsWith('.')).sort(); } catch (e) { if (e?.code !== 'ENOENT') why = `${dir} could not be listed (${e?.code ?? 'error'}), so whether the old worker runner's job is left there is not known`; else agents = []; } }
+    else {
+      // Found by what it starts, not by its file's name (#528 r2 m7): every job file there is read, and one that names the
+      // worker runner's script is the old runner, under any label. One that can't be read is said, never read as "not it".
+      let names = null;
+      try { names = io.list(dir).filter((n) => n.endsWith('.plist') && !n.startsWith('.')).sort(); } catch (e) { if (e?.code !== 'ENOENT') why = `${dir} could not be listed (${e?.code ?? 'error'}), so whether the old worker runner's job is left there is not known`; else agents = []; }
+      if (names) {
+        agents = []; const unread = [];
+        for (const n of names) { let t; try { t = io.readText(join(dir, n)); } catch (e) { unread.push([n, e?.code ?? 'error']); continue; } if (t.includes(WORKER_RUNNER_SCRIPT)) agents.push(n); }
+        if (unread.length) why = `${unread.map(([n, code]) => `${join(dir, n)} could not be read (${code})`).join(', ')}, so whether ${unread.length === 1 ? 'it is' : 'one is'} the old worker runner's job is not known`;
+      }
+    }
     item(why === null && agents.length === 0, `no worker runner job left in the owner's LaunchAgents (since L1079 it runs as the builder user, never as the owner)`,
       why ?? `${agents.map((n) => join(dir, n)).join(', ')}: the old worker runner, which would start a second runner as ${cfg.owner}. As ${cfg.owner}: launchctl bootout gui/$(id -u)/<its label>, then delete the file (README, "Moving the workers to the builder user", step 1)`);
   }
   // Each job the config leaves off: none placed or loaded (listed only when there is one).
-  const offWhy = { 'watch-only': 'the config names no rules fingerprint', [ROBOT_JOB]: 'the config does not turn the robot job on', [DISPATCHER_JOB]: 'the config has no dispatcher entry' };
+  const offWhy = { 'watch-only': 'the config names no rules fingerprint', [ROBOT_JOB]: 'the config does not turn the robot job on', [DISPATCHER_JOB]: 'the config has no dispatcher entry', [SENSORS_JOB]: 'the config has no dispatcher entry' };
   for (const off of subset ? [] : OPTIONAL_JOBS.filter((j) => !jobsFor(cfg).includes(j))) {
     const s = jobState(io, cfg, off); let placed = false; try { io.lstat(plistPath(cfg, off)); placed = true; } catch { /* none */ }
     item(!s.loaded && !placed, `no ${labelOf(cfg, off)} job is placed or loaded (${offWhy[off]})`, `${s.loaded ? `it is loaded: take it out with sudo node setup.mjs daemons unload --only ${off}, then` : 'its file is there:'} delete ${plistPath(cfg, off)}`, !s.loaded && !placed);
@@ -408,8 +426,11 @@ export function checkDaemons(io, cfg, jobs = jobsFor(cfg)) {
     for (const k of robotAppKeyItems(io, cfg)) if (k.skip) out.push({ ok: true, skip: true, what: `the robot App's key: ${k.what}`, why: k.why }); else item(k.ok, `the robot App's key: ${k.what}`, k.why);
   }
   if (jobs.includes(DISPATCHER_JOB)) { const why = dispatcherConfigProblem(io, cfg); item(why === null, `the Dispatcher's config in the copy (dispatcher.json) is the one this setup writes`, why); }
+  if (jobs.includes(SENSORS_JOB)) { const why = sensorsConfigProblem(io, cfg); item(why === null, `the Sensors' config in the copy (sensors.json) is the one this setup writes`, why); }
+  // The Sensors read who is signed in and the usage from the owner's answer: stale, and the Dispatcher starts nothing (L1051).
+  if (jobs.includes(SENSORS_JOB)) out.push(...answerRows(io, cfg));
   // check-dispatcher's FAILs only: a NOT TRIED line (no root to look) is not one, so check without sudo stays quiet on it (L807 m3).
-  if (jobs.includes(DISPATCHER_JOB)) { const why = dispatcherKeysProblem(io, cfg); item(why === null, 'check-dispatcher has no FAIL', why); }
+  if (jobs.includes(DISPATCHER_JOB) || jobs.includes(SENSORS_JOB)) { const why = dispatcherKeysProblem(io, cfg); item(why === null, 'check-dispatcher has no FAIL', why); }
   const rec = readRecord(io, cfg);
   for (const job of jobs) {
     const f = plistPath(cfg, job); const why = [];

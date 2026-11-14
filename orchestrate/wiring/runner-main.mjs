@@ -240,7 +240,10 @@ export function carriedOverProblem(c, memory, { groupGone, readSettings = sessio
   }
   const live = [];
   for (const s of Array.isArray(memory?.sessions) ? memory.sessions : []) {
-    if (!s || !isLiveSession(s)) continue;   // the one live-session rule (owner-status.mjs, #528 r1 m4)
+    // An entry that is not an object (null, "abc", 42) refuses the start (#528 r2 m3, I1): skipped, a damaged memory
+    // would read as "none live".
+    if (!s || typeof s !== 'object' || Array.isArray(s)) return `its memory lists a session that is not what the runner writes (${String(JSON.stringify(s)).slice(0, 40)}), so it is not known that none is live`;
+    if (!isLiveSession(s)) continue;   // the one live-session rule (owner-status.mjs, #528 r1 m4)
     let gone = false; try { gone = groupGone(s) === true; } catch { gone = false; }
     if (!gone) live.push({ id: s.id, product: s.product });
   }

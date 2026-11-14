@@ -21,10 +21,10 @@
 // (so no later membership, staff above all, quietly opens the owner's home, which macOS makes 0750 to staff). A group
 // list that can't be read is a FAIL, never an empty list.
 
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { RUNNER_ROLES } from '../shared/review-roles.mjs';
 import { runnerPlaces } from '../shared/product-paths.mjs';
-import { BUILDER, BUILDER_SHELL, FLAT_OUTBOX_ROLES, PRODUCT_OUTBOX_ROLES, USERS, baseMarkerPath, homeOf, outboxRootPath, workerCopiesPath } from './layout.mjs';
+import { BUILDER, BUILDER_SHELL, FLAT_OUTBOX_ROLES, PRODUCT_OUTBOX_ROLES, USERS, baseMarkerPath, proposalRows, homeOf, outboxRootPath, workerCopiesPath } from './layout.mjs';
 import { RUNNER_CONFIG } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { installPaths } from './install.mjs';
 import { readUser } from './users-folders.mjs';
@@ -40,8 +40,6 @@ const ID = '/usr/bin/id';
 const NO_WRITE = ['hooks', 'settings', 'launcher', 'lead-main', 'claude-code', 'bob', 'global-rules', 'frontdoor', 'mirror', 'private', 'keys', 'review', 'review-copies', 'worker-runner', 'outboxes', 'install', ...RUNNER_ROLES.map((r) => `outboxes/${r}`)];
 /** The groups macOS gives every local user, which open nothing of the owner's (L1079): the builder may be in these and its own group only. */
 export const BUILDER_GROUPS_ALLOWED = Object.freeze(['everyone', 'localaccounts', '_lpoperator']);
-// The Mac's answer that a read or listing was refused for want of permission: the one failure a "cannot" proof takes (#528 r1 M1).
-const DENIED = /: Permission denied\s*$/m;
 
 /**
  * What the proofs need from this Mac besides the config: { ownerHome, rules: { files: [...], why? } }. `files`: the
@@ -54,10 +52,12 @@ export function proofInputs(io, cfg) {
   let rules = null; let why = null;
   try { rules = JSON.parse(io.readText(file))?.rules ?? null; } catch (e) { why = `the installed ${file} could not be read (${e?.code ?? 'not JSON'})`; }
   if (!why && !rules) why = `the installed ${file} names no rules`;
-  const list = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string') : []);
-  const files = why ? [] : [...new Set([...list(rules.production?.env_files), ...list(rules.secrets?.paths)])];
-  if (!why && !files.length) why = `the product's rules list no production files or secrets (${file}: rules.production.env_files and rules.secrets.paths are empty)`;
-  return { ownerHome, rules: { files, why } };
+  const all = why ? [] : [rules.production?.env_files, rules.secrets?.paths].flatMap((v) => (Array.isArray(v) ? v : []));
+  const files = [...new Set(all.filter((x) => typeof x === 'string'))];
+  // An entry that is not text is said, one NOT TRIED line each, never dropped (#528 r2): it names no file to try.
+  const odd = all.filter((x) => typeof x !== 'string');
+  if (!why && !files.length && !odd.length) why = `the product's rules list no production files or secrets (${file}: rules.production.env_files and rules.secrets.paths are empty)`;
+  return { ownerHome, rules: { files, odd, why } };
 }
 
 /** The proofs: [{ what, args, expect: 'ok' | 'fail', control?, notTried? }]. `args` are what follows `sudo -n -H -u builder`.
@@ -96,12 +96,20 @@ export function proofList(cfg, { ownerHome = null, rules = { files: [], why: 'no
         : folderProofs(`${B} cannot list the owner's home ${ownerHome}`, ownerHome)),
     // The owner's own sessions' outboxes (#528 r1 m9): the owner's, 0750, with one read entry for orchestrate only.
     ...FLAT_OUTBOX_ROLES.map((r) => join(outboxRootPath(cfg), r)).map((d) => ({ what: `${B} cannot write the owner's outbox folder ${d}`, args: [TEST, '-w', d], expect: 'fail' })),
-    // The proposals folders (#528 r1 m9) get no proof of their own: no part of setup names them yet (the proposals port is
-    // not wired: review-ports.mjs NOT_WIRED_REVIEW). They are the owner's, under the owner's home, which the proof above covers.
-    // A proof that could never pass would leave containment unprovable, so the gap is named here and in the hand-in instead.
+    // The proposals folders (#528 r2 m2), from setup's own table (proposalRows, I7): the parent is root's 0711 and each
+    // product's is the owner's 0700. The builder can write none, and can list none. One not made yet (`proposals` makes
+    // them) is NOT TRIED, as a Dispatcher folder not made yet is (#528 r1 judgement 2): a missing folder proves nothing.
+    ...proposalRows(cfg).flatMap((row) => {
+      const what = `${B} cannot write or list the proposals folder ${row.path}`; const k = kindOf(row.path);
+      if (!k) return [notTried(what, 'not made yet (sudo node setup.mjs proposals makes it): nothing was tried')];
+      if (k !== 'dir') return [notTried(what, k.startsWith('error:') ? `root could not look at it (${k.slice(6)}): nothing was tried` : 'it is not a folder: nothing was tried')];
+      return [{ what: `${B} cannot write the proposals folder ${row.path}`, args: [TEST, '-w', row.path], expect: 'fail' },
+        { what: `${B} cannot list the proposals folder ${row.path}`, args: [LS, row.path], expect: 'denied' }];
+    }),
     // The Dispatcher's rules state and approvals (L1112 (3)): orchestrate's alone. Without a dispatcher entry neither exists.
     ...(cfg.dispatcher ? [cfg.dispatcher.rulesStateDir, cfg.dispatcher.approvalsStateDir].flatMap(readProof) : []),
-    ...(rules.files.length ? rules.files.flatMap(readProof) : [notTried(`${B} cannot read the product's production files and secrets`, rules.why ?? 'none named')]),
+    ...(rules.files.length || rules.odd?.length ? rules.files.flatMap(readProof) : [notTried(`${B} cannot read the product's production files and secrets`, rules.why ?? 'none named')]),
+    ...(rules.odd ?? []).map((x) => notTried(`${B} cannot read the rules entry ${String(JSON.stringify(x) ?? typeof x).slice(0, 60)}`, 'it is not text, so it names no file: nothing was tried')),
   ];
 }
 
@@ -142,16 +150,33 @@ export function runProofs(io, cfg) {
   return out;
 }
 
-/** Null when a "must fail" proof's failure is the one "no" it takes, or why it proves nothing (#528 r1 M1). */
+/**
+ * Null when a "must fail" proof's failure is the one "no" it takes, or why it proves nothing (#528 r1 M1, r2 m6). Only
+ * the program's own answer counts, word for word: a read or listing must exit 1 saying exactly `<program>: <path>:
+ * Permission denied` (sudo's own "Permission denied", or one about another path, is not it); a test must exit 1 and
+ * say nothing (a sudo error on the way in exits 1 too, but speaks).
+ */
 export function refusedWhy(pr, r) {
-  const said = String(r?.stderr ?? '').trim().slice(0, 100);
-  if (pr.expect === 'denied') return DENIED.test(String(r?.stderr ?? '')) ? null : `it failed, but not with the Mac's "Permission denied" (${said || `exit ${r?.status}`}), so it is not proven`;
-  return r?.status === 1 ? null : `test did not answer a plain no (${said || `exit ${r?.status}`}), so it is not proven`;
+  const err = String(r?.stderr ?? '').trim(); const said = err.slice(0, 100);
+  if (pr.expect === 'denied') {
+    const want = pr.args ? `${basename(pr.args[0])}: ${pr.args[pr.args.length - 1]}: Permission denied` : null;
+    return r?.status === 1 && want !== null && err === want ? null : `it failed, but not with the Mac's own "Permission denied" for it (${said || `exit ${r?.status}`}), so it is not proven`;
+  }
+  return r?.status === 1 && err === '' ? null : `test did not answer a plain no (${said || `exit ${r?.status}`}), so it is not proven`;
 }
 
-/** What is at `f` on this Mac: 'dir', 'file' (anything else that is there), null when it is not there, or 'error:<code>'
- *  when root could not look (#528 r1 m8: told as such, never as "not there"). */
-const kindOn = (io) => (f) => { try { return io.lstat(f).isDirectory() ? 'dir' : 'file'; } catch (e) { return e?.code === 'ENOENT' || e?.code === 'ENOTDIR' ? null : `error:${e?.code ?? 'unknown'}`; } };
+/**
+ * What is at `f` on this Mac: 'dir', 'file' (anything else that is there), null when it is not there, or 'error:<why>'
+ * when root could not look (#528 r1 m8: told as such, never as "not there"). A link is judged by what it leads to
+ * (#528 r2 M1): a link to a folder the builder may pass through but not list gets the folder proofs, since `head` on it
+ * is refused while a file inside can still be read. A link that leads nowhere is an error, not "not there".
+ */
+export const kindOn = (io) => (f) => {
+  const gone = (e) => e?.code === 'ENOENT' || e?.code === 'ENOTDIR';
+  let st; try { st = io.lstat(f); } catch (e) { return gone(e) ? null : `error:${e?.code ?? 'unknown'}`; }
+  if (!st.isSymbolicLink()) return st.isDirectory() ? 'dir' : 'file';
+  try { return io.stat(f).isDirectory() ? 'dir' : 'file'; } catch (e) { return gone(e) ? 'error:a link that leads nowhere' : `error:${e?.code ?? 'unknown'}`; }
+};
 
 /** What `--dry-run` prints: the commands, not run, and what will not be tried. */
 export const proofCommands = (io, cfg) => {
