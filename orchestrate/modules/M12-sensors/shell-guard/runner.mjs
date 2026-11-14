@@ -6,7 +6,9 @@
 // hookSpecificOutput.permissionDecision "deny". Exit 0 without a deny = allowed.
 // A hook that CRASHES (any other exit, a signal, or no answer within the time limit) does not block the command in
 // Claude Code, so here a crash on a refuse case is a FAILURE ("crash"), never a pass: the real hook must be built to
-// fail closed (refuse when it cannot decide). Protocol as documented by Claude Code, 29 Oct 2026 (Principle 9).
+// fail closed (refuse when it cannot decide). Protocol as documented by Claude Code, 29 Oct 2026 (Principle 9); read
+// again in 2.1.316's own hook text, 13 Nov 2026: "Other exit codes - show stderr to user only but continue with tool
+// call", and a timed-out hook's output is discarded (checked: claude-code 2.1.316).
 //
 //   node runner.mjs '<hook command>' [protected path]     prints a summary and every failure; exit 1 on any failure.
 //   Run it from the project's top folder, where Claude Code runs the hook (set CLAUDE_PROJECT_DIR if that differs): a
