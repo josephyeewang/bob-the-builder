@@ -23,6 +23,12 @@ export const USERS = Object.freeze(['orchestrate', 'pages', 'review']);
 // macOS update can add one at any time). What hides these users from the login screen is IsHidden=1, not the number (L90 M5).
 export const USER_ID_RANGE = Object.freeze({ low: 600, high: 699 });
 export const NO_SHELL = '/usr/bin/false';
+// The PATH every background job of this setup runs with (the Dispatcher's, the robot's and the Sensors' plists), and the
+// one launchctl the setup calls: one home each (I7).
+export const JOB_PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
+export const LAUNCHCTL = '/bin/launchctl';
+/** The owner's terminal: an answer is read from it, never from standard input (go-card, approve-rules): one home (I7). */
+export const TTY_PATH = '/dev/tty';
 // Root takes its orders from ONE file at a fixed place, root's own (NEW-1, L100): never from a home folder, where the
 // person's own user could change it between a read-back and the run. The person edits a copy in their home, then a
 // single `sudo install -o root -g wheel -m 0644 /dev/stdin <here> < <copy>` puts it here (README; `install` follows links,

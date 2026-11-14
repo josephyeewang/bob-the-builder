@@ -2506,6 +2506,9 @@ __bob_def('orchestrate/shared/plan-fingerprint.mjs', [], function (__bob_e, __bo
 const { createHash } = __bob_node_crypto;
 Object.defineProperties(__bob_e, {
   TIER1_BAR: { get: () => TIER1_BAR, enumerable: true },
+  SHA256: { get: () => SHA256, enumerable: true },
+  SHA40: { get: () => SHA40, enumerable: true },
+  unfingerprinted: { get: () => unfingerprinted, enumerable: true },
   canonicalJson: { get: () => canonicalJson, enumerable: true },
   UNPRINTED: { get: () => UNPRINTED, enumerable: true },
   cleanPath: { get: () => cleanPath, enumerable: true },
@@ -2532,6 +2535,12 @@ Object.defineProperties(__bob_e, {
 
 
 const TIER1_BAR = 'audited until 0 Material';
+/** A SHA-256 as 64 lower-case hex: the one pattern every fingerprint, bundle and file check uses (I7: one home). */
+const SHA256 = /^[0-9a-f]{64}$/;
+/** A git object id (commit, blob) as 40 lower-case hex. */
+const SHA40 = /^[0-9a-f]{40}$/;
+/** The refusal when a plan can't be fingerprinted (go.mjs, setup/go-card.mjs): one text (I7). */
+const unfingerprinted = (reason) => `the plan can't be fingerprinted: ${reason}`;
 const HEX = (n) => new RegExp(`^[0-9a-f]{${n}}$`);
 
 function canonicalJson(v) {

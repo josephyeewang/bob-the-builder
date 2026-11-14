@@ -19,6 +19,7 @@ import { closeSync, constants, fstatSync, openSync, readFileSync, readSync, unli
 import { ActivityTracker, State } from './activity.mjs';
 import { signalFromHook } from './claude-signals.mjs';
 import { LAUNCH_EVENT, withChange } from './changes.mjs';
+import { pastTime } from '../../../shared/still-waiting.mjs';
 
 export const HOOK_LINE_FIELDS = Object.freeze(['launchId', 'event', 'at', 'toolName', 'toolUseId', 'notificationType', 'reason', 'source', 'watchdog', 'promptHash']);
 export const HOOK_EVENTS = Object.freeze(['session-start', 'user-prompt-submit', 'pre-tool-use', 'post-tool-use', 'post-tool-use-failure',
@@ -57,11 +58,13 @@ export function signalFromLine(line) {
 /** One `held` entry as the runner writes it and the status reader takes it (the one check, both sides). The unreadable
  * store's entry names no session (sessionId, role, product, launchId null). */
 export const HELD_FIELDS = Object.freeze(['sessionId', 'role', 'product', 'reason', 'since', 'launchId']);
+// since: any readable time (I4: read through pastTime; a now of Infinity puts no time out of reach, so this is the shape check
+// it was: text that reads as a time).
 const strOrNull = (v) => v === null || (typeof v === 'string' && v.length > 0 && v.length <= 200);
 export const heldOk = (h) => !!h && typeof h === 'object' && !Array.isArray(h) && Object.keys(h).length === HELD_FIELDS.length
   && HELD_FIELDS.every((k) => Object.hasOwn(h, k)) && strOrNull(h.sessionId) && (h.role === null || INTERACTIVE_ROLES.includes(h.role))
   && strOrNull(h.product) && strOrNull(h.launchId) && typeof h.reason === 'string' && h.reason.length > 0 && h.reason.length <= 300
-  && typeof h.since === 'string' && Number.isFinite(Date.parse(h.since)) && (h.sessionId === null) === (h.role === null);
+  && pastTime(h.since, Infinity) !== null && (h.sessionId === null) === (h.role === null);
 
 /** The real files: readFrom opens without following a link and returns the bytes from `offset` to the end. */
 export function nodeHookFs() {

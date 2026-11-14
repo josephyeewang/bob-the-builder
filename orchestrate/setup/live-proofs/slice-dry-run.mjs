@@ -36,8 +36,8 @@ import { ROLES_DIR } from '../../modules/M10-rules/roles.mjs';
 import { makeRules } from '../../shared/rules.mjs';
 import { editingLimits } from '../../modules/M11-dispatcher/gate.mjs';
 import { botId } from '../../modules/M6-merge-gate/gather.mjs';
+import { SHA40 } from '../../shared/plan-fingerprint.mjs';
 
-const SHA = /^[0-9a-f]{40}$/;
 const SLICE_FILE = 'slice/card.md';
 const REFUSAL_9 = /^not this lane's change; MAIN merges it as today: slice\/card\.md is outside the docs and research lane$/;
 const row = (ok, what, why) => ({ ok, what, ...(ok ? {} : { why }) });
@@ -56,7 +56,7 @@ export function rulesRows({ product, bot, approved, lastGood, main, ports = {} }
   // The copy in force: the reader's own last good, which it saved only after it trusted it.
   const g = lastGood instanceof Error ? null : lastGood;
   const gWhy = lastGood instanceof Error ? `it can't be read (${lastGood.code ?? lastGood.message})` : 'it has no text, commit or blob';
-  const copyOk = !!g && typeof g.text === 'string' && SHA.test(g.commit ?? '') && SHA.test(g.blob ?? '');
+  const copyOk = !!g && typeof g.text === 'string' && SHA40.test(g.commit ?? '') && SHA40.test(g.blob ?? '');
   rows.push(row(copyOk, `the Dispatcher's rules reader holds ${product}'s rules (its last good copy)`, `${gWhy}: the reader has not adopted them (merged on main? approved? the Dispatcher running?)`));
   if (!copyOk) return [...rows, row(false, 'the rest of the rules rows', 'not tried: no rules in force')];
   const hashed = blobSha(Buffer.from(g.text, 'utf8'));
@@ -65,7 +65,7 @@ export function rulesRows({ product, bot, approved, lastGood, main, ports = {} }
   rows.push(row(Array.isArray(list) && list.includes(g.blob), `blob ${g.blob.slice(0, 12)}… is on the approval list (approved-rules.json)`,
     approved instanceof Error ? `the list can't be read (${approved.code ?? approved.message})` : `the list has no ${Array.isArray(list) ? 'such blob' : `entry for ${product}`} for it`));
   // What is merged on GitHub main must be this same version (L1132 M1): equal to the copy in force, which is on the list.
-  const mOk = !!main && !(main instanceof Error) && SHA.test(main.commit ?? '') && SHA.test(main.blob ?? '');
+  const mOk = !!main && !(main instanceof Error) && SHA40.test(main.commit ?? '') && SHA40.test(main.blob ?? '');
   rows.push(row(mOk && main.blob === g.blob, `GitHub main's rules${mOk ? ` (commit ${main.commit.slice(0, 12)}…)` : ''} are the copy in force`,
     !mOk ? `main can't be read: ${main instanceof Error ? main.message : 'no answer'}` : `main holds blob ${main.blob.slice(0, 12)}…, the reader holds ${g.blob.slice(0, 12)}…: main has moved, or the reader is behind (approved? the Dispatcher running?)`));
   const r = parsePolicy(g.text);
