@@ -957,7 +957,9 @@ test('#528 r1 m8 and L1112 (3): a place root can\'t look at is NOT TRIED with it
   assert.match(home.notTried, /root could not look at it \(EPERM\)/);
 });
 
-test('#528 r2 M1 REAL: a rules entry that is a link to a folder one may pass through but not list is judged as a folder; head on it is refused while a file inside reads', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, () => {
+test('#528 r2 M1 REAL: a rules entry that is a link to a folder one may pass through but not list is judged as a folder; head on it is refused while a file inside reads', { skip: process.platform !== 'darwin' || process.getuid?.() === 0 }, () => {
+  // macOS only: the proofs run on the Mac, and the refusal checked is macOS head's own wording (GNU head says "cannot open
+  // … for reading", which refusedWhy rightly reads as not proven). CI's macOS job runs it.
   const d = tempDir('orch-r2m1-'); const dir = join(d, 'keys'); const link = join(d, 'keys-link');
   mkdirSync(dir); writeFileSync(join(dir, 'key'), 'k'); symlinkSync(dir, link); chmodSync(dir, 0o100);   // pass through, no listing (0100: this user's own, as 0711 is to others)
   try {
