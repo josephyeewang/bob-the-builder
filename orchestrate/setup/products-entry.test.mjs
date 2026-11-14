@@ -5,13 +5,13 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, linkSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { FIRST, ENTRY } from '../modules/M10-rules/first-cutover.test-helper.mjs';
 import { blobSha, readProducts, RULES_PATH } from '../modules/M10-rules/reader.mjs';
 import { entryFor, folderProblem, parseGithub, productsEntry, readProductsFile, writeProductsFile } from './products-entry.mjs';
-import { parseArgs } from './setup.mjs';
+import { main as setupMain, parseArgs } from './setup.mjs';
 
 const P = ENTRY.product;
 const ME = process.getuid();          // orchestrate in these tests: the list's folder and file are the test's own
@@ -54,7 +54,7 @@ function world(opts = {}) {
   };
   const ports = {
     gh: (path, uid) => { gh.tokens.push([path, uid]); return gh; },
-    folderProblem: (d, uids) => folderProblem(d, { uids }),
+    folderProblem: (d, uids) => folderProblem(d, { uids, rootUid: ME, top: dir }),   // the test's user stands in for root above
     readList: (f, uids) => readProductsFile(f, { uids }),
     writeList: (f, t) => writeProductsFile(f, t, { uid: ME, gid: process.getgid() }),
     readBack: (f) => readProducts(f),
@@ -85,6 +85,35 @@ test('another product\'s line is kept as it is, and this one is added at the end
   const w = world({ list: [OTHER] });
   assert.equal(await w.run(), 0, w.err.join('\n'));
   assert.deepEqual(readProducts(w.file), [OTHER, ENTRY]);
+  // L1212 M3: as written, fields of its own included, not the reader's trimmed copy.
+  const extra = { ...OTHER, note: 'kept', order: [1, 2] };
+  const v = world({ list: [extra] });
+  assert.equal(await v.run(), 0, v.err.join('\n'));
+  assert.deepEqual(JSON.parse(v.listText()), [extra, ENTRY]);
+});
+
+test('L1212 (f, g): the write is whole or not at all, and the folder holds only products.json after', async () => {
+  const w = world({ list: [OTHER] });
+  assert.equal(await w.run(), 0, w.err.join('\n'));
+  assert.deepEqual(readdirSync(w.priv), ['products.json'], 'no .new left behind');
+  // A new file renamed over the old: a second name for the old file keeps the old bytes.
+  const old = JSON.stringify([OTHER]);
+  writeFileSync(w.file, old);
+  const keep = join(w.dir, 'old-name'); linkSync(w.file, keep);
+  writeProductsFile(w.file, `${JSON.stringify([OTHER, ENTRY], null, 2)}\n`, { uid: ME, gid: process.getgid() });
+  assert.equal(readFileSync(keep, 'utf8'), old);
+  assert.deepEqual(readProducts(w.file), [OTHER, ENTRY]);
+  assert.equal(statSync(w.file).nlink, 1);
+  assert.deepEqual(readdirSync(w.priv), ['products.json']);
+  // A write that fails leaves the old list and no .new.
+  chmodSync(w.priv, 0o500);
+  try { assert.throws(() => writeProductsFile(w.file, '[]\n', { uid: ME, gid: process.getgid() })); } finally { chmodSync(w.priv, 0o700); }
+  assert.deepEqual(readProducts(w.file), [OTHER, ENTRY]);
+  assert.deepEqual(readdirSync(w.priv), ['products.json']);
+  // The rename itself fails (a folder where the list goes): its .new is taken away too.
+  const d = tempDir('orch-products-rename-'); mkdirSync(join(d, 'products.json')); writeFileSync(join(d, 'products.json', 'x'), '');
+  assert.throws(() => writeProductsFile(join(d, 'products.json'), '[]\n', { uid: ME, gid: process.getgid() }));
+  assert.deepEqual(readdirSync(d), ['products.json']);
 });
 
 test('the line already there, the same: nothing written; different: refused, nothing written (it only adds)', async () => {
@@ -223,6 +252,25 @@ test('the list\'s folder: a link, or one others can write, is refused before any
   assert.equal(v.gh.calls.length, 0);
 });
 
+test('L1212 M1: the folders above the list\'s are root\'s alone, and no access list on its own', async () => {
+  // Above: a parent others can write is refused (the real walk, the test's user standing in for root).
+  const w = world();
+  chmodSync(w.dir, 0o777);
+  try { assert.equal(await w.run(), 2); } finally { chmodSync(w.dir, 0o700); }
+  assert.match(w.err.join('\n'), /the folders above .*private are not root's alone \(.* can be written by others than root\)/);
+  assert.equal(w.gh.calls.length, 0);
+  assert.equal(w.listText(), null);
+  // A parent of someone else's: refused.
+  const owned = folderProblem(w.priv, { uids: [0, ME], rootUid: ME + 9, top: w.dir });
+  assert.match(owned, /the folders above .* are not root's alone \(.* is not owned by/);
+  // The ports: the walk starts at the folder's parent, up to top, as root; the access list is the folder's own.
+  const seen = [];
+  assert.equal(folderProblem(w.priv, { uids: [ME], rootUid: 0, top: '/t', chain: (d, o) => { seen.push([d, o]); return null; }, acl: (ps) => { seen.push(ps); return null; } }), null);
+  assert.deepEqual(seen, [[w.priv], [w.dir, { owner: 0, top: '/t' }]]);
+  assert.match(folderProblem(w.priv, { uids: [ME], acl: () => 'x has an access list (ACL)' }), /has an access list/);
+  assert.match(folderProblem(w.priv, { uids: [ME], chain: () => '/a is a link' }), /are not root's alone \(\/a is a link\)/);
+});
+
 test('the list changing while this reads is refused; a write the reader can\'t read back is a FAIL', async () => {
   const w = world({ list: '[]' });
   const read = w.ports.readList; let n = 0;
@@ -256,4 +304,34 @@ test('a list file of anyone but root or orchestrate is refused, in approve-rules
   assert.deepEqual(readProductsFile(f, { uids: [0, ME] }), { text: '[]' });
   assert.throws(() => readProductsFile(f, { uids: [0, ME + 9] }), new RegExp(`belongs to uid ${ME}, not to root or orchestrate`));
   assert.deepEqual(readProductsFile(join(dir, 'none.json'), { uids: [0, ME] }), { text: null });
+});
+
+test('L1212 C1: a product the config lists, with no repo of its own, is refused even when its name is an object key', () => {
+  const cfg = { products: [P, 'constructor'] };
+  assert.throws(() => entryFor(cfg, GITHUB, 'constructor'), /github\.repos has no repository for constructor/);
+});
+
+test('setup.mjs main: root\'s config at its fixed place, its github and dispatcher entries, to the written line', async () => {
+  const w = world({ list: [OTHER] });
+  const raw = { base: '/Library/orch-test', owner: 'joe', products: [P, 'other-app'], address: 'https://example.invalid/org/repo.git', label: 'com.example.orch',
+    runnerConfig: '/Library/orch-test/review.json', hostLockPath: '/Users/joe/host.lock', dispatcher: { product: P, productsFile: w.file, tokenFile: w.tokenFile }, github: GITHUB };
+  const read = [];
+  const io = { ...ioOf(), readConfig: (f, o) => { read.push([f, o.strict]); return JSON.stringify(raw); } };
+  assert.equal(await setupMain(['products-entry', P], { io, productsEntryPorts: w.ports, out: (l) => w.out.push(l), err: (l) => w.err.push(l) }), 0, w.err.join('\n'));
+  assert.deepEqual(read, [['/Library/orchestrate-setup.json', true]]);
+  assert.deepEqual(readProducts(w.file), [OTHER, ENTRY]);
+  assert.deepEqual(w.gh.tokens, [[w.tokenFile, ME]]);
+  // --dry-run through main writes nothing; not root is refused before reading.
+  const v = world();
+  assert.equal(await setupMain(['products-entry', P, '--dry-run'], { io: { ...ioOf(), readConfig: () => JSON.stringify({ ...raw, dispatcher: { ...raw.dispatcher, productsFile: v.file, tokenFile: v.tokenFile } }) }, productsEntryPorts: v.ports, out: () => {}, err: (l) => v.err.push(l) }), 0, v.err.join('\n'));
+  assert.equal(v.listText(), null);
+  const u = world();
+  assert.equal(await setupMain(['products-entry', P], { io: { ...ioOf({ euid: ME || 501 }), readConfig: () => JSON.stringify(raw) }, productsEntryPorts: u.ports, out: () => {}, err: (l) => u.err.push(l) }), 2);
+  assert.equal(u.gh.calls.length, 0);
+  // No github entry in root's config: refused, nothing read from GitHub.
+  const x = world();
+  const { github: _g, ...noGithub } = raw;
+  assert.equal(await setupMain(['products-entry', P], { io: { ...ioOf(), readConfig: () => JSON.stringify({ ...noGithub, dispatcher: { ...raw.dispatcher, productsFile: x.file, tokenFile: x.tokenFile } }) }, productsEntryPorts: x.ports, out: () => {}, err: (l) => x.err.push(l) }), 2);
+  assert.match(x.err.join('\n'), /there is no "github" entry/);
+  assert.equal(x.gh.calls.length, 0);
 });

@@ -20,7 +20,8 @@
 // WHAT IT DOES, in order, each a refusal (exit 2 before reading anything, 1 after; nothing written) when it fails:
 //   1. who: root (the file is root's), with the orchestrate user there (the token's and the private folder's owner).
 //   2. the entry: built from the values above; the product one of the config's products. The list's folder must be
-//      a plain folder of root's or orchestrate's that no one else can write.
+//      a plain folder of root's or orchestrate's that no one else can write, with no access list, and every folder
+//      above it root's alone (install-check.mjs chainProblem, as extras.mjs proposalsProblem).
 //   3. the list as it is: a missing file is an empty list; one there is read as approve-rules reads its list (a plain
 //      file of root's or orchestrate's that no one else can write, one name, under 1 MB) and must pass the reader's
 //      own check. A line for another product is kept as it is. A line for this product that differs is refused:
@@ -31,8 +32,10 @@
 //      product.test_product: true (shared/rules.mjs exactFlag, as every reader of the flag), and their
 //      accounts.joe.github_id must be github.ownerId (first-cutover.mjs's own cross-check). Any read or parse that
 //      fails refuses (L1200 (d)): there is no fallback to the config.
-//   6. written (not with --dry-run): the old list with this line added at the end, as a new root:wheel 0644 file in
-//      the same folder, renamed over the old one; the list is read again first and must not have changed since 3.
+//   6. written (not with --dry-run): the old list, as written (other lines keep any fields of their own), with this
+//      line added at the end, as a new root:wheel 0644 file in the same folder, renamed over the old one; the list is
+//      read again first and must not have changed since 3. orchestrate reads the file and can't edit it in place; it
+//      owns the folder (<base>/private, 0700), so it could replace the file: the same trust as before (L1212 M2).
 //   7. read back through the reader's own readProducts: the line is there, as built.
 //
 // WHAT IT IS NOT (L1200 (a)). Step 5 is a filter, not an approval: it writes nothing to the rules state, and the
@@ -42,6 +45,7 @@
 
 import { closeSync, constants, fchmodSync, fchownSync, fsyncSync, lstatSync, openSync, renameSync, unlinkSync, writeSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { aclProblem, chainProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { RULES_PATH, checkProducts, readProducts } from '../modules/M10-rules/reader.mjs';
 import { parsePolicy } from '../modules/M10-rules/policy.mjs';
 import { readOnlyClient, tokenFile } from '../modules/M6-merge-gate/watch-only.mjs';
@@ -76,7 +80,7 @@ export function parseGithub(raw, cfg) {
 export function entryFor(cfg, githubRaw, product) {
   if (!cfg.products.includes(product)) throw new Error(`${product} is not one of the setup config's products`);
   const g = parseGithub(githubRaw, cfg);
-  const repo = g.repos[product];
+  const repo = Object.hasOwn(g.repos, product) ? g.repos[product] : undefined;
   if (repo === undefined) throw new Error(`config: github.repos has no repository for ${product}`);
   const [owner, name] = repo.split('/');
   return Object.freeze({ product, owner, repo: name, joe_github_id: g.ownerId });
@@ -90,14 +94,20 @@ export const readProductsFile = (file, { uids }) => readListFile(file, { uids, w
 
 /**
  * Why the list's folder can't take the file, or null: a plain folder (not a link) of root's or orchestrate's,
- * written by no one else.
+ * written by no one else, with no access list; every folder above it, up to `top`, root's alone (chainProblem, the
+ * walk extras.mjs proposalsProblem makes). `rootUid` is root's (0); `lstat`, `chain` and `acl` are ports for a test.
  */
-export function folderProblem(dir, { uids, lstat = lstatSync }) {
+export function folderProblem(dir, { uids, rootUid = 0, top = '/', lstat = lstatSync, chain = chainProblem, acl = aclProblem }) {
   let st; try { st = lstat(dir); } catch (e) { return `${dir} can't be read (${e?.code ?? e}): run users-folders first`; }
   if (st.isSymbolicLink() || !st.isDirectory()) return `${dir} is not a plain folder`;
   if (!uids.includes(st.uid)) return `${dir} belongs to uid ${st.uid}, not to root or ${DISPATCHER_USER}`;
   if (st.mode & 0o022) return `${dir} is open to writes by others than root or ${DISPATCHER_USER} (mode ${(st.mode & 0o777).toString(8)})`;
-  return null;
+  const a = acl([dir]);
+  if (a) return a;
+  const up = dirname(dir);
+  if (up === dir || dir === top) return null;
+  const c = chain(up, { owner: rootUid, top });
+  return c ? `the folders above ${dir} are not root's alone (${c})` : null;
 }
 
 /**
@@ -121,7 +131,7 @@ export function writeProductsFile(file, text, { uid = 0, gid = 0 } = {}) {
 export function realPorts(io, { fetchFn } = {}) {
   return {
     gh: (path, uid) => readOnlyClient({ token: tokenFile(path, { uid }), fetchFn }),
-    folderProblem: (dir, uids) => folderProblem(dir, { uids }),
+    folderProblem: (dir, uids) => folderProblem(dir, { uids, rootUid: io.rootUid, top: io.prefix || '/' }),
     readList: (file, uids) => readProductsFile(file, { uids }),
     writeList: writeProductsFile,
     readBack: (file) => readProducts(file),
@@ -150,8 +160,8 @@ export async function productsEntry({ io, cfg, githubRaw, product, dry = false, 
   if (fp) { err(`refused: the list's folder: ${fp}`); return 2; }
 
   // 3. the list as it is.
-  let before; let list;
-  try { before = ports.readList(file, uids); list = before.text === null ? [] : checkProducts(JSON.parse(before.text)); } catch (e) { err(`refused: ${file} can't be used (${e instanceof SyntaxError ? 'it is not valid JSON' : e.message}). Nothing written.`); return 1; }
+  let before; let list; let asWritten;
+  try { before = ports.readList(file, uids); asWritten = before.text === null ? [] : JSON.parse(before.text); list = checkProducts(asWritten); } catch (e) { err(`refused: ${file} can't be used (${e instanceof SyntaxError ? 'it is not valid JSON' : e.message}). Nothing written.`); return 1; }
   const had = list.find((p) => p.product === product);
   if (had && !same(had, entry)) { err(`refused: ${file} already lists ${product} as ${had.owner}/${had.repo} with GitHub id ${had.joe_github_id}, which is not what the setup config says (${entry.owner}/${entry.repo}, ${entry.joe_github_id}). This command only adds a line; it never changes one. Nothing written.`); return 1; }
   try { checkProducts([...list.filter((p) => p !== had), entry]); } catch (e) { err(`refused: the list with this line added would be refused by the reader (${e.message}). Nothing written.`); return 1; }
@@ -177,7 +187,8 @@ export async function productsEntry({ io, cfg, githubRaw, product, dry = false, 
   // 6. written.
   let now; try { now = ports.readList(file, uids); } catch (e) { err(`refused: ${file} can't be read again (${e.message}). Nothing written.`); return 1; }
   if (now.text !== before.text) { err(`refused: ${file} changed while this was reading. Nothing written; run it again.`); return 1; }
-  const next = [...list.map((x) => ({ ...x })), { ...entry }];
+  // The parsed original, not checkProducts' copy: another line keeps any fields of its own (L1212 M3).
+  const next = [...asWritten, { ...entry }];
   try { ports.writeList(file, `${JSON.stringify(next, null, 2)}\n`); } catch (e) { err(`refused: ${file} could not be written (${e?.code ?? e.message})`); return 1; }
 
   // 7. read back.
