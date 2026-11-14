@@ -18,14 +18,14 @@ import { FOLDERS as REVIEW_FOLDERS } from '../modules/M4-workshop/launcher/revie
 import { checkProducts } from '../modules/M10-rules/reader.mjs';
 import { checkRunnerConfig } from '../wiring/runner-main.mjs';
 import { fullPath, workerRunnerPlist } from '../wiring/runner-job.mjs';
-import { BUILDER, WORKER_STATUS_FILE, homeOf, keysPath, mirrorPath, outboxRootPath, privatePath, proposalsParentOf, storePath, workerCopiesPath, workerRunnerPaths } from './layout.mjs';
+import { BUILDER, WORKER_RUNNER_CONFIG, WORKER_STATUS_FILE, homeOf, keysPath, mirrorPath, outboxRootPath, privatePath, proposalsParentOf, storePath, workerCopiesPath, workerRunnerPaths } from './layout.mjs';
 import { installPaths, keepsNotWarning } from './install.mjs';
 import { readUser } from './users-folders.mjs';
 import { rulesProblems } from './review-config.mjs';
 import { keysDiffer, writeAside } from './dispatcher-setup.mjs';
 
 export const WORKER_RUNNER_JOB = 'worker-runner';
-export const WORKER_RUNNER_CONFIG = 'worker-runner.json';
+export { WORKER_RUNNER_CONFIG }; // one definition: layout.mjs
 export const WORKER_RUNNER_MAIN = 'wiring/runner-main.mjs';
 const PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
 const ENTRY_KEYS = Object.freeze(['product']);
