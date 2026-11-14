@@ -27,7 +27,7 @@
 // blocked it, and the run exits 1, so a blocked run can never be read as done (L989).
 // Capability note (Principle 9): step 6 reads claude's stream-json lines (`system`/`init` permissionMode, `tool_use`,
 // `tool_result` is_error, `result` permission_denials, and a `system` hook line naming PreToolUse) by names not yet
-// confirmed on any pin. A line missing reads as "can't tell", which fails the step; a renamed is_error would not be
+// confirmed on any pin (checked: claude-code 2.1.316, open until 2027-01-20 (L969): this proof's own run checks them). A line missing reads as "can't tell", which fails the step; a renamed is_error would not be
 // seen, so step 6 also needs save-work's own ok answer. Claude Code's own transcripts of the proof's sessions stay in the
 // workers' home (<configDir>/projects/); the run's last line says so.
 
@@ -113,8 +113,8 @@ export const blockedBy = (reason) => {
 /** The plain why of a step that something other than runLocked stopped. */
 const blockedWhy = (at, reason, what) => `blocked at ${at}, not by runLocked: ${what} (${reason})`;
 
-/** The lines of a stream-json run that say what claude did. Names checked against nothing yet (Principle 9): a stream
- * without them is "can't tell", never a pass. → { mode, commands, denied, errors } or null. */
+/** The lines of a stream-json run that say what claude did. Names checked against nothing yet (Principle 9;
+ * checked: claude-code 2.1.316, open until 2027-01-20 (L969)): a stream without them is "can't tell", never a pass. → { mode, commands, denied, errors } or null. */
 export function readStream(text) {
   let mode = null; const commands = []; let denied = null; let errors = 0; let seen = false; let hooks = 0;
   for (const line of String(text ?? '').split('\n')) {
