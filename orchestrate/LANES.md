@@ -24,21 +24,16 @@ More exceptions (1 Nov 2026), each limited to the files named:
 - **Lane 4, M4 `launcher/review-daemons.mjs` (L113):** an export-only change (`plist`, `str`, `arr`, `LABEL`, `ABS`), with no behaviour change, as its own commit with lane 2 told, so the watch-only week's hourly job reuses the one plist builder. The rest of M4 stays lane 2's.
 - **Lane 7, M12 screen reading (L1052, L1064):** new files only, `M12-sensors/screen/` and `M12-sensors/third_party/herdr/`, for the herdr harvest (R-0b-149 to 153). `screen/waiting.mjs` is M4's decision, kept here until R-0b-153a wires it into sendSafe. Existing M12 and M4 files stay their lanes'.
 
-**`orchestrate/wiring/`, the shared folder (lead call, 14 Nov 2026).** Each lane adds the files that connect its module to the real Mac, so this folder has one writer per file, not per folder. The owners below are taken from git history (the source pull request of every commit). A shared file is edited the way AGENTS.md's "Who changes what" table says: pull first and keep edits small. The guard tests are `orchestrate/test/wired.test.mjs` and `orchestrate/wiring/*.test.mjs`; run them before a change here.
-- **One owner** (that lane added the file; any other lane edited it at most once):
+**`orchestrate/wiring/`, the shared folder (lead call, 14 Nov 2026).** Each lane adds the files that connect its module to the real Mac, so this folder has one writer per file, not per folder. The owners below are taken from git history (the source pull request of every commit), or set by the lead where it was mixed. A shared file is edited the way AGENTS.md's "Who changes what" table says: pull first and keep edits small. The guard tests are `orchestrate/test/wired.test.mjs` and `orchestrate/wiring/*.test.mjs`; run them before a change here.
+- **One owner.** A name with no note: that lane added the file, and any other lane edited it at most once. A name marked *(lead call)*: owner by lead call, 14 Nov 2026, where the history was mixed.
   - Lane N: `push-pass`, `pr-writer`, `gate-ports`, and `robot-push` once #536 lands.
-  - Lane 4: `heartbeat-probes`, `not-wired`, `phone-ports`, `runner-job`, `runner-launch`, `sensors-wiring`.
+  - Lane 2: `review-ports`, `worker-ports`, `worker-runner`, `owner-ports`, `runner-locked` (the containment side), `script-outbox.test` (outbox intake is lane 2's under L65); all *(lead call)*.
+  - Lane 4: `heartbeat-probes`, `not-wired`, `phone-ports`, `runner-job`, `runner-launch`, `sensors-wiring`; and *(lead call)* `runner-ports`, `runner-main`, `runner-loop`, `runner-files`, `owner-status`, `owner-asks` (it goes with owner-status).
   - Lane 3: `private-folder`.
   - Lane 5: `owner-answer`, `sensors-ports`.
   - Lane A: `claude-folder-name`.
   - Lanes N, 5 and A are not in the table above.
   - Each name covers the `.mjs` file and its test.
-- **Shared** (the entry points that every lane's pass is added to): `robot-wiring`, `robot-main`, `dispatcher-wiring`, `README.md` and `fake-github.test-helper.mjs`. Lanes 1 to 5 have edited them.
-- **Lead decides** (mixed history; the lane with the most edits is given first):
-  - mostly lane 2: `review-ports`, `worker-ports`, `worker-runner`, `owner-ports`;
-  - mostly lane 4: `runner-ports`, `runner-main`, `runner-loop`, `runner-files`, `owner-status`;
-  - about even between lanes 2 and 4: `owner-asks`, `script-outbox.test`;
-  - even between lanes 2 and A: `runner-locked`;
-  - lanes 2, 3, 4 and A: `runner-checks`.
+- **Shared** (the entry points that every lane's pass is added to): `robot-wiring`, `robot-main`, `dispatcher-wiring`, `README.md` and `fake-github.test-helper.mjs`. Lanes 1 to 5 have edited them. Also `runner-checks` *(lead call)*: four lanes add checks to it.
 
 Only rows tagged `cutover: first` are built before the first cutover. Rows tagged `cutover: second` wait until after it.
