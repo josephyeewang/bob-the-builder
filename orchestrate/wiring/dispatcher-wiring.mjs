@@ -1,5 +1,6 @@
 // dispatcher-wiring.mjs — the wiring module the Dispatcher's config names (R-0b-162, LEAD-CALLS L229): the one place
-// the tick's ports are joined to the real things. main.mjs imports it and calls `wire(config, { limitedSync })`.
+// the tick's ports are joined to the real things. main.mjs imports it and calls `wire(config, { limitedSync })`
+// with limitedSync's maker; wire() makes the runner once, with node's spawnSync (L1180).
 //
 // WHY. main.mjs and tick.mjs take every outside effect as a port (M11 README, "The tick's ports"), so the pass can be
 // tested without a Mac. Until this file, nothing built those ports: main.mjs named a wiring module that did not exist,
@@ -73,9 +74,12 @@
 
 import { privateFolder } from './private-folder.mjs';
 import { isAbsolute, join } from 'node:path';
+import { spawnSync as nodeSpawnSync } from 'node:child_process';
 import { openRecord } from '../modules/M9-record/writer.mjs';
 import { makeReader, readProducts } from '../modules/M10-rules/reader.mjs';
 import { PRODUCT } from '../shared/product-paths.mjs';
+// The refusal for a config's product name, shared with the Sensors' wiring (sensors-wiring.mjs): one home (I7).
+export const PRODUCT_NAME_PROBLEM = 'config: product must be a product name (lower case letters, digits and -, a letter or digit first)';
 import { makeEngine } from '../modules/M10-rules/engine.mjs';
 import { ROLES_DIR } from '../modules/M10-rules/roles.mjs';
 import { makeRules } from '../shared/rules.mjs';
@@ -133,7 +137,7 @@ export function checkConfig(c, { keys = CONFIG_KEYS, paths = PATHS, optional = k
   const extra = Object.keys(c).filter((k) => !keys.includes(k) && !optional.includes(k));
   if (extra.length) throw new Error(`config: unknown key ${extra.join(', ')}`);
   // Setup's product rule (shared/product-paths.mjs PRODUCT, #378 r1 m3): the name its folders are made under.
-  if (typeof c.product !== 'string' || !PRODUCT.test(c.product)) throw new Error('config: product must be a product name (lower case letters, digits and -, a letter or digit first)');
+  if (typeof c.product !== 'string' || !PRODUCT.test(c.product)) throw new Error(PRODUCT_NAME_PROBLEM);
   for (const k of paths) if (typeof c[k] !== 'string' || !isAbsolute(c[k])) throw new Error(`config: ${k} must be an absolute path`);
   for (const k of optional) if (k in c && (typeof c[k] !== 'string' || !isAbsolute(c[k]))) throw new Error(`config: ${k} must be an absolute path when given`);
   if (c.hostLockStamp !== undefined && c.hostLockStamp === c.hostLockPath) throw new Error('config: hostLockStamp must be the copier\'s stamp, not host.lock\'s copy itself (hostLockPath)');
@@ -141,7 +145,8 @@ export function checkConfig(c, { keys = CONFIG_KEYS, paths = PATHS, optional = k
   if (!Number.isSafeInteger(c.ownerUid) || c.ownerUid < 0) throw new Error('config: ownerUid must be a Mac user id');
   // host.lock's owner, with the rest of the config: before wire() makes any folder or opens the Record (L805 m1). The
   // Dispatcher's own user is this process's; workerPorts checks it again with the start's selfUid.
-  if (keys.includes('hostLockUid')) { const bad = hostLockOwnerProblem(c.hostLockUid, selfUid, c.reviewUid); if (bad) throw new Error(`config: ${bad}`); }
+  // The robot's config may leave it out (its push pass then refuses as not wired, #536 r1 m3); the Dispatcher's must name it.
+  if (keys.includes('hostLockUid') && (keys === CONFIG_KEYS || c.hostLockUid !== undefined)) { const bad = hostLockOwnerProblem(c.hostLockUid, selfUid, c.reviewUid); if (bad) throw new Error(`config: ${bad}`); }
   // The worker runner's user, the builder user and never the owner (L1079), before wire() makes a folder (L943 m3).
   if (keys.includes('workerUid')) { const bad = workerUidProblem(c, selfUid); if (bad) throw new Error(`config: ${bad}`); }
   return c;
@@ -221,9 +226,10 @@ export async function recordAndRules(c, { who, log, fetchFn, now }) {
  * the same rules (cleanupProblem). So no port can look wired while it isn't, and none can be replaced or lost in silence.
  * A port file gets `ctx`: { config, rec, rules, gh, entry, stateDir, log, limitedSync, fetchFn, now, selfUid }; `gh` is the
  * read-only GitHub client the rules reader uses (L615). `selfUid` is this process's user; main.mjs passes none, and a test
- * stands in for it (L674).
+ * stands in for it (L674). `limitedSync` is given as the maker (sync-limit.mjs) and ctx holds the runner it makes with
+ * `spawnSync` (node's; a test stands in for it): main.mjs can't import child_process (L1180).
  */
-export async function wire(config, { limitedSync, log = (s) => process.stderr.write(`${s}\n`), fetchFn = globalThis.fetch, now = () => Date.now(), groups = PORT_GROUPS, selfUid = process.getuid() } = {}) {
+export async function wire(config, { limitedSync, spawnSync = nodeSpawnSync, log = (s) => process.stderr.write(`${s}\n`), fetchFn = globalThis.fetch, now = () => Date.now(), groups = PORT_GROUPS, selfUid = process.getuid() } = {}) {
   const c = checkConfig(config);
   // Before the Record opens: a state folder M2 can't use stops the start, so no product is turned on untold (L295 MAT-1).
   const stateDir = approvalsDir(c);
@@ -244,7 +250,7 @@ export async function wire(config, { limitedSync, log = (s) => process.stderr.wr
   const ports = { alert: logOnlyAlert(log) };
   for (const { notWired } of groups) for (const k of notWired) ports[k] = refusing(k);
   ports.approvals = () => [approvalsFor(c, entry, stateDir)];
-  const ctx = Object.freeze({ config: c, rec, rules, gh, entry, stateDir, log, limitedSync, fetchFn, now, selfUid });
+  const ctx = Object.freeze({ config: c, rec, rules, gh, entry, stateDir, log, limitedSync: limitedSync === undefined ? undefined : limitedSync(spawnSync), fetchFn, now, selfUid });
   const stopOn = (why, names) => { if (names.length) throw new Error(`${why}: ${names.join(', ')}`); };
   const lists = groups.flatMap((g) => g.notWired);
   const listed = new Set(lists);

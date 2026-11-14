@@ -59,7 +59,8 @@ import { join } from 'node:path';
 import { networkInterfaces } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { realpathSync } from 'node:fs';
-import { BUILDER, ROOT_CONFIG_PATH } from './layout.mjs';
+import { BUILDER, LAUNCHCTL, ROOT_CONFIG_PATH } from './layout.mjs';
+import { DAEMON_DIR } from './daemons.mjs';
 import { readUser } from './users-folders.mjs';
 import { guarded } from './guard.mjs';
 import { realIo, rootProblem } from './mac.mjs';
@@ -75,11 +76,10 @@ export const PROTOS = Object.freeze(['tcp', 'udp']);
 export const FAMILIES = Object.freeze([['IPv4', '127.0.0.1'], ['IPv6', '::1']]);
 /** Listeners bound to every address, probed through loopback: [what, the address probed, the address bound]. */
 export const ALL_ADDRESSES = Object.freeze([['IPv4', '127.0.0.1', '0.0.0.0'], ['IPv6', '::1', '::']]);
-export const DAEMON_DIR = '/Library/LaunchDaemons';
+export { DAEMON_DIR };   // daemons.mjs's one definition (I7)
 export const RECHECK_EVERY_S = 300;
 export const FIRST_RUN_WAIT_MS = 15_000;
 const PFCTL = '/sbin/pfctl';
-const LAUNCHCTL = '/bin/launchctl';
 const SUDO = '/usr/bin/sudo';
 /** The node every Mac user can run (nodejs.org's, root's; managed-settings.mjs NODE_BIN): the probes run it as the builder and the owner. */
 export const PROBE_NODE = '/usr/local/bin/node';

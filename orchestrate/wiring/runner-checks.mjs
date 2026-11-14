@@ -38,7 +38,7 @@
 //                           write, so the lock-down is shown on before any of the branch's code runs (#369 M2); then a
 //                           worker's baseline (the product's test command, run once through runner-locked.mjs guardedRun,
 //                           must exit 0: its own process group recorded and killed with claude's, the Bash tool's wait its
-//                           limit, BASELINE_MS 10 min, our cap, #463 r2 M3, r3 m2). The baseline never runs in the session's copy (#369 r1 M1): the start port makes a
+//                           limit, BASELINE_MS 10 min, our cap, #463 r2 M3, r3 m2; the Bash tool's wait read in 2.1.316's code, checked: claude-code 2.1.316). The baseline never runs in the session's copy (#369 r1 M1): the start port makes a
 //                           throwaway copy of the same commit (`x.throwaway()`), with its own settings that allow writes
 //                           there only and deny the session's copy and outbox, and removes it after. So a process the
 //                           tests leave running, one that started its own session (setsid) too, can't reach the copy

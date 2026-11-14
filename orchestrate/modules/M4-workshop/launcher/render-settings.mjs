@@ -315,7 +315,7 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
   const ob = abs(paths.outbox);
   // The Write(...) rules here and below are unmatched on claude 2.1.316 (the pin) and 2.1.322: it warns that only Edit(path) rules meet
   // file permission checks, and Edit(...) covers every file-writing tool. Kept in case a later version matches them
-  // (a capability note: recheck on each pinned upgrade).
+  // (a capability note: recheck on each pinned upgrade). 2.1.316's own text says the same (checked: claude-code 2.1.316).
   deny.push(`Write(/${ob}/.*)`, `Edit(/${ob}/.*)`, `Write(/${ob}/**/.*)`, `Edit(/${ob}/**/.*)`);
   if (profile.setupFileRefusals) {
     for (const pat of ['//**/.claude/**', '//**/.mcp.json', '//**/SKILL.md']) deny.push(`Read(${pat})`, `Edit(${pat})`, `Write(${pat})`);
@@ -439,7 +439,9 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
     [S.hooks]: hooks,
     [S.env]: { [ENV.autoCompactWindow]: String(profile.compactWindow), [ENV.disableUpdates]: '1' },
     [S.disableClaudeAiConnectors]: true,
-    [S.enabledPlugins]: {},
+    // No enabledPlugins (L1114): an empty map turns nothing on, `--setting-sources ""` loads no file that could turn a
+    // plugin on, and launch check 6 refuses a start whose start message lists a plugin. Its behaviour proof is R-0b-178,
+    // before it comes back. checkSettings below still refuses a role file that turns one on.
     [S.crossSessionInbound]: 'refuse',
     [S.disableSkillShellExecution]: true,
     [S.disableBundledSkills]: true,
@@ -457,7 +459,7 @@ const ROLE_SANDBOX_KEYS = Object.freeze({
 });
 // The machine-wide (managed) file's sandbox block: an allow-list of keys, each with its one safe value (#410 r2 M1,
 // L894). Every other key is refused, at the top level, under network and under filesystem. A capability note, checked
-// against the bundled code of claude 2.1.316 (the pin) and 2.1.322: it reads managed sandbox keys that widen the sandbox or turn it off
+// against the bundled code of claude 2.1.316 (the pin; checked: claude-code 2.1.316) and 2.1.322: it reads managed sandbox keys that widen the sandbox or turn it off
 // (enabledPlatforms, read from the managed tier only, where a list without this platform switches the sandbox off and
 // cancels the role's failIfUnavailable; allowAppleEvents, network.allowMachLookup, the proxy ports,
 // autoAllowBashIfSandboxed, enableWeakerNetworkIsolation, failIfUnavailable: false, filesystem.allowWrite and more).
@@ -508,7 +510,8 @@ function sandboxKeysProblem(obj, machineWide) {
  * The shell's write wall between sessions (L880, L881). The sandbox lets a shell write only its working folder (the
  * code copy), a per-user temp folder and the added folders, so a session's own outbox must be the only added folder
  * it writes: a sibling's outbox, one of the same product included, then can't be written, renamed or deleted (shown
- * on claude 2.1.322 with worker settings: touch, mv and rm in a sibling's outbox all refused). The only other added
+ * on claude 2.1.322 with worker settings: touch, mv and rm in a sibling's outbox all refused; checked: claude-code
+ * 2.1.322, open until 2027-01-20 (R-0b-176), which runs worker settings on the pin). The only other added
  * folder may be the Bob folder, read-only to the tools and walled from the shell. The outbox is the one every
  * hook is told (--outbox). → the reason, or null.
  */

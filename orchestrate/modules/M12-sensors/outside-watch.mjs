@@ -38,7 +38,8 @@ export const OWNER_FILE = 'robot-merges-owner.json';
 const slug = (product) => String(product).replace(/[^A-Za-z0-9_-]/g, '-');
 export const ROBOT_FACT = (product) => `outside-robot-merges-${slug(product)}`;
 export const NO_PUSH_FACT = 'outside-no-push';
-const GUARD_STEP = 'product 1 / repo-guard';
+/** The guard step's name in a product's outside-check run; gate-ports.mjs reads the same step (I7: one home). */
+export const GUARD_STEP = 'product 1 / repo-guard';
 
 // fetchJson(path) → JSON (public GitHub API, unauthenticated). homeAlerts: alerts.mjs for the home repo.
 // productAlerts: { 'product 1': alerts, … } from private config. writer: makeFactWriter(rec); productNames:

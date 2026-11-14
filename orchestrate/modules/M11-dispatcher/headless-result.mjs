@@ -7,7 +7,9 @@
 // Capability note (Principle 9): the result shape (type 'result', subtype success /
 // error_max_turns / error_max_budget_usd / error_during_execution, is_error) is CHECKED AGAINST
 // NOTHING YET. Whether --max-budget-usd is enforced on a subscription login is unverified; the live
-// proof records both with date and Claude Code version. Void at the next pin.
+// proof records both with date and Claude Code version. Void at the next pin. The subtype names and is_error are in
+// 2.1.316's own code (read 13 Nov 2026); the shape and the cap are still for the live proof (checked: claude-code
+// 2.1.316, open until 2027-01-20 (R-0b-65)).
 
 import { waitOn, move } from './moves.mjs';
 

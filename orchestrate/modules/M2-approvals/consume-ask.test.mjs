@@ -205,6 +205,7 @@ export const ALLOWED = Object.freeze({
   'modules/M6-merge-gate/build-checker.test.mjs': 1,
   'modules/M9-record/write-sites.test.mjs': 1, // a plant's own test text, the 'dynamic, built name' case (L151)
   'wiring/owner-status.test.mjs': 1, // #324: a child process loads owner-status.mjs by its file URL to test openRead on a pipe (L767); text in a test's string
+  'shared/credential-args.test.mjs': 9, // #556 (R-0b-179): the credential scan's plants, source text in a test's strings (require(`${P}`), await import(…)) that the scan must read; nothing is loaded
   'test/wired.test.mjs': 6, // #197: the CONFIG_ENTRIES call strings it pins in each loader (L234, L235, L433; +1 for the worker runner's budget row, L1001); text in a test's string
 });
 

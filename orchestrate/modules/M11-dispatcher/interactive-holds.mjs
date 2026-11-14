@@ -16,7 +16,7 @@
 
 import { HOLD_FACT, clearHold } from './pass.mjs';
 import { idHash } from './intake-facts.mjs';
-import { plain, queuedMarks, tellThen } from './alerts.mjs';
+import { plain, queuedMarks, tellThen, unqueuedText } from './alerts.mjs';
 import { stillWaiting } from '../../shared/still-waiting.mjs';
 import { heldOk } from '../M4-workshop/send-safe/hook-store.mjs';
 
@@ -48,7 +48,7 @@ export function relayInteractiveHolds({ rec, held, error, alert, now, report }) 
       clear: () => clearHold(rec, fact, now, report),
     });
     if (w.did === 'told') n += 1;
-    if (w.did === 'unsent') report(`the ${what} alert could not be queued; it is tried again next pass`, fact);
+    if (w.did === 'unsent') report(unqueuedText(what), fact);
   };
   if (!Array.isArray(held) || !held.every(heldOk)) {
     // Fail closed: say the status is unknown, and clear no session's hold (it may still be held).

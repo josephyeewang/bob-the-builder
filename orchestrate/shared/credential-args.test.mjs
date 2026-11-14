@@ -40,14 +40,21 @@ const DESTRUCTURED = "a destructured parameter: a path, a 40-hex commit id or a 
 // push.mjs's run wraps git; gitDo and gitText hand back git's own output.
 const GIT_ANSWER = "git's own answer in the product mirror (push.mjs's run, gitDo and gitText): commit, tree and ref ids and lists of them; the push token goes by GIT_CONFIG_* environment through extraConfig, never a word";
 const RECORD_DOC = "the Record's session and card documents (record.read): product name, card id, branch, outbox path, attempt and the report's sha256, each checked against its pattern before git sees it; neither document has a credential field";
+// push.mjs's push and intake facts are read the same way since #536 (holds, heldSha, a push already made): their
+// result, branch, tip, sha256 and a refusal's reason are compared, never made into a word, so they share RECORD_DOC.
 const CLAUDE_START = "Claude Code's path, its fixed flags, a settings file's path and the session prompt (the card's brief, last); the account and any key go by environment";
 const INSTALL_PATHS = "installRoot, p and rel are install paths (the copy's link, the folders under it, a file inside it); ls -led reads only their access lists";
-const PROOF_ROWS = "proofList builds each proof's args from fixed words (ls, test -w/-x, head -c 1, true) and paths: the setup config's folders, homes, proposal rows and the installed rules' env_files and secrets.paths (paths whose reading is proven refused; their contents are never read)";
+const PROOF_ROWS = "proofList builds each proof's args from fixed words (ls, test -w/-x, head -c 1, true) and paths: the setup config's folders, homes, proposal rows and the installed rules' env_files and secrets.paths (paths whose reading is proven refused; their contents are never read), and since #528 r4-r7 the links root found inside a folder and the folders above each place (paths too; an owner look has no args)";
 const CAPTURE_TOOL = "the screen-capture test tool: tmux words, the test server's name, and the keys and text a fixture scenario types into a test session; no credential exists in it";
 const REVIEW_CONFIG = "the review runner's config (readConfig, through openJobJson): paths, uids, names and the rules' file paths, with no credential field; argv[0] is that config's path and ownerTaps a folder path";
 const GITLEAKS_SETUP = "the push script's scanner setup { bin, version, config, ignoreFile }: the pinned gitleaks path (checkScanner checks it is absolute) and file paths";
-const SHARED = { SETUP_CFG, SETUP_IO, DESTRUCTURED, GIT_ANSWER, RECORD_DOC, CLAUDE_START, INSTALL_PATHS, PROOF_ROWS, CAPTURE_TOOL, REVIEW_CONFIG, GITLEAKS_SETUP };
-const SHARED_COUNT = { SETUP_CFG: 4, SETUP_IO: 13, DESTRUCTURED: 9, GIT_ANSWER: 13, RECORD_DOC: 7, CLAUDE_START: 6, INSTALL_PATHS: 13, PROOF_ROWS: 16, CAPTURE_TOOL: 6, REVIEW_CONFIG: 4, GITLEAKS_SETUP: 4 };
+// gitleaks.mjs runScanner (#536): every caller is scanSecrets or checkScanner, in the same file.
+const GITLEAKS_ARGS = "runScanner's words: a gitleaks subcommand (version, git, dir, stdin), the mirror's path, --log-opts with the new commit ids (each 40 hex, checked), the scan folder's paths and the Do-plane config and ignore file paths; a commit's own text goes on stdin";
+// The live proofs (setup/live-proofs, lane 4) ask claude its version before a run.
+const CLAUDE_VERSION = "claude's path (the worker runner config's claudeBin, or the one the proof is handed), asked only --version";
+const LIVE_TESTS = "settings-names' TESTS: each run(side, dir) gives claude fixed flags, a settings object and a prompt made of fixed text and paths in the proof's own temp folder (dir)";
+const SHARED = { SETUP_CFG, SETUP_IO, DESTRUCTURED, GIT_ANSWER, RECORD_DOC, CLAUDE_START, INSTALL_PATHS, PROOF_ROWS, CAPTURE_TOOL, REVIEW_CONFIG, GITLEAKS_SETUP, GITLEAKS_ARGS, CLAUDE_VERSION, LIVE_TESTS };
+const SHARED_COUNT = { SETUP_CFG: 4, SETUP_IO: 13, DESTRUCTURED: 9, GIT_ANSWER: 13, RECORD_DOC: 17, CLAUDE_START: 14, INSTALL_PATHS: 13, PROOF_ROWS: 31, CAPTURE_TOOL: 6, REVIEW_CONFIG: 4, GITLEAKS_SETUP: 2, GITLEAKS_ARGS: 1, CLAUDE_VERSION: 3, LIVE_TESTS: 3 };
 const REVIEWED = {
   "modules/M11-dispatcher/cleanup.mjs unread git(…, ['merge-base', '--is-ancestor', a.merge_commit, 'refs/heads/): rec.list('merge') is a call whose answer is not read @d02e91a1": "rec is the Record store: rec.list('merge') gives merge records, whose merge_commit is a 40-hex commit id (checked before git sees it), and rec.list('product') gives product ids",
   "modules/M11-dispatcher/cleanup.mjs unread mirrorTree's sha reaches git(…, ['ls-tree', '-r', '-z', '--full-tree', sha]), and mirrorTree is called from other modules @879170a7": "mirrorTree(git, mirror, sha): git ls-tree on a commit id; its callers pass a card's recorded commit",
@@ -69,13 +76,9 @@ const REVIEWED = {
   "modules/M12-sensors/shell-guard/selfcheck.mjs unread runShell's args reaches spawnSync(…, argv[0]), and runShell is called from other modules @0689a76d": "runShell's one caller passes a shell from the fixed list and -c with a case's command from the guard's own case table",
   "modules/M12-sensors/shell-guard/selfcheck.mjs unread runShell(…, [...(sh.endsWith('zsh') ? ['-f'] : []), '-c', cmd]): newFolder() is a call whose answer is not read @1a1a9702": "cmd is a case from cases(), the guard's own case table, built on a new temp folder's real path (newFolder)",
   "modules/M12-sensors/shell-guard/selfcheck.mjs unread runOne(…, sh): a parameter of an unnamed function @8a1e903d": "sh is each of touchCheck's shells: /bin/bash unless its caller names others (shell paths)",
-  "modules/M4-workshop/git/gitleaks.mjs unread run(…, bin): bin is given no value here that is read @2b887073": GITLEAKS_SETUP,
   "modules/M4-workshop/git/gitleaks.mjs unread run(…, ['git', mirror, '--log-opts', logOpts, ...common(setup, repo): shas is given no value here that is read @a29af271": "shas are 40-hex commit ids and mirror the product mirror's path, from the push script; messages' texts go on stdin (input), and only each sha reaches a word, in the report's file name",
-  "modules/M4-workshop/git/gitleaks.mjs unread run(…, setup.bin): setup is given no value here that is read @5c8bbc30": GITLEAKS_SETUP,
   "modules/M4-workshop/git/gitleaks.mjs unread run(…, ['git', mirror, '--log-opts', logOpts, ...common(setup, repo): mirror is given no value here that is read @a5f71025": "shas are 40-hex commit ids and mirror the product mirror's path, from the push script; messages' texts go on stdin (input), and only each sha reaches a word, in the report's file name",
-  "modules/M4-workshop/git/gitleaks.mjs unread run(…, setup.bin): setup is given no value here that is read @5c8bbc30 #2": GITLEAKS_SETUP,
   "modules/M4-workshop/git/gitleaks.mjs unread run(…, ['stdin', ...common(setup, rep)]): messages is given no value here that is read @b635587e": "shas are 40-hex commit ids and mirror the product mirror's path, from the push script; messages' texts go on stdin (input), and only each sha reaches a word, in the report's file name",
-  "modules/M4-workshop/git/gitleaks.mjs unread run(…, setup.bin): setup is given no value here that is read @5c8bbc30 #3": GITLEAKS_SETUP,
   "modules/M4-workshop/git/push.mjs unread run(…, ['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-): git(args, opts) is a call whose answer is not read @1f203dec": GIT_ANSWER,
   "modules/M4-workshop/git/push.mjs unread run(…, ['merge-base', '--is-ancestor', remoteTip, tip]): git(args, opts) is a call whose answer is not read @3a07f800": GIT_ANSWER,
   "modules/M4-workshop/git/push.mjs unread gitDo(…, ['cat-file', 'commit', sha]): git(args, opts) is a call whose answer is not read @b11bc3f2": GIT_ANSWER,
@@ -95,14 +98,11 @@ const REVIEWED = {
   "modules/M4-workshop/git/push.mjs unread run(…, ['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-): cardBranch(card) is a call whose answer is not read @2cb445b8": "cardBranch(card) is card/<card id>, the id checked against CARD",
   "modules/M4-workshop/git/push.mjs unread run(…, ['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-): record.read('card', card) is a call whose answer is not read @5b8b42d8": RECORD_DOC,
   "modules/M4-workshop/git/push.mjs unread gitDo(…, ['cat-file', 'commit', sha]): record.read('card', card) is a call whose answer is not read @3c962526": RECORD_DOC,
-  "modules/M4-workshop/git/push.mjs unread gitText(…, ['commit-tree', tree, '-p', main, '-m', `Copy research ask $): record.read('card', card) is a call whose answer is not read @bb92e06a": RECORD_DOC,
   "modules/M4-workshop/git/push.mjs unread run(…, ['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-): proposalFolder(rules, product) is a call whose answer is not read @ce668588 #2": "proposalFolder(rules, product) is the product's proposals folder path from the rules",
   "modules/M4-workshop/git/push.mjs unread run(…, ['push', '--porcelain', '--atomic', '--no-verify', url, `${t): testRemote(repo) is a call whose answer is not read @5415f594": "url is githubUrl(repo), checked to start https://github.com/ with no user part, or in tests testRemote's local folder, checked to be a full path",
   "modules/M4-workshop/git/push.mjs unread gitText(…, ['commit-tree', tree, '-p', main, '-m', `Copy research ask $): checkMirror(mirror) is a call whose answer is not read @c3fd0570": "checkMirror answers { ok, reason } about the mirror folder; only the mirror's path reaches a word",
   "modules/M4-workshop/git/push.mjs value auth @68a4b3f4": "remoteTip is a commit id parsed from git ls-remote's answer; auth is that call's options (the token goes by GIT_CONFIG_* environment through extraConfig), not a word",
-  "modules/M4-workshop/git/push.mjs unread gitText(…, ['commit-tree', tree, '-p', main, '-m', `Copy research ask $): rules.may('push_branch', subject) is a call whose answer is not read @ee2d0656": "rules.may answers { decision, reason }; only the decision is read, and no part of it reaches a word",
   "modules/M4-workshop/git/push.mjs value auth @d775228e": "remoteTip is a commit id parsed from git ls-remote's answer; auth is that call's options (the token goes by GIT_CONFIG_* environment through extraConfig), not a word",
-  "modules/M4-workshop/git/push.mjs unread gitText(…, ['commit-tree', tree, '-p', main, '-m', `Copy research ask $): record.read('card', card) is a call whose answer is not read @bb92e06a #2": RECORD_DOC,
   "modules/M4-workshop/git/push.mjs unread run(…, ['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-): factParts() is a call whose answer is not read @4c46e0c2": RECORD_DOC,
   "modules/M4-workshop/git/push.mjs unread run(…, ['check-ref-format', '--branch', branch]): record.read('session', sessionId) is a call whose answer is not read @df8a7b00 #2": RECORD_DOC,
   "modules/M4-workshop/git/save-work.mjs unread gitOk(…, ['bundle', 'create', '-q', tmp, `refs/heads/${branch}`]): branch is given no value here that is read @91790e7f": "branch is checked just above to be cardBranch(card) and to match BRANCH",
@@ -183,21 +183,6 @@ const REVIEWED = {
   "setup/install.mjs unread spawnSync(…, c.args): seed is given no value here that is read @0e9aebb3": "updaterCommand writes the list out: the script, the config, --first and the seed, all install paths (io.at)",
   "setup/managed-settings.mjs unread spawnSync(…, node): node is given no value here that is read @10d09a6d": "runGuard({ node, hook, copy }): node's path, the hook's path and the snapshot copy's path; the command under test goes on stdin",
   "setup/owner-answer-setup.mjs unread planOwnerLoad's io reaches bootstrap(…, io), and planOwnerLoad is called from other modules @7248fb30": SETUP_IO,
-  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf })): io.readText(file) is a call whose answer is not read @c52122b6": PROOF_ROWS,
-  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf })): cfg.products.map((prod) => [prod, runnerPlaces({ copiesRoot: is given a function whose answer is not read @edfd73da": PROOF_ROWS,
-  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf })): make(q, l.kind) is a call whose answer is not read @0f853076": PROOF_ROWS,
-  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf })): make(q, l.kind).map((pr) => ({ ...pr, what: via ? `${pr.what is given a function whose answer is not read @0235fa35": PROOF_ROWS,
-  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf })): homeOf(cfg, B) is a call whose answer is not read @ab9b14b2": PROOF_ROWS,
-  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf })): places.flatMap(([prod, at]) => [at.copies, ...PRODUCT_OUTBOX is given a function whose answer is not read @04d86977": PROOF_ROWS,
-  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf })): cfg.products.flatMap((prod) => noWrite((d) => `${B} cannot w is given a function whose answer is not read @6cca2b28": PROOF_ROWS,
-  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf })): NO_WRITE.flatMap((d) => noWrite((q) => `${B} cannot write ${ is given a function whose answer is not read @b0b9719c": PROOF_ROWS,
-  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf })): places.flatMap(([prod, at]) => noWrite((d) => `${B} cannot w is given a function whose answer is not read @c03e5425": PROOF_ROWS,
-  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf })): USERS.filter((u) => u !== B).flatMap((u) => noList((d) => `$ is given a function whose answer is not read @3dfe8e70": PROOF_ROWS,
-  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf })): FLAT_OUTBOX_ROLES.map((r) => join(outboxRootPath(cfg), r)) is given a function whose answer is not read @b889b135": PROOF_ROWS,
-  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf })): FLAT_OUTBOX_ROLES.map((r) => join(outboxRootPath(cfg), r)).f is given a function whose answer is not read @da5ccd43": PROOF_ROWS,
-  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf })): proposalRows(cfg) is a call whose answer is not read @a0ea6fda": PROOF_ROWS,
-  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf })): proposalRows(cfg).flatMap((row) => reach(`${B} cannot write  is given a function whose answer is not read @6da1c6a9": PROOF_ROWS,
-  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf })): (rules.odd ?? []).map((x) => notTried(`${B} cannot read the  is given a function whose answer is not read @55a17493": PROOF_ROWS,
   "setup/proofs.mjs unread proveList's list reaches run(…, ['-n', '-H', '-u', BUILDER, ...pr.args]), and proveList is called from other modules @680eaaba": PROOF_ROWS,
   "setup/users-folders.mjs value key @f14f1e8a": "census's read(path, key): key is a dscl attribute name, 'UniqueID' or 'PrimaryGroupID' at its one caller",
   "setup/users-folders.mjs unread want(…, [['UserShell', shellOf(name)], ['IsHidden', '1'], ['Password): homeOf(cfg, name) is a call whose answer is not read @2df588fe": "homeOf(cfg, name) is a home folder's path under the setup base and shellOf(name) a shell's path (/usr/bin/false or /bin/zsh); dscl attribute values",
@@ -227,6 +212,72 @@ const REVIEWED = {
   "wiring/runner-ports.mjs unread run(…, ['merge-base', '--is-ancestor', commit, head]): head is given no value here that is read @9fc2f629": DESTRUCTURED,
   "wiring/runner-ports.mjs unread chmodTree's d reaches execFileSync(…, ['-R', '-P', 'u+rwx', d]), and chmodTree is called from other modules @1f95cc77": "d is a folder being removed (chmod -R -P u+rwx <folder>)",
   "wiring/runner-ports.mjs unread run(…, ['cat-file', '-t', commit]): startCommit({ mirror: p.mirror, card, cardDoc: cd.doc }) is a call whose answer is not read @81fc7491": "startCommit answers with the card's start commit id, from the card record or git; git cat-file -t only names its type",
+  // From main after #536, #537 and #577 (merged into #556): the scan reads the new and rewritten sites, each looked at.
+  "modules/M4-workshop/git/gitleaks.mjs unread runScanner's bin reaches spawn(…, bin), and runScanner is called from other modules @70983b59": GITLEAKS_SETUP,
+  "modules/M4-workshop/git/gitleaks.mjs unread runScanner's args reaches spawn(…, args), and runScanner is called from other modules @261eb37f": GITLEAKS_ARGS,
+  "modules/M4-workshop/git/gitleaks.mjs unread runScanner(…, bin): bin is given no value here that is read @a344e5a3": GITLEAKS_SETUP,
+  "modules/M4-workshop/git/push.mjs unread run(…, ['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-): record.read('fact', intakeFactId(product, bundleName(card))) is a call whose answer is not read @4ac16284": RECORD_DOC,
+  "modules/M4-workshop/git/push.mjs unread run(…, ['merge-base', '--is-ancestor', remoteTip, tip]): record.read('fact', intakeFactId(product, bundleName(card))) is a call whose answer is not read @7ca6c538": RECORD_DOC,
+  "modules/M4-workshop/git/push.mjs unread run(…, ['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-): record.read('card', card) is a call whose answer is not read @5b8b42d8 #2": RECORD_DOC,
+  "modules/M4-workshop/git/push.mjs unread run(…, ['merge-base', '--is-ancestor', remoteTip, tip]): record.read('card', card) is a call whose answer is not read @ba1ff5ac": RECORD_DOC,
+  "modules/M4-workshop/git/push.mjs unread run(…, ['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-): rules.may('push_branch', subject) is a call whose answer is not read @464d44dc": "rules.may answers { decision, reason }; only the decision is read, and no part of it reaches a word",
+  "modules/M4-workshop/git/push.mjs unread run(…, ['merge-base', '--is-ancestor', remoteTip, tip]): rules.may('push_branch', subject) is a call whose answer is not read @5cdfff00": "rules.may answers { decision, reason }; only the decision is read, and no part of it reaches a word",
+  "modules/M4-workshop/git/push.mjs unread run(…, ['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-): record.read('card', card) is a call whose answer is not read @5b8b42d8 #3": RECORD_DOC,
+  "modules/M4-workshop/git/push.mjs unread run(…, ['merge-base', '--is-ancestor', remoteTip, tip]): record.read('card', card) is a call whose answer is not read @ba1ff5ac #2": RECORD_DOC,
+  "modules/M4-workshop/git/push.mjs unread run(…, ['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-): record.read('fact', id) is a call whose answer is not read @73ed70b6": RECORD_DOC,
+  "modules/M4-workshop/git/push.mjs unread run(…, ['merge-base', '--is-ancestor', remoteTip, tip]): record.read('fact', id) is a call whose answer is not read @76a464da": RECORD_DOC,
+  "modules/M4-workshop/git/push.mjs unread run(…, ['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-): record.read('fact', PUSH_FACT(got.card, got.att)) is a call whose answer is not read @aa8e573e": RECORD_DOC,
+  "modules/M4-workshop/git/push.mjs unread run(…, ['merge-base', '--is-ancestor', remoteTip, tip]): record.read('fact', PUSH_FACT(got.card, got.att)) is a call whose answer is not read @9bd8c5e2": RECORD_DOC,
+  "modules/M4-workshop/git/push.mjs unread run(…, ['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-): record.read('fact', PUSH_FACT(inputs.card, inputs.att)) is a call whose answer is not read @51c67952": RECORD_DOC,
+  "modules/M4-workshop/git/push.mjs unread run(…, ['merge-base', '--is-ancestor', remoteTip, tip]): record.read('fact', PUSH_FACT(inputs.card, inputs.att)) is a call whose answer is not read @32bd96a6": RECORD_DOC,
+  "setup/live-proofs/runlocked.mjs unread childSpawn(…, bin): a parameter of an unnamed function @12b29354": CLAUDE_START,
+  "setup/live-proofs/runlocked.mjs unread childSpawn(…, args): a parameter of an unnamed function @878dbc18": CLAUDE_START,
+  "setup/live-proofs/runlocked.mjs unread run(…, log) @5ed0d222": "underLock hands run the proof's own temp folder and a function that writes the proof's log lines",
+  "setup/live-proofs/runlocked.mjs unread execFileSync(…, c.claudeBin): checkRunnerConfig(readRunnerConfig(arg(argv, '--config'), se is a call whose answer is not read @a958a5f7": CLAUDE_VERSION,
+  "setup/live-proofs/runlocked.mjs unread verifyBundle's mirror reaches spawnSync(…, ['--git-dir', mirror, 'bundle', 'verify', file]), and verifyBundle is called from other modules @5d821cdd": "git bundle verify on two paths: the runner config's mirror and the bundle the proof's own run left in its outbox",
+  "setup/live-proofs/settings-names.mjs unread run(…, d): findInit(out) is a call whose answer is not read @3aebf2ba": LIVE_TESTS,
+  "setup/live-proofs/settings-names.mjs value secret @4519cb0e": "a fixture file the live proof makes in its own temp folder, named `secret` (its text is the marker seen-<side>-7c1f): the word is a file name in a test prompt, not a credential",
+  "setup/live-proofs/settings-names.mjs unread run(…, d): Object.freeze([ { id: 'allow', title: 'an allow rule lets a  is not read to its end @fe71caeb": LIVE_TESTS,
+  "setup/live-proofs/settings-names.mjs unread runToEnd(…, c.claudeBin): checkInit(findInit(out), { role, profile, pin, args }) is a call whose answer is not read @0ce73cfe": CLAUDE_START,
+  "setup/live-proofs/settings-names.mjs unread runToEnd's bin reaches childSpawn(…, bin), and runToEnd is called from other modules @1377338b": CLAUDE_START,
+  "setup/live-proofs/settings-names.mjs unread runToEnd's args reaches childSpawn(…, args), and runToEnd is called from other modules @6ab99d41": CLAUDE_START,
+  "setup/live-proofs/settings-names.mjs unread claudeVersion's bin reaches execFileSync(…, bin), and claudeVersion is called from other modules @97a91a5e": CLAUDE_VERSION,
+  "setup/live-proofs/settings-names.mjs unread main's argv reaches arg(…, argv), and main is called from other modules @415dae43": "the proof's own command line, read for --config (a path), --product (a name) and --restore",
+  "setup/live-proofs/settings-names.mjs unread runToEnd(…, c.claudeBin): d.readConfig(arg(argv, '--config')) is a call whose answer is not read @09442aee": CLAUDE_START,
+  "setup/live-proofs/settings-names.mjs unread run(…, d): d.makeBase() is a call whose answer is not read @33ab196e": LIVE_TESTS,
+  "setup/live-proofs/settings-names.mjs unread claude's args reaches runToEnd(…, args), and claude is called from other modules @e43b0132": CLAUDE_START,
+  "setup/live-proofs/settings-names.mjs unread start's args reaches runToInit(…, args), and start is called from other modules @ae8656fa": CLAUDE_START,
+  "setup/live-proofs/transcript-place.mjs unread version's bin reaches execFileSync(…, bin), and version is called from other modules @37189a6c": CLAUDE_VERSION,
+  "setup/proofs.mjs unread noList(…, ownerHome): readUser(io, cfg.owner) is a call whose answer is not read @6556a4e2": PROOF_ROWS,
+  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf, walkOf, stickyOf: sticky): io.readText(file) is a call whose answer is not read @2d0c1107": PROOF_ROWS,
+  "setup/proofs.mjs unread proofList's cfg reaches noWrite(…, p('products', prod, 'store')), and proofList is called from other modules @8d3e8664": PROOF_ROWS,
+  "setup/proofs.mjs unread proofList's cfg reaches noWrite(…, p(d)), and proofList is called from other modules @46598acc": PROOF_ROWS,
+  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf, walkOf, stickyOf: sticky): cfg.products.map((prod) => [prod, runnerPlaces({ copiesRoot: is given a function whose answer is not read @1b180d51": PROOF_ROWS,
+  "setup/proofs.mjs unread above passes its words on, and is not called here (it may be handed on as a value) @6e6dc9f8": PROOF_ROWS,
+  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf, walkOf, stickyOf: sticky): walks.get(l.real) is a call whose answer is not read @6f9e859d": PROOF_ROWS,
+  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf, walkOf, stickyOf: sticky): w.links.flatMap((x) => reach(`${B} cannot read ${x.at} (a li is given a function whose answer is not read @45575eac": PROOF_ROWS,
+  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf, walkOf, stickyOf: sticky): w.named.map((x) => notTried(`${B} cannot read ${x} (inside $ is given a function whose answer is not read @768b9f46": PROOF_ROWS,
+  "setup/proofs.mjs unread reach(…, x.at): a parameter of an unnamed function @a7ea4f22": PROOF_ROWS,
+  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf, walkOf, stickyOf: sticky): make(q, l.kind) is a call whose answer is not read @cfc54bb7": PROOF_ROWS,
+  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf, walkOf, stickyOf: sticky): make(q, l.kind).map((pr) => ({ ...pr, what: via ? `${pr.what is given a function whose answer is not read @96e5e18e": PROOF_ROWS,
+  "setup/proofs.mjs unread readProof passes its words on, and is not called here (it may be handed on as a value) @ab6ebb34": PROOF_ROWS,
+  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf, walkOf, stickyOf: sticky): homeOf(cfg, B) is a call whose answer is not read @93fdee0f": PROOF_ROWS,
+  "setup/proofs.mjs unread proofList's cfg reaches proveList(…, proofList(cfg, { ...inputs, kindOf, walkOf, stickyOf: sticky), and proofList is called from other modules @e9414952": PROOF_ROWS,
+  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf, walkOf, stickyOf: sticky): places.flatMap(([prod, at]) => [at.copies, ...PRODUCT_OUTBOX is given a function whose answer is not read @da0b1b48": PROOF_ROWS,
+  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf, walkOf, stickyOf: sticky): cfg.products.flatMap((prod) => noWrite((d) => `${B} cannot w is given a function whose answer is not read @6d6950c3": PROOF_ROWS,
+  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf, walkOf, stickyOf: sticky): NO_WRITE.flatMap((d) => noWrite((q) => `${B} cannot write ${ is given a function whose answer is not read @7864abb3": PROOF_ROWS,
+  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf, walkOf, stickyOf: sticky): places.flatMap(([prod, at]) => noWrite((d) => `${B} cannot w is given a function whose answer is not read @c2a82600": PROOF_ROWS,
+  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf, walkOf, stickyOf: sticky): USERS.filter((u) => u !== B).flatMap((u) => noList((d) => `$ is given a function whose answer is not read @a9d0951f": PROOF_ROWS,
+  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf, walkOf, stickyOf: sticky): FLAT_OUTBOX_ROLES.map((r) => join(outboxRootPath(cfg), r)) is given a function whose answer is not read @5a2bc9f8": PROOF_ROWS,
+  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf, walkOf, stickyOf: sticky): FLAT_OUTBOX_ROLES.map((r) => join(outboxRootPath(cfg), r)).f is given a function whose answer is not read @7d74408a": PROOF_ROWS,
+  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf, walkOf, stickyOf: sticky): proposalRows(cfg) is a call whose answer is not read @20b250b7": PROOF_ROWS,
+  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf, walkOf, stickyOf: sticky): proposalRows(cfg).flatMap((row) => reach(`${B} cannot write  is given a function whose answer is not read @fab3ee5a": PROOF_ROWS,
+  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf, walkOf, stickyOf: sticky): (rules.odd ?? []).map((x) => notTried(`${B} cannot read the  is given a function whose answer is not read @bc84f16e": PROOF_ROWS,
+  "setup/proofs.mjs unread noWrite(…, p('products', prod, 'store')): a parameter of an unnamed function @2cc004fb": PROOF_ROWS,
+  "setup/proofs.mjs unread noWrite(…, p(d)): a parameter of an unnamed function @e3a3185d": PROOF_ROWS,
+  "setup/proofs.mjs unread noList(…, homeOf(cfg, u)): homeOf(cfg, u) is a call whose answer is not read @af83e728": PROOF_ROWS,
+  "setup/proofs.mjs unread noWrite(…, d): a parameter of an unnamed function @8767b4f0": PROOF_ROWS,
+  "setup/proofs.mjs unread runProofs's cfg reaches proofList(…, cfg), and runProofs is called from other modules @3746eaba": PROOF_ROWS,
 };
 /** A finding's key in REVIEWED: file, kind, what, @site, and #n for the nth time that text is met in the file. */
 function keysOf(rel, src) {
