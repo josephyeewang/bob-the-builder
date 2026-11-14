@@ -6,20 +6,23 @@ import assert from 'node:assert/strict';
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { anchorHash, wallFrom, wallHeld, wallProblem, wallStatusProblem } from './wall-gate.mjs';
+import { createHash } from 'node:crypto';
+import { wallFrom, wallHeld, wallProblem, wallStatusProblem } from './wall-gate.mjs';
 import { chainProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { readRootFile } from './runner-main.mjs';
 import * as builderWall from '../setup/builder-wall.mjs';
 
 // Lane A's own names (#585, setup/builder-wall.mjs): the rules, the beat, the reader and the writer. No stand-in for them.
-const { anchorText, statusOf, statusText } = builderWall;
+const { anchorSha256, statusOf, statusText } = builderWall;
+// Any other text's hash, for statuses that speak for other rules (a test's own value, not the format's).
+const shaOf = (t) => createHash('sha256').update(t, 'utf8').digest('hex');
 const REAL = wallFrom(builderWall);
 const UID = 403; const NOW = Date.parse('2026-11-14T12:00:00.000Z'); const BEAT = REAL.beatMs;
-// The gate's own judgments are also run under a lax reader (a plain JSON read, the same anchorText and beat): lane A's
+// The gate's own judgments are also run under a lax reader (a plain JSON read, the same anchorSha256 and beat): lane A's
 // parseStatus refuses most bad lines first, so this shows the gate holds on its own for any value a reader lets through.
 const WALL = { ...REAL, parseStatus: (t) => JSON.parse(t) };
 const iso = (ms) => new Date(ms).toISOString();
-const status = (o = {}) => ({ v: 1, time: iso(NOW - 60_000), builderUid: UID, anchorSha256: anchorHash(anchorText, UID), ok: true, why: [], ...o });
+const status = (o = {}) => ({ v: 1, time: iso(NOW - 60_000), builderUid: UID, anchorSha256: anchorSha256(UID), ok: true, why: [], ...o });
 const text = (o) => JSON.stringify(status(o));
 const check = (t, o = {}) => wallStatusProblem(t, { uid: UID, now: NOW, wall: WALL, ...o });
 const HELD = /so no session starts until the builder wall is confirmed \(L1170 m5\)$/;
@@ -51,9 +54,9 @@ test('L1193 plants: each status that does not confirm the wall holds the start, 
     ['wrong uid', text({ builderUid: 404 }), /for uid 404, not this runner's \(403\)/],
     ['uid as text', text({ builderUid: '403' }), /for uid "403"/],
     ['no uid', JSON.stringify((({ builderUid, ...r }) => r)(status())), /for uid undefined/],
-    ['wrong hash', text({ anchorSha256: anchorHash(anchorText, 404) }), /for other rules than this copy's wall/],
-    ['hash in capitals', text({ anchorSha256: anchorHash(anchorText, UID).toUpperCase() }), /for other rules/],
-    ['hash of other rules', text({ anchorSha256: anchorHash(() => 'set skip on lo0\n', UID) }), /for other rules/],
+    ['wrong hash', text({ anchorSha256: anchorSha256(404) }), /for other rules than this copy's wall/],
+    ['hash in capitals', text({ anchorSha256: anchorSha256(UID).toUpperCase() }), /for other rules/],
+    ['hash of other rules', text({ anchorSha256: shaOf('set skip on lo0\n') }), /for other rules/],
     ['no hash', JSON.stringify((({ anchorSha256, ...r }) => r)(status())), /for other rules/],
     ['an array', '[]', /reads as nothing/],
     ['null', 'null', /reads as nothing/],
@@ -70,7 +73,7 @@ test('L1193 plants: each status that does not confirm the wall holds the start, 
   assert.match(check(text(), { wall: { ...WALL, parseStatus: () => { throw new Error('version 2, not 1'); } } }), /is not one the wall job writes \(version 2, not 1\)/);
   for (const r of [undefined, null, 'ok', 1]) assert.match(check(text(), { wall: { ...WALL, parseStatus: () => r } }), /reads as nothing/, String(r));
   assert.match(check(text(), { now: NaN }), /this runner's clock can't be read/);
-  assert.match(check(text(), { wall: { ...WALL, anchorText: () => { throw new Error('uid 0'); } } }), /rules for uid 403 can't be built \(uid 0\)/);
+  assert.match(check(text(), { wall: { ...WALL, anchorSha256: () => { throw new Error('uid 0'); } } }), /rules for uid 403 can't be built \(uid 0\)/);
 });
 
 // The file's side, on a real folder this test owns: the test's own uid stands for root (chainProblem's and readRootFile's
@@ -113,7 +116,7 @@ test('L1193: a status file not owned by root, or an owner check that throws, hol
 test('L1193: the wall\'s code not loaded, no status file in the config, or no uid holds every start', () => {
   const base = { file: '/b/s.json', wall: WALL, uid: UID, now: () => NOW, chain: () => null, readRoot: () => text() };
   const P = WALL.parseStatus;
-  for (const wall of [null, undefined, {}, { anchorText, parseStatus: P }, { anchorText, beatMs: BEAT }, { parseStatus: P, beatMs: BEAT }, { anchorText, parseStatus: P, beatMs: 0 }, { anchorText, parseStatus: P, beatMs: 1.5 }, { anchorText: 'x', parseStatus: P, beatMs: BEAT }, { anchorText, parseStatus: 'x', beatMs: BEAT }]) {
+  for (const wall of [null, undefined, {}, { anchorSha256, parseStatus: P }, { anchorSha256, beatMs: BEAT }, { parseStatus: P, beatMs: BEAT }, { anchorSha256, parseStatus: P, beatMs: 0 }, { anchorSha256, parseStatus: P, beatMs: 1.5 }, { anchorSha256: 'x', parseStatus: P, beatMs: BEAT }, { anchorSha256, parseStatus: 'x', beatMs: BEAT }]) {
     assert.match(wallProblem({ ...base, wall, wallWhy: 'Cannot find module' }), /code can't be loaded from the installed copy/, JSON.stringify(wall));
   }
   assert.match(wallProblem({ ...base, wall: null, wallWhy: 'Cannot find module builder-wall.mjs' }), /\(Cannot find module builder-wall\.mjs\)/);
@@ -124,10 +127,10 @@ test('L1193: the wall\'s code not loaded, no status file in the config, or no ui
   assert.equal(read, false, 'nothing is read when there is nothing to check against');
 });
 
-test('L1193: wallFrom takes lane A\'s anchorText, parseStatus and beat, refusing a module without them', () => {
+test('L1193: wallFrom takes lane A\'s anchorSha256, parseStatus and beat, refusing a module without them', () => {
   const parseStatus = WALL.parseStatus;
-  assert.deepEqual(wallFrom({ anchorText, parseStatus, RECHECK_EVERY_S: 300 }), { anchorText, parseStatus, beatMs: 300_000 });
-  for (const m of [null, {}, { anchorText, parseStatus }, { anchorText, RECHECK_EVERY_S: 300 }, { parseStatus, RECHECK_EVERY_S: 300 }, { anchorText, parseStatus, RECHECK_EVERY_S: '300' }, { anchorText, parseStatus, RECHECK_EVERY_S: 0 }]) assert.throws(() => wallFrom(m), /exports no/);
+  assert.deepEqual(wallFrom({ anchorSha256, parseStatus, RECHECK_EVERY_S: 300 }), { anchorSha256, parseStatus, beatMs: 300_000 });
+  for (const m of [null, {}, { anchorSha256, parseStatus }, { anchorSha256, RECHECK_EVERY_S: 300 }, { parseStatus, RECHECK_EVERY_S: 300 }, { anchorSha256, parseStatus, RECHECK_EVERY_S: '300' }, { anchorSha256, parseStatus, RECHECK_EVERY_S: 0 }]) assert.throws(() => wallFrom(m), /exports no/);
 });
 
 test('L1193: wallHeld asks the gate first, every time; the rest only when the wall is confirmed; a gate that throws holds', () => {
@@ -147,8 +150,7 @@ test('L1193 round trip: the writer\'s ok status passes the gate, from text and f
   const good = statusText(statusOf([{ ok: true, what: 'pf is on' }, { ok: true, what: 'the probes and their controls' }], UID, at));
   assert.equal(wallStatusProblem(good, { uid: UID, now: NOW, wall: REAL }), null);
   assert.equal(REAL.beatMs, builderWall.RECHECK_EVERY_S * 1000, 'the beat is lane A\'s');
-  assert.equal(JSON.parse(good).anchorSha256, anchorHash(anchorText, UID), 'one hash, both sides: sha256 of anchorText(uid) as utf8, lowercase hex');
-  assert.equal(builderWall.anchorSha256(UID), anchorHash(anchorText, UID));
+  assert.equal(JSON.parse(good).anchorSha256, shaOf(builderWall.anchorText(UID)), 'the hash both sides use: sha256 of anchorText(uid) as utf8, lowercase hex');
   assert.equal(wallStatusProblem(statusText(statusOf([{ ok: true, what: 'x' }], UID, new Date(NOW - 2 * BEAT))), { uid: UID, now: NOW, wall: REAL }), null, 'exactly two beats old');
   const d = mkdtempSync(join(tmpdir(), 'orch-wall-rt-')); chmodSync(d, 0o755);
   try {
@@ -173,7 +175,7 @@ test('L1193 round trip: every status the writer writes that does not confirm the
     ['after this clock', w(OK, UID, new Date(NOW + 1)), /after this runner's clock/],
     ['far after', w(OK, UID, new Date(NOW + 3_600_000)), /no date or is after this runner's clock/],
     ['another uid', w(OK, UID + 1), /for uid 404, not this runner's \(403\)/],
-    ['other rules', statusText({ ...statusOf(OK, UID, at), anchorSha256: anchorHash(() => 'set skip on lo0\n', UID) }), /for other rules than this copy's wall/],
+    ['other rules', statusText({ ...statusOf(OK, UID, at), anchorSha256: shaOf('set skip on lo0\n') }), /for other rules than this copy's wall/],
     ['another uid\'s rules', statusText({ ...statusOf(OK, UID, at), anchorSha256: builderWall.anchorSha256(UID + 1) }), /for other rules/],
   ];
   for (const [name, t, why] of written) { const p = gate(t); assert.ok(p, name); assert.match(p, why, name); assert.match(p, HELD, name); }

@@ -1,5 +1,6 @@
 // The worker runner's job in setup (L1092, L1112): off without the entry, the runner-shaped job as builder when on, and
 // load refused until the copy holds a worker-runner.json the runner's own check takes.
+import { STATUS_FILE } from './builder-wall.mjs';
 import * as layout from './layout.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -97,7 +98,7 @@ const ioOf = (files) => ({ rootUid: 0, prefix: '', at: (p) => p, readText(f) { i
 const FILES = (rc = RC, products = PRODUCTS) => ({ [`${R}/review.json`]: JSON.stringify(rc), [DISP.productsFile]: JSON.stringify(products) });
 
 test('worker-config: the config is built from the layout, the Mac, the copy\'s review.json and products.json, and the runner\'s own check takes it', () => {
-  const { config, problems } = workerRunnerConfigFor(ioOf(FILES()), cfgOn(), { userOf, wallMod: {} });
+  const { config, problems } = workerRunnerConfigFor(ioOf(FILES()), cfgOn(), { userOf });
   assert.deepEqual(problems, []);
   assert.doesNotThrow(() => checkRunnerConfig(config));
   const W = `${BASE}/worker-runner`;
@@ -122,6 +123,8 @@ test('worker-config: the config is built from the layout, the Mac, the copy\'s r
     } },
     pin: RC.pin, machineWide: RC.machineWide, accountCopy: RC.accountCopy,
     budget: RC.budget, dispatcherRules: RC.dispatcherRules, reviewStatusFile: `${BASE}/review/status.json`, reviewUid: 402,
+    // L1193: root's wall job's status, at layout's place (builder-wall.mjs reads it as STATUS_FILE).
+    wallStatus: `${BASE}/builder-wall-status/status.json`,
   });
   assert.equal(workerRunnerConfigText(config), `${JSON.stringify(config, null, 1)}\n`);
 });
@@ -278,7 +281,7 @@ test('#537 r1 (L1188): daemons check\'s worker-runner.json row: not known withou
   assert.deepEqual(same, { ok: true, what: same.what }, 'PASS: no reason, no skip');
 });
 
-test('L1193: worker-config names the builder wall status file at lane A\'s place, or none (the runner then holds every start)', () => {
+test('L1193: worker-config names the builder wall status file at layout\'s place, and refuses a layout that names none (L1205 m3)', () => {
   const place = (cfg) => `${cfg.base}/builder-wall-status/status.json`;
   const on = workerRunnerConfigFor(ioOf(FILES()), cfgOn(), { userOf, wallMod: { wallStatusPath: place } });
   assert.deepEqual(on.problems, []);
@@ -288,14 +291,15 @@ test('L1193: worker-config names the builder wall status file at lane A\'s place
   assert.deepEqual(pre.problems, []); assert.equal(pre.config.wallStatus, `/pfx${BASE}/builder-wall-status/status.json`, 'written through io.at, as every other place');
   for (const wallMod of [{}, { wallStatusPath: 'x' }, null]) {
     const off = workerRunnerConfigFor(ioOf(FILES()), cfgOn(), { userOf, wallMod });
-    assert.deepEqual(off.problems, []); assert.equal('wallStatus' in off.config, false, 'no status file named: the runner holds every start');
+    assert.equal(off.config, null, 'no place named: refused, nothing built'); assert.match(off.problems.join(), /the layout names no place for the builder wall's status file \(layout\.mjs wallStatusPath\), so the worker runner would hold every start/);
   }
   const bad = workerRunnerConfigFor(ioOf(FILES()), cfgOn(), { userOf, wallMod: { wallStatusPath: () => { throw new Error('no base'); } } });
   assert.equal(bad.config, null); assert.match(bad.problems.join(), /the builder wall's status file can't be placed \(no base\)/);
   const rel = workerRunnerConfigFor(ioOf(FILES()), cfgOn(), { userOf, wallMod: { wallStatusPath: () => 'builder-wall-status/status.json' } });
   assert.equal(rel.config, null); assert.match(rel.problems.join(), /one the worker runner refuses \(config: wallStatus must be a full path/);
-  // The real layout, whatever it exports today: a status file is named exactly when layout names its place.
-  const real = workerRunnerConfigFor(ioOf(FILES()), cfgOn(), { userOf });
+  // The real layout and lane A's module: the config names the very file the wall job writes (STATUS_FILE).
+  const cfg = cfgOn(); const real = workerRunnerConfigFor(ioOf(FILES()), cfg, { userOf });
   assert.deepEqual(real.problems, []);
-  assert.equal('wallStatus' in real.config, typeof layout.wallStatusPath === 'function');
+  assert.equal(real.config.wallStatus, STATUS_FILE(cfg));
+  assert.equal(real.config.wallStatus, layout.wallStatusPath(cfg));
 });

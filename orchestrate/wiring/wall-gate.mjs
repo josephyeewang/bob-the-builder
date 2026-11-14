@@ -12,7 +12,7 @@
 //     (install-check.mjs chainProblem), or the file is not root's own plain file when opened (runner-main readRootFile);
 //   - it can't be read or is not exactly the shape below;
 //   - its time is in the future, or older than two of the wall job's beats;
-//   - it is not ok, names another uid, or its rules' hash is not anchorText(this uid)'s.
+//   - it is not ok, names another uid, or its rules' hash is not anchorSha256(this uid)'s (lane A's).
 // Any error on the way is a refusal, never a pass.
 //
 // Stated limit (L1193): the wall job writes at each beat, so a wall switched off just after a beat is not seen for up to
@@ -21,21 +21,17 @@
 // The status file is root's wall job's (lane A, setup/builder-wall.mjs): its place (STATUS_FILE, which setup writes into this
 // runner's config as wallStatus), its shape and its reader (parseStatus) are that module's, one home for the format. This
 // gate takes what parseStatus gives, { v, time, builderUid, anchorSha256, ok, why }, and judges it: fresh within two of
-// the job's beats (2 x RECHECK_EVERY_S), not after this clock, ok, for this uid and for anchorText(this uid)'s hash. A wall
+// the job's beats (2 x RECHECK_EVERY_S), not after this clock, ok, for this uid and for lane A's anchorSha256(this uid). A wall
 // check that could not run is written ok: false with its reason, so it holds as a failed one does.
 
-import { createHash } from 'node:crypto';
 import { pastTime } from '../shared/still-waiting.mjs';
 
 const HELD = 'so no session starts until the builder wall is confirmed (L1170 m5)';
 const clip = (s, n = 160) => String(s).replace(/\s+/g, ' ').slice(0, n);
 const whyOf = (w) => (Array.isArray(w) ? w.filter((x) => typeof x === 'string' && x).join('; ') : typeof w === 'string' ? w : '') || 'no reason given';
 
-/** sha256 of the anchor's rules for `uid`, as the wall job loads them (lane A's anchorText). */
-export const anchorHash = (anchorText, uid) => createHash('sha256').update(anchorText(uid), 'utf8').digest('hex');
-
 /**
- * Null, or why the status text does not confirm the wall for `uid` at `now` (ms). `wall`: { anchorText, beatMs,
+ * Null, or why the status text does not confirm the wall for `uid` at `now` (ms). `wall`: { anchorSha256, beatMs,
  * parseStatus } (wallFrom). Pure: the file's reading and its owners are wallProblem's.
  */
 export function wallStatusProblem(text, { uid, now, wall }) {
@@ -51,18 +47,18 @@ export function wallStatusProblem(text, { uid, now, wall }) {
   if (now - at > fresh) return `the builder wall's status is from ${clip(s.time, 40)}, older than two of the wall job's beats (${Math.round(fresh / 60_000)} minutes): the wall job may have stopped, ${HELD}`;
   if (s.ok !== true) return `the builder wall's last check failed (${clip(whyOf(s.why))}), ${HELD}`;
   if (s.builderUid !== uid) return `the builder wall's status is for uid ${clip(JSON.stringify(s.builderUid), 20)}, not this runner's (${uid}), ${HELD}`;
-  let want; try { want = anchorHash(wall.anchorText, uid); } catch (e) { return `the builder wall's rules for uid ${uid} can't be built (${clip(e?.message ?? e)}), ${HELD}`; }
-  if (s.anchorSha256 !== want) return `the builder wall's status is for other rules than this copy's wall (its hash is not anchorText(${uid})'s), ${HELD}`;
+  let want; try { want = wall.anchorSha256(uid); } catch (e) { return `the builder wall's rules for uid ${uid} can't be built (${clip(e?.message ?? e)}), ${HELD}`; }
+  if (s.anchorSha256 !== want) return `the builder wall's status is for other rules than this copy's wall (its hash is not anchorSha256(${uid})'s), ${HELD}`;
   return null;
 }
 
 /**
- * Null, or why the wall is not confirmed. file: the status file's full path (config wallStatus). wall: { anchorText,
+ * Null, or why the wall is not confirmed. file: the status file's full path (config wallStatus). wall: { anchorSha256,
  * beatMs, parseStatus } from lane A's module, or null when it could not be loaded (`wallWhy` says why). Ports: chain(p) (root's all the
  * way up: null or why), readRoot(p) (root's own plain file's text, or a throw), now() (ms), uid.
  */
 export function wallProblem({ file, wall, wallWhy, uid, chain, readRoot, now }) {
-  if (!wall || typeof wall.anchorText !== 'function' || typeof wall.parseStatus !== 'function' || !Number.isInteger(wall.beatMs) || wall.beatMs <= 0) return `the builder wall's code can't be loaded from the installed copy (${clip(wallWhy ?? 'no anchorText, parseStatus or beat')}), ${HELD}`;
+  if (!wall || typeof wall.anchorSha256 !== 'function' || typeof wall.parseStatus !== 'function' || !Number.isInteger(wall.beatMs) || wall.beatMs <= 0) return `the builder wall's code can't be loaded from the installed copy (${clip(wallWhy ?? 'no anchorSha256, parseStatus or beat')}), ${HELD}`;
   if (typeof file !== 'string' || !file.startsWith('/')) return `the runner's config names no builder wall status file (wallStatus), ${HELD}`;
   if (!Number.isInteger(uid) || uid <= 0) return `this runner's uid can't be read, ${HELD}`;
   let why; try { why = chain(file); } catch (e) { why = `it can't be checked (${clip(e?.code ?? e?.message ?? e)})`; }
@@ -78,10 +74,10 @@ export const wallHeld = (gate, inner) => (product) => {
   return why ?? inner(product);
 };
 
-/** Lane A's module's names this gate takes → { anchorText, beatMs, parseStatus }, or a throw saying which is missing. */
+/** Lane A's module's names this gate takes → { anchorSha256, beatMs, parseStatus }, or a throw saying which is missing. */
 export function wallFrom(mod) {
-  if (typeof mod?.anchorText !== 'function') throw new Error('setup/builder-wall.mjs exports no anchorText');
+  if (typeof mod?.anchorSha256 !== 'function') throw new Error('setup/builder-wall.mjs exports no anchorSha256');
   if (typeof mod?.parseStatus !== 'function') throw new Error('setup/builder-wall.mjs exports no parseStatus');
   if (!Number.isInteger(mod?.RECHECK_EVERY_S) || mod.RECHECK_EVERY_S <= 0) throw new Error('setup/builder-wall.mjs exports no RECHECK_EVERY_S');
-  return { anchorText: mod.anchorText, parseStatus: mod.parseStatus, beatMs: mod.RECHECK_EVERY_S * 1000 };
+  return { anchorSha256: mod.anchorSha256, parseStatus: mod.parseStatus, beatMs: mod.RECHECK_EVERY_S * 1000 };
 }

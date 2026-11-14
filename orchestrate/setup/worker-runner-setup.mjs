@@ -149,11 +149,10 @@ export function workerRunnerConfigFor(io, cfg, { userOf = (n) => readUser(io, n)
   } catch (e) { denied ||= deniedCode(e); problems.push(`${cfg.dispatcher.productsFile} can't be used (${e?.code ?? e?.message})`); }
   // The builder wall's status file (L1193): its place is root's wall job's (lane A), named once in layout.mjs as wallStatusPath,
   // never a second copy here (I7). Not builder-wall.mjs itself: it imports daemons.mjs, which imports this file, a loop that
-  // leaves names unset at load. While layout names none, the config names none, and the runner holds every start, saying so.
+  // leaves names unset at load. Required (L1205 m3): a config without it would hold every start, so it is refused here.
   let wallStatus;
-  if (typeof wallMod?.wallStatusPath === 'function') {
-    try { wallStatus = at(wallMod.wallStatusPath(cfg)); } catch (e) { problems.push(`the builder wall's status file can't be placed (${e?.message ?? e})`); }
-  }
+  if (typeof wallMod?.wallStatusPath !== 'function') problems.push('the layout names no place for the builder wall\'s status file (layout.mjs wallStatusPath), so the worker runner would hold every start');
+  else { try { wallStatus = at(wallMod.wallStatusPath(cfg)); } catch (e) { problems.push(`the builder wall's status file can't be placed (${e?.message ?? e})`); } }
   if (problems.length) return { config: null, problems, denied };
 
   const W = workerRunnerPaths(cfg); const home = at(homeOf(cfg, BUILDER));
@@ -181,7 +180,7 @@ export function workerRunnerConfigFor(io, cfg, { userOf = (n) => readUser(io, n)
     ...opt('pin'), ...opt('machineWide'), ...opt('accountCopy'), ...opt('bobManifest'),
     // Check 12 (L1001): M11's module and the Dispatcher's rules, as the review runner names them, with the review runner's status.
     budget: rc.budget, dispatcherRules: rc.dispatcherRules, reviewStatusFile: at(join(P.reviewRoot, REVIEW_FOLDERS.status)), reviewUid: rev.uid,
-    ...(wallStatus !== undefined ? { wallStatus } : {}),
+    wallStatus,
   };
   try { checkRunnerConfig(config); } catch (e) { return { config: null, problems: [`the config this would write is one the worker runner refuses (${e.message})`], denied }; }
   return { config, problems: [], denied };
