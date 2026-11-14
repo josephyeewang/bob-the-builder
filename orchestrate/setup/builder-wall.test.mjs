@@ -14,7 +14,7 @@ import {
   ALL_ADDRESSES, ANCHOR, ANCHOR_DIR, ANCHOR_FILE, FAMILIES, PROTOS, TAG, anchorText, bootScript, checkWall, loadedRulesProblem, main, otherAddresses,
   planWall, tokenPath, unreadPath, waitForFirstRun, wallLabel, wallPlistPath, wallDir,
   RECHECK_EVERY_S, STATUS_FILE, STATUS_VERSION, WALL_CHECK_JOB, WALL_SCRIPT, WHY_CHARS, WHY_MAX, anchorSha256, parseStatus, statusOf, statusText,
-  wallCheckPlist,
+  wallCheckPlist, WAY_OUT_TEXT,
 } from './builder-wall.mjs';
 import { createHash } from 'node:crypto';
 import { readdirSync } from 'node:fs';
@@ -672,4 +672,11 @@ test('L1193: the check job is one of setup\'s daemons, on with the worker runner
   assert.ok(t.includes(`<key>StartInterval</key><integer>${RECHECK_EVERY_S}</integer>`)); assert.ok(t.includes('<key>RunAtLoad</key><true/>'));
   assert.equal(/UserName/.test(t), false, 'root\'s: pf and the probes need root');
   assert.ok(existsSync(join(import.meta.dirname, '..', WALL_SCRIPT)), 'the script the job starts is this file');
+});
+
+test('L1193: the way out says worker sessions stay held until the wall is back, and how to stop the runner and the check job too', () => {
+  const t = WAY_OUT_TEXT({ base: BASE, label: LABEL });
+  assert.match(t, /Until the wall is back, every worker session stays held/);
+  assert.ok(t.includes(`daemons unload --only worker-runner`) && t.includes(`daemons unload --only ${WALL_CHECK_JOB}`), t);
+  assert.deepEqual(OPTIONAL_JOBS.filter((j) => t.includes(`--only ${j}`)).sort(), [WALL_CHECK_JOB, 'worker-runner'].sort(), 'the names it gives are real jobs');
 });

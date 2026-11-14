@@ -354,7 +354,7 @@ export function wayOut(io, cfg) {
   return { done, lines };
 }
 
-export const WAY_OUT_TEXT = (cfg) => `To take the builder wall out: sudo launchctl bootout system/${wallLabel(cfg)}; sudo rm ${wallPlistPath(cfg)}; sudo ${PFCTL} -a ${ANCHOR} -F rules; and sudo ${PFCTL} -X with the number in ${tokenPath(cfg)}.`;
+export const WAY_OUT_TEXT = (cfg) => `To take the builder wall out: sudo launchctl bootout system/${wallLabel(cfg)}; sudo rm ${wallPlistPath(cfg)}; sudo ${PFCTL} -a ${ANCHOR} -F rules; and sudo ${PFCTL} -X with the number in ${tokenPath(cfg)}. Until the wall is back, every worker session stays held: the check job keeps writing ok false. To stop that too, sudo node setup.mjs daemons unload --only worker-runner and sudo node setup.mjs daemons unload --only ${WALL_CHECK_JOB}.`;
 
 // --- the read-back ---------------------------------------------------------------------------------------------------
 
