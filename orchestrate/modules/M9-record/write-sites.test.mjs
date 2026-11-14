@@ -39,7 +39,7 @@ test('L112: the scan sees the writes the lead counted, so an empty answer is not
   // asks are approvals' alone (lane 2's consumeAsk).
   assert.equal(n('dispatcher', 'handoff'), 0);
   assert.equal(n('dispatcher', 'ask'), 0);
-  assert.equal(n('workshop', 'fact'), 2, 'the push record (M4 push.mjs settle) and the pull request still to open (wiring/pr-writer.mjs mark, lane N)');
+  assert.equal(n('workshop', 'fact'), 3, 'the push record (M4 push.mjs settle), the pull request still to open (wiring/pr-writer.mjs mark, lane N) and the push called (wiring/push-pass.mjs mark, #536 r2)');
   // 12 on main 5a4fdba (8 of them through move()); lane 2 moved the cancel and merge card writes elsewhere.
   assert.ok(n('dispatcher', 'card') >= 12, 'move() through moves.mjs is followed to its callers');
   assert.ok(scan.sites.filter((s) => s.via === 'move()' && s.entity === 'card').length >= 8, 'each move(rec, \'card\', …) call is a site');

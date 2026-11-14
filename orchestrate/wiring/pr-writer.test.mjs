@@ -181,3 +181,9 @@ test('the real masker hides a secret-shaped string in the card\'s words', async 
   const post = g.seen.find((x) => x.method === 'POST');
   assert.ok(!post.body.body.includes(fake));
 });
+
+test('#536 r1 m6: a mask that is not a function is refused when the writer is built, not at its first write', () => {
+  for (const mask of ['x', 1, {}, true]) assert.throws(() => prWriter({ record: {}, mask }), /mask must be a function/);
+  assert.doesNotThrow(() => prWriter({ record: {} }));
+  assert.doesNotThrow(() => prWriter({ record: {}, mask: (t) => t }));
+});

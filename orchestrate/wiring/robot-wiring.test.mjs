@@ -22,7 +22,8 @@ import { ALERT_QUEUE_FACT, dropCause, outbox } from '../modules/M11-dispatcher/a
 import { HOLD_FACT, holdAlert as holdAlertReal } from '../modules/M11-dispatcher/pass.mjs';
 import { LAST_PASS_FACT } from '../modules/M11-dispatcher/tick.mjs';
 import { USAGE_FACT } from '../modules/M11-dispatcher/usage.mjs';
-import { wire as wireOwn, checkUser, lastReturn, dispatcherLate, dropLateAlerts, lockHolder, LIVE_PASS_MAX_MS, NOT_WIRED_PASSES, ROBOT_PASSES, APP_KEYS, robotToken, robotChannel, markToldByBeat, SENSORS_CAUSE, dropSensorsAlerts, SWEEP_CAUSES, SWEEP_MARGIN_MS, LATE_CAUSE } from './robot-wiring.mjs';
+import { wire as wireOwn, checkUser, lastReturn, dispatcherLate, dropLateAlerts, lockHolder, LIVE_PASS_MAX_MS, NOT_WIRED_PASSES, ROBOT_PASSES, APP_KEYS, pushTokenFor, robotToken, robotChannel, markToldByBeat, SENSORS_CAUSE, dropSensorsAlerts, SWEEP_CAUSES, SWEEP_MARGIN_MS, LATE_CAUSE } from './robot-wiring.mjs';
+import { PUSH_NOT_WIRED } from './robot-push.mjs';
 import { generateKeyPairSync } from 'node:crypto';
 import { pidDead, takePassLock } from '../modules/M11-dispatcher/pass-lock.mjs';
 import { tick } from '../modules/M11-dispatcher/tick.mjs';
@@ -268,7 +269,8 @@ test('R-0b-162 B (L242): with the Dispatcher never run, the late alert is queued
   assert.ok(got.includes('the Dispatcher has no full pass on record: nothing is started or merged until it runs'), got.join(' | '));
   // Every pass before it had run: their failures were queued first, so delivery saw them too.
   for (const p of ['gate', 'watch']) assert.ok(got.some((t) => t.startsWith(`the robot job's ${p} pass failed`)), p);
-  assert.equal(ROBOT_PASSES.at(-1), 'deliver');
+  // Deliver is after every pass but push, which is last so a slow push never holds up the round's alerts (L1115).
+  assert.deepEqual(ROBOT_PASSES.slice(-2), ['deliver', 'push']);
 });
 
 test('audit #144 r2 n1: a config that names no installRoot is refused by main, which says installRoot', async () => {
@@ -891,6 +893,35 @@ test('L600 PR 1: without the App keys deliver is not wired; some but not all, or
   const r = boot(world({ extra: three }));
   assert.equal(r.code, 1);
   assert.match(r.err, /robot: not started: config: the robot App keys go together, all four or none: alertOwner missing/);
+});
+
+test('L1115: the push pass refuses until every part is there; some outside check keys, or a bad one, stop the start', async () => {
+  const OUTSIDE = { outsideRepo: 'owner-x/outside', outsideWorkflow: '.github/workflows/outside-check.yml', outsideSlot: 'product 1', outsideTag: 'abcd1234' };
+  // No App: the push says so.
+  const none = world();
+  const a = await wire(none.config, { fetchFn: fakeGitHubFetch(none.fake), log: () => {} });
+  assert.throws(() => a.passes.push(), (e) => e.message === notWiredText(NOT_WIRED_PASSES.push));
+  // The App and the outside check named, no owner's Mac user id: the push says so (#536 r1 m3).
+  const noOwner = world({ extra: { ...APP, ...OUTSIDE } });
+  const n = await wire(noOwner.config, { fetchFn: fakeGitHubFetch(noOwner.fake), log: () => {} });
+  assert.throws(() => n.passes.push(), (e) => e.message === notWiredText(PUSH_NOT_WIRED.owner));
+  // A hostLockUid that is root's or this job's own user: the job does not start (the Dispatcher's own check).
+  for (const uid of [0, process.getuid()]) {
+    const w = world({ extra: { ...APP, ...OUTSIDE, hostLockUid: uid } });
+    await assert.rejects(wire(w.config, { fetchFn: fakeGitHubFetch(w.fake), log: () => {} }), /config: hostLockUid is/);
+  }
+  // With it too: the next missing part is the scanner's paths (lane 4, #525), still refusing.
+  const both = world({ extra: { ...APP, ...OUTSIDE, hostLockUid: process.getuid() + 2 } });
+  const b = await wire(both.config, { fetchFn: fakeGitHubFetch(both.fake), log: () => {} });
+  assert.throws(() => b.passes.push(), /not wired yet: robot\.push: the secret scanner's paths are not wired/);
+  // Some but not all, or a bad value: the job does not start.
+  for (const k of Object.keys(OUTSIDE)) {
+    const { [k]: _, ...three } = OUTSIDE;
+    const w = world({ extra: three });
+    await assert.rejects(wire(w.config, { fetchFn: fakeGitHubFetch(w.fake), log: () => {} }), new RegExp(`config: the outside check keys go together, all four or none: ${k} missing`));
+  }
+  const bad = world({ extra: { ...OUTSIDE, outsideSlot: 'slot one' } });
+  await assert.rejects(wire(bad.config, { fetchFn: fakeGitHubFetch(bad.fake), log: () => {} }), /config: outsideSlot must be/);
 });
 
 test('L600 PR 1: robotToken mints on the first ask only, keeps that one answer, and never rejects', async () => {
@@ -1847,4 +1878,13 @@ test('#464 m-C: wire passes upMs to the heartbeat probes: just after a restart a
     await (await wire(w.config, o)).passes.heartbeat();
     assert.equal([...gh.issues.values()].some((i) => /heartbeat red: sensors/.test(i.title)), red, `up ${up} ms`);
   }
+});
+
+test('#536 r2 Q21: the push\'s token getter mints with the scope it is given, never the installation\'s whole token', async () => {
+  const asked = [];
+  const c = { keyDir: '/k', appId: '1', appInstallation: 2, ownerUid: 3 };
+  const get = pushTokenFor(c, { uid: 7001, now: () => 0, mint: async (o) => { asked.push(o.scope); return { ok: true, token: 'x' }; } });
+  const scope = { repositories: ['test-repo'], permissions: { contents: 'write', pull_requests: 'write' } };
+  assert.deepEqual(await get(scope)(), { ok: true, token: 'x' });
+  assert.deepEqual(asked, [scope]);
 });
