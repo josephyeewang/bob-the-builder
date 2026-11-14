@@ -8,7 +8,7 @@
 // silent the start command must hold the one allowed sources limit (settings-names.mjs sourcesArgs), or no start.
 
 import { spawn } from 'node:child_process';
-import { FLAGS as F, INIT_FIELDS as I, ALLOWED_SETTING_SOURCES, MIN_CLAUDE_CODE, NO_FILE_SOURCES, sourcesArgs } from './settings-names.mjs';
+import { FLAGS as F, INIT_FIELDS as I, ALLOWED_SETTING_SOURCES, MIN_CLAUDE_CODE, NO_FILE_SOURCES, noToolServerArgs, sourcesArgs } from './settings-names.mjs';
 import { compareVersions } from './hooks-check.mjs';
 import { NEVER_TOOLS, ALWAYS_TOLERATED } from './role-profiles.mjs';
 
@@ -17,7 +17,7 @@ const refuse = (reason) => ({ ok: false, reason });
 /** The headless start command for a role. No tool server config but an empty one. */
 export function roleArgs({ profile, settingsFile, model, prompt = 'Reply with the word ready.' }) {
   const a = [F.print, F.outputFormat, F.streamJson, F.verbose, F.tools, profile.tools.join(','), F.settings, settingsFile, ...sourcesArgs(),
-    F.strictMcpConfig, F.mcpConfig, '{"mcpServers":{}}', F.permissionMode, profile.mode];
+    ...noToolServerArgs(), F.permissionMode, profile.mode];
   if (profile.restricted) a.push(F.restricted);
   if (model) a.push(F.model, model);
   a.push(F.maxTurns, '1', prompt);

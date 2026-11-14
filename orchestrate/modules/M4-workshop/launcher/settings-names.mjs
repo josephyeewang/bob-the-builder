@@ -35,6 +35,9 @@ export const FLAGS = Object.freeze({
 export const NO_FILE_SOURCES = '';
 /** The start-command words that limit the settings sources: the only form the read-back accepts. */
 export const sourcesArgs = () => [FLAGS.settingSources, NO_FILE_SOURCES];
+/** The start-command words that load no tool server but an empty list: every start the launcher makes carries them
+ * (readback.mjs roleArgs, review-launch.mjs sessionArgs, the live proof's runs). */
+export const noToolServerArgs = () => [FLAGS.strictMcpConfig, FLAGS.mcpConfig, '{"mcpServers":{}}'];
 
 export const SETTINGS = Object.freeze({
   permissions: 'permissions',
@@ -152,6 +155,11 @@ export const CONFIRMED = Object.freeze({
 
 /** The ways a CONFIRMED entry may say a name was proven. */
 export const PROOF_KIND = /^(readback|break-it|spelling):./;
+/** The only names a spelling pair may confirm (L1114, audit L1124 m3): it shows the CLI reads the name, not what the
+ * setting does, so it counts only where the lead ruled it does. Their behaviour proofs are R-0b-178. */
+export const SPELLING_ONLY = Object.freeze([SETTINGS.failIfUnavailable, SETTINGS.strictAllowlist, SETTINGS.crossSessionInbound]);
+/** Whether a CONFIRMED entry's `by` text proves `name`: a known proof kind, and a spelling pair only for SPELLING_ONLY. */
+export const proofCounts = (name, by) => typeof by === 'string' && PROOF_KIND.test(by) && (!by.startsWith('spelling:') || SPELLING_ONLY.includes(name));
 
 // Keys whose children are data (plugin ids, variable names and values), not setting names.
 const DATA_KEYS = new Set([SETTINGS.enabledPlugins]);
@@ -181,6 +189,6 @@ export function unconfirmedNames({ settings, flags = [], version, confirmed = CO
   if (typeof version !== 'string' || !version) return ['(no Claude Code version given)'];
   return [...new Set([...namesIn(settings), ...flags])].filter((n) => {
     const c = Object.hasOwn(confirmed, n) ? confirmed[n] : null;
-    return !(c && typeof c.by === 'string' && PROOF_KIND.test(c.by) && c.version === version);
+    return !(c && proofCounts(n, c.by) && c.version === version);
   });
 }
