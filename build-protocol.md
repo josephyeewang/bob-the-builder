@@ -449,6 +449,8 @@ When a bug is discovered during verification or after deployment, follow this se
 6. **Add regression test:** Write a test that would have caught this bug. This prevents recurrence.
 7. **Update spec if gap found:** If the bug revealed a spec gap (Step 3), update the relevant spec and run propagation enforcement.
 
+**How, and a record per bug:** `templates/debugging-protocol.md` gives the how for steps 1, 2 and 4 (boundary logging, tracing a bad value back to its source, one cause at a time, the layers that stop a bug coming back, waiting for a condition instead of a guessed time), the warning signs that mean "back to step 1", and a record to fill in. It adds no step; where it and this section disagree, this section wins.
+
 **Anti-pattern this prevents:** The "spray and pray" debugging pattern — adding logging, trying random fixes, bypassing checks, adding temporary endpoints — which produces chains of 5-6 commits that should have been one. (Observed: a consumer task app's Twilio webhook debugging required 6 commits; structured debugging would have required 1-2.)
 
 **Three-strikes integration:** If the same fix fails 3 times following this protocol, STOP. The bug is not where you think it is. State what was tried, what was ruled out, and change approach entirely.
@@ -1220,6 +1222,7 @@ This generates the full folder structure (`docs/`, `contracts/`, `evals/`, `scri
 After the script runs, Claude:
 - Customizes the hook commands in `.claude/settings.json` for the chosen stack (replace the placeholder `echo` commands with real format/typecheck commands per Step 6b)
 - **Once CI exists:** gives the owner the paste-ready edit that names its required jobs in `.claude/required-checks.json` (and lists every other job under `not_required` with a reason) — that moves the merge guard from "no CI yet" to guarding. Claude cannot make this edit itself (config-protection), by design.
+- **Once the product has pages:** adds Bob's quality checks (every page loads, matches its reference image, is accessible and fast enough; no new dead or duplicated code) by following `~/.claude/skills/bob/../templates/quality/README.md`.
 - Sets up hosting/deployment (if applicable — e.g., `vercel link`)
 - Pushes to GitHub
 - Initializes project memory directory (if not already created)
