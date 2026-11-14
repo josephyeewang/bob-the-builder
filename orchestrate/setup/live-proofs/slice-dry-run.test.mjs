@@ -5,8 +5,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { FIRST, swap } from '../../modules/M10-rules/first-cutover.test-helper.mjs';
-import { blobSha } from '../../modules/M10-rules/reader.mjs';
-import { rulesRows, mergeRow, dryRun, parseArgs, main, NOT_WIRED } from './slice-dry-run.mjs';
+import { blobSha, RULES_PATH } from '../../modules/M10-rules/reader.mjs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { rulesRows, mergeRow, dryRun, parseArgs, main, writeNew, NOT_WIRED } from './slice-dry-run.mjs';
 
 const P = 'sample-app';
 const BOT = '1000099';
@@ -22,10 +25,21 @@ const SLICE = [
 
 const state = (text, { list } = {}) => {
   const blob = blobSha(Buffer.from(text, 'utf8'));
-  return { approved: { [P]: list ?? [blob] }, lastGood: { text, commit: COMMIT, blob } };
+  return { approved: { [P]: list ?? [blob] }, lastGood: { text, commit: COMMIT, blob }, main: { text, commit: COMMIT, blob } };
 };
 const rows = (text, o = {}) => rulesRows({ product: P, bot: BOT, ...state(text, o), ...o.over });
 const failed = (rs) => rs.filter((r) => !r.ok).map((r) => r.what);
+// The Dispatcher's config, and ports that answer GitHub main's two reads as the reader would see them.
+const CONF = { product: P, rulesStateDir: '/rs', productsFile: '/p.json', tokenFile: '/t' };
+const ENTRY = { product: P, owner: 'o', repo: 'r', joe_github_id: 1 };
+const contents = (text) => { const buf = Buffer.from(text, 'utf8'); return { status: 200, json: { type: 'file', path: RULES_PATH, sha: blobSha(buf), encoding: 'base64', size: buf.length, content: buf.toString('base64') } }; };
+const ghOf = (answer) => ({ get: async (path) => answer(path) });
+const mainAnswer = ({ commit = COMMIT, text, refStatus = 200, fileStatus = 200 }) => (path) => {
+  if (path.endsWith('/git/ref/heads/main')) return refStatus === 200 ? { status: 200, json: { object: { sha: commit } } } : { status: refStatus, json: null };
+  if (path.includes('/contents/') && path.endsWith(`?ref=${commit}`)) return fileStatus === 200 ? contents(text) : { status: fileStatus, json: null };
+  return { status: 404, json: null };
+};
+const mainPorts = (m, over = {}) => ({ products: () => [ENTRY], gh: () => ghOf(mainAnswer({ commit: m.commit, text: m.text, ...over })) });
 const only = (rs, re) => { const f = failed(rs); assert.equal(f.length, 1, `one FAIL row, got: ${JSON.stringify(f)}`); assert.match(f[0], re); };
 
 test('the slice rules: every step-1 row PASSes', () => {
@@ -107,9 +121,9 @@ test('P17: shakedown off fails its own row', () => {
 test('the approval list: a blob not on it, no entry for the product, or a list that cannot be read, each FAIL', () => {
   only(rows(SLICE, { list: ['f'.repeat(40)] }), /on the approval list/);
   const s = state(SLICE);
-  only(rulesRows({ product: P, bot: BOT, lastGood: s.lastGood, approved: { other: s.approved[P] } }), /on the approval list/);
+  only(rulesRows({ product: P, bot: BOT, main: s.main, lastGood: s.lastGood, approved: { other: s.approved[P] } }), /on the approval list/);
   const e = Object.assign(new Error('no'), { code: 'ENOENT' });
-  const rs = rulesRows({ product: P, bot: BOT, lastGood: s.lastGood, approved: e });
+  const rs = rulesRows({ product: P, bot: BOT, main: s.main, lastGood: s.lastGood, approved: e });
   only(rs, /on the approval list/);
   assert.match(rs.find((r) => !r.ok).why, /ENOENT/);
 });
@@ -117,7 +131,7 @@ test('the approval list: a blob not on it, no entry for the product, or a list t
 test('a damaged copy (text not matching its blob) fails, even when its blob is on the list', () => {
   const s = state(SLICE);
   const lastGood = { ...s.lastGood, text: SLICE + '# changed\n' };
-  only(rulesRows({ product: P, bot: BOT, approved: s.approved, lastGood }), /hashes to its blob/);
+  only(rulesRows({ product: P, bot: BOT, approved: s.approved, main: s.main, lastGood }), /hashes to its blob/);
 });
 
 test('no copy in force: the first row fails and the rest are not tried, never passed', () => {
@@ -134,19 +148,19 @@ test('rules that do not parse fail, and the rest are not tried', () => {
   assert.match(rs.at(-1).why, /not tried/);
 });
 
-test('dryRun reads the reader\'s own files under rulesStateDir, and is never a PASS while steps are NOT WIRED', () => {
+test('dryRun reads the reader\'s own files under rulesStateDir, and is never a PASS while steps are NOT WIRED', async () => {
   const s = state(SLICE);
-  const files = { '/c.json': { rulesStateDir: '/rs' }, '/rs/approved-rules.json': s.approved, [`/rs/${P}.last-good.json`]: s.lastGood };
+  const files = { '/c.json': CONF, '/rs/approved-rules.json': s.approved, [`/rs/${P}.last-good.json`]: s.lastGood };
   const seen = [];
   const read = (f) => { seen.push(f); if (!(f in files)) throw Object.assign(new Error('no'), { code: 'ENOENT' }); return files[f]; };
-  const r = dryRun({ config: '/c.json', product: P, bot: BOT, read });
+  const r = await dryRun({ config: '/c.json', product: P, bot: BOT, read, ...mainPorts(s.main) });
   assert.deepEqual(seen.sort(), Object.keys(files).sort());
   assert.equal(r.pass, false);
   assert.ok(!r.lines.some((l) => /^\s+FAIL/.test(l)), r.lines.join('\n'));
   assert.equal(r.lines.filter((l) => /^\s+NOT WIRED/.test(l)).length, NOT_WIRED.length);
   assert.match(r.lines.at(-1), /^RESULT: NOT DONE \(1\/6 steps PASS; 5 NOT WIRED\)$/);
   delete files[`/rs/${P}.last-good.json`];
-  assert.match(dryRun({ config: '/c.json', product: P, bot: BOT, read }).lines.at(-1), /^RESULT: FAIL /);
+  assert.match((await dryRun({ config: '/c.json', product: P, bot: BOT, read, ...mainPorts(s.main) })).lines.at(-1), /^RESULT: FAIL /);
 });
 
 test('the merge row passes only refusal 9: another refusal, an allow, an ask or no answer each FAIL', () => {
@@ -156,17 +170,23 @@ test('the merge row passes only refusal 9: another refusal, an allow, an ask or 
     { decision: 'ask', reason: r9 }, { decision: 'deny' }, {}, undefined]) assert.equal(mergeRow(m).ok, false, JSON.stringify(m));
 });
 
-test('dryRun says why a list or copy could not be read, with its error code', () => {
+test('dryRun says why a list or copy could not be read, with its error code', async () => {
   const s = state(SLICE);
-  const files = { '/c.json': { rulesStateDir: '/rs' }, [`/rs/${P}.last-good.json`]: s.lastGood };
+  const files = { '/c.json': CONF, [`/rs/${P}.last-good.json`]: s.lastGood };
   const read = (f) => { if (!(f in files)) throw Object.assign(new Error('no'), { code: 'ENOENT' }); return files[f]; };
-  const out = dryRun({ config: '/c.json', product: P, bot: BOT, read }).lines.join('\n');
+  const out = (await dryRun({ config: '/c.json', product: P, bot: BOT, read, ...mainPorts(s.main) })).lines.join('\n');
   assert.match(out, /FAIL  blob .* is on the approval list .* the list can't be read \(ENOENT\)/);
 });
 
-test('dryRun stops on a config with no full rulesStateDir', () => {
-  for (const c of [{}, { rulesStateDir: 'rel' }, { rulesStateDir: 3 }]) {
-    assert.throws(() => dryRun({ config: '/c.json', product: P, bot: BOT, read: () => c }), /no full rulesStateDir/);
+test('dryRun stops on a config with no full rulesStateDir', async () => {
+  for (const c of [{ product: P }, { product: P, rulesStateDir: 'rel' }, { product: P, rulesStateDir: 3 }]) {
+    await assert.rejects(dryRun({ config: '/c.json', product: P, bot: BOT, read: () => c, ...mainPorts(state(SLICE).main) }), /no full rulesStateDir/);
+  }
+});
+
+test('m1: dryRun stops on a config that is the Dispatcher\'s for another product, or names none', async () => {
+  for (const c of [{ ...CONF, product: 'other-app' }, { rulesStateDir: '/rs' }, null]) {
+    await assert.rejects(dryRun({ config: '/c.json', product: P, bot: BOT, read: () => c, ...mainPorts(state(SLICE).main) }), /the Dispatcher's config for .*, not sample-app/);
   }
 });
 
@@ -179,20 +199,105 @@ test('parseArgs needs a full config path, a product and a bot id; nothing else',
   }
 });
 
-test('main: exit 1 while not done, writes only the result file asked for (0600), exit 2 on bad arguments', () => {
+test('main: exit 1 while not done, writes only the result file asked for, exit 2 on bad arguments or a result file already there', async () => {
   const s = state(SLICE);
-  const files = { '/c.json': { rulesStateDir: '/rs' }, '/rs/approved-rules.json': s.approved, [`/rs/${P}.last-good.json`]: s.lastGood };
+  const files = { '/c.json': CONF, '/rs/approved-rules.json': s.approved, [`/rs/${P}.last-good.json`]: s.lastGood };
   const read = (f) => files[f];
   const outs = []; const writes = [];
-  const code = main(['/c.json', '--product', P, '--bot-id', BOT, '--result', '/r.txt'], { out: (l) => outs.push(l), err: () => {}, write: (...a) => writes.push(a), read });
+  const code = await main(['/c.json', '--product', P, '--bot-id', BOT, '--result', '/r.txt'], { out: (l) => outs.push(l), err: () => {}, write: (...a) => writes.push(a), read, ...mainPorts(s.main) });
   assert.equal(code, 1);
   assert.equal(writes.length, 1);
   assert.equal(writes[0][0], '/r.txt');
-  assert.deepEqual(writes[0][2], { mode: 0o600 });
   assert.match(writes[0][1], /RESULT: NOT DONE/);
   assert.match(outs.at(-1), /RESULT: NOT DONE/);
   const errs = [];
-  assert.equal(main(['c.json'], { out: () => {}, err: (l) => errs.push(l), write: () => assert.fail('wrote'), read }), 2);
+  assert.equal(await main(['c.json'], { out: () => {}, err: (l) => errs.push(l), write: () => assert.fail('wrote'), read }), 2);
   assert.match(errs[0], /usage/);
-  assert.equal(main(['/c.json', '--product', P, '--bot-id', BOT], { out: () => {}, err: () => {}, write: () => assert.fail('wrote'), read: () => ({}) }), 2);
+  assert.equal(await main(['/c.json', '--product', P, '--bot-id', BOT], { out: () => {}, err: () => {}, write: () => assert.fail('wrote'), read: () => ({}) }), 2);
+  const e2 = [];
+  const eexist = () => { throw Object.assign(new Error('x'), { code: 'EEXIST' }); };
+  assert.equal(await main(['/c.json', '--product', P, '--bot-id', BOT, '--result', '/r.txt'], { out: () => {}, err: (l) => e2.push(l), write: eexist, read, ...mainPorts(s.main) }), 2);
+  assert.match(e2[0], /can't be made new \(EEXIST\)/);
+});
+
+// L1132 M1: GitHub main's rules are read and compared; anything but main holding the version in force is a FAIL.
+test('M1: main moved, other rules on main, a 404, a 500, a throw, a timeout or no products entry: each FAILs the main row alone', async () => {
+  const s = state(SLICE);
+  const files = { '/c.json': CONF, '/rs/approved-rules.json': s.approved, [`/rs/${P}.last-good.json`]: s.lastGood };
+  const read = (f) => files[f];
+  const run = async (gh, products = () => [ENTRY]) => (await dryRun({ config: '/c.json', product: P, bot: BOT, read, products, gh: () => gh })).lines;
+  const mainFail = (lines, why) => {
+    const f = lines.filter((l) => /^\s+FAIL/.test(l));
+    assert.equal(f.length, 1, f.join('\n'));
+    assert.match(f[0], /GitHub main's rules .*are the copy in force/);
+    assert.match(f[0], why);
+    assert.match(lines.at(-1), /^RESULT: FAIL /);
+  };
+  const ok = await run(ghOf(mainAnswer({ text: SLICE })));
+  assert.ok(ok.some((l) => /PASS  GitHub main's rules \(commit cccccccccccc…\) are the copy in force/.test(l)), ok.join('\n'));
+  mainFail(await run(ghOf(mainAnswer({ commit: 'd'.repeat(40), text: `${SLICE}# more\n` }))), /main holds blob .*the reader holds/);
+  mainFail(await run(ghOf(mainAnswer({ text: swap(SLICE, '  shakedown: true\n', '  shakedown: false\n') }))), /main holds blob/);
+  mainFail(await run(ghOf(mainAnswer({ text: SLICE, fileStatus: 404 }))), /main can't be read: .*404/);
+  mainFail(await run(ghOf(mainAnswer({ text: SLICE, refStatus: 500 }))), /main can't be read: .*500/);
+  mainFail(await run({ get: async () => { throw new TypeError('fetch failed'); } }), /main can't be read: fetch failed/);
+  mainFail(await run({ get: async () => { throw Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' }); } }), /main can't be read: .*timeout/);
+  mainFail(await run(ghOf(mainAnswer({ text: SLICE })), () => []), /main can't be read: products.json has no sample-app/);
+  mainFail(await run(ghOf(mainAnswer({ text: SLICE })), () => { throw new Error('products.json must be a list'); }), /main can't be read: products.json must be a list/);
+});
+
+test('M1: rulesRows with main missing, an Error, no blob, or another blob each FAIL that one row', () => {
+  const s = state(SLICE);
+  for (const m of [undefined, new Error('x'), { commit: COMMIT }, { ...s.main, blob: 'e'.repeat(40) }]) {
+    only(rulesRows({ product: P, bot: BOT, approved: s.approved, lastGood: s.lastGood, main: m }), /GitHub main's rules/);
+  }
+});
+
+// L1132 m2: one test per row the auditor's plants showed untested.
+test('b15: M10\'s module checks finding a problem fails their row alone', () => {
+  const rs = rulesRows({ product: P, bot: BOT, ...state(SLICE), ports: { moduleProblems: () => ['M6: x is missing'] } });
+  only(rs, /module checks pass/);
+  assert.match(rs.find((r) => !r.ok).why, /M6: x is missing/);
+});
+
+test('b17: a cutover_stage other than first fails its row', () => {
+  const f = failed(rows(swap(SLICE, '  cutover_stage: first\n', '  cutover_stage: second\n')));
+  assert.ok(f.some((w) => /cutover_stage is first/.test(w)), JSON.stringify(f));
+});
+
+test('b18: no named required check fails its row', () => {
+  const f = failed(rows(swap(SLICE, '  required_checks: [build, test]\n', '')));
+  assert.ok(f.some((w) => /every merge needs a named check/.test(w)), JSON.stringify(f));
+});
+
+test('b12: a caps read that throws is a FAIL on every caps row, never a cap of 0', () => {
+  const rs = rulesRows({ product: P, bot: BOT, ...state(SLICE), ports: { editingLimits: () => { throw new Error('caps unreadable'); } } });
+  const f = rs.filter((r) => !r.ok);
+  assert.equal(f.length, 5, JSON.stringify(f));
+  assert.ok(f.every((r) => /editing session/.test(r.what) && /error: caps unreadable/.test(r.why)), JSON.stringify(f));
+});
+
+test('b16: a merge gate that throws is a FAIL, never read as refusal 9', () => {
+  const rs = rulesRows({ product: P, bot: BOT, ...state(SLICE), ports: { may: () => { throw new Error('gate broke'); } } });
+  only(rs, /the merge gate refuses slice\/card\.md/);
+  assert.match(rs.find((r) => !r.ok).why, /it answers error: gate broke/);
+});
+
+// L1132 m3: the result file is made new, never one already there and never through a link.
+test('m3: writeNew makes a new 0600 file, and refuses a file already there or a link (dangling or not), writing nothing through it', () => {
+  const d = mkdtempSync(join(tmpdir(), 'slice-dry-run-'));
+  try {
+    const f = join(d, 'r.txt');
+    writeNew(f, 'one\n');
+    assert.equal(readFileSync(f, 'utf8'), 'one\n');
+    assert.equal(statSync(f).mode & 0o777, 0o600);
+    assert.throws(() => writeNew(f, 'two\n'), { code: 'EEXIST' });
+    assert.equal(readFileSync(f, 'utf8'), 'one\n');
+    const target = join(d, 'target'); const link = join(d, 'link');
+    symlinkSync(target, link);
+    assert.throws(() => writeNew(link, 'x'), { code: 'EEXIST' });
+    assert.equal(existsSync(target), false);
+    writeFileSync(target, 'kept\n');
+    assert.throws(() => writeNew(link, 'x'));
+    assert.equal(readFileSync(target, 'utf8'), 'kept\n');
+  } finally { rmSync(d, { recursive: true, force: true }); }
 });
