@@ -33,7 +33,11 @@
 //                                says what it is, a credential's name (a finding) or a name followed to its values:
 //                                - a name that says it holds a credential (`token`, `appKey`, `cfg.secret`, `cfg?.token`,
 //                                  `cfg['token']`, `tok`, `pw`, `key`) is a finding; one that says what it is (a path, a
-//                                  count, a switch) passes, and so does an imported name;
+//                                  count, a switch) passes, and so does an imported name. A chain is judged by its last
+//                                  part (`env.GITHUB_PAT` does not pass because it starts `env`, r5 M3); a chain ending
+//                                  env or vars is followed, not passed; `tokens[i]` is listed (r5 m-b);
+//                                - `process.env.X` is a finding unless X is a plain variable (SAFE_ENV: HOME, PATH,
+//                                  TMPDIR, USER…); `process.env` as a whole value is listed; globalThis is not quiet (r5 M1);
 //                                - a parameter is read at each caller (r3 M2), its property `o.v` too, with the caller's
 //                                  object read for its values;
 //                                - any other name through every value this module gives it (`const t =
@@ -43,8 +47,9 @@
 //                                  that only reshapes (TRANSFORM: `.trim()`, `.map(pure function)`, `JSON.parse`) through
 //                                  what it is called on and given; node's path, os and url functions (PURE_IMPORT), and a
 //                                  function whose name says it answers with a path, a name, a count or a yes or no
-//                                  (`tokenPath(cfg)`, `isRoot()`), pass. `Object.entries(x)`/`values(x)` read x's values,
-//                                  so a name like `env` does not pass there.
+//                                  (`tokenPath(cfg)`, `isRoot()`), pass; not one ending env, vars, file or source, nor one
+//                                  named for reading (`readFile`, `loadKey`, `getSecret`, r5 M2). `Object.entries(x)`/
+//                                  `values(x)` read x's values, so a name like `env` does not pass there.
 //                                Anything else (a program's answer, a file's text, an `await` of an object's method, a
 //                                name given no value here) is listed.
 //   everything else              listed as `unread`: a list or word from a helper exported or called as a method (its
@@ -56,7 +61,8 @@
 // Each finding carries `site`, a hash of its kind, what it says and the whole call's text with its spaces folded, so the
 // reviewed list names each place, not each function or message (r4 M-C). A listed site inside a function that reads a
 // credential (`readSecret(`, a cat or a read of a path whose last name part, or whose given value, says token, secret,
-// key or password) is kind `reader`, not `unread`, so a reason written for ordinary words can not cover it.
+// key or password) is kind `reader`, not `unread`, so a reason written for ordinary words can not cover it. So is one
+// that uses, or sits in a function that uses, a credential the module reads at its top level (r5 m-a).
 // The safe forms pass: a flag or name that says where a credential is or what it is (`--token-file`, `tokenPath(cfg)`,
 // `secretKind`), a count (`--max-tokens`, `maxTokens`, `tokens`), a switch (`--no-token`, `--secret-scan`), a helper's name
 // (`credentialHelper`), and a port in a URL (`https://host:443/`). What follows a list in a start call is its options
@@ -323,6 +329,8 @@ function judgeList(list) {
 
 const escape = (s) => s.replace(/[$]/g, '\\$');
 const NAME_RE = /^[A-Za-z_$][\w$]*$/;
+/** Environment variables that hold a place, a name or a setting, never a credential: process.env.X passes only for these. */
+const SAFE_ENV = /^(?:HOME|PATH|TMPDIR|USER|LOGNAME|SUDO_USER|SUDO_UID|SUDO_GID|SHELL|PWD|LANG|LC_ALL|LC_CTYPE|TERM|TZ|NODE_ENV|CI|XDG_[A-Z_]+_HOME)$/;
 
 /** The index of the '(' that the ')' at `close` closes, counting brackets back (parameter lists hold no strings that matter). */
 function openOf(src, close) {
@@ -449,9 +457,13 @@ function pureFunction(f) {
 /**
  * A function whose name says what it returns: a path, a name, a count, a yes or no (`tokenPath(cfg)`, `isRoot()`). Not
  * one ending in env or vars: that answers with an environment, whose values are what must stay off a command line
- * (`safeGitEnv()` spread into `env -i K=V …`, #556 r4); nor `with…`/`use…`, which may hand back what they are given.
+ * (`safeGitEnv()` spread into `env -i K=V …`, #556 r4); nor `with…`/`use…`, which may hand back what they are given; nor
+ * one ending in file or source, or named for reading (`readFile(tokenFile)`, `readKeyFile(p)`), which answer with what
+ * they read (#556 r5 M2).
  */
-const safeCall = (f) => (SAFE_END.test(f) && !/(?:env|vars?)$/i.test(f)) || /^(?:max|min|num|no|has|is)(?=[A-Z_])/.test(f);
+const safeCall = (f) => (SAFE_END.test(f) && !/(?:env|vars?|files?|source)$/i.test(f) && !READ_START.test(f)) || /^(?:max|min|num|no|has|is)(?=[A-Z_])/.test(f);
+/** A function named for reading or fetching (`readFile`, `loadKey`, `getSecret`, `fetchToken`, `catFile`) answers with what it read (#556 r5 M2). */
+const READ_START = /^(?:read|load|get|fetch|cat)(?![a-z])/;
 /** Methods that take nothing and answer with a place, a time, an id or a number. */
 const NOARG_SAFE = /^(?:tmpdir|homedir|cwd|now|hostname|platform|arch|getuid|getgid|geteuid|getegid|randomUUID|uptime|toISOString|getTime|toJSON)$/;
 /** Global functions that reshape their argument. */
@@ -724,7 +736,7 @@ export function credentialArgFindings(text) {
     ...[...src.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:require|await\s+import)\s*\(/g)].map((m) => m[1]),
   ]);
   const imported = (n) => importedNames.has(n);
-  const QUIET = /^(?:undefined|null|true|false|this|NaN|Infinity|String|Number|Boolean|JSON|Math|Object|Array|process|Buffer|Promise|Date|RegExp|Error|Symbol|Set|Map|URL|console|globalThis|Intl)$/;
+  const QUIET = /^(?:undefined|null|true|false|this|NaN|Infinity|String|Number|Boolean|JSON|Math|Object|Array|process|Buffer|Promise|Date|RegExp|Error|Symbol|Set|Map|URL|console|Intl)$/;
   const isFunction = (x) => /^(?:async\b|function\b|\([^()]*\)\s*=>|[\w$]+\s*=>)/.test(x);
   /** A word leaf followed to its end (#556 r4 M-A): this module's helper is read through its returns (its parameters bound
    * to the call's arguments); a call that only reshapes its inputs (TRANSFORM) is read through them; anything else is
@@ -752,7 +764,12 @@ export function credentialArgFindings(text) {
     if (!p) return unreadLeaf(at, label, `${short(e)} is not read to its end`, e);
     const callAt = p.ops.map((o) => o.type).lastIndexOf('call');
     if (callAt < 0 && !isNew) {
-      if (p.root.type === 'name') return nameChain([p.root.name, ...p.ops.filter((o) => o.type === 'prop').map((o) => o.name)], at, level, label, env, seen);
+      if (p.root.type === 'name') {
+        const c = [p.root.name, ...p.ops.filter((o) => o.type === 'prop').map((o) => o.name)];
+        // One element of a list named tokens (`tokens[0]`) is a token, whatever a list of them says it is (#556 r5 m-b).
+        if (p.ops.some((o) => o.type === 'index') && /tokens$/i.test(c.at(-1))) return unreadLeaf(at, label, `${short(e)} is one of a list of tokens`, e);
+        return nameChain(c, at, level, label, env, seen);
+      }
       return rootLeaves(p.root, at, level, label, env, seen);
     }
     // The value is what the last call returns; a property of it is read with it (a credential's name is a finding).
@@ -799,10 +816,19 @@ export function credentialArgFindings(text) {
   /** A name or `a.b.c`: see the comment above the start calls. */
   const nameChain = (c, at, level, label, env, seen, values = false) => {
     const n = c[0];
+    // process.env (#556 r5 M1): a variable is a finding unless its name is one of the plain ones; the whole environment
+    // as a value (spread, Object.entries, JSON.stringify) is listed.
+    if (n === 'process' && c[1] === 'env') {
+      if (c.length === 2) return unreadLeaf(at, label, 'process.env as a value: every variable becomes a word', c.join('.'));
+      if (credName(c)) return undefined;
+      return SAFE_ENV.test(c[2]) ? undefined : push(at, 'value', c.slice(0, 3).join('.'), c.join('.'));
+    }
     if (QUIET.test(n) || credName(c) || local.has(n)) return undefined;
     if (imported(n)) return values ? unreadLeaf(at, label, `${n}'s values become words, and ${n} comes from another module`, n) : undefined;
-    if (!values && (SAFE_END.test(n) || SAFE_START.test(n))) return undefined;
-    if (c.length > 1 && (SAFE_END.test(c.at(-1)) || SAFE_START.test(c.at(-1)))) return undefined;
+    // A plain name that says what it is passes; `env.X` or `cfg.value` is read by its last part, not its first (r5 M3).
+    if (!values && c.length === 1 && (SAFE_END.test(n) || SAFE_START.test(n))) return undefined;
+    // A chain ending env or vars is an environment, whose values are the words (r5 M1): it is followed, not passed.
+    if (c.length > 1 && !/(?:env|vars?)$/i.test(c.at(-1)) && (SAFE_END.test(c.at(-1)) || SAFE_START.test(c.at(-1)))) return undefined;
     if (seen.has(n)) return undefined;
     seen.add(n);
     if (env?.has(n)) { const b = env.get(n); return leaf(b.expr, b.at, level, label, b.env, seen); }
@@ -960,9 +986,22 @@ export function credentialArgFindings(text) {
     || [...body.matchAll(/['"](?:\/bin\/)?cat['"]\s*,([^\]]*)\]/g)].some((m) => pathy(m[1]))
     || [...body.matchAll(/\b(?:readFileSync|readFile|readText)\s*\(([^)]*)\)/g)].some((m) => pathy(m[1]));
   const readers = defs.filter((d) => readsCredential(src.slice(d.start, d.end)));
+  // A credential read at the module's top level (`const t = readFileSync(tokenPath)`, #556 r5 m-a): a site that names
+  // what it read, or sits in a function that does, is a reader site too.
+  let top = src; for (const d of defs) top = top.slice(0, d.start) + ' '.repeat(d.end - d.start) + top.slice(d.end);
+  const topReads = [...top.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*/g)]
+    .map((m) => ({ name: m[1], start: m.index, end: exprEnd(src, m.index + m[0].length) }))
+    .filter((r) => readsCredential(src.slice(r.start, r.end)));
+  const readNames = topReads.map((r) => r.name);
+  const usesRead = (t) => readNames.some((n) => new RegExp(`(?<![\\w$.])${escape(n)}(?![\\w$])`).test(t));
   for (const x of found) {
     const r = x.kind === 'unread' && readers.find((d) => d.start <= x.at && x.at < d.end);
     if (r) { x.kind = 'reader'; x.what = `${x.what} (in ${r.name ?? 'a function'}, which reads a credential)`; }
+    else if (x.kind === 'unread' && readNames.length) {
+      const d = defs.filter((f) => f.start <= x.at && x.at < f.end).sort((a, b) => (b.start - a.start))[0];
+      // the site itself is the top-level read (a word followed to it), or names what it read, or sits in a function that does
+      if (topReads.some((r) => r.start <= x.at && x.at < r.end) || usesRead(x.list) || (d && usesRead(src.slice(d.start, d.end)))) { x.kind = 'reader'; x.what = `${x.what} (it uses a credential this module reads at its top)`; }
+    }
     delete x.at;
   }
   return found.sort((x, y) => x.line - y.line);

@@ -400,6 +400,45 @@ test('R-0b-179 (b, #556 r3): the scan fails closed: command strings, parameters,
   ]) assert.deepEqual(said(src), [], src);
 });
 
+test('R-0b-179 (b, #556 r5): the environment, read-named calls and env.X are read, not passed', () => {
+  const H = "import { spawnSync } from 'node:child_process';\nimport { readFile } from 'node:fs/promises';\nimport fsp from 'node:fs/promises';\n";
+  const E = 'process.' + 'env';
+  const plants = {
+    'M1 an environment variable as a word': `spawnSync('gh', ['x', ${E}.GH_PAT]);`,
+    'M1 an environment variable through a name': `const k2 = ${E}.ANTHROPIC_KEY;\nspawnSync('x', ['--', k2]);`,
+    'M1 env -i K=V from the whole environment': `const git = (args) => spawnSync('/usr/bin/env', ['-i', ...Object.entries(${E}).map(([k, v]) => \`\${k}=\${v}\`), 'git', ...args]);\ngit(['x']);`,
+    'M1 the environment spread into an object': `spawnSync('x', ['--', JSON.stringify({ ...${E} })]);`,
+    'M1 the environment stringified': `spawnSync('x', ['--', JSON.stringify(${E})]);`,
+    'M1 globalThis is not quiet': "spawnSync('x', ['--', globalThis.vault]);",
+    'M1 a chain ending env': "export function f(o) { spawnSync('/usr/bin/env', ['-i', ...Object.entries(o.env).map(([k, v]) => `${k}=${v}`)]); }",
+    'M2 readFile(tokenFile)': "async function f(tokenFile) { spawnSync('x', ['--', await readFile(tokenFile, 'utf8')]); }\nf('/t');",
+    'M2 fsp.readFile(p)': "async function f(p) { spawnSync('x', ['--', await fsp.readFile(p, 'utf8')]); }\nf('/t');",
+    'M2 readKeyFile(p)': "import { readKeyFile } from './k.mjs';\nspawnSync('x', ['--', readKeyFile('/t')]);",
+    // Each half of M2 pinned alone: a read-named call whose name ends like a path; a call ending source.
+    'M2 readTokenPath(p)': "import { readTokenPath } from './k.mjs';\nspawnSync('x', ['--', readTokenPath('/t')]);",
+    'M2 secretSource(p)': "import { secretSource } from './k.mjs';\nspawnSync('x', ['--', secretSource('/t')]);",
+    // Exported with no caller here, so each is caught only by its own rule (not by globalThis at a caller).
+    'M3 env.GITHUB_PAT': "export function f(env) { spawnSync('x', ['--', env.GITHUB_PAT]); }",
+    'M3 ghEnv.value': "export function f(ghEnv) { spawnSync('x', ['--', ghEnv.value]); }",
+    'M3 gitEnv.GIT_CONFIG_VALUE_0': "export function f(gitEnv) { spawnSync('x', ['--', gitEnv.GIT_CONFIG_VALUE_0]); }",
+  };
+  for (const [what, src] of Object.entries(plants)) assert.ok(said(H + src).length > 0, `${what} passed in silence`);
+  // A variable not on the plain list is a finding (value), not only a listing.
+  assert.ok(said(H + plants['M1 an environment variable as a word']).includes(`value:${E}.GH_PAT`));
+  assert.ok(said(H + plants['M1 an environment variable through a name']).includes(`value:${E}.ANTHROPIC_KEY`));
+  // M2: a read of a token file inside the function makes its site a reader site.
+  assert.equal(said(H + plants['M2 readFile(tokenFile)']).filter((x) => x.startsWith('reader:')).length, 1);
+  // The plain variables still pass.
+  assert.deepEqual(said(H + `spawnSync('/bin/x', [${E}.HOME, \`\${${E}.TMPDIR}/a\`, ${E}.USER]);`), []);
+  // m-a: a credential read at the module's top makes the sites that use it reader sites, in a function or not.
+  const R = "import { readFileSync } from 'node:fs';\nconst tokenPath = '/k/t';\nconst t = readFileSync(tokenPath, 'utf8').trim();\n";
+  const readerOf = (src) => said(H + R + src).filter((x) => x.startsWith('reader:'));
+  assert.equal(readerOf("export function f(io) { const h = t.slice(0); return io.run('x', ['--', h]); }").length, 1);
+  assert.equal(readerOf("export function f(io, w) { return io.run('x', ['--', w, t.length > 1 ? 'a' : 'b']); }").length, 1);
+  // m-b: one element of a list named tokens is listed.
+  assert.ok(said(H + "export function f(tokens) { spawnSync('x', ['--', tokens[0]]); }").some((x) => x.includes('one of a list of tokens')));
+});
+
 test('R-0b-179 (b): the safe ways pass: the environment, a file, a kind or a name, a count, a switch, and an options object after the list', () => {
   for (const src of [
     "spawnSync(bin, ['push'], { env: { GH_TOKEN: token } });",
