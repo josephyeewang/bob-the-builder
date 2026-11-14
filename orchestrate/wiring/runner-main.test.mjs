@@ -638,6 +638,8 @@ test('L1001: main stops when the budget or Bob file list is not root\'s alone in
     // One that can't be loaded, or answers nothing, is logged and leaves its check without a port; the runner still runs.
     for (const [o, said] of [[{ loadBudget: async () => { throw new Error('no snapshot'); } }, /the budget module could not be loaded \(no snapshot\); no session starts/],
       [{ loadBudget: async () => ({ rules: {} }) }, /the budget module gave no rules, rec, bandsNow and runningNow; no session starts/],
+      // Each of the four is needed (BUDGET_PORTS, L1121 c2): one missing alone is refused.
+      ...['rules', 'rec', 'bandsNow', 'runningNow'].map((k) => [{ loadBudget: async () => ({ ...budget, [k]: undefined }) }, /the budget module gave no rules, rec, bandsNow and runningNow; no session starts/]),
       [{ readManifest: () => '{not json' }, /the Bob file list could not be read/]]) {
       logs = []; got.length = 0;
       assert.equal(await main(['/cfg.json'], opts(o)), 0, logs.join('\n'));
