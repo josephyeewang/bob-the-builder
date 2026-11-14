@@ -13,7 +13,14 @@ import { chainProblem } from '../modules/M4-workshop/launcher/install-check.mjs'
 import {
   ALL_ADDRESSES, ANCHOR, ANCHOR_DIR, ANCHOR_FILE, FAMILIES, PROTOS, TAG, anchorText, bootScript, checkWall, loadedRulesProblem, main, otherAddresses,
   planWall, tokenPath, unreadPath, waitForFirstRun, wallLabel, wallPlistPath, wallDir,
+  RECHECK_EVERY_S, STATUS_FILE, STATUS_VERSION, WALL_CHECK_JOB, WALL_SCRIPT, WHY_CHARS, WHY_MAX, anchorSha256, parseStatus, statusOf, statusText,
+  wallCheckPlist,
 } from './builder-wall.mjs';
+import { createHash } from 'node:crypto';
+import { readdirSync } from 'node:fs';
+import { installPaths, parseInstallConfig } from './install.mjs';
+import { OPTIONAL_JOBS, jobsFor, onlyJobs } from './daemons.mjs';
+import { NODE } from '../modules/M4-workshop/launcher/install-check.mjs';
 
 const BASE = '/Library/orchestrate';
 const LABEL = 'com.example.orch';
@@ -532,4 +539,137 @@ test('R-0b-179 (#556 r2 m3): an anchor file that is not the wall\'s rules refuse
   // The right text with the wrong mode refuses too.
   chmodSync(w.mac.at(ANCHOR_FILE), 0o666);
   assert.ok(fails(await checkWall(w.mac, w.cfg, { net: w.net })).some((x) => x.startsWith(`${ANCHOR_FILE} is the wall's rules`)));
+});
+
+// --- L1193: the status the worker runner reads -----------------------------------------------------------------------
+
+const statusAt = (w) => readFileSync(w.mac.at(STATUS_FILE(w.cfg)), 'utf8');
+const hexOf = (uid) => createHash('sha256').update(anchorText(uid), 'utf8').digest('hex');
+const STATUS_DIR = `${BASE}/builder-wall-status`;
+
+test('L1193 round trip: check writes the status, root\'s 0644 in its own root 0755 folder, and parseStatus reads it back: ok, this uid, anchorText(uid)\'s hash', async () => {
+  const w = world(); writeConfig(w);
+  assert.equal(STATUS_FILE(w.cfg), `${STATUS_DIR}/status.json`, 'the place lane 2\'s reader takes (layout.mjs wallStatusPath)');
+  const before = Date.now();
+  const p = await runMain(w, ['place']);
+  assert.equal(p.code, 0, p.all);
+  assert.equal(parseStatus(statusAt(w)).ok, true, 'place leaves a status too');
+  const r = await runMain(w, ['check']);
+  assert.equal(r.code, 0, r.all);
+  const text = statusAt(w);
+  assert.equal(text.split('\n').length, 2, 'one line, then its newline');
+  const s = parseStatus(text);
+  assert.deepEqual(Object.keys(s).sort(), ['anchorSha256', 'builderUid', 'ok', 'time', 'v', 'why']);
+  assert.equal(s.v, STATUS_VERSION); assert.equal(s.ok, true); assert.deepEqual(s.why, []);
+  assert.equal(s.builderUid, BUILDER_UID);
+  // The contract with the reader (#579): sha256 over exactly anchorText(uid) as utf8, lowercase hex.
+  assert.equal(s.anchorSha256, hexOf(BUILDER_UID)); assert.equal(anchorSha256(BUILDER_UID), hexOf(BUILDER_UID)); assert.match(s.anchorSha256, /^[0-9a-f]{64}$/);
+  assert.ok(Date.parse(s.time) >= before - 1000 && Date.parse(s.time) <= Date.now() + 1000, s.time);
+  const f = w.mac.lstat(STATUS_FILE(w.cfg));
+  assert.ok(f.isFile()); assert.equal(f.uid, w.mac.rootUid); assert.equal(f.mode & 0o7777, 0o644);
+  const d = w.mac.lstat(STATUS_DIR);
+  assert.ok(d.isDirectory()); assert.equal(d.uid, w.mac.rootUid); assert.equal(d.mode & 0o7777, 0o755);
+  assert.equal(w.mac.lstat(wallDir(w.cfg)).mode & 0o7777, 0o700, 'the wall\'s own folder stays closed (L1193 change 3)');
+  assert.deepEqual(readdirSync(w.mac.at(STATUS_DIR)), ['status.json'], 'no side file left');
+  // The writer's text is the reader's format: statusText of what parseStatus gave is the same bytes.
+  assert.equal(statusText(s), text);
+});
+
+test('L1193: a failing check replaces an ok status with ok false and its reasons; a place whose read-back refuses leaves ok false too', async () => {
+  const w = world(); writeConfig(w);
+  assert.equal((await runMain(w, ['place'])).code, 0);
+  assert.equal(parseStatus(statusAt(w)).ok, true);
+  w.pf.enabled = false;   // switched off by hand
+  const r = await runMain(w, ['check']);
+  assert.equal(r.code, 1);
+  const s = parseStatus(statusAt(w));
+  assert.equal(s.ok, false); assert.equal(s.builderUid, BUILDER_UID); assert.equal(s.anchorSha256, hexOf(BUILDER_UID));
+  assert.ok(s.why.some((x) => x.startsWith('pf is on (iii): pf is off')), s.why.join(' | '));
+  // A place whose read-back refuses: the wall is taken out and the status says so.
+  const w2 = world(); writeConfig(w2);
+  const net = fakeNet(w2.pf, { twist: ({ user, to, said }) => (user === 'sam' && to === 'sam' ? 'refused' : said) });
+  assert.equal((await runMain(w2, ['place'], net)).code, 1);
+  const s2 = parseStatus(statusAt(w2));
+  assert.equal(s2.ok, false);
+  assert.equal(s2.why[0], 'place: the read-back refused, so the wall was taken out again', 'first, so the cap on reasons never drops it');
+  assert.equal(s2.why.length, WHY_MAX, 'this many failing rows fill the cap');
+  assert.ok(s2.why.some((x) => /the owner reaches its own listener/.test(x)), s2.why.join(' | '));
+});
+
+test('L1193: with no builder user, check still writes: ok false, no uid, no hash, and why', async () => {
+  const w = world({ builder: false }); writeConfig(w);
+  const r = await runMain(w, ['check']);
+  assert.equal(r.code, 1);
+  const s = parseStatus(statusAt(w));
+  assert.equal(s.ok, false); assert.equal(s.builderUid, null); assert.equal(s.anchorSha256, null);
+  assert.ok(s.why.some((x) => /builder user is not on this Mac/.test(x)), s.why.join(' | '));
+});
+
+test('L1193 PLANT: a status folder that is a link or not root\'s is refused, nothing is written, and the run fails saying so; a loose mode is put right; an unsafe base gets nothing', async () => {
+  for (const plant of ['link', 'owner', 'file']) {
+    const w = world(); writeConfig(w);
+    if (plant === 'link') { mkdirSync(w.mac.at('/elsewhere')); w.mac.owners.set('/elsewhere', { uid: w.mac.rootUid, gid: 0 }); symlinkSync(w.mac.at('/elsewhere'), w.mac.at(STATUS_DIR)); }
+    else if (plant === 'owner') { mkdirSync(w.mac.at(STATUS_DIR)); chmodSync(w.mac.at(STATUS_DIR), 0o755); w.mac.owners.set(STATUS_DIR, { uid: OWNER_UID, gid: 20 }); }
+    else { writeFileSync(w.mac.at(STATUS_DIR), ''); w.mac.owners.set(STATUS_DIR, { uid: w.mac.rootUid, gid: 0 }); }
+    const r = await runMain(w, ['check']);
+    assert.equal(r.code, 1, plant);
+    assert.match(r.err, /the wall's status could not be written to \S*builder-wall-status\/status\.json \(.*is there but is not a folder of root's/, `${plant}: ${r.err}`);
+    assert.equal(existsSync(w.mac.at('/elsewhere/status.json')), false, plant);
+    if (plant === 'owner') assert.deepEqual(readdirSync(w.mac.at(STATUS_DIR)), [], plant);
+  }
+  const w = world(); writeConfig(w);
+  mkdirSync(w.mac.at(STATUS_DIR)); chmodSync(w.mac.at(STATUS_DIR), 0o777); w.mac.owners.set(STATUS_DIR, { uid: w.mac.rootUid, gid: 0 });
+  await runMain(w, ['check']);
+  assert.equal(w.mac.lstat(STATUS_DIR).mode & 0o7777, 0o755, 'a folder anyone could write is put back to 0755');
+  assert.equal(parseStatus(statusAt(w)).builderUid, BUILDER_UID);
+  const w3 = world(); writeConfig(w3); chmodSync(w3.mac.at(BASE), 0o777);
+  const r3 = await runMain(w3, ['check']);
+  assert.equal(r3.code, 1); assert.match(r3.err, /the wall's status could not be written .*is not safe for root to write in/);
+  assert.equal(existsSync(w3.mac.at(STATUS_DIR)), false, 'nothing is made under a base others can write');
+});
+
+test('L1193: parseStatus takes exactly the one format and refuses every other shape; statusText refuses what it would not read', () => {
+  const good = statusOf([{ ok: true, what: 'x' }], BUILDER_UID, new Date('2026-11-14T12:00:00.000Z'));
+  const line = statusText(good);
+  assert.equal(line, `{"v":1,"time":"2026-11-14T12:00:00.000Z","builderUid":${BUILDER_UID},"anchorSha256":"${hexOf(BUILDER_UID)}","ok":true,"why":[]}\n`);
+  assert.deepEqual({ ...parseStatus(line), why: [] }, good);
+  assert.equal(parseStatus(line.trimEnd()).ok, true, 'no newline at the end reads too');
+  assert.ok(Object.isFrozen(parseStatus(line))); assert.ok(Object.isFrozen(parseStatus(line).why));
+  const o = JSON.parse(line); const j = (x) => JSON.stringify(x);
+  const bad = {
+    'two lines': `${line}${line}`, 'a CR': line.replace('\n', '\r\n'), 'not JSON': '{', 'an array': '[]', 'null': 'null', 'a number': '1',
+    'a key more': j({ ...o, extra: 1 }), 'a key less': j({ v: o.v, time: o.time, builderUid: o.builderUid, anchorSha256: o.anchorSha256, ok: o.ok }),
+    'version 2': j({ ...o, v: 2 }), 'version as text': j({ ...o, v: '1' }), 'a local time': j({ ...o, time: '2026-11-14T12:00:00.000+01:00' }), 'no millis': j({ ...o, time: '2026-11-14T12:00:00Z' }),
+    'a date that is none': j({ ...o, time: '2026-02-30T12:00:00.000Z' }), 'uid 0': j({ ...o, builderUid: 0 }), 'uid as text': j({ ...o, builderUid: String(BUILDER_UID) }), 'uid not whole': j({ ...o, builderUid: 1.5 }),
+    'upper hex': j({ ...o, anchorSha256: o.anchorSha256.toUpperCase() }), 'short hex': j({ ...o, anchorSha256: o.anchorSha256.slice(1) }),
+    'ok as text': j({ ...o, ok: 'true' }), 'ok with a reason': j({ ...o, why: ['x'] }), 'ok without uid': j({ ...o, builderUid: null }),
+    'ok without hash': j({ ...o, anchorSha256: null }), 'not ok, no reason': j({ ...o, ok: false }), 'why not a list': j({ ...o, ok: false, why: 'x' }),
+    'an empty reason': j({ ...o, ok: false, why: [''] }), 'a long reason': j({ ...o, ok: false, why: ['x'.repeat(WHY_CHARS + 1)] }),
+    'too many reasons': j({ ...o, ok: false, why: Array(WHY_MAX + 1).fill('x') }), 'a reason not text': j({ ...o, ok: false, why: [1] }),
+  };
+  for (const [name, text] of Object.entries(bad)) assert.throws(() => parseStatus(text), Error, name);
+  assert.throws(() => parseStatus(undefined)); assert.throws(() => statusText({ ...good, ok: 'yes' })); assert.throws(() => statusText({ ...good, v: undefined }));
+  // statusOf: ok only with rows, all passing, and a uid; reasons are clipped and capped so the line stays short.
+  assert.equal(statusOf([], BUILDER_UID).ok, false);
+  assert.equal(statusOf([{ ok: true, what: 'x' }], null).ok, false);
+  assert.equal(statusOf([{ ok: true, what: 'x' }, { ok: false, what: 'y', why: 'z' }], BUILDER_UID).ok, false);
+  const many = statusOf(Array.from({ length: 40 }, (_, k) => ({ ok: false, what: `row ${k}`, why: 'y'.repeat(500) })), BUILDER_UID);
+  assert.equal(many.why.length, WHY_MAX); assert.equal(many.why.at(-1), 'and 21 more');
+  assert.ok(many.why.every((x) => x.length <= WHY_CHARS)); assert.doesNotThrow(() => parseStatus(statusText(many)));
+});
+
+test('L1193: the check job is one of setup\'s daemons, on with the worker runner: root\'s, the copy\'s node and this script\'s check, at load and every beat', () => {
+  const raw = { base: BASE, owner: 'sam', products: ['alpha'], address: 'https://example.invalid/o/r.git', label: LABEL, runnerConfig: '/x/review.json' };
+  const on = parseInstallConfig({ ...raw, workerRunner: { product: 'alpha' } }); const off = parseInstallConfig(raw);
+  assert.deepEqual(jobsFor(on).slice(-2), [WALL_CHECK_JOB, 'worker-runner'], 'it loads just before the runner whose starts it gates');
+  assert.equal(jobsFor(off).includes(WALL_CHECK_JOB), false);
+  assert.ok(OPTIONAL_JOBS.includes(WALL_CHECK_JOB));
+  assert.throws(() => onlyJobs(off, WALL_CHECK_JOB), /workerRunner/);
+  assert.deepEqual(onlyJobs(off, WALL_CHECK_JOB, { anyKnown: true }), [WALL_CHECK_JOB], 'one the config has since turned off can still be taken out');
+  const t = wallCheckPlist(on); const P = installPaths(on);
+  assert.ok(t.includes(`<key>Label</key><string>${LABEL}.${WALL_CHECK_JOB}</string>`), t);
+  assert.ok(t.includes(`<key>ProgramArguments</key><array><string>${P.installRoot}/${NODE}</string><string>${P.installRoot}/${WALL_SCRIPT}</string><string>check</string></array>`), t);
+  assert.ok(t.includes(`<key>StartInterval</key><integer>${RECHECK_EVERY_S}</integer>`)); assert.ok(t.includes('<key>RunAtLoad</key><true/>'));
+  assert.equal(/UserName/.test(t), false, 'root\'s: pf and the probes need root');
+  assert.ok(existsSync(join(import.meta.dirname, '..', WALL_SCRIPT)), 'the script the job starts is this file');
 });

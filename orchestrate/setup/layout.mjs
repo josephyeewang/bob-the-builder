@@ -38,6 +38,8 @@ export const shellOf = (name) => (name === BUILDER ? BUILDER_SHELL : NO_SHELL);
 // one launchctl the setup calls: one home each (I7).
 export const JOB_PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
 export const LAUNCHCTL = '/bin/launchctl';
+/** launchd's folder of root's jobs, where daemons.mjs and builder-wall.mjs place their job files: one home (I7). */
+export const DAEMON_DIR = '/Library/LaunchDaemons';
 /** The owner's terminal: an answer is read from it, never from standard input (go-card, approve-rules): one home (I7). */
 export const TTY_PATH = '/dev/tty';
 // Root takes its orders from ONE file at a fixed place, root's own (NEW-1, L100): never from a home folder, where the
@@ -52,6 +54,12 @@ export const BASE_MARKER = '.made-by-setup';
 export const BOB_NEW = '.bob-new';
 export const BOB_OLD = '.bob-old';
 export const baseMarkerPath = (cfg) => join(cfg.base, BASE_MARKER);
+// The builder wall's status (R-0b-179, L1193): root's wall check writes it after every check, and the worker runner, which
+// runs as the builder and can't ask pf, reads it before every start. Its own folder, root's 0755, so the wall's own folder
+// (builder-wall/, root's 0700) stays closed. Named here, not in builder-wall.mjs, so the worker runner's setup can take it
+// without loading the wall's module (builder-wall → daemons → worker-runner-setup would be a load loop).
+export const wallStatusDir = (cfg) => join(cfg.base, 'builder-wall-status');
+export const wallStatusPath = (cfg) => join(wallStatusDir(cfg), 'status.json');
 
 const NAME = /^[a-z_][a-z0-9_.-]{0,31}$/;
 const BASE = /^\/[A-Za-z0-9._/-]+$/;
