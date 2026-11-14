@@ -97,7 +97,7 @@ const SHA = /^[0-9a-f]{40}$/;
 // The cut, as 2.1.316's code has it (EL with lke=200 and Zhe, read in its bundle; checked: claude-code 2.1.316): a name
 // over 200 characters keeps its first 200 and gets "-" and the base-36 of the absolute 32-bit string hash
 // (h = h*31 + code unit) of the folder path itself, not of the name. Characters are UTF-16 code units, as there: an
-// é is one "-", an emoji two. CLAUDE_CODE_PROJECT_DIR_NAME can replace the whole name when the config folder is set,
+// an accented e is one "-", an emoji two. CLAUDE_CODE_PROJECT_DIR_NAME can replace the whole name when the config folder is set,
 // as the runner's is; roleEnv passes only its own list, so a session never carries it (runner-ports.test.mjs).
 const PROJECT_NAME_MAX = 200;
 const stringHash = (s) => { let h = 0; for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0; return h; };

@@ -60,9 +60,9 @@ test('L1134: the conversation folder name is cut as 2.1.316 cuts it: 200 charact
   // The hash is of the path, so two paths alike for 200 characters get two folders.
   const [a, b] = [`/copies/${'q'.repeat(200)}one`, `/copies/${'q'.repeat(200)}two`];
   assert.ok(projectFolderName(a).endsWith('-g01wx3')); assert.ok(projectFolderName(b).endsWith('-g01szl'));
-  // Not ASCII: each UTF-16 code unit is one character, as in claude (é one "-", an emoji two).
-  assert.equal(projectFolderName('/copies/café/\u{1F600}'), '-copies-caf----');
-  const wide = `/copies/café-\u{1F600}-${'b'.repeat(200)}`;
+  // Not ASCII: each UTF-16 code unit is one character, as in claude (an accented e is one "-", an emoji two).
+  assert.equal(projectFolderName('/copies/caf\u00e9/\u{1F600}'), '-copies-caf----');
+  const wide = `/copies/caf\u00e9-\u{1F600}-${'b'.repeat(200)}`;
   assert.equal(projectFolderName(wide), `${'-copies-caf-----'}${'b'.repeat(184)}-b6b4tn`);
   assert.equal(transcriptPath({ configDir: '/cfg', copy: over, sessionId: SID }), join('/cfg', 'projects', `-copies-${'a'.repeat(192)}-sne018`, `${SID}.jsonl`));
   // Not proved on a live session yet (L1134): it stays null until a real run finds its transcript at this path.
