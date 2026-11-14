@@ -3,7 +3,7 @@
 // connection from the rules it holds, so a wrong rule shows up twice: in what the check reads back, and in the traffic.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync, symlinkSync } from 'node:fs';
+import { chmodSync, linkSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync, symlinkSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { fakeMac } from './fake-mac.test-helper.mjs';
@@ -679,4 +679,80 @@ test('L1193: the way out says worker sessions stay held until the wall is back, 
   assert.match(t, /Until the wall is back, every worker session stays held/);
   assert.ok(t.includes(`daemons unload --only worker-runner`) && t.includes(`daemons unload --only ${WALL_CHECK_JOB}`), t);
   assert.deepEqual(OPTIONAL_JOBS.filter((j) => t.includes(`--only ${j}`)).sort(), [WALL_CHECK_JOB, 'worker-runner'].sort(), 'the names it gives are real jobs');
+});
+
+// --- L1205 (the joint #585/#579 audit) -------------------------------------------------------------------------------
+
+test('L1205 m1 PLANT: a throw in the read-back (a probe\'s connect, a command) writes ok false over an old ok; place takes the wall out', async () => {
+  const boom = (w) => ({ ...w.net, connect: async () => { throw new Error('connect blew up'); } });
+  const w = world(); writeConfig(w);
+  assert.equal((await runMain(w, ['place'])).code, 0);
+  assert.equal(parseStatus(statusAt(w)).ok, true);
+  w.pf.enabled = false;
+  const r = await runMain(w, ['check'], boom(w));
+  assert.equal(r.code, 1, r.all);
+  const s = parseStatus(statusAt(w));
+  assert.equal(s.ok, false, 'the old ok does not stand');
+  assert.ok(s.why.some((x) => /^the check: it stopped: connect blew up/.test(x)), s.why.join(' | '));
+  // A command that throws (pfctl refused by the system, say).
+  const w2 = world(); writeConfig(w2);
+  assert.equal((await runMain(w2, ['place'])).code, 0);
+  const run = w2.mac.run; w2.mac.run = (cmd, args) => { if (cmd === '/sbin/pfctl') { const e = new Error('spawnSync /sbin/pfctl EACCES'); e.code = 'EACCES'; throw e; } return run(cmd, args); };
+  assert.equal((await runMain(w2, ['check'])).code, 1);
+  const s2 = parseStatus(statusAt(w2));
+  assert.equal(s2.ok, false); assert.ok(s2.why.some((x) => /EACCES/.test(x)), s2.why.join(' | '));
+  // place: a throw in the read-back is a refusal; the wall is taken out and the status says so.
+  const w3 = world(); writeConfig(w3);
+  const r3 = await runMain(w3, ['place'], boom(w3));
+  assert.equal(r3.code, 1);
+  assert.match(r3.err, /The read-back refused, so the wall was taken out again/);
+  const s3 = parseStatus(statusAt(w3));
+  assert.equal(s3.ok, false); assert.equal(s3.why[0], 'place: the read-back refused, so the wall was taken out again');
+  assert.ok(s3.why.some((x) => /connect blew up/.test(x)), s3.why.join(' | '));
+});
+
+test('L1205 m2: the status carries the time the check started, not when its probes ended', async () => {
+  const w = world(); writeConfig(w);
+  assert.equal((await runMain(w, ['place'])).code, 0);
+  let slowed = false;
+  const slow = { ...w.net, connect: async (a) => { if (!slowed) { slowed = true; await new Promise((ok) => { setTimeout(ok, 1200); }); } return w.net.connect(a); } };
+  const before = Date.now();
+  assert.equal((await runMain(w, ['check'], slow)).code, 0);
+  const after = Date.now();
+  const t = Date.parse(parseStatus(statusAt(w)).time);
+  assert.ok(after - before >= 1200, 'the probes took the delay');
+  assert.ok(t >= before && t < before + 1000, `stamped ${t - before} ms after the start of a ${after - before} ms check`);
+});
+
+test('L1205: an old status that is not one plain file of root\'s (a link, a second name) is removed and the run fails saying so', async () => {
+  for (const plant of ['hard link', 'link', 'folder']) {
+    const w = world(); writeConfig(w);
+    assert.equal((await runMain(w, ['place'])).code, 0);
+    const f = STATUS_FILE(w.cfg);
+    if (plant === 'hard link') linkSync(w.mac.at(f), w.mac.at(`${BASE}/second-name`));
+    else if (plant === 'link') { rmSync(w.mac.at(f)); writeFileSync(w.mac.at('/victim'), 'x'); symlinkSync(w.mac.at('/victim'), w.mac.at(f)); w.mac.owners.set(f, { uid: w.mac.rootUid, gid: 0 }); }
+    else { rmSync(w.mac.at(f)); mkdirSync(w.mac.at(f)); w.mac.owners.set(f, { uid: w.mac.rootUid, gid: 0 }); }
+    if (plant === 'folder') { assert.equal((await runMain(w, ['check'])).code, 1); continue; }   // unlink refuses a folder: the run fails, it never writes
+    const r = await runMain(w, ['check']);
+    assert.equal(r.code, 1, plant);
+    assert.match(r.err, /was not one plain file of root's \((2 names|a link)\); it was removed, and nothing new was written/, `${plant}: ${r.err}`);
+    assert.equal(existsSync(w.mac.at(f)), false, `${plant}: no old ok stands`);
+    if (plant === 'link') assert.equal(readFileSync(w.mac.at('/victim'), 'utf8'), 'x', 'what the link pointed at is untouched');
+    assert.equal((await runMain(w, ['check'])).code, 0, `${plant}: the next run writes it fresh`);
+    assert.equal(w.mac.lstat(f).nlink, 1);
+  }
+});
+
+test('L1205 cosmetic: parseStatus takes only the writer\'s exact bytes, and says plainly when a date is none', () => {
+  const line = statusText(statusOf([{ ok: true, what: 'x' }], BUILDER_UID, new Date('2026-11-14T12:00:00.000Z')));
+  const body = line.trimEnd(); const o = JSON.parse(body);
+  const bad = {
+    'a key given twice': body.replace('"ok":true', '"ok":false,"ok":true'),
+    'space before': ` ${body}`, 'space after': `${body} `, 'space inside': body.replace('"v":1', '"v": 1'),
+    'another key order': JSON.stringify({ time: o.time, v: o.v, builderUid: o.builderUid, anchorSha256: o.anchorSha256, ok: o.ok, why: o.why }),
+    'a slash written \\/': body.replace('"why":[]', '"why":[]').replace('"ok":true,"why":[]', '"ok":false,"why":["a\\/b"]'),
+  };
+  for (const [name, text] of Object.entries(bad)) assert.throws(() => parseStatus(text), /not written exactly as statusText writes it|keys are/, name);
+  assert.throws(() => parseStatus(JSON.stringify({ ...o, time: '2026-13-45T99:99:99.999Z' })), /the status's time is not a real UTC time/);
+  assert.equal(parseStatus(line).ok, true);
 });
