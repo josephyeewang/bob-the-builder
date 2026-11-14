@@ -1113,7 +1113,6 @@
     "modules/M6-merge-gate/undo.mjs",
     "modules/M6-merge-gate/watch-only.mjs",
     "setup/bob-manifest.mjs",
-    "setup/live-proofs/slice-dry-run.mjs",
     "wiring/review-ports.mjs",
     "wiring/runner-checks.mjs",
     "wiring/runner-ports.mjs"
