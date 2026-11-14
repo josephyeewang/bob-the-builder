@@ -6,8 +6,10 @@
 //
 // (<installRoot> is the installed copy, <base>/install/orchestrate: setup/install.mjs installPaths.)
 //
-// The run reaches the network only through the pairs' asked-for GETs of plain public pages: 2 to api.github.com and 4 to
-// example.com (GETS). The ones a setting must refuse are refused by the sandbox, so fewer reach the hosts.
+// Network: the run asks for 2 GETs to api.github.com and 4 to example.com (GETS), plain public pages; on an honest run
+// 2 and 2 reach them (the sandbox's proxy refuses the other two); a retry, which voids its side, can add a few more
+// within the turn limit; no other host; plus Claude's own API traffic. The receipt carries both: the asked-for GETs
+// and the ones the transcripts show were sent, per host.
 //
 // It prints one line per name: PASS, FAIL or NOT TRIED, with how it was proven or why not. A name no test ran is NOT
 // TRIED, never PASS. The receipt, settings-names-proof-<time>.jsonl in the user's home, holds the pin and one line per
@@ -146,22 +148,54 @@ const init = (out) => findInit(out);
 // ask to leave the sandbox or carry its own allowed_domains (sandboxed): what the side shows then came from that one
 // call as the settings ran it, not from a retry. A pair opts out only through BASH_OPT_OUT, by its id, with the reason.
 const bashExact = (cmd, opt = {}) => ({ tool: 'Bash', needle: cmd, exact: true, once: true, sandboxed: true, ...opt });
+// Each opt-out names the side and what it sets each default to instead (L1171 M-2), and why.
 export const BASH_OPT_OUT = Object.freeze({
-  // Its off side makes two calls, the second the evidence (the marker it writes), so it cannot be the only call.
-  maxTurns: { once: 'its off side makes two Bash calls by design: the second one\'s marker is what --max-turns 1 must stop' },
+  // Its off side makes two calls, the second the evidence (the marker it writes), so it cannot be the only call. Its on
+  // side keeps once within the asked-for call's turn ('turn'): two calls in that one turn under --max-turns 1 void it,
+  // not a wrong FAIL; a second call in a later turn is the setting failing, so it must still read FAIL (L1128 m1).
+  maxTurns: Object.freeze({ on: Object.freeze({ once: 'turn' }), off: Object.freeze({ once: false }), why: 'its off side makes two Bash calls by design: the second one\'s marker is what --max-turns 1 must stop' }),
 });
+const optOut = (id, side) => ({ ...(BASH_OPT_OUT[id]?.[side] ?? {}) });
+/** Each tool call's turn: how many tool results came before it in the stream (L1171 M-2). Calls made together, before
+ * any of their results, share a turn. */
+const callTurns = (out) => {
+  const turn = new Map(); let n = 0;
+  for (const e of events(out)) {
+    if (e.type === 'user' && contentOf(e).some((c) => c?.type === 'tool_result')) n += 1;
+    if (e.type === 'assistant') for (const c of contentOf(e)) if (c?.type === 'tool_use') turn.set(c.id, n);
+  }
+  return turn;
+};
+/**
+ * What a side expects (L1171 m-2): the pair's own expect. A side that lets claude use Bash (runArgs gives Bash unless
+ * the pair names other tools) but asks for no call reads none, so it may make at most one tool call (once): a side
+ * doing more than the pair asks shows nothing.
+ */
+export const wantOf = (t, side, dir, o) => {
+  const w = t.expect?.(side, dir) ?? {};
+  return !w.needle && /\bBash\b/.test(String(o?.tools ?? 'Bash')) ? { once: true, ...w } : w;
+};
 const writeUse = (needle) => ({ tool: 'Write', needle });
 // failIfUnavailable: a sandbox path entry 2.1.316 can't resolve (it holds a null byte). With the setting on, the entry
 // stops the sandbox from being built and every command in it is refused; off, it is dropped with a warning.
 export const unbuildable = (dir) => join(dir, 'out', 'bad\u0000path');
 // strictAllowlist: host A in the --settings file, host B only in the project's file (L1152). Each side asks for one GET of
-// each host, so 2 of api.github.com and 2 of example.com; allowedDomains asks for one GET of example.com on each side, 2
-// more. In all (GETS): 2 to api.github.com and 4 to example.com, plain public pages, no third host (L1169 M4).
+// each host; allowedDomains asks for one GET of example.com on each side. So the run asks for 2 to api.github.com and 4
+// to example.com (GETS); on an honest run 2 and 2 reach them, as the proxy refuses example.com on strictAllowlist's on
+// side and allowedDomains' off side; a retry, which voids its side, can add a few more within the turn limit; no other
+// host; plus Claude's own API traffic (L1169 M4, L1171 M-1). This is what is asked for, not a ceiling: `sentGets`
+// counts what was sent.
 export const HOST = Object.freeze({ a: 'api.github.com', b: 'example.com' });
 const got = (dir, k) => join(dir, 'work', `got-${k}`);
 const fetchHost = (dir, k) => `curl -sSf -o ${got(dir, k)} https://${HOST[k]}`;
 /** Every GET the run asks claude to make, by host (L1169 M4); the test counts them from the pairs' own prompts. */
 export const GETS = Object.freeze({ 'api.github.com': 2, 'example.com': 4 });
+/** The GETs a run's transcript shows its tool calls sent, by host (L1171 M-1): each http(s) address in a call's input.
+ * One the proxy refused counts too, as it left the call; a retry's counts, though it voids its side. */
+export const sentGets = (out, into = {}) => {
+  for (const u of toolUses(out)) for (const [, h] of JSON.stringify(u.input ?? {}).matchAll(/https?:\/\/([a-z0-9.-]+)/gi)) into[h] = (into[h] ?? 0) + 1;
+  return into;
+};
 const fetchBoth = (dir) => `${fetchHost(dir, 'a')} ; ${fetchHost(dir, 'b')}`;
 // What each host's page holds (L1163 MAT-1): a host counts as reached only when its file holds its page, so a file the
 // model made (`touch`, a write) is not a host reached.
@@ -237,7 +271,7 @@ export function refusalSeen(r, want = {}) {
  * setting's. `want.sandboxed`: any tool call asking to leave the sandbox (dangerouslyDisableSandbox set to anything but
  * false), or carrying its own allowed_domains, voids the side. `want.once`: the asked-for call must be the side's only
  * tool call (L1163 MAT-1), so what it shows came from that call and not from a retry, a `touch` or a write. Both are
- * bashExact's defaults (L1169).
+ * bashExact's defaults (L1169). `once: 'turn'`: the only call in the asked-for call's turn (L1171 M-2).
  */
 export function voidProblem(r, want = {}) {
   const uses = toolUses(r?.out);
@@ -245,7 +279,11 @@ export function voidProblem(r, want = {}) {
   // 2.1.316 honours a call's own allowed_domains only in auto mode (read, not run; checked: claude-code 2.1.316); these
   // runs are dontAsk, but a call carrying one is not the settings' list either way (L1166).
   if (want.sandboxed && uses.some((u) => u.input?.allowed_domains !== undefined)) return 'a tool call carried its own allowed_domains, so what it reached is not the settings\' list';
-  if (want.once && uses.length > 1) return `${uses.length} tool calls (${uses.map((u) => u.name).join(', ')}), not one, so what it reached can't be read from the asked-for call`;
+  if (want.once === 'turn') {
+    const turn = callTurns(r?.out); const mine = new Set(usesFor(r?.out, want).map((u) => turn.get(u.id)));
+    const same = uses.filter((u) => mine.has(turn.get(u.id)));
+    if (same.length > 1) return `${same.length} tool calls in the asked-for call's turn (${same.map((u) => u.name).join(', ')}), not one, so what it reached can't be read from the asked-for call`;
+  } else if (want.once && uses.length > 1) return `${uses.length} tool calls (${uses.map((u) => u.name).join(', ')}), not one, so what it reached can't be read from the asked-for call`;
   return null;
 }
 /** Why a side's run shows nothing about the name, or null when it ran properly. `r` is { out, err, code, signal,
@@ -518,7 +556,7 @@ export const TESTS = Object.freeze([
   { id: 'maxTurns', title: '--max-turns 1 stops before a second command; 4 lets it run', kind: 'break-it', names: [F.maxTurns],
     run: (side, dir) => ({ maxTurns: side === 'on' ? 1 : 4, settings: { [S.permissions]: { [S.allow]: [...ALLOW_TOUCH(mark(dir, 'a')), ...ALLOW_TOUCH(mark(dir, 'b'))] } },
       prompt: `Use the Bash tool to run ${touchIn(dir, 'a')}. After it has finished, use the Bash tool again, in a separate call, to run ${touchIn(dir, 'b')}. Then reply with the word done.` }),
-    expect: (side, dir) => ({ ...bashExact(touchIn(dir, 'a'), { once: false }), turnsEnd: side === 'on' }),
+    expect: (side, dir) => ({ ...bashExact(touchIn(dir, 'a'), optOut('maxTurns', side)), turnsEnd: side === 'on' }),
     see: (side, dir) => there(mark(dir, 'b')), judge: sameBut({ on: false, off: true }) },
 ]);
 
@@ -664,10 +702,11 @@ const realFs = {
  * Runs every test, each side in a folder of its own under `base`, then the role read-back. `io.claude(args, { cwd })`
  * runs the pinned claude to its end → { out, err, code, signal, timedOut, error } (its stdout stream, its stderr, how it
  * ended); `io.readbackAll()` → { ok, why };
- * `io.userFile` is the user settings file; `io.fs` writes files. → { outcomes, readback }
+ * `io.userFile` is the user settings file; `io.fs` writes files. → { outcomes, readback, gets } (gets: sentGets over
+ * every run)
  */
 export async function runAll({ base, io, tests = TESTS }) {
-  const outcomes = {};
+  const outcomes = {}; const gets = {};
   for (const [i, t] of tests.entries()) {
     if (t.byGuard) { if (io.guardPassed === true) outcomes[t.id] = { ok: true }; continue; }
     const seen = {}; const sick = []; const quiet = []; const bad = []; const loose = [];
@@ -687,7 +726,8 @@ export async function runAll({ base, io, tests = TESTS }) {
         const user = t.user?.(side, d);
         const r = user === undefined ? await go() : await withUserSettings(io.userFile, user, go, io.fs);
         if (t.settle) await io.sleep(t.settle);
-        const want = t.expect?.(side, d) ?? {};
+        sentGets(r?.out, gets);
+        const want = wantOf(t, side, d, o);
         const voided = voidProblem(r, want);
         if (voided) bad.push(`the ${side} side: ${voided}`);
         const problem = runProblem(r, want);
@@ -721,7 +761,7 @@ export async function runAll({ base, io, tests = TESTS }) {
   }
   let readback;
   try { readback = await io.readbackAll(); } catch (e) { readback = { ok: false, why: `the read-back could not run: ${e?.message ?? e}` }; }
-  return { outcomes, readback };
+  return { outcomes, readback, gets };
 }
 
 /** The roles' read-back (L6): each role's file rendered as the launcher renders it, started by roleArgs, its start
@@ -831,7 +871,7 @@ export function finish({ res, pin, base, home, at, print }) {
   print(r.text);
   if (base) print(`The runs' folders are kept in ${base}.\n`);
   let receipt;
-  try { receipt = writeReceipt({ home, at, header: { pin, runs: base ?? null, ok: r.ok, gets: GETS }, lines, outcomes: res.outcomes, readback: res.readback }); print(`Written to ${receipt}\n`); } catch (e) {
+  try { receipt = writeReceipt({ home, at, header: { pin, runs: base ?? null, ok: r.ok, gets: { asked: GETS, sent: res.gets ?? null } }, lines, outcomes: res.outcomes, readback: res.readback }); print(`Written to ${receipt}\n`); } catch (e) {
     print(`The record of this run could not be written (${e?.code ?? e?.message}), so the run can't be used.\n`);
     print(`NOT DONE on Claude Code ${pin}: the receipt could not be written${r.ok ? '' : `; ${r.verdict.replace(/^NOT DONE on Claude Code \S+: /, '')}`}\n`);
     return 1;

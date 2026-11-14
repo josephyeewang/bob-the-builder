@@ -9,7 +9,7 @@ import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { refusalSeen } from './settings-names.mjs';
-import { BASH_OPT_OUT, GETS, callOutput, BACKUP_SUFFIX, BAD_EFFORT, CONNECTORS_FALLBACK, HOST, META_SUFFIX, PAGE, PEER_FROM, PEER_WORD, READY, REFUSAL, STDIN_ARGS, REPLAY_USER_MESSAGES, peerLine, peerTaken, replayed, saidWord, unbuildable, voidProblem, accountSettingsFiles, effortWarning, NOT_TRIED, NOT_USED, SPELLING_LABEL, misspell, READBACK_NAMES, TESTS, allNames, finish, guardProblem, judgeNames, main, report, restoreUserFile, roleReadback, runAll, runArgs, runProblem, runToEnd, withUserSettings, writeReceipt } from './settings-names.mjs';
+import { BASH_OPT_OUT, GETS, callOutput, sentGets, wantOf, BACKUP_SUFFIX, BAD_EFFORT, CONNECTORS_FALLBACK, HOST, META_SUFFIX, PAGE, PEER_FROM, PEER_WORD, READY, REFUSAL, STDIN_ARGS, REPLAY_USER_MESSAGES, peerLine, peerTaken, replayed, saidWord, unbuildable, voidProblem, accountSettingsFiles, effortWarning, NOT_TRIED, NOT_USED, SPELLING_LABEL, misspell, READBACK_NAMES, TESTS, allNames, finish, guardProblem, judgeNames, main, report, restoreUserFile, roleReadback, runAll, runArgs, runProblem, runToEnd, withUserSettings, writeReceipt } from './settings-names.mjs';
 import { CONFIRMED, FLAGS as F, PROOF_KIND, REFUSED_SETTINGS, SPELLING_ONLY, noToolServerArgs, proofCounts, sourcesArgs, unconfirmedNames } from '../../modules/M4-workshop/launcher/settings-names.mjs';
 import { FIRST_ROUND_EFFORT, SEND_BACK_EFFORT } from '../../modules/M4-workshop/launcher/review-launch.mjs';
 import { sourcesProblem } from '../../modules/M4-workshop/launcher/readback.mjs';
@@ -274,11 +274,13 @@ test('m4: a cut-off run leaves the raw bytes and a note; --restore puts the file
 
 test('m5: every run ends with its own receipt; one that can\'t be written is NOT DONE and exit 1', () => {
   const all = Object.fromEntries(TESTS.map((t) => [t.id, { ok: true }]));
-  const res = { outcomes: all, readback: { ok: true } };
+  const res = { outcomes: all, readback: { ok: true }, gets: { 'api.github.com': 2, 'example.com': 3 } };
   const home = tempDir('orch-names-'); let out = '';
   assert.equal(finish({ res, pin: PIN, base: null, home, at: 0, print: (t) => { out += t; } }), 0);
   assert.match(out.trimEnd().split('\n').at(-1), /^PASS/);
   const path = out.match(/Written to (\S+)/)[1]; assert.ok(existsSync(path) && path.startsWith(home));
+  // L1171 M-1: the receipt's header has the asked-for GETs and the sent ones.
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8').split('\n')[0]).gets, { asked: { ...GETS }, sent: { 'api.github.com': 2, 'example.com': 3 } });
   out = '';
   assert.equal(finish({ res, pin: PIN, base: null, home: join(home, 'gone'), at: 0, print: (t) => { out += t; } }), 1);
   assert.match(out.trimEnd().split('\n').at(-1), /^NOT DONE.*receipt could not be written/);
@@ -331,21 +333,27 @@ test('L1160 M2: voidProblem reads a call outside the sandbox and a repeated call
 });
 
 test('L1166, L1169: every pair that asks for a Bash call reads only that exact call, once, inside the sandbox', () => {
-  const d = '/x/run'; let n = 0; const asks = new Set();
+  const d = '/x/run'; let n = 0; let quiet = 0; const asks = new Set();
   for (const t of TESTS.filter((x) => !x.byGuard)) {
     for (const side of ['on', 'off']) {
       const o = t.run(side, d, { sessionId: 's', peerId: 'p', plainId: 'q' });
-      const w = t.expect?.(side, d);
+      const w = wantOf(t, side, d, o);
       // M3: a pair asks for Bash by its prompt or its tools; one that does must say which call it reads.
       const asksBash = /\bBash\b/.test(String(o.prompt ?? '')) || /\bBash\b/.test(String(o.tools ?? ''));
-      if (!asksBash) { assert.notEqual(w?.tool, 'Bash', `${t.id} ${side}: reads a Bash call it never asks for`); continue; }
+      if (!asksBash) {
+        assert.notEqual(w?.tool, 'Bash', `${t.id} ${side}: reads a Bash call it never asks for`);
+        // L1171 m-2: runArgs gives Bash when the pair names no tools, so a side that may use Bash and asks for no call
+        // may make at most one (once), and reads none (no needle).
+        if (/\bBash\b/.test(String(o.tools ?? 'Bash'))) { assert.equal(w.once, true, `${t.id} ${side}: may use Bash with no once`); assert.equal(w.needle, undefined, `${t.id} ${side}`); quiet += 1; }
+        continue;
+      }
       n += 1; asks.add(t.id);
       assert.equal(w?.tool, 'Bash', `${t.id} ${side}: asks for a Bash call but reads none`);
       assert.equal(w.exact, true, `${t.id} ${side}: not exact`);
-      // The defaults, unless the pair is named in BASH_OPT_OUT with its reason.
+      // The defaults, unless BASH_OPT_OUT names the pair, this side and the default, with its reason (L1171 M-2).
       for (const k of ['once', 'sandboxed']) {
         if (w[k] === true) continue;
-        assert.ok(typeof BASH_OPT_OUT[t.id]?.[k] === 'string' && BASH_OPT_OUT[t.id][k].length > 20, `${t.id} ${side}: ${k} off with no reason in BASH_OPT_OUT`);
+        assert.ok(BASH_OPT_OUT[t.id]?.[side]?.[k] === w[k] && String(BASH_OPT_OUT[t.id].why ?? '').length > 20, `${t.id} ${side}: ${k} off with no reason in BASH_OPT_OUT`);
       }
       const prompt = o.prompt;
       const asked = /run exactly this shell command, once, and nothing else: (.*)\n/.exec(prompt)?.[1];
@@ -355,11 +363,16 @@ test('L1166, L1169: every pair that asks for a Bash call reads only that exact c
     }
   }
   assert.equal(n, 30, `${n} Bash sides`);
-  // Every opt-out names a pair that asks for Bash and really turns the default off.
-  for (const [id, why] of Object.entries(BASH_OPT_OUT)) {
+  assert.equal(quiet, 32, `${quiet} sides that may use Bash and ask for none`);
+  // L1171 m-1: the opt-outs, exactly; a new one must change this test. Each names a pair that asks for Bash and really
+  // turns the default off on its side, and only there.
+  assert.deepEqual(BASH_OPT_OUT, { maxTurns: { on: { once: 'turn' }, off: { once: false }, why: 'its off side makes two Bash calls by design: the second one\'s marker is what --max-turns 1 must stop' } });
+  for (const [id, o] of Object.entries(BASH_OPT_OUT)) {
     assert.ok(asks.has(id), id);
-    for (const k of Object.keys(why)) assert.ok(['on', 'off'].some((sd) => byId(id).expect(sd, d)[k] === false), `${id}: ${k}`);
+    for (const side of ['on', 'off']) for (const k of ['once', 'sandboxed']) assert.equal(byId(id).expect(side, d)[k], o[side]?.[k] ?? true, `${id} ${side}: ${k}`);
   }
+  // L1171 M-2: maxTurns' on side keeps once within its turn, so two calls in that one turn void it rather than read FAIL.
+  assert.equal(byId('maxTurns').expect('on', d).once, 'turn');
   // A call holding the asked-for command and more is not it.
   const t = byId('strictAllowlist'); const w = t.expect('off', d); const cmd = w.needle;
   const run = (command) => runProblem({ out: [INIT, call('1', { command }), evt({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: '1', content: '' }] } }), OK].join('\n') }, w);
@@ -367,7 +380,7 @@ test('L1166, L1169: every pair that asks for a Bash call reads only that exact c
   assert.match(run(`${cmd} || echo "Example Domain" > /x/got-b`), /no Bash call that is exactly/);
 });
 
-test('L1169 M4: the run asks for exactly GETS, per host: 2 to api.github.com, 4 to example.com, no third host', () => {
+test('L1169 M4, L1171 M-1: the run asks for exactly GETS, per host: 2 to api.github.com, 4 to example.com, no third host', () => {
   const d = '/x/run'; const count = {};
   for (const t of TESTS.filter((x) => !x.byGuard)) {
     for (const side of ['on', 'off']) {
@@ -380,8 +393,20 @@ test('L1169 M4: the run asks for exactly GETS, per host: 2 to api.github.com, 4 
   assert.deepEqual(count, { ...GETS });
   assert.deepEqual(GETS, { 'api.github.com': 2, 'example.com': 4 });
   const src = readFileSync(new URL('./settings-names.mjs', import.meta.url), 'utf8');
-  assert.match(src, /header: \{ pin, runs: base \?\? null, ok: r\.ok, gets: GETS \}/, 'the receipt carries the count');
-  assert.match(src, /2 to api\.github\.com and 4 to\n\/\/ example\.com \(GETS\)/, 'the run sheet says the count');
+  assert.match(src, /header: \{ pin, runs: base \?\? null, ok: r\.ok, gets: \{ asked: GETS, sent: res\.gets \?\? null \} \}/, 'the receipt carries both counts');
+  // The run sheet says what is asked for, what reaches the hosts on an honest run, and that a retry can add more.
+  const sheet = src.split('\n').slice(0, 20).join(' ').replace(/\s*\/\/\s*/g, ' ');
+  for (const x of ['asks for 2 GETs to api.github.com and 4 to example.com (GETS)', 'on an honest run 2 and 2 reach them',
+    'a retry, which voids its side, can add a few more within the turn limit', 'no other host', "plus Claude's own API traffic"]) assert.ok(sheet.includes(x), x);
+  assert.doesNotMatch(src, /fewer reach the hosts/);
+  // sentGets: every address a call's input holds, per host, a refused or retried one too; none from the model's words.
+  const o = (...l) => [INIT, ...l, OK].join('\n');
+  const say = evt({ type: 'assistant', message: { content: [{ type: 'text', text: 'https://example.org' }] } });
+  assert.deepEqual(sentGets(o(call('1', { command: 'curl -sSf -o a https://api.github.com ; curl -sSf -o b https://example.com' }),
+    result('1', 'curl: (56) CONNECT tunnel failed, response 403', true), say, call('2', { command: 'curl http://example.com', dangerouslyDisableSandbox: true }))),
+  { 'api.github.com': 1, 'example.com': 2 });
+  const into = { 'example.com': 1 }; sentGets(o(call('1', { command: 'curl https://example.com' })), into);
+  assert.deepEqual(into, { 'example.com': 2 });
 });
 
 test('m5: a receipt is never overwritten', () => {
@@ -670,6 +695,14 @@ test('L1128 m1: a marker on a side that must have none is a FAIL, however that r
   assert.equal(o.ok, false);
   // No marker on that side and a broken run stays NOT TRIED.
   assert.equal((await runDeny({ on: 'api', off: 'runs' })).ok, null);
+  // L1171 M-2: the on side's two touches made together, in its one turn, before either result: void, not FAIL.
+  const both = await runOne(t, async (args, { cwd }) => {
+    const a = join(cwd, 'a'); const b = join(cwd, 'b'); writeFileSync(a, ''); writeFileSync(b, '');
+    const turnEnd = sideOf(cwd) === 'on' ? evt({ type: 'result', subtype: 'error_max_turns', is_error: true }) : OK;
+    return { out: sideOf(cwd) === 'on' ? [INIT, call('1', { command: `touch ${a}` }), call('2', { command: `touch ${b}` }), result('1', ''), result('2', ''), turnEnd].join('\n')
+      : [INIT, call('1', { command: `touch ${a}` }), result('1', ''), call('2', { command: `touch ${b}` }), result('2', ''), OK].join('\n'), err: '', code: 0 };
+  });
+  assert.equal(both.ok, null, JSON.stringify(both)); assert.match(both.notTried, /the on side: 2 tool calls in the asked-for call's turn/);
 });
 
 test('L1131 m1: settingSources, strictMcp and the connectors FAIL when the limited side shows what it must not, however that run ended', async () => {
@@ -990,6 +1023,24 @@ test('L1169: a Bash pair\'s evidence comes from its one call inside the sandbox,
   const ev = (plant) => oneCallFake((side) => (side === 'off' ? [{ out: 'PATH=/bin' }] : plant ? [{ out: 'PATH=/bin', say: VARS }] : [{ out: `PATH=/bin\n${VARS}` }]));
   assert.equal((await runOne(byId('env'), ev(false))).ok, true);
   assert.notEqual((await runOne(byId('env'), ev(true))).ok, true, 'the model saying the variables is not the call printing them');
+});
+
+test('L1171 m-2, M-1: the run reads each side through wantOf, and hands back the GETs its transcripts sent', async () => {
+  const root = tempDir('orch-names-'); const base = join(root, 'runs'); mkdirSync(base);
+  const io = (claude) => ({ claude, readbackAll: async () => ({ ok: true }), userFile: join(root, 's.json'), guardPassed: true, sleep: async () => {} });
+  // A pair that may use Bash (no tools named) and asks for no call: two calls on a side void it.
+  const quiet = { id: 'quiet', names: [], run: () => ({ prompt: 'Reply with the word ready.' }), see: () => true, judge: () => null };
+  const two = async () => ({ out: [INIT, call('1', { command: 'ls' }), result('1', ''), call('2', { command: 'ls' }), result('2', ''), OK].join('\n'), err: '', code: 0 });
+  assert.equal((await runAll({ base, io: io(two), tests: [quiet] })).outcomes.quiet.ok, null);
+  const one = async () => ({ out: [INIT, OK].join('\n'), err: '', code: 0 });
+  assert.equal((await runAll({ base, io: io(one), tests: [quiet] })).outcomes.quiet.ok, true);
+  // allowedDomains, honest: one GET of example.com on each side, both counted though the off side's is refused.
+  const ad = oneCallFake((side, cmd) => {
+    const g = /-o (\S+) https:/.exec(cmd)[1];
+    return side === 'off' ? [{ out: 'curl: (56) CONNECT tunnel failed, response 403', error: true }] : [{ write: [[g, `<h1>${PAGE.b}</h1>`]] }];
+  });
+  const res = await runAll({ base, io: io(ad), tests: [byId('allowedDomains')] });
+  assert.equal(res.outcomes.allowedDomains.ok, true); assert.deepEqual(res.gets, { 'example.com': 2 });
 });
 
 test('R-0b-178: each lock-down setting\'s pair differs only in the setting, with the setups the pin needs', () => {
