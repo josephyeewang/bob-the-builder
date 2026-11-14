@@ -3,7 +3,7 @@
 // logic, and the real one, where installed, for the bypass cases.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, mkdirSync, rmSync, symlinkSync, readFileSync, existsSync, renameSync, chmodSync, copyFileSync, linkSync, fstatSync, appendFileSync, utimesSync } from 'node:fs';
+import { writeFileSync, mkdirSync, rmSync, symlinkSync, readFileSync, existsSync, renameSync, chmodSync, copyFileSync, linkSync, fstatSync, appendFileSync, utimesSync, realpathSync } from 'node:fs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
 import { join, dirname, delimiter } from 'node:path';
 import { randomBytes, createHash } from 'node:crypto';
@@ -31,7 +31,7 @@ import { parsePolicy } from '../../M10-rules/policy.mjs';
 import { rulesFromText } from '../../M10-rules/from-text.mjs';
 import { FIRST } from '../../M10-rules/first-cutover.test-helper.mjs';
 import { fileURLToPath } from 'node:url';
-import { pushWorld, makeFakeScanner, makeFakeGit, realEngine, WF, PRODUCT, REPO } from './push-world.test-helper.mjs';
+import { pushWorld, makeFakeScanner, makeFakeGit, realEngine, scannerPinOf, WF, PRODUCT, REPO } from './push-world.test-helper.mjs';
 
 const tmp = (p = 'orch-push-') => tempDir(p);
 // Tests can't chown, so every file here is the test user's. The worker door expects that user by default (the worker
@@ -48,7 +48,7 @@ const realGitleaks = await (async () => {
   for (const d of (process.env.PATH ?? '').split(delimiter)) {
     const p = join(d, 'gitleaks');
     if (!d || !existsSync(p)) continue;
-    try { return (await import('node:child_process')).execFileSync(p, ['version'], { encoding: 'utf8' }).includes(RULES_VERSION) ? p : null; } catch { return null; }
+    try { return (await import('node:child_process')).execFileSync(p, ['version'], { encoding: 'utf8' }).includes(RULES_VERSION) ? realpathSync(p) : null; } catch { return null; }   // the program itself: the push never follows a link (L1123 m5)
   }
   return null;
 })();
@@ -477,7 +477,7 @@ test('real gitleaks: an inline gitleaks:allow comment does not hide a secret fro
   const sha = (await gitOk(['rev-parse', 'HEAD'], w.cg)).trim();
   assert.equal(await scanAsCareless(w.clone, []), 0, 'control: without the flag the inline comment hides it');
   await gitOk(['push', '-q', w.mirror, 'HEAD:refs/heads/scan'], w.cg);
-  const r = await scanSecrets({ setup: scanner, mirror: w.mirror, shas: [sha], messages: [], privateDir: tmp() });
+  const r = await scanSecrets({ setup: scanner, mirror: w.mirror, shas: [sha], messages: [], privateDir: tmp(), testPin: scannerPinOf(scanner.bin) });
   assert.equal(r.ok, false);
   assert.match(r.reason, /likely secret/);
 });
@@ -504,7 +504,7 @@ test('R-0b-47 MAT-2, real gitleaks: a secret in a file git calls binary is still
   const sha = (await gitOk(['rev-parse', 'HEAD'], w.cg)).trim();
   await gitOk(['push', '-q', w.mirror, 'HEAD:refs/heads/scan'], w.cg);
   // Positive control: the git scan alone, without the files, misses it.
-  assert.deepEqual(await scanSecrets({ setup: scanner, mirror: w.mirror, shas: [sha], messages: [], privateDir: tmp() }), { ok: true, binaries: [] });
+  assert.deepEqual(await scanSecrets({ setup: scanner, mirror: w.mirror, shas: [sha], messages: [], privateDir: tmp(), testPin: scannerPinOf(scanner.bin) }), { ok: true, binaries: [] });
   await w.bundle();
   const r = await refusedAndUntouched(w, /b\.js cannot be scanned for secrets/);
   assert.match(r.reason, /not plain UTF-8 text/);
@@ -677,7 +677,7 @@ test('R-0b-47 MIN-1: a program that quits before reading its input is refused, a
   const sha = (await gitOk(['rev-parse', 'HEAD'], w.cg)).trim();
   await gitOk(['push', '-q', w.mirror, 'HEAD:refs/heads/scan'], w.cg);
   w.fake.setMode('stdinquit');
-  const s = await scanSecrets({ setup: w.ports.scanner, mirror: w.mirror, shas: [sha], messages: [[sha, 'x'.repeat(16 * 1024 * 1024)]], privateDir: tmp() });
+  const s = await scanSecrets({ setup: w.ports.scanner, mirror: w.mirror, shas: [sha], messages: [[sha, 'x'.repeat(16 * 1024 * 1024)]], privateDir: tmp(), testPin: w.ports.testScannerPin });
   assert.equal(s.ok, false);
   assert.match(s.reason, /header lines or file names: .*did not finish cleanly/);
 });
@@ -1046,7 +1046,7 @@ test('R-0b-47 round 2 MIN-d: a new file over the size cap, or new files over the
   await gitOk(['push', '-q', w.mirror, 'HEAD:refs/heads/scan'], w.cg);
   const ls = await gitOk(['ls-tree', 'HEAD'], w.cg);
   const blobs = ls.trim().split('\n').map((l) => ({ id: l.split(/\s+/)[2], path: l.split('\t')[1] })).filter((b) => /^[ab]\.txt$/.test(b.path));
-  const scan = (o) => scanSecrets({ setup: w.ports.scanner, mirror: w.mirror, shas: [sha], blobs, messages: [], privateDir: tmp(), ...o });
+  const scan = (o) => scanSecrets({ setup: w.ports.scanner, mirror: w.mirror, shas: [sha], blobs, messages: [], privateDir: tmp(), testPin: w.ports.testScannerPin, ...o });
   const before = callLog.length;
   let r = await scan({ maxFileBytes: 4000 });
   assert.equal(r.ok, false);
@@ -1726,8 +1726,10 @@ test('L325 cosmetics: no root as the worker or owner; the test fstat port outsid
   const ctx = process.env.NODE_TEST_CONTEXT;
   delete process.env.NODE_TEST_CONTEXT;
   try {
-    assert.throws(() => createPushScript({ ...w.ports, testFstat: fstatSync }), /testFstat is for tests only/);
-    assert.equal(typeof createPushScript(w.ports), 'function');
+    const { testScannerPin, ...realPorts } = w.ports;
+    assert.throws(() => createPushScript({ ...realPorts, testFstat: fstatSync }), /testFstat is for tests only/);
+    assert.throws(() => createPushScript({ ...realPorts, testScannerPin }), /testScannerPin is for tests only/, 'L1123 m5: a stand-in pin outside tests');
+    assert.equal(typeof createPushScript(realPorts), 'function');
   } finally { process.env.NODE_TEST_CONTEXT = ctx; }
   for (const attempt of ['p-abc', 'r-abc']) {
     const cur = w.record.read('session', 'S-1');

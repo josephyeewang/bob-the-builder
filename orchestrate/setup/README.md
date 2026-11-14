@@ -356,3 +356,25 @@ machine-wide guard").
    copy's `robot.json` still names the old one. So: `sudo node setup.mjs daemons unload --only dispatcher`, delete the
    Dispatcher's job file (and a `.<label>.dispatcher.plist.new` beside it, if a cut-off write left one; `daemons check` names
    any such file), change the entry and `robot.json`, then `dispatcher-config`, install, `daemons place`, `daemons load`.
+
+## Part 7 — the secret scanner the push step runs (L1083)
+
+The push step scans every new commit with gitleaks before anything leaves the Mac (`modules/M4-workshop/git/gitleaks.mjs`).
+It runs the pinned program by full path, with the Do-plane's own rules and an empty ignore file, and refuses to push
+without them. This part puts those three files in place and proves them. The paths are `scannerPaths(cfg)` in
+`layout.mjs` (no config key names them): `<base>/scanner/gitleaks`, `gitleaks.toml` and `gitleaksignore`, all root's.
+The pin is gitleaks 8.30.1 for Apple silicon (`scanner-setup.mjs` holds both hashes); a new version takes new rules
+too, so it is a code change, never a config edit.
+
+1. Download `gitleaks_8.30.1_darwin_arm64.tar.gz` and `gitleaks_8.30.1_checksums.txt` from gitleaks' 8.30.1 release
+   page on GitHub, into a new empty folder.
+2. In that folder: `shasum -a 256 gitleaks_8.30.1_darwin_arm64.tar.gz` must print
+   `b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5`, the same line the checksums file has for it.
+   Anything else: stop.
+3. `tar -xzf gitleaks_8.30.1_darwin_arm64.tar.gz gitleaks` takes the program out. Do not run it.
+4. `sudo /usr/local/bin/node setup.mjs scanner --from <full path of that gitleaks>` (`--dry-run` first shows the steps).
+
+| Command | What it does | Root? |
+|---|---|---|
+| `sudo /usr/local/bin/node setup.mjs scanner --from <full path> [--dry-run]` | reads the named program once, refuses it unless its bytes hash to the pin (`ba52fb1bfabbcde42f032afad3d6e0b19dff8ed105229a16e7caa338bbc0e84f`, the program inside the checked tarball), and writes those same bytes as `<base>/scanner/gitleaks` (root:wheel 0755). Beside it, the push step's own rules (`DO_PLANE_TOML`, copied from the code, never retyped) as `gitleaks.toml` and an empty `gitleaksignore`, both root:wheel 0644. A file already exactly right is left; one that drifted (bytes, mode, owner, a second name, an access list) is written again. A scanner folder that is not root's 0755, or has an access list, is refused, never taken over; an empty one of root's (a run cut off before it was secured) is secured again. Then the file rows of `check-scanner` | yes |
+| `node setup.mjs check-scanner` | read only, **without sudo** (it runs the downloaded program, which never runs as root; with sudo it refuses). The folder root:wheel 0755; each file root:wheel, its mode, one name, its hash; no access list on any. Only when all of that passes, the push step's own check (`checkScanner`, which the push runs before every scan): the program's hash, owner, mode and one name (a link is not followed), the rules byte for byte, the ignore file empty, and the program run once with `version`, which must say 8.30.1. Anything else FAILs (exit 1) | no |

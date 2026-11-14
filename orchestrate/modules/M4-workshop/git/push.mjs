@@ -304,6 +304,8 @@ async function messages(mirror, shas, names, about) {
  *                           never passes it, so every address is https://github.com/<repo>.git.
  *   testFstat(fd)           tests only, refused outside them: stands in for fstat on the bundle's handle.
  *   testGit                 tests only, refused outside them: { bin, timeouts, failStart } for every git call (gitTest).
+ *   testScannerPin          tests only, refused outside them: { sha, uid } of a stand-in gitleaks, in place of root's
+ *                           real pin (gitleaks.mjs scannerBinProblem; L1123 m5).
  *   afterStage()            tests only: runs right after the private copy is taken, so a test can
  *                           swap the outbox bundle at the earliest moment (review R-0b-47 MAT-4).
  *   uids.worker             the Mac user a worker's bundle must be owned by (`orchestrate`, L65)
@@ -315,9 +317,10 @@ async function messages(mirror, shas, names, about) {
  *                           look owned by another user (tests can't chown).
  */
 export function createPushScript(deps) {
-  const { record, rules, productPlace, outsideWorkflow, privateDir, scanner, getRobotToken, readRun, workflowRule, issues, pullRequests, gateCache = {}, testRemote, afterStage, bundleCap = BUNDLE_CAP, now = () => Date.now(), uids, ownerUid, outboxRoot, testFstat: fstat, testGit } = deps;
+  const { record, rules, productPlace, outsideWorkflow, privateDir, scanner, getRobotToken, readRun, workflowRule, issues, pullRequests, gateCache = {}, testRemote, afterStage, bundleCap = BUNDLE_CAP, now = () => Date.now(), uids, ownerUid, outboxRoot, testFstat: fstat, testGit, testScannerPin } = deps;
   if (fstat !== undefined && !process.env.NODE_TEST_CONTEXT) throw new Error('createPushScript: testFstat is for tests only');
   if (testGit !== undefined && !process.env.NODE_TEST_CONTEXT) throw new Error('createPushScript: testGit is for tests only');
+  if (testScannerPin !== undefined && !process.env.NODE_TEST_CONTEXT) throw new Error('createPushScript: testScannerPin is for tests only');
   // Checked once, here: a push script that can't tell a worker's bundle from Joe's is never made.
   // So is one that doesn't know where a product lives, or which outside check to trust (L568).
   if (typeof productPlace !== 'function') throw new Error('createPushScript: productPlace must be a function');
@@ -503,7 +506,7 @@ export function createPushScript(deps) {
       // 5. The secret scan.
       const shas = commits.map(([s]) => s);
       for (const sha of shas) if (await addedAllowComment(mirror, sha, of)) no(`commit ${sha.slice(0, 12)} adds a "gitleaks:allow" comment`);
-      const scan = await scanSecrets({ setup: scanner, mirror, shas, blobs: [...blobs.values()], messages: await messages(mirror, shas, names, of), privateDir: work, allowedBinaries: allowList(rules.get('product.allowed_binaries', { product })) });
+      const scan = await scanSecrets({ setup: scanner, mirror, shas, blobs: [...blobs.values()], messages: await messages(mirror, shas, names, of), privateDir: work, allowedBinaries: allowList(rules.get('product.allowed_binaries', { product })), testPin: testScannerPin });
       if (!scan.ok) no(scan.reason);
 
       // 6. The rules, then the start gate. M10's push_branch reads the card as { id, kind, rows, doc: { lane, files } } and each

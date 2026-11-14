@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { writeSnapshot } from '../modules/M4-workshop/hooks/snapshot.mjs';
 import { makeLock } from '../modules/M9-record/lock.mjs';
 import { loginJobPlist } from '../modules/M11-dispatcher/login-job.mjs';
-import { DENY_KEYS, aclWriteEntries, carriedOverProblem, checkRunnerConfig, hookStoreOf, keepSnapshots, snapshotFolderProblem, startDeps, listenStop, main, readRootFile, realRunnerPorts } from './runner-main.mjs';
+import { DENY_KEYS, aclWriteEntries, carriedOverProblem, checkRunnerConfig, hookStoreOf, keepSnapshots, launchInputs, readRunnerConfig, snapshotFolderProblem, startDeps, listenStop, main, readRootFile, realRunnerPorts } from './runner-main.mjs';
 import { RUNNER_JOB_LOG, RUNNER_JOB_UMASK, fullPath, workerRunnerPlist } from './runner-job.mjs';
 
 const config = (d, over = {}) => ({ installRoot: join(d, 'install'), requestsDir: join(d, 'requests'), statusFile: join(d, 'runner', 'status.json'), orchestrateUid: 501,
@@ -662,6 +662,54 @@ test('L1001: the Bob file list is read only as root\'s own plain file, never thr
     const l = join(d, 'l.json'); symlinkSync(f, l);
     assert.throws(() => readRootFile(l, { uid: process.getuid() }), /ELOOP|link/);
   } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test('L1092: launchInputs, the one loader of checks 12 and 13 (the runner\'s and the runLocked proof\'s): root\'s alone first, each loaded once with the caller\'s user', async () => {
+  const c = { installRoot: '/i', budget: '/i/b.mjs', bobManifest: '/i/m.json', statusFile: '/s.json', dispatcherRules: '/r' };
+  const budget = { rules: {}, rec: {}, bandsNow: () => ({}), runningNow: () => [] };
+  const loads = []; const logs = [];
+  const r = await launchInputs(c, { pinnedProblem: () => null, uid: 777, log: (s) => logs.push(s),
+    loadBudget: async (f, x) => { loads.push([f, x.workerUid, x.workerStatusFile]); return budget; }, readManifest: () => '{"a.md":"x"}' });
+  assert.deepEqual(r, { budget, bobManifest: { 'a.md': 'x' } });
+  assert.deepEqual(loads, [['/i/b.mjs', 777, '/s.json']]);
+  assert.deepEqual(logs, []);
+  // Not root's alone, or a check that throws: a problem, and nothing is loaded.
+  for (const pinnedProblem of [() => 'b.mjs is 501\'s', () => { throw new Error('b.mjs is 501\'s'); }]) {
+    loads.length = 0;
+    const p = await launchInputs(c, { pinnedProblem, loadBudget: async () => { loads.push(1); return budget; }, readManifest: () => '{}' });
+    assert.equal(p.problem, 'its budget or Bob file list is not root\'s alone in the installed copy: b.mjs is 501\'s');
+    assert.equal(loads.length, 0);
+  }
+  // Neither in the config: no pinned check, both null.
+  let asked = false;
+  assert.deepEqual(await launchInputs({ installRoot: '/i' }, { pinnedProblem: () => { asked = true; return 'x'; } }), { budget: null, bobManifest: null });
+  assert.equal(asked, false);
+});
+
+test('L1121 m1: readRunnerConfig is the runner\'s one config reading: budget is checked as a code file when named; no own path, no read', () => {
+  const copy = tempDir('orch-rrc-');
+  const file = join(copy, 'runner.json');
+  writeFileSync(file, JSON.stringify({ installRoot: copy, budget: 'budget.mjs' }));
+  // budget named as code (optionalCode): a relative path is refused before anything else is read. Planted: dropped or mistyped.
+  assert.throws(() => readRunnerConfig(file, join(copy, 'wiring', 'runner-main.mjs')), /budget must be a full path/);
+  assert.throws(() => readRunnerConfig(file, undefined), /its own script's path can't be read/);
+});
+
+test('L1121 m2: launchInputs\' own defaults are the real ones: a budget or Bob file list that is not root\'s stops the start, and nothing is loaded', async () => {
+  if (process.getuid() === 0) return;
+  const copy = tempDir('orch-li-');
+  for (const k of ['budget', 'bobManifest']) {
+    const f = join(copy, k === 'budget' ? 'b.mjs' : 'm.json');
+    writeFileSync(f, k === 'budget' ? 'export const budget = () => { throw new Error("loaded"); };\n' : '{}');
+    const r = await launchInputs({ installRoot: copy, [k]: f });
+    assert.match(r.problem ?? '', /^its budget or Bob file list is not root's alone in the installed copy: /, k);
+  }
+  // The manifest's own reader is a second guard: with the first check let through, a file that is not root's still reads as no list.
+  const m = join(copy, 'm.json');
+  const said = [];
+  const r2 = await launchInputs({ installRoot: copy, bobManifest: m }, { pinnedProblem: () => null, log: (t) => said.push(t) });
+  assert.equal(r2.bobManifest, null, 'planted: the manifest read without the root-only check');
+  assert.match(said.join('\n'), /the Bob file list could not be read \(.*is not root's own plain file\)/);
 });
 
 test('R-0b-175a: hookStateDir is optional, a folder apart from the Dispatcher\'s, the requests and every place a worker writes; start_timeout_s per interactive role', () => {
