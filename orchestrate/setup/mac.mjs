@@ -31,6 +31,7 @@ import { openRead } from '../wiring/owner-status.mjs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { chainProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
+import { registerSecret } from '../shared/secret-guard.mjs';
 
 /**
  * Set the owner and mode of the folder at `real` through an open handle. Refuses a link, anything that is not a folder, and
@@ -139,7 +140,9 @@ export function readSecretFromTty(prompt, { maxBytes = 1024 } = {}) {
         bytes.push(one[0]);
       }
     } finally { stty('echo'); writeSync(fd, '\n'); }
-    return Buffer.from(bytes).toString('utf8');
+    const typed = Buffer.from(bytes).toString('utf8');
+    registerSecret(typed.trim());
+    return typed;
   } finally { closeSync(fd); }
 }
 
