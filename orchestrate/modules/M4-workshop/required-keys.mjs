@@ -24,7 +24,9 @@ export const OPTIONAL_KEYS = Object.freeze([
 ]);
 
 // L719 m4 (L612): the go/no-go check must agree with the start gate, which shuts for good unless the project is non-empty
-// text (start-gate.mjs vercelFact). Read as push.mjs reads it, so the two can't differ.
+// text (start-gate.mjs vercelFact). Read as push.mjs reads it, so the two can't differ. Exactly `none` (start-gate.mjs
+// NO_VERCEL, L1081) is non-empty text, so it passes here too: the product has no Vercel project, and the gate's two
+// Vercel facts hold for it. A missing or empty value is still this line's problem.
 export const VERCEL_PROJECT_LINE = 'M4: product.vercel_project must name the Vercel project';
 export function policyProblems(rules, product) {
   let v;
