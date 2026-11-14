@@ -200,6 +200,7 @@ export const ALLOWED = Object.freeze({
   'setup/install.test.mjs': 1, // #81: the stand-in updater's runner text; `script` is the install script the test copies and runs in a child (L160 MAT-1, lead's and lane 1's OK)
   'modules/M4-workshop/launcher/review-install-closure.test.mjs': 17, // #82: an import scanner's own test text (L142 m1, lead's OK); +1 each for the CONFIG_IMPORTS rows of robot-main (L256), loop.mjs (R-0b-169) and runner-main's budget (L1001)
   'modules/M4-workshop/launcher/review-runner-main.mjs': 2,
+  'setup/live-proofs/guard-proof.mjs': 2, // L1211: its child loads a job's script and the copy's guard by path, each first checked to be the copy's own and root's (never ask-store)
   'wiring/runner-main.mjs': 1, // L1001: the worker runner loads the budget module its config names (launch check 12), as review-runner-main does
   'modules/M4-workshop/launcher/review-updater.test.mjs': 1,
   'modules/M6-merge-gate/build-checker.test.mjs': 1,
