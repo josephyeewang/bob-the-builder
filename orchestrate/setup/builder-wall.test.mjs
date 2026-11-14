@@ -9,15 +9,21 @@ import { join } from 'node:path';
 import { fakeMac } from './fake-mac.test-helper.mjs';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { ROOT_CONFIG_PATH } from './layout.mjs';
+import { chainProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
 import {
-  ANCHOR, ANCHOR_FILE, FAMILIES, PROTOS, TAG, anchorText, bootScript, checkWall, loadedRulesProblem, main, planWall,
-  tokenPath, wallLabel, wallPlistPath, wallDir,
+  ANCHOR, ANCHOR_DIR, ANCHOR_FILE, FAMILIES, PROTOS, TAG, anchorText, bootScript, checkWall, loadedRulesProblem, main, otherAddresses,
+  planWall, tokenPath, unreadPath, waitForFirstRun, wallLabel, wallPlistPath, wallDir,
 } from './builder-wall.mjs';
 
 const BASE = '/Library/orchestrate';
 const LABEL = 'com.example.orch';
 const BUILDER_UID = 65002;
 const OWNER_UID = 65001;   // sam, the stand-in Mac's own user
+const LAN = '192.168.1.20';   // the stand-in Mac's one address that is not loopback
+/** Every place the read-back probes, as its rows name them. */
+const PLACES = [...FAMILIES, ["this Mac's own address", LAN]];
+const ROWS_CHECK = 5 + PROTOS.length * PLACES.length * 4;   // the settings half, then v, ii, i, ii-again per protocol and place
+const FAST = { sleep: async () => {}, limitMs: 15_000, stepMs: 500 };
 
 /** pf, stood in: its state, pfctl's answers, and a rule evaluator for the probes. */
 function fakePf(mac, { mainAnchor = true } = {}) {
@@ -46,11 +52,12 @@ function fakePf(mac, { mainAnchor = true } = {}) {
   };
   /** The macOS job, as its script does it (the script itself is run for real in its own test). */
   pf.job = () => {
-    if (!pf.mainAnchor) return;
+    if (!pf.mainAnchor) return 1;
     pf.run(['-a', ANCHOR, '-q', '-f', ANCHOR_FILE]);
     let tok = null; try { tok = readFileSync(mac.at(tokenPath({ base: BASE })), 'utf8').trim(); } catch { /* none */ }
-    if (pf.enabled && tok && pf.refs.has(Number(tok))) return;
+    if (pf.enabled && tok && pf.refs.has(Number(tok))) return 0;
     const r = pf.run(['-E']); writeFileSync(mac.at(tokenPath({ base: BASE })), /Token : (\d+)/.exec(r.stderr)[1]);
+    return 0;
   };
   /** One rule line as the evaluator needs it. */
   const parse = (l) => ({
@@ -74,39 +81,64 @@ function fakePf(mac, { mainAnchor = true } = {}) {
 }
 
 /** The probes, stood in: listeners are numbers, a connection is pf's decision. `twist` lets a test break the probes themselves. */
-function fakeNet(pf, { twist = null } = {}) {
+function fakeNet(pf, { twist = null, addresses = null } = {}) {
   const uidOf = (user) => (user === 'builder' ? BUILDER_UID : user === 'sam' ? OWNER_UID : -1);
   const listeners = new Map(); let port = 50000;
   const log = [];
   return {
     log,
-    listen: async ({ user, proto, host }) => { const p = port++; listeners.set(p, { user, proto, host }); return { port: p, close: () => listeners.delete(p) }; },
-    connect: ({ user, proto, host, port: p }) => {
-      const l = listeners.get(p); const fam = FAMILIES.find(([, h]) => h === host)[0];
-      log.push(`${user}→${l.user} ${proto} ${fam}`);
-      // The request, then the listener's reply back (the TCP SYN-ACK, the UDP pong): both legs must pass for an 'ok'.
+    addresses: () => (addresses ? [...addresses] : [LAN]),
+    listen: async ({ user, proto, host }) => {
+      const p = port++; const l = { user, proto, host, got: 0 }; listeners.set(p, l);
+      return { port: p, received: () => l.got, settle: async () => {}, close: () => listeners.delete(p) };
+    },
+    connect: async ({ user, proto, host, port: p }) => {
+      const l = listeners.get(p); const fam = host.includes(':') ? 'IPv6' : 'IPv4';
+      log.push(`${user}→${l.user} ${proto} ${host}`);
+      // The request, then the listener's reply back (the TCP SYN-ACK, the UDP pong): both legs must pass for an 'ok'. A
+      // request that got there is received, whatever the reply's fate.
       const there = pf.decide({ fromUid: uidOf(user), toUid: uidOf(l.user), proto, fam });
+      if (there === 'ok') l.got += 1;
       const said = there === 'ok' ? pf.decide({ fromUid: uidOf(l.user), toUid: uidOf(user), proto, fam }) : there;
-      return twist ? twist({ user, to: l.user, proto, fam, said }) : said;
+      return twist ? twist({ user, to: l.user, proto, fam, host, said }) : said;
     },
   };
 }
 
-function world({ builder = true, builderUid = BUILDER_UID, mainAnchor = true } = {}) {
+/**
+ * The stand-in Mac with a builder, the stand-in pf, and the job. `late`: the job's first run comes only at that many
+ * `launchctl print`s after load (launchd starts a RunAtLoad job after bootstrap has returned, #556 r1 M2); Infinity, never.
+ */
+function world({ builder = true, builderUid = BUILDER_UID, mainAnchor = true, late = 0 } = {}) {
   const mac = fakeMac({ users: builder ? { builder: { UniqueID: String(builderUid), PrimaryGroupID: '20', UserShell: '/bin/zsh', NFSHomeDirectory: '/Users/builder' } } : {} });
-  for (const d of ['/etc', '/etc/pf.anchors', BASE]) { mkdirSync(mac.at(d), { recursive: true }); chmodSync(mac.at(d), 0o755); mac.owners.set(d, { uid: mac.rootUid, gid: 0 }); }
+  // /etc is a link to /private/etc on the stand-in Mac as on a real one: the anchor folder is made through the real path.
+  for (const d of [ANCHOR_DIR, BASE]) { mkdirSync(mac.at(d), { recursive: true }); chmodSync(mac.at(d), 0o755); mac.owners.set(d, { uid: mac.rootUid, gid: 0 }); }
   const pf = fakePf(mac, { mainAnchor });
   const cfg = { base: BASE, owner: 'sam', products: ['alpha'], label: LABEL };
-  const runMac = mac.run;
+  const runMac = mac.run; let wait = null;
+  const runJob = () => { const j = mac.loaded.get(wallLabel(cfg)); const code = pf.job(); if (j) { j.runs = (j.runs ?? 0) + 1; j.lastExit = code; } };
   mac.run = (cmd, args) => {
     if (cmd === '/sbin/pfctl') return pf.run(args);
+    if (cmd === '/bin/launchctl' && args[0] === 'print' && args[1] === `system/${wallLabel(cfg)}` && wait !== null && (wait -= 1) <= 0) { wait = null; runJob(); }
     const r = runMac(cmd, args);
-    // launchd runs the job at load (RunAtLoad), as root.
-    if (cmd === '/bin/launchctl' && args[0] === 'bootstrap' && r.status === 0 && args[2] === mac.at(wallPlistPath(cfg))) pf.job();
+    // launchd runs the job at load (RunAtLoad), as root: at once, or a little later.
+    if (cmd === '/bin/launchctl' && args[0] === 'bootstrap' && r.status === 0 && args[2] === mac.at(wallPlistPath(cfg))) {
+      mac.loaded.get(wallLabel(cfg)).runs = 0;
+      if (late === 0) runJob(); else wait = late;
+    }
     return r;
   };
   return { mac, pf, cfg, net: fakeNet(pf) };
 }
+const writeConfig = (w) => {
+  mkdirSync(w.mac.at('/Library'), { recursive: true });
+  writeFileSync(w.mac.at(ROOT_CONFIG_PATH), JSON.stringify({ base: BASE, owner: 'sam', products: ['alpha'], address: 'https://example.invalid/o/r.git', label: LABEL, runnerConfig: '/x/review.json' }));
+};
+const runMain = async (w, argv, net = w.net) => {
+  const out = []; const err = [];
+  const code = await main(argv, { io: w.mac, net, wait: FAST, out: (x) => out.push(x), err: (x) => err.push(x) });
+  return { code, out: out.join('\n'), err: err.join('\n'), all: [...out, ...err].join('\n') };
+};
 const runPlan = (p) => { assert.deepEqual(p.problems, []); for (const o of p.ops) o.run(); };
 const fails = (rows) => rows.filter((r) => !r.ok).map((r) => `${r.what} — ${r.why}`);
 const placed = async (w) => { runPlan(planWall(w.mac, w.cfg)); return checkWall(w.mac, w.cfg, { net: w.net }); };
@@ -127,9 +159,14 @@ test('R-0b-179: place writes the rules for the builder\'s uid read from this Mac
   assert.equal(w.mac.lstat(ANCHOR_FILE).mode & 0o7777, 0o644);
   assert.equal(w.mac.lstat(wallDir(w.cfg)).mode & 0o7777, 0o700);
   assert.ok(w.mac.loaded.has(wallLabel(w.cfg)));
-  // Both directions in each protocol and family, every run (L1150): 4 × (v, ii, i), and nothing else proven by traffic.
-  for (const p of PROTOS) for (const [fam] of FAMILIES) for (const who of ['builder→builder', 'sam→sam', 'builder→sam']) assert.ok(w.net.log.includes(`${who} ${p} ${fam}`), `${who} ${p} ${fam} was not tried`);
-  assert.equal(rows.filter((r) => /\((i|ii|v)(;|\))/.test(r.what)).length, PROTOS.length * FAMILIES.length * 3);
+  // The real path, not the one through /etc (#556 r1 M1): on the stand-in Mac as on a real one, /etc is a link, so a
+  // folder named through it is refused by the chain check, and the wall could never be placed.
+  assert.match(ANCHOR_FILE, /^\/private\/etc\/pf\.anchors\//);
+  assert.match(chainProblem(w.mac.at('/etc/pf.anchors'), { owner: w.mac.rootUid, top: w.mac.prefix }), /\/etc is a link/);
+  // Both directions in each protocol and place, every run (L1150), with one address that is not loopback (r1 m4).
+  for (const p of PROTOS) for (const [, host] of PLACES) for (const who of ['builder→builder', 'sam→sam', 'builder→sam']) assert.ok(w.net.log.includes(`${who} ${p} ${host}`), `${who} ${p} ${host} was not tried`);
+  assert.equal(rows.length, ROWS_CHECK);
+  assert.equal(rows.filter((r) => /\((i|ii|v)(;|\))/.test(r.what)).length, PROTOS.length * PLACES.length * 4);
   // Twice: nothing is rewritten, the job is reloaded, and it holds the same token (no second reference).
   const again = planWall(w.mac, w.cfg).ops.map((o) => o.text);
   assert.equal(again.some((t) => /^write /.test(t)), false, again.join(' | '));
@@ -165,7 +202,7 @@ test('R-0b-179 (ii): a wall that blocks the owner from its own listener refuses,
   await placed(w);
   const f = fails(await withRules(w, `${anchorText(BUILDER_UID)}block return in quick on lo0 proto { tcp udp } from any to any user = ${OWNER_UID}\n`));
   assert.ok(f.some((x) => /owner reaches its own listener .*\(ii\) — it got refused: the wall is blocking the owner/.test(x)), f.join('\n'));
-  assert.ok(f.some((x) => /\(i\) — not proven: a control above failed/.test(x)));
+  assert.ok(f.some((x) => /\(i\) — not proven: a control in this protocol and address failed/.test(x)));
   assert.ok(f.some((x) => /holds 2 lines that are not the wall's/.test(x)), 'the extra rule is also seen in what pf holds');
 });
 
@@ -187,7 +224,7 @@ test('R-0b-179 (iv): rules that did not load, or a main ruleset that never reach
   await placed(w);
   w.pf.run(['-a', ANCHOR, '-F', 'rules']);
   let f = fails(await checkWall(w.mac, w.cfg, { net: w.net }));
-  assert.ok(f.some((x) => /holds the wall's rules \(iv\) — com\.apple\/100\.orchestrate\.builder holds no rules/.test(x)), f.join('\n'));
+  assert.ok(f.some((x) => /holds exactly the wall's rules \(iv\) — com\.apple\/100\.orchestrate\.builder holds no rules/.test(x)), f.join('\n'));
   assert.ok(f.some((x) => /\(i\) — builder connected/.test(x)), 'with no rules loaded the traffic shows it too');
   const w2 = world(); await placed(w2); w2.pf.mainAnchor = false;
   f = fails(await checkWall(w2.mac, w2.cfg, { net: w2.net }));
@@ -199,8 +236,8 @@ test('R-0b-179 (v): a wall that cuts the builder off from its own listener (its 
   await placed(w);
   const twisted = fakeNet(w.pf, { twist: ({ user, to, said }) => (user === 'builder' && to === 'builder' ? 'refused' : said) });
   const f = fails(await checkWall(w.mac, w.cfg, { net: twisted }));
-  assert.equal(f.filter((x) => /reaches its own listener .*\(v; the proxy path\) — it got refused/.test(x)).length, 4, f.join('\n'));
-  assert.equal(f.filter((x) => /\(i\) — not proven/.test(x)).length, 4);
+  assert.equal(f.filter((x) => /reaches its own listener .*\(v; the proxy path\) — it got refused/.test(x)).length, PROTOS.length * PLACES.length, f.join('\n'));
+  assert.equal(f.filter((x) => /\(i\) — not proven/.test(x)).length, PROTOS.length * PLACES.length);
 });
 
 test('R-0b-179 plants (L1150): each wrong rule is refused, by what pf holds and by the traffic it lets through or blocks', async () => {
@@ -226,11 +263,11 @@ test('R-0b-179 plants (L1150): each wrong rule is refused, by what pf holds and 
 test('R-0b-179 plant: a one-direction read-back (no controls) is not this one: every (i) row stands on its (ii) and (v) in the same protocol and family', async () => {
   const w = world();
   const rows = await placed(w);
-  for (const p of PROTOS) for (const [fam, host] of FAMILIES) {
+  for (const p of PROTOS) for (const [fam, host] of PLACES) {
     const where = `${p.toUpperCase()} ${fam} (${host})`;
     const at = (re) => rows.findIndex((r) => r.what.includes(where) && re.test(r.what));
-    const v = at(/\(v;/); const ii = at(/\(ii\)/); const i = at(/\(i\)/);
-    assert.ok(v >= 0 && ii >= 0 && i > v && i > ii, `${where}: v ${v}, ii ${ii}, i ${i}`);
+    const v = at(/\(v;/); const ii = at(/reaches its own listener on [^)]*\) \(ii\)$/); const i = at(/\(i\)$/); const again = at(/after \(i\) \(ii\)/);
+    assert.ok(v >= 0 && ii >= 0 && i > v && i > ii && again > ii, `${where}: v ${v}, ii ${ii}, i ${i}, ii again ${again}`);
   }
 });
 
@@ -239,15 +276,15 @@ test('R-0b-179 (L1154): another user cannot reach a builder listener either (the
   await placed(w);
   for (const proto of PROTOS) for (const [fam, host] of FAMILIES) {
     const l = await w.net.listen({ user: 'builder', proto, host });
-    assert.equal(w.net.connect({ user: 'sam', proto, host, port: l.port }), 'refused', `${proto} ${fam}: the owner reached a builder listener`);
+    assert.equal(await w.net.connect({ user: 'sam', proto, host, port: l.port }), 'refused', `${proto} ${fam}: the owner reached a builder listener`);
     w.pf.enabled = false;
-    assert.equal(w.net.connect({ user: 'sam', proto, host, port: l.port }), 'ok', `${proto} ${fam}: the control (no wall) failed`);
+    assert.equal(await w.net.connect({ user: 'sam', proto, host, port: l.port }), 'ok', `${proto} ${fam}: the control (no wall) failed`);
     w.pf.enabled = true; l.close();
   }
   // It is the tag on the reply that does it: with the tag rule gone the owner gets through.
   await withRules(w, rulesWith(` tag ${TAG} no state`, ' no state'));
   const l = await w.net.listen({ user: 'builder', proto: 'tcp', host: '127.0.0.1' });
-  assert.equal(w.net.connect({ user: 'sam', proto: 'tcp', host: '127.0.0.1', port: l.port }), 'ok');
+  assert.equal(await w.net.connect({ user: 'sam', proto: 'tcp', host: '127.0.0.1', port: l.port }), 'ok');
 });
 
 test('R-0b-179: loadedRulesProblem reads OpenBSD\'s print or a list not split, in any order, and refuses an extra or a missing word', () => {
@@ -270,23 +307,22 @@ test('R-0b-179: loadedRulesProblem reads OpenBSD\'s print or a list not split, i
 test('R-0b-179: a failed read-back takes the wall out again (job unloaded, its file gone, rules emptied, token released)', async () => {
   const w = world();
   const net = fakeNet(w.pf, { twist: ({ user, to, said }) => (user === 'sam' && to === 'sam' ? 'refused' : said) });
-  mkdirSync(w.mac.at('/Library'), { recursive: true });
-  writeFileSync(w.mac.at(ROOT_CONFIG_PATH), JSON.stringify({ base: BASE, owner: 'sam', products: ['alpha'], address: 'https://example.invalid/o/r.git', label: LABEL, runnerConfig: '/x/review.json' }));
-  const out = []; const err = [];
-  const code = await main(['place'], { io: w.mac, net, out: (s) => out.push(s), err: (s) => err.push(s) });
-  assert.equal(code, 1, [...out, ...err].join('\n'));
-  assert.ok(err.includes('The read-back refused, so the wall was taken out again:'), err.join('\n'));
+  writeConfig(w);
+  const r = await runMain(w, ['place'], net);
+  assert.equal(r.code, 1, r.all);
+  assert.match(r.err, /^The read-back refused, so the wall was taken out again:$/m);
   assert.equal(w.mac.loaded.has(wallLabel(w.cfg)), false);
   assert.equal(existsSync(w.mac.at(wallPlistPath(w.cfg))), false);
   assert.equal(w.pf.anchors.has(ANCHOR), false);
   assert.equal(w.pf.refs.size, 0); assert.equal(w.pf.enabled, false);
   // The same config, the probes honest: it places and passes.
   const w2 = { ...w, net: fakeNet(w.pf) };
-  out.length = 0; err.length = 0;
-  assert.equal(await main(['place'], { io: w2.mac, net: w2.net, out: (s) => out.push(s), err: (s) => err.push(s) }), 0, [...out, ...err].join('\n'));
-  assert.match(out.join('\n'), /all 17 PASS/);
-  assert.equal(await main(['check'], { io: w2.mac, net: w2.net, out: (s) => out.push(s), err: (s) => err.push(s) }), 0);
-  assert.equal(await main(['nonsense'], { io: w2.mac, net: w2.net, out: () => {}, err: () => {} }), 2);
+  const placedOk = await runMain(w2, ['place']);
+  assert.equal(placedOk.code, 0, placedOk.all);
+  assert.match(placedOk.out, new RegExp(`all ${ROWS_CHECK + 1} PASS`));   // the job's first run, then the read-back
+  const checked = await runMain(w2, ['check']);
+  assert.equal(checked.code, 0, checked.all); assert.match(checked.out, new RegExp(`all ${ROWS_CHECK} PASS`));
+  assert.equal((await runMain(w2, ['nonsense'])).code, 2);
 });
 
 test('R-0b-179: the job\'s own script, run by a real shell against a stand-in pfctl: waits for com.apple/*, loads, enables once, keeps the token', () => {
@@ -301,8 +337,8 @@ case "$*" in
   "-s rules") [ -f "$S/main" ] && echo 'anchor "com.apple/*" all'; exit 0 ;;
   "-s info") if [ -f "$S/on" ]; then echo 'Status: Enabled for 0 days'; else echo 'Status: Disabled for 0 days'; fi; exit 0 ;;
   "-s References") echo 'TOKENS:'; [ -f "$S/refs" ] && while read t; do echo "4001  launchd  $t  0 days"; done < "$S/refs"; exit 0 ;;
-  "-E") touch "$S/on"; n=$(( $(cat "$S/n" 2>/dev/null || echo 40) + 1 )); echo $n > "$S/n"; echo $n >> "$S/refs"; echo 'pf enabled' >&2; echo "Token : $n" >&2; exit 0 ;;
-  "-q -a ${ANCHOR} -f "*) cp "\${5}" "$S/loaded"; exit 0 ;;
+  "-E") if [ -f "$S/garble" ]; then echo 'pf enabled, somehow' >&2; touch "$S/on"; exit 0; fi; touch "$S/on"; n=$(( $(cat "$S/n" 2>/dev/null || echo 40) + 1 )); echo $n > "$S/n"; echo $n >> "$S/refs"; echo 'pf enabled' >&2; echo "Token : $n" >&2; exit 0 ;;
+  "-q -a ${ANCHOR} -f "*) [ -f "$S/failload" ] && exit 1; cp "\${5}" "$S/loaded"; exit 0 ;;
 esac
 exit 1
 `);
@@ -325,4 +361,124 @@ exit 1
   writeFileSync(join(state, 'refs'), ''); spawnSync('/bin/rm', [join(state, 'on')]);
   assert.equal(sh().status, 0);
   assert.equal(readFileSync(tokenPath(cfg), 'utf8').trim(), '42');
+  const enables = () => readFileSync(join(state, 'log'), 'utf8').split('\n').filter((l) => l === '-E').length;
+  // r1 m3(b): the rules fail to load: exit 1, and pf is not enabled over a wall that is not there.
+  writeFileSync(join(state, 'refs'), ''); spawnSync('/bin/rm', [join(state, 'on')]); writeFileSync(join(state, 'failload'), '');
+  const before = enables();
+  assert.equal(sh().status, 1);
+  assert.equal(enables(), before); assert.equal(existsSync(join(state, 'on')), false);
+  spawnSync('/bin/rm', [join(state, 'failload')]);
+  // r1 m7: pfctl -E answers with no token in it: what it said is kept, the job exits 3, and later runs take no more references.
+  writeFileSync(join(state, 'garble'), '');
+  assert.equal(sh().status, 3);
+  assert.match(readFileSync(unreadPath(cfg), 'utf8'), /pf enabled, somehow/);
+  const after = enables();
+  spawnSync('/bin/rm', [join(state, 'on')]);
+  assert.equal(sh().status, 3); assert.equal(sh().status, 3);
+  assert.equal(enables(), after, 'a run after an unread token took another reference');
+});
+
+test('R-0b-179 (r1 M2): place waits for the job\'s first run when launchd starts it late, and refuses when it never runs or exits badly', async () => {
+  // Late: the first run comes on the third look; the read-back follows it and passes.
+  const w = world({ late: 3 }); writeConfig(w);
+  const sleeps = [];
+  const r = await main(['place'], { io: w.mac, net: w.net, wait: { ...FAST, sleep: async (ms) => { sleeps.push(ms); } }, out: () => {}, err: () => {} });
+  assert.equal(r, 0);
+  assert.equal(sleeps.length, 2, 'it looked three times, sleeping between');
+  // Never: refused within the limit, and taken out again.
+  const n = world({ late: Infinity });
+  runPlan(planWall(n.mac, n.cfg));
+  let t = 0;
+  const row = await waitForFirstRun(n.mac, n.cfg, { limitMs: 15_000, stepMs: 500, sleep: async (ms) => { t += ms; }, now: () => t });
+  assert.equal(row.ok, false); assert.match(row.why, /after 15 seconds it has run 0 times/);
+  assert.ok(t <= 15_000 + 500, `it waited ${t} ms`);
+  const n2 = world({ late: Infinity }); writeConfig(n2);
+  const said = await main(['place'], { io: n2.mac, net: n2.net, wait: { sleep: async (ms) => { t += ms; }, now: () => t, limitMs: 15_000 }, out: () => {}, err: () => {} });
+  assert.equal(said, 1); assert.equal(n2.mac.loaded.has(wallLabel(n2.cfg)), false, 'the job was not taken out again');
+  // Ran and failed (macOS's own rules not loaded yet, the job exits 1): refused at once, without waiting out the limit.
+  const bad = world({ mainAnchor: false });
+  runPlan(planWall(bad.mac, bad.cfg));
+  let slept = 0;
+  const b = await waitForFirstRun(bad.mac, bad.cfg, { sleep: async () => { slept += 1; } });
+  assert.equal(b.ok, false); assert.match(b.why, /it ran and exited 1/); assert.equal(slept, 0);
+});
+
+test('R-0b-179 (r1 m1): a timeout counts as a block only when the owner\'s listener received nothing from the builder', async () => {
+  const w = world();
+  await placed(w);
+  w.pf.enabled = false;   // the builder's packets get through, but the probe says timeout (a reply lost on the way back)
+  const lost = fakeNet(w.pf, { twist: ({ user, to, said }) => (user === 'builder' && to === 'sam' ? 'timeout' : said) });
+  const f = fails(await checkWall(w.mac, w.cfg, { net: lost }));
+  assert.equal(f.filter((x) => /\(i\) — the owner's listener received 1 from builder \(the probe said timeout\)/.test(x)).length, PROTOS.length * PLACES.length, f.join('\n'));
+  // With the wall up the same timeout is a block: nothing was received.
+  w.pf.enabled = true;
+  assert.deepEqual(fails(await checkWall(w.mac, w.cfg, { net: fakeNet(w.pf, { twist: ({ user, to, said }) => (user === 'builder' && to === 'sam' ? 'timeout' : said) }) })), []);
+  // (ii) again after (i): an owner's listener gone by then makes (i) not proven.
+  let n = 0;
+  const g = fakeNet(w.pf, { twist: ({ user, to, said }) => (user === 'sam' && to === 'sam' && (n += 1) % 2 === 0 ? 'refused' : said) });
+  const fg = fails(await checkWall(w.mac, w.cfg, { net: g }));
+  assert.ok(fg.some((x) => /after \(i\) \(ii\) — it got refused/.test(x)), fg.join('\n'));
+  assert.ok(fg.some((x) => /\(i\) — not proven/.test(x)));
+});
+
+test('R-0b-179 (r1 m4): one address of this Mac that is not loopback is probed; with none, the read-back says only loopback was', async () => {
+  const w = world();
+  await placed(w);
+  const lone = fakeNet(w.pf, { addresses: [] });
+  const rows = await checkWall(w.mac, w.cfg, { net: lone });
+  assert.deepEqual(fails(rows), []);
+  assert.ok(rows.some((r) => /no address but loopback, so only 127\.0\.0\.1 and ::1 were probed/.test(r.what)));
+  assert.equal(lone.log.some((l) => l.endsWith(LAN)), false);
+  // The real lookup: the first IPv4 address that is not internal or link-local.
+  assert.deepEqual(otherAddresses({ lo0: [{ address: '127.0.0.1', family: 'IPv4', internal: true }], en0: [{ address: 'fe80::1', family: 'IPv6', internal: false }, { address: '169.254.3.4', family: 'IPv4', internal: false }, { address: '10.0.0.7', family: 'IPv4', internal: false }] }), ['10.0.0.7']);
+  assert.deepEqual(otherAddresses({ lo0: [{ address: '127.0.0.1', family: 'IPv4', internal: true }] }), []);
+});
+
+test('R-0b-179 (r1 m2, m3): every printed word is checked: keep state, no quick, a group, a family on a rule that is not self, and a qualifier more all refuse', async () => {
+  const u = BUILDER_UID;
+  const plants = {
+    'the tag rule keeping state': rulesWith(`tag ${TAG} no state`, `tag ${TAG} keep state`),
+    'the block rule not quick': rulesWith('block return in quick on lo0', 'block return in on lo0'),
+    'the tag rule not quick': rulesWith('pass out quick on lo0', 'pass out on lo0'),
+    'the block rule narrowed by group': rulesWith(`tagged ${TAG} user != ${u}`, `tagged ${TAG} user != ${u} group = 20`),
+    'the block rule IPv4 only': rulesWith('block return in quick on lo0 proto', 'block return in quick on lo0 inet proto'),
+    'the self rule to one port': rulesWith('to self user', 'to self port 22 user'),
+    'the block rule dropping, not returning': rulesWith('block return in quick', 'block drop in quick'),
+  };
+  for (const [name, text] of Object.entries(plants)) {
+    const w = world();
+    await placed(w);
+    const f = fails(await withRules(w, text));
+    assert.ok(f.some((x) => /exactly the wall's rules \(iv\) — .*missing the rules? /.test(x)), `${name}: not refused:\n${f.join('\n')}`);
+  }
+});
+
+test('R-0b-179 (r1 m3a, m8, c1): a step that fails takes out what was placed; a base that is not root\'s alone refuses; "taken out" is said only when it was', async () => {
+  const w = world(); writeConfig(w);
+  w.mac.failBootstrap = new Set([wallLabel(w.cfg)]);
+  const r = await runMain(w, ['place']);
+  assert.equal(r.code, 1, r.all);
+  assert.match(r.err, /stopped: could not load/); assert.match(r.err, /^A step failed, so the wall was taken out again:$/m);
+  assert.equal(existsSync(w.mac.at(wallPlistPath(w.cfg))), false, 'the job file was left behind');
+  // Taking it out fails at one step: it says NOT, never "taken out".
+  const w2 = world(); writeConfig(w2);
+  const run2 = w2.mac.run;
+  w2.mac.run = (cmd, args) => (cmd === '/sbin/pfctl' && args.includes('-F') ? { status: 1, stdout: '', stderr: 'pfctl: busy' } : run2(cmd, args));
+  const r2 = await runMain(w2, ['place'], fakeNet(w2.pf, { twist: ({ user, to, said }) => (user === 'sam' && to === 'sam' ? 'refused' : said) }));
+  assert.equal(r2.code, 1);
+  assert.doesNotMatch(r2.err, /so the wall was taken out again/);
+  assert.match(r2.err, /Taking the wall out again did NOT fully work/); assert.match(r2.err, /NOT done: empty com\.apple/);
+  // The base itself writable by another user: the token folder would be made in it, so nothing is placed.
+  const w3 = world(); chmodSync(w3.mac.at(BASE), 0o777);
+  const p = planWall(w3.mac, w3.cfg);
+  assert.deepEqual(p.ops, []);
+  assert.match(p.problems.join(' '), new RegExp(`${BASE} is not safe for root to write in`));
+});
+
+test('R-0b-179 (r1 m7): the read-back refuses while a pfctl -E answer could not be read, and the way out says to find that reference', async () => {
+  const w = world();
+  await placed(w);
+  writeFileSync(w.mac.at(unreadPath(w.cfg)), 'pf enabled, somehow\n');
+  const f = fails(await checkWall(w.mac, w.cfg, { net: w.net }));
+  assert.ok(f.some((x) => /is held \(iii\).* — pfctl -E answered in a way no token could be read from/.test(x)), f.join('\n'));
 });

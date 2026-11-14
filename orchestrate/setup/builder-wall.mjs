@@ -9,39 +9,54 @@
 //   out on lo0, a packet from a builder socket is tagged ORCH_BUILDER; in on lo0, a tagged packet to a listener that is
 //   not the builder's is blocked (pf's `user` is the sending socket's owner on the way out, the receiving one's on the way
 //   in). TCP and UDP, IPv4 and IPv6 (the rules name no family, so ::1 is covered with 127.0.0.0/8). A connect to one of
-//   this Mac's other addresses goes through lo0 as well; a third rule blocks the builder to `self` off lo0 all the same.
+//   this Mac's other addresses goes through lo0 as well (the read-back probes one); a third rule blocks the builder to
+//   `self` off lo0 all the same.
 //   Another user's connection TO a builder listener fails too, and that is intended (L1154): the builder's reply is tagged
 //   and meets a socket that is not the builder's. builder-wall.test.mjs pins it; the read-back on the Mac does not probe it.
 //
+// Known limits (#556 r1, L1158; said in Joe's run sheet too):
+//   - A packet sent by a setuid-root program the builder runs (traceroute's UDP probes, ping) comes from root's socket, so it
+//     is not tagged and reaches the owner's listener. Such a program sends probes; it holds no conversation the builder can use.
+//   - The wall is network only. Claude Code's session sockets (/tmp/cc-socks) are files, guarded by their folder's owner and
+//     mode: the builder can make the owner's session messaging go quiet by making that folder first after a reboot (Claude
+//     Code refuses a folder another user owns, so it can not take the messaging over). A login job of the owner's that makes
+//     the folder first is a later row (L1158).
+//   - Nothing alarms if the wall is switched off later. The start-of-session gate of the wiring PR reruns the settings half
+//     (pf on, token held, rules exact) before every builder session (L1154, L1158 m5).
+//
 // What it places, as root (`place`):
-//   /etc/pf.anchors/orchestrate.builder      the rules, root:wheel 0644 (anchorText)
+//   /private/etc/pf.anchors/orchestrate.builder   the rules, root:wheel 0644 (anchorText). /etc is a link to /private/etc
+//       on every Mac, so the real path is the one named (#556 r1 M1: a path through a link is refused by the chain check).
 //   <base>/builder-wall/                     root's 0700: pf-token, the pf enable reference this job holds
 //   /Library/LaunchDaemons/<label>.builder-wall.plist   root's 0644. At load, at boot and every 5 minutes it loads the
 //       rules into com.apple/100.orchestrate.builder (a child of the `anchor "com.apple/*"` that macOS's own /etc/pf.conf
 //       has, and that com.apple.pfctl loads at every boot: so /etc/pf.conf is never edited) and, unless the token it
 //       holds is still held and pf is on, enables pf with `pfctl -E` and keeps the new token.
-// then runs the read-back, and when the read-back refuses, takes the wall out again (the way out, below) and says why: a
-// wall that blocks the owner or the builder's own proxy never stays live.
+// then waits (15 seconds at most) for the job's first run to have finished well, runs the read-back, and when either
+// refuses, takes the wall out again (the way out, below) and says why: a wall that blocks the owner or the builder's own
+// proxy never stays live.
 //
 // The read-back (`check`, and the last step of `place`) refuses in five cases (L1149, L1150):
-//   (i)   the builder still connects to a throwaway listener of the owner's
-//   (ii)  the owner can no longer connect to its own throwaway listener
+//   (i)   the builder still connects to a throwaway listener of the owner's, or that listener received what it sent
+//   (ii)  the owner can not connect to its own throwaway listener, before (i) or after it
 //   (iii) the anchor file is there but pf is off, or the token this job keeps isn't held
-//   (iv)  the rules didn't load: com.apple/100.orchestrate.builder isn't these rules, or the main ruleset has no
+//   (iv)  the rules didn't load: com.apple/100.orchestrate.builder isn't exactly these rules, or the main ruleset has no
 //         `anchor "com.apple/*"` to reach it
 //   (v)   the builder can't reach its own throwaway listener (the proxy path would be cut)
-// Both directions, in each of TCP and UDP over 127.0.0.1 and ::1, on every run. (i) proves nothing unless (ii) and (v)
-// pass in the same family and protocol: they are its controls, as proofs.mjs's are.
+// Both directions, in each of TCP and UDP over 127.0.0.1, ::1 and one other address of this Mac, on every run. (i) proves
+// nothing unless (ii) and (v) pass in the same protocol and address: they are its controls, as proofs.mjs's are. A timeout
+// counts as a block only when the owner's listener received nothing from the builder.
 //
 // How pfctl prints loaded rules is read from OpenBSD's pfctl (print_rule), from which macOS's comes; it is not yet seen on
-// this Mac (Joe's run sheet, laneA-localhost-ps.md part (c)). The check matches each rule by its words, in any order, so a
-// different order passes, and a missing word refuses: an unexpected print fails closed, never open.
+// this Mac (Joe's run sheet, laneA-builder-wall-runsheet.md). The check takes each printed rule as a set of words and wants
+// exactly the wall's set: a word missing or a word more refuses, so an unexpected print fails closed, never open.
 //
 // The way out (said after every run): sudo launchctl bootout system/<label>.builder-wall; sudo rm the job file; sudo pfctl
 // -a com.apple/100.orchestrate.builder -F rules; sudo pfctl -X <the token in <base>/builder-wall/pf-token>.
 
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { join } from 'node:path';
+import { networkInterfaces } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { realpathSync } from 'node:fs';
 import { BUILDER, ROOT_CONFIG_PATH } from './layout.mjs';
@@ -53,12 +68,14 @@ import { parseInstallConfig } from './install.mjs';
 import { chainProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
 
 export const ANCHOR = 'com.apple/100.orchestrate.builder';
-export const ANCHOR_FILE = '/etc/pf.anchors/orchestrate.builder';
+export const ANCHOR_DIR = '/private/etc/pf.anchors';
+export const ANCHOR_FILE = `${ANCHOR_DIR}/orchestrate.builder`;
 export const TAG = 'ORCH_BUILDER';
 export const PROTOS = Object.freeze(['tcp', 'udp']);
 export const FAMILIES = Object.freeze([['IPv4', '127.0.0.1'], ['IPv6', '::1']]);
 export const DAEMON_DIR = '/Library/LaunchDaemons';
 export const RECHECK_EVERY_S = 300;
+export const FIRST_RUN_WAIT_MS = 15_000;
 const PFCTL = '/sbin/pfctl';
 const LAUNCHCTL = '/bin/launchctl';
 const SUDO = '/usr/bin/sudo';
@@ -69,6 +86,8 @@ export const wallLabel = (cfg) => `${cfg.label}.builder-wall`;
 export const wallPlistPath = (cfg) => join(DAEMON_DIR, `${wallLabel(cfg)}.plist`);
 export const wallDir = (cfg) => join(cfg.base, 'builder-wall');
 export const tokenPath = (cfg) => join(wallDir(cfg), 'pf-token');
+/** What `pfctl -E` said when no token could be read from it: the job stops there rather than take reference after reference. */
+export const unreadPath = (cfg) => join(wallDir(cfg), 'pf-enable-unread');
 const lstatOr = (io, p) => { try { return io.lstat(p); } catch (e) { if (e?.code === 'ENOENT') return null; throw e; } };
 const said = (r) => (String(r?.stderr ?? '').trim() || String(r?.stdout ?? '').trim()).slice(0, 160) || `exit ${r?.status}`;
 
@@ -84,42 +103,46 @@ export function anchorText(uid) {
 }
 
 /**
- * Each rule: its text; the words pfctl must print for it once per protocol (any order); and words it must NOT print. The two
- * lo0 rules must cover every address in both families, so a family (`inet`, `inet6`), a port, or an address other than `any`
- * on them is a narrower rule than the wall's and refuses (a wall that left out ::1, L1150). The self rule is the exception:
- * pf turns `self` into this Mac's own addresses as it loads, one rule each, so its lines name families and addresses.
+ * Each rule: its text, and the exact words pfctl prints for it in one protocol (OpenBSD's print_rule: one rule per protocol,
+ * `all` for `from any to any`, `user = N`). The self rule alone may name a family and an address: pf turns `self` into this
+ * Mac's own addresses as it loads, one rule each. Any other word (a family, a port, a group, `keep state`, no `quick`) is
+ * a different rule, and refuses (#556 r1 m2).
  */
 export const RULES = Object.freeze([
   { id: 'tag', text: (u) => `pass out quick on lo0 proto { tcp udp } from any to any user ${u} tag ${TAG} no state`,
-    words: (u) => [/^pass\b/, /\bout\b/, /\bquick\b/, /\bon lo0\b/, userIs('=', u), new RegExp(`\\btag ${TAG}\\b`)], not: () => EVERY_ADDRESS },
+    words: (u, p) => `pass out quick on lo0 proto ${p} all user = ${u} no state tag ${TAG}` },
   { id: 'block-in', text: (u) => `block return in quick on lo0 proto { tcp udp } from any to any tagged ${TAG} user != ${u}`,
-    words: (u) => [/^block\b/, /\breturn\b/, /\bin\b/, /\bquick\b/, /\bon lo0\b/, new RegExp(`\\btagged ${TAG}\\b`), userIs('!=', u)], not: () => EVERY_ADDRESS },
+    words: (u, p) => `block return in quick on lo0 proto ${p} all user != ${u} tagged ${TAG}` },
   { id: 'self', text: (u) => `block return out quick on ! lo0 proto { tcp udp } from any to self user ${u}`,
-    words: (u) => [/^block\b/, /\breturn\b/, /\bout\b/, /\bquick\b/, /\bon ! lo0\b/, userIs('=', u)], not: () => [/\bport\b/, /\bfrom (?!any\b)/] },
+    words: (u, p) => `block return out quick on ! lo0 proto ${p} from any to ADDRESS user = ${u}`, anyAddress: true },
 ]);
-const EVERY_ADDRESS = Object.freeze([/\binet6?\b/, /\bport\b/, /\bfrom (?!any\b)/, /\bto (?!any\b)/]);
-const fits = (r, uid, line) => r.words(uid).every((w) => w.test(line)) && !r.not().some((w) => w.test(line));
-// pfctl prints `user = 502` (OpenBSD print_ugid); `user 502` and the name are taken too. `!=` is never read as `=`.
-function userIs(op, u) {
-  const who = `(?:${u}|${BUILDER})\\b`;
-  return op === '!=' ? new RegExp(`\\buser\\s*!=\\s*${who}`) : new RegExp(`\\buser\\s+(?:=\\s*)?${who}`);
+
+/** One loaded line → the lines it stands for, one per protocol (a `{ tcp udp }` pfctl did not split counts for both). */
+function perProto(line) {
+  const m = /\bproto\s+\{\s*([a-z0-9 ,]+?)\s*\}/.exec(line);
+  return m ? m[1].split(/[\s,]+/).filter(Boolean).map((p) => line.replace(m[0], `proto ${p}`)) : [line];
 }
-const protoOf = (line) => {
-  const m = /\bproto\s+(?:\{\s*([a-z0-9 ,]+?)\s*\}|([a-z0-9]+))/.exec(line);
-  return m ? (m[1] ?? m[2]).split(/[\s,]+/).filter(Boolean) : [];
-};
+const sorted = (s) => s.trim().split(/\s+/).sort().join(' ');
+/** The words of a printed rule as the wall's are written: `from any to any` as `all`, the user as `user = N` / `user != N`. */
+function normal(line, uid, anyAddress) {
+  let s = ` ${line} `.replace(/\s+/g, ' ').replace(/ from any to any /, ' all ')
+    .replace(/ user\s*(!=|=)?\s*(\S+) /, (_, op, who) => ` user ${op ?? '='} ${who === BUILDER ? uid : who} `);
+  if (anyAddress) s = s.replace(/ inet6? /, ' ').replace(/ to (?!any )\S+ /, ' to ADDRESS ');
+  return sorted(s);
+}
+const fits = (r, uid, line, p) => normal(line, uid, r.anyAddress) === sorted(r.words(uid, p));
 
 /**
- * Null, or why the anchor as pfctl prints it is not these rules (iv): each rule in each protocol (a `{ tcp udp }` line pfctl
- * did not split counts for both), and no line that is none of them. `text`: `pfctl -a <ANCHOR> -s rules`.
+ * Null, or why the anchor as pfctl prints it is not these rules (iv): each rule in each protocol, and no line that is none of
+ * them. `text`: `pfctl -a <ANCHOR> -s rules`.
  */
 export function loadedRulesProblem(text, uid) {
-  const lines = String(text).split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
+  const lines = String(text).split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#')).flatMap(perProto);
   if (!lines.length) return `${ANCHOR} holds no rules`;
   const missing = [];
-  for (const r of RULES) for (const p of PROTOS) if (!lines.some((l) => fits(r, uid, l) && protoOf(l).includes(p))) missing.push(`${r.id} (${p})`);
-  const extra = lines.filter((l) => !RULES.some((r) => fits(r, uid, l)));
-  if (missing.length) return `${ANCHOR} is missing the rule${missing.length > 1 ? 's' : ''} ${missing.join(', ')}: what is loaded is not the wall`;
+  for (const r of RULES) for (const p of PROTOS) if (!lines.some((l) => fits(r, uid, l, p))) missing.push(`${r.id} (${p})`);
+  const extra = lines.filter((l) => !RULES.some((r) => PROTOS.some((p) => fits(r, uid, l, p))));
+  if (missing.length) return `${ANCHOR} is missing the rule${missing.length > 1 ? 's' : ''} ${missing.join(', ')} exactly as written: what is loaded is not the wall`;
   if (extra.length) return `${ANCHOR} holds ${extra.length === 1 ? 'a line' : `${extra.length} lines`} that ${extra.length === 1 ? 'is' : 'are'} not the wall's: ${extra[0].slice(0, 120)}`;
   return null;
 }
@@ -129,13 +152,17 @@ export function bootScript(cfg) {
   const q = (s) => `'${String(s).replace(/'/g, "'\\''")}'`;
   return [
     'set -u',
-    `A=${q(ANCHOR)}; F=${q(ANCHOR_FILE)}; T=${q(tokenPath(cfg))}`,
+    `A=${q(ANCHOR)}; F=${q(ANCHOR_FILE)}; T=${q(tokenPath(cfg))}; U=${q(unreadPath(cfg))}`,
     // macOS's own boot job loads /etc/pf.conf, whose `anchor "com.apple/*"` reaches the wall. Until it has, try again later.
     `${PFCTL} -s rules 2>/dev/null | /usr/bin/grep -q '^anchor "com.apple/\\*"' || exit 1`,
     `${PFCTL} -q -a "$A" -f "$F" || exit 1`,
     // The reference this job holds keeps pf on; while pf is on and the token is still held there is nothing to do.
     `if ${PFCTL} -s info 2>/dev/null | /usr/bin/grep -q '^Status: Enabled' && [ -s "$T" ] && ${PFCTL} -s References 2>/dev/null | /usr/bin/awk -v t="$(/bin/cat "$T")" '{for(i=1;i<=NF;i++) if($i==t) f=1} END{exit !f}'; then exit 0; fi`,
-    `${PFCTL} -E 2>&1 | /usr/bin/sed -n 's/^Token : *\\([0-9][0-9]*\\).*/\\1/p' > "$T.new" && [ -s "$T.new" ] && /bin/mv -f "$T.new" "$T"`,
+    // A pfctl -E whose token could not be read took a reference no one can give back: say so once and take no more (r1 m7).
+    '[ -e "$U" ] && exit 3',
+    `O=$(${PFCTL} -E 2>&1); N=$(printf '%s\\n' "$O" | /usr/bin/sed -n 's/^Token : *\\([0-9][0-9]*\\)$/\\1/p')`,
+    'if [ -z "$N" ]; then printf \'%s\\n\' "$O" > "$U"; exit 3; fi',
+    'printf \'%s\\n\' "$N" > "$T.new" && /bin/mv -f "$T.new" "$T"',
   ].join('\n');
 }
 
@@ -174,7 +201,8 @@ export function planWall(io, cfg) {
   const id = builderUid(io, cfg);
   if (id.problem) return { ops: [], problems: [`${id.problem}. Nothing was changed.`] };
   const problems = [];
-  for (const d of ['/etc/pf.anchors', DAEMON_DIR]) {
+  // The folders written in, and the base itself (r1 m8: the token folder is made in it, so the base must be root's alone too).
+  for (const d of [ANCHOR_DIR, DAEMON_DIR, cfg.base]) {
     const above = chainProblem(io.at(d), { owner: io.rootUid, top: io.prefix || '/' });
     if (above) problems.push(`${d} is not safe for root to write in (${above}); nothing was changed`);
   }
@@ -195,55 +223,99 @@ export function planWall(io, cfg) {
   return guarded(io, cfg, { ops, problems: [] });
 }
 
-/** The way out, as steps root can run: used when the read-back refuses, and said after every run. Each step's failure is reported, never hidden. */
+/**
+ * The way out, as steps root can run: used when the read-back refuses, and said after every run. → { done, lines }: `done`
+ * only when every step was done; each step's failure is reported, never hidden.
+ */
 export function wayOut(io, cfg) {
-  const out = [];
-  const step = (what, cmd, args) => { const r = io.run(cmd, args); out.push(r.status === 0 ? `done: ${what}` : `NOT done: ${what} (${said(r)})`); };
-  step(`unload ${wallLabel(cfg)}`, LAUNCHCTL, ['bootout', `system/${wallLabel(cfg)}`]);
-  try { io.unlink(wallPlistPath(cfg)); out.push(`done: removed ${wallPlistPath(cfg)} (so it does not start at boot)`); } catch (e) { out.push(`NOT done: remove ${wallPlistPath(cfg)} (${e?.code ?? e})`); }
+  const lines = []; let done = true;
+  const step = (what, cmd, args, fine = () => false) => {
+    const r = io.run(cmd, args);
+    if (r.status === 0 || fine(r)) lines.push(`done: ${what}`); else { done = false; lines.push(`NOT done: ${what} (${said(r)})`); }
+  };
+  // Not loaded is the same as unloaded (launchctl says 3, "No such process").
+  step(`unload ${wallLabel(cfg)}`, LAUNCHCTL, ['bootout', `system/${wallLabel(cfg)}`], (r) => r.status === 3);
+  try { io.unlink(wallPlistPath(cfg)); lines.push(`done: removed ${wallPlistPath(cfg)} (so it does not start at boot)`); } catch (e) { done = false; lines.push(`NOT done: remove ${wallPlistPath(cfg)} (${e?.code ?? e})`); }
   step(`empty ${ANCHOR}`, PFCTL, ['-a', ANCHOR, '-F', 'rules']);
   let tok = null; try { tok = io.readText(tokenPath(cfg)).trim(); } catch { /* none kept */ }
   if (tok && /^\d+$/.test(tok)) { step(`release pf token ${tok}`, PFCTL, ['-X', tok]); try { io.unlink(tokenPath(cfg)); } catch { /* said by the next check */ } }
-  else out.push('no pf token was kept, so none was released');
-  return out;
+  else lines.push('no pf token was kept, so none was released');
+  if (lstatOr(io, unreadPath(cfg))) { done = false; lines.push(`NOT done: pfctl -E once answered in a way no token could be read from (kept in ${unreadPath(cfg)}); find that reference with sudo pfctl -s References and release it with sudo pfctl -X <token>`); }
+  return { done, lines };
 }
 
 export const WAY_OUT_TEXT = (cfg) => `To take the builder wall out: sudo launchctl bootout system/${wallLabel(cfg)}; sudo rm ${wallPlistPath(cfg)}; sudo ${PFCTL} -a ${ANCHOR} -F rules; and sudo ${PFCTL} -X with the number in ${tokenPath(cfg)}.`;
 
 // --- the read-back ---------------------------------------------------------------------------------------------------
 
-/** The settings half (iii, iv): [{ ok, what, why? }]. Reads only, as root. */
+const pfOn = (io) => { const r = io.run(PFCTL, ['-s', 'info']); return { r, on: r.status === 0 && /^Status: Enabled\b/m.test(r.stdout) }; };
+function tokenHeld(io, cfg) {
+  let tok = null; try { tok = io.readText(tokenPath(cfg)).trim(); } catch { /* below */ }
+  const refs = io.run(PFCTL, ['-s', 'References']);
+  const held = !!tok && /^\d+$/.test(tok) && refs.status === 0 && refs.stdout.split('\n').some((l) => l.trim().split(/\s+/).includes(tok));
+  return { tok, refs, held };
+}
+
+/** The settings half (iii, iv): [{ ok, what, why? }]. Reads only, as root. The wiring PR's gate runs it before every builder session. */
 export function settingsChecks(io, cfg, uid) {
   const out = []; const item = (ok, what, why) => out.push(ok ? { ok, what } : { ok, what, why });
   const want = anchorText(uid);
   const f = lstatOr(io, ANCHOR_FILE);
   item(sameFile(io, ANCHOR_FILE, want), `${ANCHOR_FILE} is the wall's rules for uid ${uid}, root's 0644`, !f ? 'it is not there (run place)' : 'it is there but not the rules for this uid, or not root\'s 0644');
-  const info = io.run(PFCTL, ['-s', 'info']);
-  const on = info.status === 0 && /^Status: Enabled\b/m.test(info.stdout);
+  const { r: info, on } = pfOn(io);
   item(on, 'pf is on (iii)', info.status !== 0 ? `pfctl -s info failed (${said(info)})` : `pf is off${f ? ' though the anchor file is there' : ''}: the rules are loaded but nothing applies them`);
-  let tok = null; try { tok = io.readText(tokenPath(cfg)).trim(); } catch { /* below */ }
-  const refs = io.run(PFCTL, ['-s', 'References']);
-  const held = !!tok && /^\d+$/.test(tok) && refs.status === 0 && refs.stdout.split('\n').some((l) => l.trim().split(/\s+/).includes(tok));
-  item(held, `the pf token in ${tokenPath(cfg)} is held (iii): pf stays on while the job holds it`,
-    !tok ? 'no token is kept there: the job has not enabled pf (look at it with: sudo launchctl print system/' + wallLabel(cfg) + ')'
-      : !/^\d+$/.test(tok) ? 'what is kept there is not a token'
-        : refs.status !== 0 ? `pfctl -s References failed (${said(refs)})` : `token ${tok} is not among pf's held references, so anything may turn pf off`);
+  const { tok, refs, held } = tokenHeld(io, cfg);
+  const unread = lstatOr(io, unreadPath(cfg));
+  item(held && !unread, `the pf token in ${tokenPath(cfg)} is held (iii): pf stays on while the job holds it`,
+    unread ? `pfctl -E answered in a way no token could be read from (kept in ${unreadPath(cfg)}), so the job stopped: read it, then remove it and run place again`
+      : !tok ? 'no token is kept there: the job has not enabled pf (look at it with: sudo launchctl print system/' + wallLabel(cfg) + ')'
+        : !/^\d+$/.test(tok) ? 'what is kept there is not a token'
+          : refs.status !== 0 ? `pfctl -s References failed (${said(refs)})` : `token ${tok} is not among pf's held references, so anything may turn pf off`);
   const main = io.run(PFCTL, ['-s', 'rules']);
   item(main.status === 0 && /^anchor "com\.apple\/\*"/m.test(main.stdout), 'the main ruleset reaches com.apple/* (iv)',
     main.status !== 0 ? `pfctl -s rules failed (${said(main)})` : 'the main ruleset has no anchor "com.apple/*", so the wall\'s anchor is never read (macOS\'s own /etc/pf.conf has it; something replaced the main ruleset)');
   const a = io.run(PFCTL, ['-a', ANCHOR, '-s', 'rules']);
   const why = a.status !== 0 ? `pfctl -a ${ANCHOR} -s rules failed (${said(a)})` : loadedRulesProblem(a.stdout, uid);
-  item(why === null, `${ANCHOR} holds the wall's rules (iv)`, why);
+  item(why === null, `${ANCHOR} holds exactly the wall's rules (iv)`, why);
   return out;
 }
 
 /**
- * The traffic half (i, ii, v), in each protocol and family: the builder reaches its own listener, the owner its own, and the
- * builder NOT the owner's. `net`: { listen({ user, proto, host }) → Promise<{ port, close() }>, connect({ user, proto, host, port }) → 'ok' | 'refused' | 'timeout' | 'error: …' }.
+ * After bootstrap, the job's first run (RunAtLoad) may not have happened yet (#556 r1 M2): wait, at most `limitMs`, until
+ * launchctl says it ran at least once and its last exit was 0, the token is held and pf is on. → one row.
+ */
+export async function waitForFirstRun(io, cfg, { limitMs = FIRST_RUN_WAIT_MS, stepMs = 500, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => Date.now() } = {}) {
+  const what = `the job ${wallLabel(cfg)} ran once and finished well (within ${limitMs / 1000} seconds of loading)`;
+  const start = now(); let seen = 'launchctl has not shown it yet';
+  for (;;) {
+    const p = io.run(LAUNCHCTL, ['print', `system/${wallLabel(cfg)}`]);
+    const runs = Number(/^\s*runs = (\d+)/m.exec(p.stdout ?? '')?.[1] ?? 0);
+    const exit = /^\s*last exit code = (\S+)/m.exec(p.stdout ?? '')?.[1];
+    if (p.status !== 0) seen = `launchctl print said ${said(p)}`;
+    else if (runs >= 1 && exit !== undefined && exit !== '0' && !/never/.test(exit)) return { ok: false, what, why: `it ran and exited ${exit} (look at it with: sudo launchctl print system/${wallLabel(cfg)})` };
+    else if (runs >= 1 && exit === '0') {
+      const on = pfOn(io).on; const { held } = tokenHeld(io, cfg);
+      if (on && held) return { ok: true, what };
+      seen = `it ran and exited 0, but ${!on ? 'pf is off' : 'its token is not held'}`;
+    } else seen = `it has run ${runs} time${runs === 1 ? '' : 's'}${exit ? `, last exit ${exit}` : ''}`;
+    if (now() - start >= limitMs) return { ok: false, what, why: `after ${limitMs / 1000} seconds ${seen}` };
+    await sleep(stepMs);
+  }
+}
+
+/**
+ * The traffic half (i, ii, v), in each protocol and address: the builder reaches its own listener, the owner its own, the
+ * builder NOT the owner's (and the owner's listener received nothing from it), and the owner still reaches its own after.
+ * `net`: { addresses() → [one other address of this Mac, or none], listen({ user, proto, host }) → Promise<{ port,
+ * received() → how many connections or messages it has had, settle() → Promise, close() }>, connect({ user, proto, host,
+ * port }) → Promise<'ok' | 'refused' | 'timeout' | 'error: …'> }.
  */
 export async function trafficChecks(cfg, net) {
   const out = [];
-  for (const proto of PROTOS) for (const [fam, host] of FAMILIES) {
+  const other = net.addresses().slice(0, 1);
+  if (!other.length) out.push({ ok: true, what: 'this Mac has no address but loopback, so only 127.0.0.1 and ::1 were probed' });
+  const places = [...FAMILIES, ...other.map((a) => [`this Mac's own address`, a])];
+  for (const proto of PROTOS) for (const [fam, host] of places) {
     const where = `${proto.toUpperCase()} ${fam} (${host})`;
     let mine = null; let theirs = null;
     try {
@@ -251,15 +323,22 @@ export async function trafficChecks(cfg, net) {
         out.push({ ok: false, what: `the probes could listen on ${where}`, why: `${e?.message ?? e}: nothing about ${where} was proven` });
         continue;
       }
-      const v = net.connect({ user: BUILDER, proto, host, port: mine.port });
+      const v = await net.connect({ user: BUILDER, proto, host, port: mine.port });
       out.push(v === 'ok' ? { ok: true, what: `${BUILDER} reaches its own listener on ${where} (v; the proxy path)` } : { ok: false, what: `${BUILDER} reaches its own listener on ${where} (v; the proxy path)`, why: `it got ${v}: a worker session's sandboxed shell would lose its network proxy` });
-      const ii = net.connect({ user: cfg.owner, proto, host, port: theirs.port });
+      const ii = await net.connect({ user: cfg.owner, proto, host, port: theirs.port });
       out.push(ii === 'ok' ? { ok: true, what: `the owner reaches its own listener on ${where} (ii)` } : { ok: false, what: `the owner reaches its own listener on ${where} (ii)`, why: `it got ${ii}: the wall is blocking the owner` });
-      const i = net.connect({ user: BUILDER, proto, host, port: theirs.port });
+      await theirs.settle(); const before = theirs.received();
+      const i = await net.connect({ user: BUILDER, proto, host, port: theirs.port });
+      // (ii) again: the owner's listener is still up and answering, so a block in (i) is the wall's, not a listener gone.
+      const again = await net.connect({ user: cfg.owner, proto, host, port: theirs.port });
+      await theirs.settle(); const got = theirs.received() - before - (again === 'ok' ? 1 : 0);
+      out.push(again === 'ok' ? { ok: true, what: `the owner still reaches its own listener on ${where} after (i) (ii)` } : { ok: false, what: `the owner still reaches its own listener on ${where} after (i) (ii)`, why: `it got ${again}` });
       const what = `${BUILDER} can NOT reach the owner's listener on ${where} (i)`;
-      if (v !== 'ok' || ii !== 'ok') out.push({ ok: false, what, why: 'not proven: a control above failed in this protocol and family' });
+      if (v !== 'ok' || ii !== 'ok' || again !== 'ok') out.push({ ok: false, what, why: 'not proven: a control in this protocol and address failed' });
+      else if (i === 'ok') out.push({ ok: false, what, why: `${BUILDER} connected: the wall is not up` });
+      else if (got > 0) out.push({ ok: false, what, why: `the owner's listener received ${got} from ${BUILDER} (the probe said ${i}): what the builder sent got through` });
       else if (i === 'refused' || i === 'timeout') out.push({ ok: true, what });
-      else out.push({ ok: false, what, why: i === 'ok' ? `${BUILDER} connected: the wall is not up` : `the probe said ${i}, which is not a block` });
+      else out.push({ ok: false, what, why: `the probe said ${i}, which is not a block` });
     } finally { mine?.close(); theirs?.close(); }
   }
   return out;
@@ -274,35 +353,54 @@ export async function checkWall(io, cfg, { net = realNet() } = {}) {
 
 // --- the real probes: node run as the builder or the owner, through sudo, each on its own ----------------------------
 
-const LISTENER = `const [proto, host] = process.argv.slice(1); const end = () => process.exit(0); setTimeout(end, 30000).unref(); process.stdin.on('end', end); process.stdin.resume();
-if (proto === 'tcp') { const s = require('net').createServer((c) => c.end()); s.listen(0, host, () => process.stdout.write('PORT ' + s.address().port + '\\n')); s.on('error', (e) => { process.stdout.write('ERR ' + e.code + '\\n'); end(); }); }
-else { const s = require('dgram').createSocket(host.includes(':') ? 'udp6' : 'udp4'); s.on('message', (m, r) => s.send('pong', r.port, r.address)); s.on('error', (e) => { process.stdout.write('ERR ' + e.code + '\\n'); end(); }); s.bind(0, host, () => process.stdout.write('PORT ' + s.address().port + '\\n')); }`;
+// The listener says GOT for each connection or message it receives, so (i) can tell a block from a reply that was lost.
+const LISTENER = `const [proto, host] = process.argv.slice(1); const end = () => process.exit(0); setTimeout(end, 60000).unref(); process.stdin.on('end', end); process.stdin.resume();
+const got = () => process.stdout.write('GOT\\n');
+if (proto === 'tcp') { const s = require('net').createServer((c) => { got(); c.end(); }); s.listen(0, host, () => process.stdout.write('PORT ' + s.address().port + '\\n')); s.on('error', (e) => { process.stdout.write('ERR ' + e.code + '\\n'); end(); }); }
+else { const s = require('dgram').createSocket(host.includes(':') ? 'udp6' : 'udp4'); s.on('message', (m, r) => { got(); s.send('pong', r.port, r.address); }); s.on('error', (e) => { process.stdout.write('ERR ' + e.code + '\\n'); end(); }); s.bind(0, host, () => process.stdout.write('PORT ' + s.address().port + '\\n')); }`;
 const CLIENT = `const [proto, host, port] = process.argv.slice(1); const say = (w) => { process.stdout.write(w); process.exit(0); }; setTimeout(() => say('timeout'), 3000);
 if (proto === 'tcp') { const c = require('net').connect(Number(port), host, () => say('ok')); c.on('error', (e) => say(e.code === 'ECONNREFUSED' || e.code === 'ECONNRESET' ? 'refused' : 'error: ' + e.code)); }
 else { const s = require('dgram').createSocket(host.includes(':') ? 'udp6' : 'udp4'); s.on('message', (m) => say(String(m) === 'pong' ? 'ok' : 'error: odd reply')); s.on('error', (e) => say(e.code === 'ECONNREFUSED' ? 'refused' : 'error: ' + e.code)); s.connect(Number(port), host, () => s.send('ping')); }`;
 
 const ENV = Object.freeze({ PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LC_ALL: 'C' });
+/** One address of this Mac that is not loopback (IPv4, not link-local), for the probe through it (#556 r1 m4). */
+export function otherAddresses(ifaces = networkInterfaces()) {
+  for (const list of Object.values(ifaces)) for (const a of list ?? []) if (!a.internal && a.family === 'IPv4' && !a.address.startsWith('169.254.')) return [a.address];
+  return [];
+}
 export function realNet({ node = PROBE_NODE } = {}) {
   const as = (user) => ['-n', '-H', '-u', user, node];
   return {
+    addresses: () => otherAddresses(),
     listen: ({ user, proto, host }) => new Promise((resolve, reject) => {
+      // From /, which every user may enter: root's own folder may be one the builder can't.
       const p = spawn(SUDO, [...as(user), '-e', LISTENER, proto, host], { cwd: '/', stdio: ['pipe', 'pipe', 'pipe'], env: ENV });
-      let buf = ''; let err = '';
+      let buf = ''; let err = ''; let ready = false;
       const t = setTimeout(() => { p.kill(); reject(new Error(`a listener as ${user} did not start within 10 seconds`)); }, 10_000);
       p.stderr.on('data', (d) => { err += d; });
       p.stdout.on('data', (d) => {
-        buf += d; const m = /^PORT (\d+)$/m.exec(buf); const e = /^ERR (\S+)$/m.exec(buf);
-        if (m) { clearTimeout(t); resolve({ port: Number(m[1]), close: () => { p.stdin.end(); p.kill(); } }); }
-        else if (e) { clearTimeout(t); p.kill(); reject(new Error(`a listener as ${user} could not bind ${host} (${e[1]})`)); }
+        buf += d; if (ready) return;
+        const m = /^PORT (\d+)$/m.exec(buf); const e = /^ERR (\S+)$/m.exec(buf);
+        if (m) {
+          ready = true; clearTimeout(t);
+          resolve({
+            port: Number(m[1]),
+            received: () => (buf.match(/^GOT$/mg) ?? []).length,
+            // A GOT the listener printed reaches this process a moment later: let it.
+            settle: () => new Promise((r) => setTimeout(r, 300)),
+            close: () => { p.stdin.end(); p.kill(); },
+          });
+        } else if (e) { clearTimeout(t); p.kill(); reject(new Error(`a listener as ${user} could not bind ${host} (${e[1]})`)); }
       });
-      p.on('exit', (c) => { clearTimeout(t); reject(new Error(`a listener as ${user} ended (exit ${c}${err.trim() ? `: ${err.trim().slice(0, 100)}` : ''})`)); });
+      p.on('exit', (c) => { clearTimeout(t); if (!ready) reject(new Error(`a listener as ${user} ended (exit ${c}${err.trim() ? `: ${err.trim().slice(0, 100)}` : ''})`)); });
     }),
-    connect: ({ user, proto, host, port }) => {
-      // From /, which every user may enter: root's own folder may be one the builder can't (the listener starts there too).
-      const r = spawnSync(SUDO, [...as(user), '-e', CLIENT, proto, host, String(port)], { cwd: '/', encoding: 'utf8', env: ENV, timeout: 20_000 });
-      const w = String(r.stdout ?? '').trim();
-      return r.status === 0 && /^(ok|refused|timeout|error: .*)$/.test(w) ? w : `error: the probe as ${user} did not answer (${said(r)})`;
-    },
+    connect: ({ user, proto, host, port }) => new Promise((resolve) => {
+      const p = spawn(SUDO, [...as(user), '-e', CLIENT, proto, host, String(port)], { cwd: '/', stdio: ['ignore', 'pipe', 'pipe'], env: ENV });
+      let o = ''; let e = '';
+      const t = setTimeout(() => p.kill(), 20_000);
+      p.stdout.on('data', (d) => { o += d; }); p.stderr.on('data', (d) => { e += d; });
+      p.on('close', (c) => { clearTimeout(t); const w = o.trim(); resolve(c === 0 && /^(ok|refused|timeout|error: .*)$/.test(w) ? w : `error: the probe as ${user} did not answer (${said({ status: c, stdout: o, stderr: e })})`); });
+    }),
   };
 }
 
@@ -310,8 +408,8 @@ export function realNet({ node = PROBE_NODE } = {}) {
 
 const USAGE = 'usage: sudo /usr/local/bin/node builder-wall.mjs <place [--dry-run] | check>';
 
-/** → exit code. `io` and `net` are ports for the tests. */
-export async function main(argv, { io = realIo(), net, out = (s) => process.stdout.write(`${s}\n`), err = (s) => process.stderr.write(`${s}\n`) } = {}) {
+/** → exit code. `io`, `net` and `wait` (waitForFirstRun's options) are ports for the tests. */
+export async function main(argv, { io = realIo(), net, wait = {}, out = (s) => process.stdout.write(`${s}\n`), err = (s) => process.stderr.write(`${s}\n`) } = {}) {
   const [cmd, ...rest] = argv; const dry = rest.includes('--dry-run');
   if (!['place', 'check'].includes(cmd) || rest.some((a) => a !== '--dry-run') || (dry && cmd !== 'place')) { err(USAGE); return 2; }
   if (!dry) { const p = rootProblem(io); if (p) { err(`refused: ${p}`); return 2; } }
@@ -322,16 +420,22 @@ export async function main(argv, { io = realIo(), net, out = (s) => process.stdo
   } catch (e) { err(`refused: ${e.message}`); return 2; }
   const probes = net ?? realNet();
   const report = (res) => { for (const r of res) out(r.ok ? `PASS  ${r.what}` : `FAIL  ${r.what} — ${r.why}`); const bad = res.filter((r) => !r.ok).length; out(bad ? `${bad} of ${res.length} FAILED` : `all ${res.length} PASS`); return bad; };
+  const takeOut = (why) => {
+    const w = wayOut(io, cfg);
+    err(w.done ? `${why}, so the wall was taken out again:` : `${why}. Taking the wall out again did NOT fully work; do the NOT done steps by hand:`);
+    for (const l of w.lines) err(l);
+  };
   if (cmd === 'check') { const bad = report(await checkWall(io, cfg, { net: probes })); out(WAY_OUT_TEXT(cfg)); return bad ? 1 : 0; }
   const plan = planWall(io, cfg);
   if (plan.problems.length) { for (const p of plan.problems) err(`refused: ${p}`); return 1; }
-  if (dry) { for (const o of plan.ops) out(`would: ${o.text}`); out('would then run the read-back, and take the wall out again if it refuses'); return 0; }
+  if (dry) { for (const o of plan.ops) out(`would: ${o.text}`); out('would then wait for the job\'s first run, run the read-back, and take the wall out again if either refuses'); return 0; }
   for (const o of plan.ops) {
     out(`doing: ${o.text}`);
-    try { o.run(); } catch (e) { err(`stopped: ${e.message}`); for (const l of wayOut(io, cfg)) err(l); return 1; }
+    try { o.run(); } catch (e) { err(`stopped: ${e.message}`); takeOut('A step failed'); return 1; }
   }
-  const bad = report(await checkWall(io, cfg, { net: probes }));
-  if (bad) { err('The read-back refused, so the wall was taken out again:'); for (const l of wayOut(io, cfg)) err(l); return 1; }
+  const first = await waitForFirstRun(io, cfg, wait);
+  const bad = report([first, ...await checkWall(io, cfg, { net: probes })]);
+  if (bad) { takeOut('The read-back refused'); return 1; }
   out(WAY_OUT_TEXT(cfg));
   return 0;
 }

@@ -6,7 +6,7 @@
 // invalid, a write with no value is a bad call, a record that is not there reads as exit 56; chown needs root; mkdir
 // needs the parent and refuses an existing folder (those two are the real mkdir's own refusals, since it is the real one).
 
-import { renameSync, unlinkSync, chmodSync, cpSync, fchmodSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync } from 'node:fs';
+import { renameSync, unlinkSync, chmodSync, cpSync, fchmodSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync } from 'node:fs';
 import { openRead } from '../wiring/owner-status.mjs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
@@ -57,6 +57,9 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
   const at = (p) => join(prefix, p);
   mkdirSync(at('/Library/LaunchDaemons'), { recursive: true });
   for (const p of ['/Library', '/Library/LaunchDaemons']) mac.owners.set(p, { uid: mac.rootUid, gid: 0 });
+  // As on every Mac, /etc is a link to /private/etc (#556 r1 M1): a path through it is a path through a link.
+  mkdirSync(at('/private/etc'), { recursive: true }); symlinkSync('private/etc', at('/etc'));
+  for (const p of ['/private', '/private/etc']) mac.owners.set(p, { uid: mac.rootUid, gid: 0 });
   const dscl = (args) => {
     const [flag, path, ...rest] = args;
     const m = /^\/(Users|Groups)(?:\/([A-Za-z0-9_.-]+))?$/.exec(path ?? '');
@@ -277,7 +280,7 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
       const m = /^system\/(.+)$/.exec(a ?? '');
       if (!m) return err(64, 'Usage: launchctl print <domain-target>');
       if (!mac.loaded.has(m[1])) return err(113, `Could not find service "${m[1]}" in domain for system`);
-      return { status: 0, stdout: `system/${m[1]} = {\n\tstate = ${mac.loaded.get(m[1]).state}\n\tlast exit code = ${mac.loaded.get(m[1]).lastExit ?? '(never exited)'}\n${mac.loaded.get(m[1]).pid ? `\tpid = ${mac.loaded.get(m[1]).pid}\n` : ''}}\n`, stderr: '' };
+      return { status: 0, stdout: `system/${m[1]} = {\n\tstate = ${mac.loaded.get(m[1]).state}\n\tlast exit code = ${mac.loaded.get(m[1]).lastExit ?? '(never exited)'}\n${mac.loaded.get(m[1]).pid ? `\tpid = ${mac.loaded.get(m[1]).pid}\n` : ''}${mac.loaded.get(m[1]).runs !== undefined ? `\truns = ${mac.loaded.get(m[1]).runs}\n` : ''}}\n`, stderr: '' };
     }
     if (verb === 'bootstrap' || verb === 'bootout') {
       if (mac.as !== 0) return err(1, `${verb === 'bootstrap' ? 'Bootstrap' : 'Boot-out'} failed: 1: Operation not permitted`);
