@@ -45,7 +45,7 @@ function x(over = {}, li = undefined) {
   return {
     made, settings, calls: sp.calls,
     x: {
-      role, card: 'C-1', head: HEAD, sessionId: 'S-1', outbox: '/o/reviewer/S-1', env: { CLAUDE_CONFIG_DIR: '/h/.claude' }, earlier: '',
+      role, card: 'C-1', head: HEAD, sessionId: 'S-1', outbox: '/o/reviewer/S-1', home: '/h', env: { CLAUDE_CONFIG_DIR: '/h/.claude' }, earlier: '',
       claudeBin: '/i/claude-code/2.1.300/claude', copy: '/rc/S-1-not-there', spawn: sp.spawn,
       makeCopy: async () => { made.push('/rc/S-1'); return { ok: true }; },
       settingsFor: (dir) => { settings.push(dir); return { ok: true, file: '/r/settings/S-1.json', settings: DESIGN_PROFILES[role] ? settingsOf(role) : {} }; },
@@ -59,6 +59,15 @@ function x(over = {}, li = undefined) {
 
 test('R-0b-163 (L78): the wiring exports start and nothing else', () => {
   assert.deepEqual(Object.keys(wiring).sort(), ['start']);
+});
+
+test('#530 r1 m1 PLANT: the review session\'s environment comes from startEnv, with HOME the runner names; none named, or a name off the allow-list, is refused before claude', async () => {
+  for (const [over, re] of [[{ home: undefined }, /the environment: the session's home was not named by the runner/], [{ home: 'h' }, /home was not named/],
+    [{ env: { CLAUDE_CONFIG_DIR: '/h/.claude', CLAUDECODE: '1' } }, /the environment: variables not on the role's allow-list .*CLAUDECODE/],
+    [{ env: { ANTHROPIC_API_KEY: 'k' } }, /the environment: refused variables .*ANTHROPIC_API_KEY/], [{ env: 'x' }, /the environment: the extra environment is not an object/]]) {
+    const w = x(over); const r = await wiring.start(w.x);
+    assert.equal(r.ok, false, JSON.stringify(over)); assert.match(r.reason, re); assert.equal(w.calls.length, 0, 'claude is never spawned');
+  }
 });
 
 test('L83 M-3 planted: start runs launch(): with no launch inputs it is refused at check 0, and claude is never spawned', async () => {
