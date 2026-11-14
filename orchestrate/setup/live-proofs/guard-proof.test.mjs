@@ -28,7 +28,8 @@ function standIn(files = {}) {
   return { base, root, cfg: { label: LABEL, base, owner: 'joe' } };
 }
 const plistFile = (job) => join(DAEMON_DIR, `${LABEL}.${job}.plist`);
-const jobFile = (root, job, extra = {}) => ({ ProgramArguments: [join(root, 'bin/node'), join(root, PROVED_JOBS[job].script)], UserName: 'robot', ...extra });
+const jobFile = (root, job, extra = {}) => ({ Label: `${LABEL}.${job}`, ProgramArguments: [join(root, 'bin/node'), join(root, PROVED_JOBS[job].script)], UserName: 'robot', ...extra });
+const noUser = (plist) => { const { UserName, ...rest } = plist; return rest; };
 
 /** The proof's io for a stand-in: the job files from a table, users from a table, each check run as this user. */
 function testIo({ base, plists = {}, users = { robot: { uid: ME, gid: MY_GID }, joe: { uid: 99_999, gid: 20 } }, chain, myUid = ME, child } = {}) {
@@ -112,7 +113,7 @@ test('L1211 (d): a guard that marks itself but is read back as another instance 
 
 test('L1211 (e): a job running as root (named or by no UserName) or as the owner\'s uid is a FAIL; the updater must be root\'s', () => {
   const s = standIn();
-  for (const plist of [jobFile(s.root, 'robot', { UserName: 'root' }), { ProgramArguments: jobFile(s.root, 'robot').ProgramArguments }]) {
+  for (const plist of [jobFile(s.root, 'robot', { UserName: 'root' }), noUser(jobFile(s.root, 'robot'))]) {
     assert.deepEqual(Object.values(judge(s, { plist })).slice(1), ['FAIL', 'it runs as root']);
   }
   const owner = judge(s, { plist: jobFile(s.root, 'robot', { UserName: 'joe' }) });
@@ -120,8 +121,19 @@ test('L1211 (e): a job running as root (named or by no UserName) or as the owner
   const updater = standIn({ [PROVED_JOBS['review-updater'].script]: "import '../../../shared/secret-guard.mjs';\n" });
   const u = judge(updater, { job: 'review-updater' });
   assert.deepEqual([u.result, u.why], ['FAIL', 'it runs as robot; it is root\'s job by design']);
-  const asRoot = judge(updater, { job: 'review-updater', plist: { ProgramArguments: jobFile(updater.root, 'review-updater').ProgramArguments } });
+  const asRoot = judge(updater, { job: 'review-updater', plist: noUser(jobFile(updater.root, 'review-updater')) });
   assert.deepEqual([asRoot.result, asRoot.why], ['NOT TRIED', 'it runs as root: run this with sudo, which starts each check as the job\'s own user']);
+  // The root exemption is the exact review-updater label only (lead ruling on #591 r1).
+  for (const Label of [`${LABEL}.review-updater-2`, `x.${LABEL}.review-updater`, `${LABEL}.review-updater `, undefined]) {
+    const r = judge(updater, { job: 'review-updater', plist: { ...noUser(jobFile(updater.root, 'review-updater')), Label } });
+    assert.deepEqual([r.result, r.why], ['FAIL', `its job file's Label is ${JSON.stringify(Label)}, not ${LABEL}.review-updater; not loaded`]);
+  }
+  const robotLabel = judge(s, { plist: jobFile(s.root, 'robot', { Label: `${LABEL}.review-updater` }) });
+  assert.deepEqual([robotLabel.result, robotLabel.why], ['FAIL', `its job file's Label is "${LABEL}.review-updater", not ${LABEL}.robot; not loaded`]);
+  for (const job of ['review-updater-2', 'my-review-updater', 'review-account']) {
+    const r = judgeJob(job, { cfg: updater.cfg, io: testIo({ base: updater.base, plists: { [plistFile(job)]: { ...noUser(jobFile(updater.root, 'review-updater')), Label: `${LABEL}.${job}` } } }), ownerUid: 99_999 });
+    assert.deepEqual([r.result, r.why], ['FAIL', 'not a job this proof knows'], job);
+  }
   assert.equal(judge(s, { plist: jobFile(s.root, 'robot', { UserName: 'nobody-here' }) }).why, 'its user nobody-here is not a user on this Mac');
 });
 
@@ -174,9 +186,9 @@ test('L1211: a script that writes, connects or starts a program while it loads i
 test('L1211: the job file must start the copy\'s node and the job\'s own script; a job named in LOAD_WRITES is never loaded', () => {
   const s = standIn();
   const [node, script] = jobFile(s.root, 'robot').ProgramArguments;
-  assert.deepEqual(Object.values(judge(s, { plist: { ProgramArguments: ['/usr/local/bin/node', script], UserName: 'robot' } })).slice(1), ['FAIL', `it starts /usr/local/bin/node, not the copy's node ${node}`]);
+  assert.deepEqual(Object.values(judge(s, { plist: jobFile(s.root, 'robot', { ProgramArguments: ['/usr/local/bin/node', script] }) })).slice(1), ['FAIL', `it starts /usr/local/bin/node, not the copy's node ${node}`]);
   const other = join(s.root, 'wiring/runner-main.mjs');
-  assert.deepEqual(Object.values(judge(s, { plist: { ProgramArguments: [node, other], UserName: 'robot' } })).slice(1), ['FAIL', `it runs ${other}, not its script ${script}; not loaded`]);
+  assert.deepEqual(Object.values(judge(s, { plist: jobFile(s.root, 'robot', { ProgramArguments: [node, other] }) })).slice(1), ['FAIL', `it runs ${other}, not its script ${script}; not loaded`]);
   assert.equal(judge(s, { plist: { UserName: 'robot' } }).why, 'its job file has no program and script');
   const never = () => { throw new Error('the child must not start'); };
   const r = judge(s, { loadWrites: { robot: 'it writes its status at load' }, child: never });

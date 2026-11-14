@@ -43,7 +43,12 @@ export const GUARD = 'shared/secret-guard.mjs';
 export const CHILD_LIMIT_MS = 30_000;
 const IN = 'ORCH_GUARD_PROOF';
 
-/** The jobs whose processes load the guard, each with the script its job file must start; `root`: runs as root by design. */
+/**
+ * The jobs whose processes load the guard, each with the script its job file must start; `root`: runs as root by design.
+ * The root exemption is this table's one exact key: the job file must be <label>.review-updater.plist and its Label exactly
+ * <label>.review-updater (judgeJob). Any other name is not a job this proof knows, and a FAIL, even one merely containing
+ * "review-updater"; any other job here that runs as root is a FAIL.
+ */
 export const PROVED_JOBS = Object.freeze({
   'review-updater': Object.freeze({ script: SCRIPTS.updater, root: true }),
   'review-runner': Object.freeze({ script: SCRIPTS.runner }),
@@ -53,8 +58,13 @@ export const PROVED_JOBS = Object.freeze({
   [ROBOT_JOB]: Object.freeze({ script: ROBOT_MAIN }),
   [WORKER_RUNNER_JOB]: Object.freeze({ script: WORKER_RUNNER_MAIN }),
 });
-/** Jobs left out, and why: listed in the output so a reader sees them. */
+/**
+ * Jobs left out, and why: listed in the output so a reader sees them. Each exemption covers that one label only: it never
+ * counts toward "every placed job PASSes" and stands in for no other job.
+ */
 export const NOT_CHECKED = Object.freeze({
+  // review-account (L1211 ruling): it starts nothing that carries a secret today. If it ever gains a start whose command
+  // line could carry a secret, it must load the guard, move to PROVED_JOBS and be checked like the rest.
   'review-account': 'it loads no guard: it copies the owner\'s account file and starts only claude\'s status check, with no secret on the line',
 });
 /** A job whose script writes or connects when it is only loaded is never loaded here: NOT TRIED, with the reason. None today. */
@@ -143,6 +153,7 @@ export function judgeJob(job, { cfg, io, ownerUid, loadWrites = LOAD_WRITES }) {
   if (!Array.isArray(args) || args.length < 2) return row(job, 'FAIL', 'its job file has no program and script');
   if (args[0] !== node) return row(job, 'FAIL', `it starts ${args[0]}, not the copy's node ${node}`);
   if (args[1] !== script) return row(job, 'FAIL', `it runs ${args[1]}, not its script ${script}; not loaded`);
+  if (p.Label !== `${cfg.label}.${job}`) return row(job, 'FAIL', `its job file's Label is ${JSON.stringify(p.Label)}, not ${cfg.label}.${job}; not loaded`);
   if (Object.hasOwn(loadWrites, job)) return row(job, 'NOT TRIED', `its script is not loaded here: ${loadWrites[job]}`);
   // The user: a job file with no UserName runs as root.
   const user = p.UserName === undefined ? 'root' : p.UserName;
