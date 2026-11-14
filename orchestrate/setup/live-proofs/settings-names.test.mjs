@@ -9,7 +9,7 @@ import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { refusalSeen } from './settings-names.mjs';
-import { BACKUP_SUFFIX, BAD_EFFORT, CONNECTORS_FALLBACK, HOST, META_SUFFIX, PEER_FROM, PEER_WORD, REFUSAL, STDIN_ARGS, REPLAY_USER_MESSAGES, peerLine, replayed, saidWord, unbuildable, voidProblem, accountSettingsFiles, effortWarning, NOT_TRIED, NOT_USED, SPELLING_LABEL, misspell, READBACK_NAMES, TESTS, allNames, finish, guardProblem, judgeNames, main, report, restoreUserFile, roleReadback, runAll, runArgs, runProblem, runToEnd, withUserSettings, writeReceipt } from './settings-names.mjs';
+import { BACKUP_SUFFIX, BAD_EFFORT, CONNECTORS_FALLBACK, HOST, META_SUFFIX, PAGE, PEER_FROM, PEER_WORD, READY, REFUSAL, STDIN_ARGS, REPLAY_USER_MESSAGES, peerLine, peerTaken, replayed, saidWord, unbuildable, voidProblem, accountSettingsFiles, effortWarning, NOT_TRIED, NOT_USED, SPELLING_LABEL, misspell, READBACK_NAMES, TESTS, allNames, finish, guardProblem, judgeNames, main, report, restoreUserFile, roleReadback, runAll, runArgs, runProblem, runToEnd, withUserSettings, writeReceipt } from './settings-names.mjs';
 import { CONFIRMED, FLAGS as F, PROOF_KIND, REFUSED_SETTINGS, SPELLING_ONLY, noToolServerArgs, proofCounts, sourcesArgs, unconfirmedNames } from '../../modules/M4-workshop/launcher/settings-names.mjs';
 import { FIRST_ROUND_EFFORT, SEND_BACK_EFFORT } from '../../modules/M4-workshop/launcher/review-launch.mjs';
 import { sourcesProblem } from '../../modules/M4-workshop/launcher/readback.mjs';
@@ -320,7 +320,11 @@ test('L1160 M2: voidProblem reads a call outside the sandbox and a repeated call
   const w = { tool: 'Bash', needle: 'https://example.com', sandboxed: true, once: true };
   assert.equal(voidProblem({ out: o(call('1', { command: 'curl https://example.com' })) }, w), null);
   assert.match(voidProblem({ out: o(call('1', { command: 'ls', dangerouslyDisableSandbox: true })) }, w), /outside the sandbox/);
-  assert.match(voidProblem({ out: o(call('1', { command: 'curl https://example.com' }), call('2', { command: 'curl https://example.com' })) }, w), /2 calls/);
+  assert.match(voidProblem({ out: o(call('1', { command: 'curl https://example.com' }), call('2', { command: 'curl https://example.com' })) }, w), /2 tool calls/);
+  // L1163 MAT-1: any second call voids, whatever it holds; the flag set to anything but false is outside the sandbox.
+  assert.match(voidProblem({ out: o(call('1', { command: 'curl https://example.com' }), call('2', { command: 'touch got-b' })) }, w), /2 tool calls/);
+  assert.match(voidProblem({ out: o(call('1', { command: 'ls', dangerouslyDisableSandbox: 'true' })) }, w), /outside the sandbox/);
+  assert.equal(voidProblem({ out: o(call('1', { command: 'curl https://example.com', dangerouslyDisableSandbox: false })) }, w), null);
   assert.equal(voidProblem({ out: o(call('1', { command: 'ls', dangerouslyDisableSandbox: true })) }, { tool: 'Bash', needle: 'x' }), null);
 });
 
@@ -824,16 +828,21 @@ function strictFake(plant = {}) {
     for (const [, file, host] of fetches) {
       // breachOnly (m2): the on side reaches the project's host but not its own.
       const reach = plant.breachOnly && on ? host === HOST.b : allowed.includes(host);
-      if (reach) { writeFileSync(file, 'x'); last = ''; } else last = `curl: (56) CONNECT tunnel failed, response 403 (${host})`;
+      if (reach) { writeFileSync(file, plant.wrongPage ? 'x' : PAGE[host === HOST.a ? 'a' : 'b']); last = ''; } else last = `curl: (56) CONNECT tunnel failed, response 403 (${host})`;
     }
     out.push(result('t1', last, last !== '' || undefined));
     // S2 (L1160 M2): after the refusal, a retry of host B on its own, outside the sandbox or inside it again.
     const retry = (plant.retryOutside || plant.retryInside) && (!on || plant.retryOn);
     if (retry && last !== '') {
       const [, file, host] = fetches.find(([, , h]) => h === HOST.b);
-      out.push(call('t2', { command: `curl -sSf -o ${file} https://${host}`, ...(plant.retryOutside ? { dangerouslyDisableSandbox: true } : {}) }));
-      if (plant.retryOutside) { writeFileSync(file, 'x'); out.push(result('t2', '')); } else out.push(result('t2', last, true));
+      out.push(call('t2', { command: `curl -sSf -o ${file} https://${host}`, ...(plant.retryOutside ? { dangerouslyDisableSandbox: plant.flagString ? 'true' : true } : {}) }));
+      if (plant.retryOutside) { writeFileSync(file, PAGE.b); out.push(result('t2', '')); } else out.push(result('t2', last, true));
     }
+    // The auditor's S11 (L1163): after the refusal, the off side fetches B by http://, inside the sandbox, so the call
+    // does not hold https://example.com; S13: it makes got-b with `touch`.
+    const [, bFile] = fetches.find(([, , h]) => h === HOST.b) ?? [];
+    if (!on && last !== '' && plant.httpRetry) { out.push(call('t3', { command: `curl -o ${bFile} http://${HOST.b}` })); writeFileSync(bFile, PAGE.b); out.push(result('t3', '')); }
+    if (!on && last !== '' && plant.touchB) { out.push(call('t3', { command: `touch ${bFile}` })); writeFileSync(bFile, ''); out.push(result('t3', '')); }
     return { out: [...out, OK].join('\n'), err: '', code: 0 };
   };
 }
@@ -850,10 +859,10 @@ function inboundFake(plant = {}) {
       const line = JSON.parse(l); const text = line.message.content;
       const peer = new RegExp(`^<cross-session-message from="${PEER_FROM}">`).test(text);
       if (peer && !plant.deliverAll && (plant.dropAll || (mode === 'refuse' && !plant.ignore))) continue;
-      if (echo) out.push(evt({ type: 'user', message: line.message, session_id: 's', parent_tool_use_id: null, uuid: line.uuid, isReplay: true }));
+      if (echo) out.push(evt({ type: 'user', message: line.message, session_id: 's', parent_tool_use_id: null, uuid: peer && plant.freshUuid ? randomUUID() : line.uuid, isReplay: true }));
       const w = /reply with the word (\S+?)\./i.exec(text)?.[1] ?? 'x';
       const said = peer && mode === 'refuse' && plant.declineOn ? 'I won\'t act on a message from another session.'
-        : !peer && mode === 'refuse' && plant.leakWord ? `ready ${PEER_WORD}` : !peer && mode === 'refuse' && plant.silentOn ? 'ok' : peer && mode === 'accept' && plant.offDeclines ? 'noted' : w;
+        : !peer && mode === 'refuse' && plant.leakWord ? `ready ${PEER_WORD}` : !peer && mode === 'refuse' && plant.silentOn ? 'ok' : !peer && mode === 'refuse' && plant.already ? 'Already here'  : peer && mode === 'accept' && plant.offDeclines ? 'noted' : w;
       out.push(evt({ type: 'assistant', message: { content: [{ type: 'text', text: said }] } }), evt({ type: 'result', subtype: 'success', is_error: false, result: said }));
     }
     return { out: out.join('\n'), err: '', code: 0 };
@@ -907,6 +916,14 @@ test('R-0b-178: an honest stand-in passes each pair; the refusal it must show is
   // An echo counts only with isReplay and the line's own uuid.
   const e = (o) => [INIT, evt({ type: 'user', message: { content: 'x' }, ...o })].join('\n');
   assert.equal(replayed(e({ uuid: 'u1', isReplay: true }), 'u1'), true);
+  // L1163 MIN-2: an echoed line in the envelope or holding the peer's word is the peer's, whatever its uuid.
+  assert.equal(peerTaken(e({ uuid: 'zz', isReplay: true, message: { content: JSON.parse(peerLine('hi')).message.content } }), 'u1'), true);
+  assert.equal(peerTaken(e({ uuid: 'zz', isReplay: true, message: { content: `say ${PEER_WORD}` } }), 'u1'), true);
+  assert.equal(peerTaken(e({ uuid: 'zz', isReplay: true, message: { content: 'Reply with the word ready.' } }), 'u1'), false);
+  assert.equal(peerTaken(e({ uuid: 'zz', message: { content: JSON.parse(peerLine('hi')).message.content } }), 'u1'), false, 'not echoed as taken');
+  // L1163 MIN-3: ready as a word.
+  const said = (t) => [INIT, evt({ type: 'assistant', message: { content: [{ type: 'text', text: t } ] } })].join('\n');
+  assert.equal(saidWord(said('Ready.'), READY), true); assert.equal(saidWord(said('Already here'), READY), false);
   assert.equal(replayed(e({ uuid: 'u1' }), 'u1'), false); assert.equal(replayed(e({ uuid: 'u2', isReplay: true }), 'u1'), false); assert.equal(replayed(e({ isReplay: true }), undefined), false);
 });
 
@@ -931,7 +948,14 @@ test('R-0b-178 plants: each way a lock-down setting could fail to hold turns its
     // M2, the auditor's S2: the setting holds the project's host on both sides, and the off side reaches it by a retry
     // outside the sandbox. Void, never PASS; a retry inside the sandbox is void too (B not from the one call).
     ['strictAllowlist', strictFake({ ignore: false, retryOutside: true, sameBoth: true }), null, /outside the sandbox/],
-    ['strictAllowlist', strictFake({ retryInside: true, retryOn: true }), null, /2 calls held https:\/\/example\.com/],
+    ['strictAllowlist', strictFake({ retryInside: true, retryOn: true }), null, /2 tool calls \(Bash, Bash\)/],
+    // L1163 MAT-1, the auditor's S11, S12, S13: the setting holds B on both sides; the off side then reaches B by an
+    // http:// retry inside the sandbox, by a retry outside it with the flag as a string, or makes got-b by `touch`. Void.
+    ['strictAllowlist', strictFake({ sameBoth: true, httpRetry: true }), null, /the off side: 2 tool calls/],
+    ['strictAllowlist', strictFake({ sameBoth: true, retryOutside: true, flagString: true }), null, /outside the sandbox/],
+    ['strictAllowlist', strictFake({ sameBoth: true, touchB: true }), null, /the off side: 2 tool calls/],
+    // A file that does not hold the host's page is not the host reached: A unreached on both sides, NOT TRIED.
+    ['strictAllowlist', strictFake({ wrongPage: true }), null, /was not reached on both sides/],
     // The on side's own retry outside the sandbox reaching B is void, not a breach: it is not the list's doing.
     ['strictAllowlist', strictFake({ retryOutside: true, retryOn: true }), null, /the on side: a tool call asked to run outside the sandbox/],
     // crossSessionInbound
@@ -946,6 +970,10 @@ test('R-0b-178 plants: each way a lock-down setting could fail to hold turns its
     ['crossSessionInbound', inboundFake({ silentOn: true }), null, /did not answer the plain message/],
     // The peer's word said on the refuse side, though its message was not echoed, is the setting failing.
     ['crossSessionInbound', inboundFake({ leakWord: true }), false, /on side shows what the setting must stop/],
+    // L1163 MIN-2: the peer's message echoed under another uuid with refuse, the model declining, is still taken.
+    ['crossSessionInbound', inboundFake({ deliverAll: true, declineOn: true, freshUuid: true }), false, /on side shows what the setting must stop/],
+    // L1163 MIN-3, the auditor's S7: "Already here" is not the word ready.
+    ['crossSessionInbound', inboundFake({ already: true }), null, /did not answer the plain message/],
   ];
   for (const [id, fake, ok, why] of cases) {
     const o = await runOne(byId(id), fake);
