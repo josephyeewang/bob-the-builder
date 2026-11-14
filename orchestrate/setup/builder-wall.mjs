@@ -178,11 +178,12 @@ export function bootScript(cfg) {
   ].join('\n');
 }
 
-// The job file's plist, written the way review-daemons.mjs writes its own (its helpers are not exported).
+// The job file's plist, written the way review-daemons.mjs writes its own (its helpers are not exported). Exported for
+// setup's other root job (worker-rules.mjs, L1226), so the two root jobs write their files one way.
 const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-const str = (s) => `<string>${esc(s)}</string>`;
-const arr = (xs) => `<array>${xs.map(str).join('')}</array>`;
-const plist = (entries) => ['<?xml version="1.0" encoding="UTF-8"?>',
+export const str = (s) => `<string>${esc(s)}</string>`;
+export const arr = (xs) => `<array>${xs.map(str).join('')}</array>`;
+export const plist = (entries) => ['<?xml version="1.0" encoding="UTF-8"?>',
   '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
   '<plist version="1.0">', '<dict>', ...entries.map((e) => `  ${e}`), '</dict>', '</plist>', ''].join('\n');
 
@@ -286,18 +287,25 @@ export function statusOf(rows, uid, now = new Date()) {
  * else throws, and nothing is written.
  */
 export function writeStatus(io, cfg, status) {
-  const text = statusText(status);
+  writeRootFile(io, cfg, wallStatusDir(cfg), wallStatusPath(cfg), statusText(status));
+}
+
+/**
+ * One file root writes in a folder of its own under the base, whole or not at all; shared with worker-rules.mjs (L1226).
+ * The base and the folder must be safe for root (chainProblem); the folder is made root's 0755 if missing, and anything
+ * else at its name is refused. The old file must be one plain file of root's with one name (L1205). Anything else is
+ * only a name in root's own folder: it is removed, so nothing old stands behind the refusal, and the run says so.
+ */
+export function writeRootFile(io, cfg, dir, f, text) {
   const base = chainProblem(io.at(cfg.base), { owner: io.rootUid, top: io.prefix || '/' });
   if (base) throw new Error(`${cfg.base} is not safe for root to write in (${base})`);
-  const dir = wallStatusDir(cfg); const st = lstatOr(io, dir);
+  const st = lstatOr(io, dir);
   if (!st) { io.mkdir(dir, 0o755); io.secure(dir, { uid: io.rootUid, gid: 0, mode: 0o755 }); }
   else if (!st.isDirectory() || st.isSymbolicLink() || st.uid !== io.rootUid) throw new Error(`${dir} is there but is not a folder of root's; look at it and remove it by hand`);
   else if ((st.mode & 0o7777) !== 0o755 || st.gid !== 0) io.secure(dir, { uid: io.rootUid, gid: 0, mode: 0o755, ino: st.ino, dev: st.dev });
   const above = chainProblem(io.at(dir), { owner: io.rootUid, top: io.prefix || '/' });
   if (above) throw new Error(`${dir} is not safe for root to write in (${above})`);
-  // The old status must be one plain file of root's with one name (L1205). Anything else is only a name in root's own
-  // folder: it is removed, so no old "ok" stands behind the refusal, and the run says so.
-  const f = wallStatusPath(cfg); const old = lstatOr(io, f);
+  const old = lstatOr(io, f);
   if (old && (!old.isFile() || old.isSymbolicLink() || old.nlink !== 1 || old.uid !== io.rootUid)) {
     io.unlink(f);
     throw new Error(`${f} was not one plain file of root's (${old.isSymbolicLink() ? 'a link' : !old.isFile() ? 'not a plain file' : old.nlink !== 1 ? `${old.nlink} names` : 'not root\'s'}); it was removed, and nothing new was written`);

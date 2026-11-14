@@ -15,8 +15,9 @@
 //                checked by the runner's own check (runner-main.mjs checkRunnerConfig). Each product's `rules` there is
 //                the one source (I7): the same object the runner loads as p.rules.
 //   the files    <base>/worker-rules/<product>.json (layout.mjs workerRulesPath), root:wheel 0644, written whole beside its
-//                name and renamed over it (dispatcher-setup.mjs writeAside), so it always has one name: a hard link the
-//                builder made to an old one (nlink 2, which every reader refuses) is healed by the next beat's rename.
+//                name and renamed over it (builder-wall.mjs writeRootFile, shared with the wall's status): a hard link
+//                the builder made to an old one (nlink 2, which every reader refuses) is removed with a refusal, and
+//                the next beat writes a new file of one name.
 //                The shape is M4's ({ written_at, hash, rules }, hash = snapshotHash(rules)) plus `product` and
 //                `config_sha256`, the sha256 of JSON.stringify of the whole parsed config, so the runner can tell the
 //                snapshot is from the very config it loaded (a config changed under a running runner is held).
@@ -41,9 +42,9 @@ import { realpathSync } from 'node:fs';
 import { BUILDER, JOB_PATH, LAUNCHCTL, ROOT_CONFIG_PATH, workerRulesDir, workerRulesPath } from './layout.mjs';
 import { readUser } from './users-folders.mjs';
 import { realIo, rootProblem } from './mac.mjs';
-import { writeAside } from './dispatcher-setup.mjs';
+import { arr, plist, str, writeRootFile } from './builder-wall.mjs';
 import { installPaths, parseInstallConfig } from './install.mjs';
-import { NODE, chainProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
+import { NODE } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { snapshotHash } from '../modules/M4-workshop/hooks/snapshot.mjs';
 import { readJobConfig } from '../shared/job-config.mjs';
 import { checkRunnerConfig } from '../wiring/runner-main.mjs';
@@ -54,14 +55,6 @@ export const WORKER_RULES_JOB = 'worker-rules';
 export const WORKER_RULES_SCRIPT = 'setup/worker-rules.mjs';
 export const WRITE_EVERY_S = 60;
 export const PS = '/bin/ps';
-
-// The job file's plist, written the way builder-wall.mjs writes its check job's.
-const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-const str = (s) => `<string>${esc(s)}</string>`;
-const arr = (xs) => `<array>${xs.map(str).join('')}</array>`;
-const plist = (entries) => ['<?xml version="1.0" encoding="UTF-8"?>',
-  '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
-  '<plist version="1.0">', '<dict>', ...entries.map((e) => `  ${e}`), '</dict>', '</plist>', ''].join('\n');
 
 export function workerRulesPlist(cfg) {
   const P = installPaths(cfg);
@@ -78,7 +71,6 @@ export function workerRulesPlist(cfg) {
 }
 
 const said = (r) => (String(r?.stderr ?? '').trim() || String(r?.stdout ?? '').trim()).slice(0, 160) || `exit ${r?.status}`;
-const lstatOr = (io, p) => { try { return io.lstat(p); } catch (e) { if (e?.code === 'ENOENT') return null; throw e; } };
 
 /**
  * Whether the worker runner's job is running now, by launchd's own answer for its exact label (L1227): → { live: true,
@@ -114,27 +106,13 @@ export function rulesText(product, rules, configSha256, at = new Date()) {
 export const configSha256 = (config) => createHash('sha256').update(JSON.stringify(config), 'utf8').digest('hex');
 
 /**
- * Writes one product's snapshot, whole or not at all, in the folder (root's 0755, made here when missing). The base and the
- * folder must be root's alone all the way up; anything else throws, and nothing is written. An old name that is not a
- * plain file of root's (a link, a folder, someone else's) is removed and the write refused, as the wall's status is
- * (builder-wall.mjs writeStatus); only root can put anything in this folder, so that is said loudly. A plain file of root's
- * with more than one name is replaced by the rename, which leaves the new one with one.
+ * Writes one product's snapshot, whole or not at all, in root's folder for them, the way the wall's status is written
+ * (builder-wall.mjs writeRootFile): the base and the folder root's alone all the way up, and an old name that is not one
+ * plain file of root's with one name (a link, a folder, someone else's, a hard link) removed and the write refused. Only
+ * root can put anything in this folder, so that is said loudly.
  */
 export function writeRules(io, cfg, product, text) {
-  const base = chainProblem(io.at(cfg.base), { owner: io.rootUid, top: io.prefix || '/' });
-  if (base) throw new Error(`${cfg.base} is not safe for root to write in (${base})`);
-  const dir = workerRulesDir(cfg); const st = lstatOr(io, dir);
-  if (!st) { io.mkdir(dir, 0o755); io.secure(dir, { uid: io.rootUid, gid: 0, mode: 0o755 }); }
-  else if (!st.isDirectory() || st.isSymbolicLink() || st.uid !== io.rootUid) throw new Error(`${dir} is there but is not a folder of root's; look at it and remove it by hand`);
-  else if ((st.mode & 0o7777) !== 0o755 || st.gid !== 0) io.secure(dir, { uid: io.rootUid, gid: 0, mode: 0o755, ino: st.ino, dev: st.dev });
-  const above = chainProblem(io.at(dir), { owner: io.rootUid, top: io.prefix || '/' });
-  if (above) throw new Error(`${dir} is not safe for root to write in (${above})`);
-  const f = workerRulesPath(cfg, product); const old = lstatOr(io, f);
-  if (old && (!old.isFile() || old.isSymbolicLink() || old.uid !== io.rootUid)) {
-    io.unlink(f);
-    throw new Error(`${f} was not a plain file of root's (${old.isSymbolicLink() ? 'a link' : !old.isFile() ? 'not a plain file' : `uid ${old.uid}`}); it was removed, and nothing new was written`);
-  }
-  writeAside(io, f, text);
+  writeRootFile(io, cfg, workerRulesDir(cfg), workerRulesPath(cfg, product), text);
 }
 
 /**

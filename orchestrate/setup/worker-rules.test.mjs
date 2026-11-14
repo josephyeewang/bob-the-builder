@@ -166,15 +166,17 @@ test('L1226: the snapshot follows the config: other rules give another hash, and
   assert.equal(rulesText('alpha', RULES, 'x'.repeat(64), new Date(0)), `${JSON.stringify({ written_at: new Date(0).toISOString(), hash: snapshotHash(RULES), rules: RULES, product: 'alpha', config_sha256: 'x'.repeat(64) })}\n`);
 });
 
-test('L1226 plant 5: a hard link the builder made to the snapshot (two names, which every reader refuses) is healed by the next beat\'s rename', () => {
+test('L1226 plant 5: a hard link the builder made to the snapshot (two names, which every reader refuses) is removed with a refusal, and the next beat writes it fresh', () => {
   const w = world(); doBeat(w);
   const f = w.mac.at(workerRulesPath(w.cfg, 'alpha')); const other = w.mac.at(`${BASE}/elsewhere.json`);
   linkSync(f, other);
   assert.equal(lstatSync(f).nlink, 2);
   assert.match(readSnapshot(f, { ownerUid: w.mac.rootUid, now: Date.parse('2026-11-14T12:00:30Z') }).reason, /2 names/);
-  doBeat(w);
-  assert.equal(lstatSync(f).nlink, 1, 'the rename leaves the name with a new file of one name');
+  assert.throws(() => doBeat(w), /was not one plain file of root's \(2 names\); it was removed, and nothing new was written/);
+  assert.throws(() => lstatSync(f), /ENOENT/, 'root\'s name is gone, so no reader is pointed at the old file');
   assert.equal(lstatSync(other).nlink, 1, 'the other name keeps the old file, which no reader is pointed at');
+  doBeat(w);
+  assert.equal(lstatSync(f).nlink, 1, 'the next beat writes a new file of one name');
   assert.equal(readSnapshot(f, { ownerUid: w.mac.rootUid, now: Date.parse('2026-11-14T12:00:30Z') }).ok, true);
 });
 
@@ -183,12 +185,12 @@ test('L1226 plant 4: anything at the snapshot\'s name but a plain file of root\'
   let w = world(); doBeat(w);
   const f = workerRulesPath(w.cfg, 'alpha');
   w.mac.unlink(f); symlinkSync('/etc/hosts', w.mac.at(f));
-  assert.throws(() => doBeat(w), /was not a plain file of root's \(a link\); it was removed/);
+  assert.throws(() => doBeat(w), /was not one plain file of root's \(a link\); it was removed/);
   assert.throws(() => w.mac.lstat(f), /ENOENT/);
   // A plain file at the name with another owner.
   w = world(); doBeat(w);
   w.mac.owners.set(f, { uid: BUILDER_UID, gid: 20 });
-  assert.throws(() => doBeat(w), /uid 65002/);
+  assert.throws(() => doBeat(w), /was not one plain file of root's \(not root's\); it was removed/);
   // The folder there but someone else's: refused, and nothing is written in it.
   w = world(); mkdirSync(w.mac.at(workerRulesDir(w.cfg))); w.mac.owners.set(workerRulesDir(w.cfg), { uid: BUILDER_UID, gid: 20 });
   assert.throws(() => doBeat(w), /is there but is not a folder of root's/);
