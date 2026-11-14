@@ -84,7 +84,9 @@ function fakeNet(pf, { twist = null } = {}) {
     connect: ({ user, proto, host, port: p }) => {
       const l = listeners.get(p); const fam = FAMILIES.find(([, h]) => h === host)[0];
       log.push(`${user}→${l.user} ${proto} ${fam}`);
-      const said = pf.decide({ fromUid: uidOf(user), toUid: uidOf(l.user), proto, fam });
+      // The request, then the listener's reply back (the TCP SYN-ACK, the UDP pong): both legs must pass for an 'ok'.
+      const there = pf.decide({ fromUid: uidOf(user), toUid: uidOf(l.user), proto, fam });
+      const said = there === 'ok' ? pf.decide({ fromUid: uidOf(l.user), toUid: uidOf(user), proto, fam }) : there;
       return twist ? twist({ user, to: l.user, proto, fam, said }) : said;
     },
   };
@@ -230,6 +232,22 @@ test('R-0b-179 plant: a one-direction read-back (no controls) is not this one: e
     const v = at(/\(v;/); const ii = at(/\(ii\)/); const i = at(/\(i\)/);
     assert.ok(v >= 0 && ii >= 0 && i > v && i > ii, `${where}: v ${v}, ii ${ii}, i ${i}`);
   }
+});
+
+test('R-0b-179 (L1154): another user cannot reach a builder listener either (the builder\'s tagged reply is blocked), and can with the wall down', async () => {
+  const w = world();
+  await placed(w);
+  for (const proto of PROTOS) for (const [fam, host] of FAMILIES) {
+    const l = await w.net.listen({ user: 'builder', proto, host });
+    assert.equal(w.net.connect({ user: 'sam', proto, host, port: l.port }), 'refused', `${proto} ${fam}: the owner reached a builder listener`);
+    w.pf.enabled = false;
+    assert.equal(w.net.connect({ user: 'sam', proto, host, port: l.port }), 'ok', `${proto} ${fam}: the control (no wall) failed`);
+    w.pf.enabled = true; l.close();
+  }
+  // It is the tag on the reply that does it: with the tag rule gone the owner gets through.
+  await withRules(w, rulesWith(` tag ${TAG} no state`, ' no state'));
+  const l = await w.net.listen({ user: 'builder', proto: 'tcp', host: '127.0.0.1' });
+  assert.equal(w.net.connect({ user: 'sam', proto: 'tcp', host: '127.0.0.1', port: l.port }), 'ok');
 });
 
 test('R-0b-179: loadedRulesProblem reads OpenBSD\'s print or a list not split, in any order, and refuses an extra or a missing word', () => {

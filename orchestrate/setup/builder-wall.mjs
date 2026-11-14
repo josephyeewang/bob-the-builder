@@ -10,8 +10,8 @@
 //   not the builder's is blocked (pf's `user` is the sending socket's owner on the way out, the receiving one's on the way
 //   in). TCP and UDP, IPv4 and IPv6 (the rules name no family, so ::1 is covered with 127.0.0.0/8). A connect to one of
 //   this Mac's other addresses goes through lo0 as well; a third rule blocks the builder to `self` off lo0 all the same.
-//   One effect beyond the ask: another user's connection TO a builder listener fails too (the builder's reply is tagged and
-//   meets a socket that is not the builder's). Nothing in ORCHESTRATE connects to one; the read-back does not test it.
+//   Another user's connection TO a builder listener fails too, and that is intended (L1154): the builder's reply is tagged
+//   and meets a socket that is not the builder's. builder-wall.test.mjs pins it; the read-back on the Mac does not probe it.
 //
 // What it places, as root (`place`):
 //   /etc/pf.anchors/orchestrate.builder      the rules, root:wheel 0644 (anchorText)
