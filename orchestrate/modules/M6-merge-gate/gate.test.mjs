@@ -25,6 +25,9 @@ import { timeLimits, requestMerges } from '../M11-dispatcher/merges.mjs';
 import { MERGED_OUTSIDE, MERGED_OUTSIDE_UNTOLD, settleMerge, reconcileMerge } from './merge-outcome.mjs';
 import { markReverted } from './undo.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
+import { undoStep, FIX_CARD, REVERSE_FACT as M11_REVERSE_FACT } from '../M11-dispatcher/undo.mjs';
+import { withAlerts } from '../M11-dispatcher/fixtures.test-helper.mjs';
+import { REVERSE_FACT, NOT_CLEAN } from '../../shared/record-names.mjs';
 
 const POLICY = 'tiers: {}\n';
 const CLEAN = { correct: 'clean', well_built: 'clean', works_for_user: 'clean', holds_up: 'clean' };
@@ -555,6 +558,367 @@ test('an undo card whose change is not the exact reverse is refused (9) and neve
   assert.equal(u.doc.state, 'refused');
   assert.ok(u.doc.reasons.some((x) => x.startsWith('9:')), u.doc.reasons.join(' | '));
   assert.equal(w.env.record.read('card', 'C-1').doc.state, 'closed');
+});
+
+// L980: the whole way for an undo that can never be the exact reverse. The gate refuses it (9, final: the check read
+// everything), records reverse-<card> = not_clean with what it found, and fails the card; M11 then writes the fix card
+// as a draft and tells the Lead once. Another pass, gate or M11, adds nothing.
+async function notCleanUndo(w) {
+  verifiedCard(w);
+  await gatePass(w.ctx);
+  const flagged = mergeOf(w).doc.merge_commit;
+  must(put(w.env.record, 'dispatcher', 'card', 'C-1', { state: 'closed' }), 'closed');
+  // The undo also changes a path the reversed merge never touched: no later pass can make it an exact reverse.
+  verifiedCard(w, 'U-1', { pr: 9, files: { 'src/a.mjs': 'one', 'src/extra.mjs': 'x' }, undo: flagged });
+  return flagged;
+}
+const m11Pass = (w, sent) => withAlerts(w.env.record, w.env.clock.t, (t) => { sent.push(typeof t === 'string' ? t : t.text); return true; },
+  (alert) => undoStep({ rec: w.env.record, rules: w.ctx.rules, now: w.env.clock.t, filesOf: () => [], alert }));
+
+test('L980: a not-clean undo is refused, recorded not_clean by the gate, failed, and M11 writes its fix card once', async () => {
+  const w = world();
+  await notCleanUndo(w);
+  await gatePass(w.ctx);
+  const u = mergeOf(w, 'U-1');
+  assert.equal(u.doc.state, 'refused');
+  assert.ok(u.doc.reasons.some((x) => x.startsWith('9:')), u.doc.reasons.join(' | '));
+  assert.ok(Array.isArray(u.doc.not_clean) && u.doc.not_clean.length, JSON.stringify(u.doc));
+  const fid = REVERSE_FACT('U-1');
+  assert.equal(fid, M11_REVERSE_FACT('U-1'), 'M11 reads the fact the gate writes');
+  const f = w.env.record.read('fact', fid);
+  assert.equal(f.doc.state, NOT_CLEAN);
+  assert.equal(w.env.record.meta('fact', fid).createdBy, 'merge_gate');
+  assert.match(f.doc.reason, /src\/extra\.mjs/, f.doc.reason);
+  assert.equal(f.doc.merge, u.id);
+  assert.equal(w.env.record.read('card', 'U-1').doc.state, 'failed');
+
+  const sent = [];
+  await m11Pass(w, sent);
+  const fix = w.env.record.read('card', FIX_CARD('U-1'));
+  assert.ok(fix, 'the fix card is written');
+  assert.deepEqual([fix.doc.state, fix.doc.kind, fix.doc.fix_of], ['draft', 'fix', 'U-1']);
+  assert.match(fix.doc.what, /could not be an exact reverse: .*src\/extra\.mjs/);
+  assert.equal(sent.filter((t) => /could not be an exact reverse/.test(t)).length, 1, sent.join(' | '));
+
+  // Again, both sides: the fact is written once, the card stays failed, no second fix card or alert.
+  const factRev = f.rev;
+  const cardRev = w.env.record.read('card', 'U-1').rev;
+  await gatePass(w.ctx);
+  await m11Pass(w, sent);
+  assert.equal(w.env.record.read('fact', fid).rev, factRev);
+  assert.equal(w.env.record.read('card', 'U-1').rev, cardRev);
+  assert.equal(w.env.record.list('card').filter((c) => c.id === FIX_CARD('U-1')).length, 1);
+  assert.equal(sent.filter((t) => /could not be an exact reverse/.test(t)).length, 1, sent.join(' | '));
+  assert.deepEqual(w.alerts.filter((x) => x.type === 'merge_gate_write_refused'), [], 'no write was refused on the way');
+});
+
+test('L980: a not_clean fact the gate wrote whose card move was lost is settled on the next pass', async () => {
+  const w = world();
+  await notCleanUndo(w);
+  // The card's move into failed is refused once; the fact stands.
+  const real = w.ctx.record;
+  let lose = true;
+  w.ctx.record = Object.create(real, { write: { value: (x) => {
+    if (lose && x.entity === 'card' && x.id === 'U-1' && x.doc?.state === 'failed') { lose = false; return { ok: false, reason: 'the Record was in use' }; }
+    return real.write(x);
+  } } });
+  await gatePass(w.ctx);
+  assert.equal(w.env.record.read('fact', REVERSE_FACT('U-1')).doc.state, NOT_CLEAN);
+  assert.equal(w.env.record.read('card', 'U-1').doc.state, 'verified');
+  assert.ok(w.alerts.some((a) => a.type === 'merge_gate_write_refused'), JSON.stringify(w.alerts));
+  await gatePass(w.ctx);
+  assert.equal(w.env.record.read('card', 'U-1').doc.state, 'failed');
+});
+
+// Review r0 m1: the fact was written, the card's move was lost, and the card was pushed again since. The old finding
+// was for the old head: the gate does not fail the card on it.
+test('L980: a card pushed again after its not_clean finding is not failed on the old head', async () => {
+  const w = world();
+  await notCleanUndo(w);
+  const real = w.ctx.record;
+  w.ctx.record = Object.create(real, { write: { value: (x) => (x.entity === 'card' && x.id === 'U-1' && x.doc?.state === 'failed' ? { ok: false, reason: 'the Record was in use' } : real.write(x)) } });
+  await gatePass(w.ctx);
+  const at = w.env.record.read('card', 'U-1').doc.head;
+  assert.equal(w.env.record.read('fact', REVERSE_FACT('U-1')).doc.head, at, 'the fact names the head it was found on');
+  w.ctx.record = real;
+  const c = w.env.record.read('card', 'U-1');
+  w.env.store.transaction((tx) => tx.commit([{ entity: 'card', id: 'U-1', doc: { ...c.doc, head: 'f'.repeat(40) } }], { actor: 'test', kind: 'seed' }));
+  await gatePass(w.ctx);
+  assert.equal(w.env.record.read('card', 'U-1').doc.state, 'verified');
+  // #466 r1 M2: and on to the right end. Reviewed again at a real head that is still not clean, the gate brings its own
+  // finding up to that head and fails the card there; M11 writes the fix card.
+  const h3 = await reReview(w, 'U-1', 9, { 'src/a.mjs': 'one', 'src/extra3.mjs': 'z' }, 3);
+  for (let i = 0; i < 3; i++) { w.env.clock.t += 60_000; await gatePass(w.ctx); }
+  assert.equal(w.env.record.read('card', 'U-1').doc.state, 'failed');
+  assert.equal(w.env.record.read('fact', REVERSE_FACT('U-1')).doc.head, h3);
+  assert.match(w.env.record.read('fact', REVERSE_FACT('U-1')).doc.reason, /src\/extra3\.mjs/);
+  const sent = [];
+  await m11Pass(w, sent);
+  assert.ok(w.env.record.read('card', FIX_CARD('U-1')), 'the fix card is written');
+});
+
+// #466 r1 M2: the card pushed again and reviewed again at a head that is still not clean. reReview is the Workshop's
+// push (in_review at the new head) then a clean review and a merge request, as the real flow makes them.
+async function reReview(w, id, pr, files, n, { verify = true } = {}) {
+  const E = w.env; const g = w.g;
+  const head = g.commit([g.main], files, { from: g.main });
+  g.openPull({ number: pr, head, files });
+  must(put(E.record, 'workshop', 'card', id, { head, state: 'in_review' }), 'pushed again');
+  if (!verify) return head;
+  const sid = `R-${id}-${n}`;
+  runnerLaunch(E, id, sid, 'reviewer', head);
+  const hdr = `${JSON.stringify({ entity: 'verdict', card: id, expectRev: E.record.read('card', id).rev, fields: { head, pass: true, checklist: CLEAN, material: 0 } })}\n`;
+  must(E.review.applyOutbox({ role: 'reviewer', sessionId: sid, card: id }, outboxFile(E, 'reviewer', sid, `verdict-${id}-${n}.md`, hdr)), 'verdict');
+  runnerEndedRecord(E, id, sid, 'reviewer', head);
+  must(put(E.review, 'dispatcher', 'card', id, { state: 'verified' }), 'verified');
+  must(E.record.write({ actor: 'dispatcher', entity: 'merge_request', id: `mr-${id}-${n}`, expectRev: 0, doc: { card: id, pr, session_id: 'S-1', head, rev: E.record.read('card', id).rev, requested_at: new Date(E.clock.t).toISOString() } }), 'request');
+  return head;
+}
+
+test('L980 (#466 r1 M2): an undo pushed again while queued (in review), then verified at a head still not clean, is failed there (the write guard, M2a)', async () => {
+  const w = world();
+  await notCleanUndo(w);
+  await reReview(w, 'U-1', 9, { 'src/a.mjs': 'one', 'src/extra2.mjs': 'y' }, 2, { verify: false });
+  await gatePass(w.ctx);
+  // In review: no finding is for the card, so nothing is written and nothing is failed.
+  assert.equal(w.env.record.read('fact', REVERSE_FACT('U-1')), null);
+  assert.equal(w.env.record.read('card', 'U-1').doc.state, 'in_review');
+  const h3 = await reReview(w, 'U-1', 9, { 'src/a.mjs': 'one', 'src/extra3.mjs': 'z' }, 3);
+  for (let i = 0; i < 3; i++) { w.env.clock.t += 60_000; await gatePass(w.ctx); }
+  assert.equal(w.env.record.read('card', 'U-1').doc.state, 'failed');
+  assert.equal(w.env.record.read('fact', REVERSE_FACT('U-1')).doc.head, h3);
+  const sent = [];
+  await m11Pass(w, sent);
+  assert.ok(w.env.record.read('card', FIX_CARD('U-1')), 'the fix card is written');
+});
+
+test('L980 (#466 r1 M2): the card move lost, then pushed again and verified at a head still not clean: failed there, on the finding brought up to it', async () => {
+  const w = world();
+  await notCleanUndo(w);
+  const real = w.ctx.record;
+  w.ctx.record = Object.create(real, { write: { value: (x) => (x.entity === 'card' && x.id === 'U-1' && x.doc?.state === 'failed' ? { ok: false, reason: 'the Record was in use' } : real.write(x)) } });
+  await gatePass(w.ctx);
+  w.ctx.record = real;
+  const h1 = w.env.record.read('fact', REVERSE_FACT('U-1')).doc.head;
+  const h2 = await reReview(w, 'U-1', 9, { 'src/a.mjs': 'one', 'src/extra2.mjs': 'y' }, 2);
+  assert.notEqual(h1, h2);
+  for (let i = 0; i < 3; i++) { w.env.clock.t += 60_000; await gatePass(w.ctx); }
+  assert.equal(w.env.record.read('card', 'U-1').doc.state, 'failed');
+  const f = w.env.record.read('fact', REVERSE_FACT('U-1'));
+  assert.equal(f.doc.head, h2);
+  assert.match(f.doc.reason, /src\/extra2\.mjs/);
+  assert.equal(w.env.record.meta('fact', REVERSE_FACT('U-1')).createdBy, 'merge_gate');
+  const sent = [];
+  await m11Pass(w, sent);
+  assert.ok(w.env.record.read('card', FIX_CARD('U-1')), 'the fix card is written');
+});
+
+// #466 r1 M1: the card was verified at a clean head; the pull request was pushed to a head that is not clean, which the
+// Record has not seen. The finding is of GitHub's test merge of that other head: nothing is recorded, nothing is failed.
+test('L980 (#466 r1 M1): a finding on a pull request head that is not the card head records nothing and fails no card', async () => {
+  const w = world();
+  verifiedCard(w);
+  await gatePass(w.ctx);
+  const flagged = mergeOf(w).doc.merge_commit;
+  must(put(w.env.record, 'dispatcher', 'card', 'C-1', { state: 'closed' }), 'closed');
+  const h1 = verifiedCard(w, 'U-1', { pr: 9, files: { 'src/a.mjs': 'one' }, undo: flagged });
+  const h2 = w.g.commit([w.g.main], { 'src/a.mjs': 'one', 'src/extra.mjs': 'x' }, { from: w.g.main });
+  w.g.openPull({ number: 9, head: h2, files: { 'src/a.mjs': 'one', 'src/extra.mjs': 'x' } });
+  await gatePass(w.ctx);
+  const u = mergeOf(w, 'U-1');
+  // Refused as before (6: the pull request is not at the card's head), never held on the other head's test merge.
+  assert.equal(u.doc.state, 'refused', JSON.stringify(u.doc));
+  assert.equal(u.doc.not_clean, undefined, JSON.stringify(u.doc));
+  assert.equal(w.env.record.read('fact', REVERSE_FACT('U-1')), null);
+  assert.notEqual(w.env.record.read('card', 'U-1').doc.state, 'failed');
+  assert.equal(w.env.record.read('card', 'U-1').doc.head, h1);
+});
+
+// #466 r1 m1 (and r1 fix self-review M-a, M-b): while GitHub has not worked out the test merge, or the test merge is
+// stale (of a main that is not the one read now), the undo is judged on nothing: it waits (held, never refused for
+// good), nothing is recorded and no card is failed; once GitHub's test merge is current, it is refused, recorded and
+// failed.
+async function waitsThenSettles(w, settle) {
+  await gatePass(w.ctx);
+  const u = mergeOf(w, 'U-1');
+  assert.notEqual(u.doc.state, 'refused', JSON.stringify(u.doc));
+  assert.equal(u.doc.not_clean, undefined, JSON.stringify(u.doc));
+  assert.equal(w.env.record.read('fact', REVERSE_FACT('U-1')), null);
+  assert.equal(w.env.record.read('card', 'U-1').doc.state, 'verified');
+  settle();
+  for (let i = 0; i < 3; i++) { w.env.clock.t += 60_000; await gatePass(w.ctx); }
+  assert.equal(mergeOf(w, 'U-1').doc.state, 'refused', JSON.stringify(mergeOf(w, 'U-1').doc));
+  assert.equal(w.env.record.read('fact', REVERSE_FACT('U-1'))?.doc?.state, NOT_CLEAN);
+  assert.equal(w.env.record.read('card', 'U-1').doc.state, 'failed');
+}
+
+test('L980 (#466 r1 m1): an undo waits while GitHub has not worked out the test merge, then is failed', async () => {
+  const w = world();
+  await notCleanUndo(w);
+  const real = w.ctx.gh;
+  const pending = { mergeable: null, mergeable_state: 'unknown' };
+  w.ctx.gh = Object.create(real, { get: { value: async (path, ...rest) => {
+    const r = await real.get(path, ...rest);
+    return /\/pulls\/9$/.test(path) && r?.json ? { ...r, json: { ...r.json, ...pending } } : r;
+  } } });
+  await waitsThenSettles(w, () => { w.ctx.gh = real; });
+});
+
+// GitHub answers with a test merge that is not the current one: built on another main, or of another head. The
+// commit is real and readable (so the check answers no), but it is not the card's change on main as read now.
+function staleTestMerge(w, parentsOf) {
+  const real = w.ctx.gh;
+  const p = w.g.pulls.get(9);
+  const [base, tip] = parentsOf(p.head);
+  const files = { 'src/a.mjs': 'one', 'src/extra.mjs': 'x' };
+  const tm = w.g.commit([base, tip], files, { from: base });
+  w.ctx.gh = Object.create(real, { get: { value: async (path, ...rest) => {
+    const r = await real.get(path, ...rest);
+    return /\/pulls\/9$/.test(path) && r?.json ? { ...r, json: { ...r.json, merge_commit_sha: tm } } : r;
+  } } });
+  return () => { w.ctx.gh = real; };
+}
+
+test('L980 (#466 r1 m1): an undo waits on a stale test merge (of an old main), then is failed', async () => {
+  const w = world();
+  await notCleanUndo(w);
+  const old = w.g.commit([w.g.main], { 'docs/other.md': 'o' }, { from: w.g.main });
+  await waitsThenSettles(w, staleTestMerge(w, (head) => [old, head]));
+});
+
+test('L980 (#466 r1 M1): an undo waits on a test merge of another head, then is failed', async () => {
+  const w = world();
+  await notCleanUndo(w);
+  const other = w.g.commit([w.g.main], { 'src/a.mjs': 'one', 'src/extra.mjs': 'x', 'src/more.mjs': 'm' }, { from: w.g.main });
+  await waitsThenSettles(w, staleTestMerge(w, () => [w.g.main, other]));
+});
+
+// #466 r1 m4: refused under the lock (check), the card put back to verified is failed in that same pass. Main moves
+// between the first judgement (a clean undo) and the one under the lock (now a path changed since).
+test('L980 (#466 r1 m4): an undo found not clean under the lock is failed in the same pass', async () => {
+  const w = world();
+  verifiedCard(w);
+  await gatePass(w.ctx);
+  const flagged = mergeOf(w).doc.merge_commit;
+  must(put(w.env.record, 'dispatcher', 'card', 'C-1', { state: 'closed' }), 'closed');
+  verifiedCard(w, 'U-1', { pr: 9, files: { 'src/a.mjs': 'one' }, undo: flagged });
+  const real = w.ctx.record;
+  let moved = false;
+  w.ctx.record = Object.create(real, { write: { value: (x) => {
+    const r = real.write(x);
+    if (!moved && r.ok && x.entity === 'merge' && x.doc?.state === 'checking') { moved = true; w.g.main = w.g.commit([w.g.main], { 'src/a.mjs': 'by hand' }, { from: w.g.main }); }
+    return r;
+  } } });
+  await gatePass(w.ctx);
+  w.ctx.record = real;
+  assert.ok(moved, 'the merge reached checking');
+  const u = mergeOf(w, 'U-1');
+  assert.equal(u.doc.state, 'refused', JSON.stringify(u.doc));
+  assert.ok(Array.isArray(u.doc.not_clean) && u.doc.not_clean.length, JSON.stringify(u.doc));
+  assert.equal(w.env.record.read('card', 'U-1').doc.state, 'failed');
+});
+
+test('L980: an undo whose reverse could not be read is held: no not_clean fact, the card is not failed', async () => {
+  const w = world();
+  const flagged = await notCleanUndo(w);
+  const real = w.ctx.view;
+  const view = {};
+  for (const k of Object.keys(real)) view[k] = typeof real[k] === 'function' ? real[k].bind(real) : real[k];
+  view.commit = async (sha) => { if (sha === flagged) throw Object.assign(new Error('HTTP 502 for the commit'), { unreadable: true }); return real.commit(sha); };
+  w.ctx.view = view;
+  await gatePass(w.ctx);
+  assert.notEqual(mergeOf(w, 'U-1').doc.state, 'refused', JSON.stringify(mergeOf(w, 'U-1').doc));
+  assert.equal(w.env.record.read('fact', REVERSE_FACT('U-1')), null);
+  assert.equal(w.env.record.read('card', 'U-1').doc.state, 'verified');
+});
+
+// Self-review m3: a check that threw inside ("could not check: ...", not a failed read) says nothing about the change, so
+// gather keeps no finding: no not_clean fact, the card is not failed.
+test('L980: a reverse check that could not check records no not_clean fact and fails no card', async () => {
+  const w = world();
+  const flagged = await notCleanUndo(w);
+  const real = w.ctx.view;
+  const view = {};
+  for (const k of Object.keys(real)) view[k] = typeof real[k] === 'function' ? real[k].bind(real) : real[k];
+  view.commit = async (sha) => (sha === flagged ? {} : real.commit(sha));   // an odd answer: no parents list
+  w.ctx.view = view;
+  await gatePass(w.ctx);
+  const u = mergeOf(w, 'U-1');
+  assert.equal(u.doc.not_clean, undefined, JSON.stringify(u.doc));
+  assert.equal(w.env.record.read('fact', REVERSE_FACT('U-1')), null);
+  assert.notEqual(w.env.record.read('card', 'U-1').doc.state, 'failed');
+});
+
+// Self-review m2: a reverse- fact there that is not the gate's own not_clean finding: the card is not failed, and the
+// owner is told once, not every pass.
+test('L980: a reverse fact the gate did not write fails no card and is told once', async () => {
+  const w = world();
+  await notCleanUndo(w);
+  w.env.store.transaction((tx) => tx.commit([{ entity: 'fact', id: REVERSE_FACT('U-1'), doc: { type: 'undo_reverse', state: NOT_CLEAN, reason: 'x' } }], { actor: 'test', kind: 'seed' }));
+  await gatePass(w.ctx);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w, 'U-1').doc.state, 'refused');
+  assert.equal(w.env.record.read('card', 'U-1').doc.state, 'verified');
+  const told = w.alerts.filter((a) => a.type === 'merge_gate_unsure' && a.card === 'U-1');
+  assert.equal(told.length, 1, JSON.stringify(w.alerts));
+  assert.match(told[0].note, /not the gate's own not_clean finding/);
+  assert.ok(mergeOf(w, 'U-1').doc.not_clean_stuck_told_at);
+});
+
+// Plants g7, g19, g20: the guards before the fact is written or brought up to date.
+test('L980: a fact write lost, then the card pushed again: no fact is written for the old head', async () => {
+  const w = world();
+  await notCleanUndo(w);
+  const real = w.ctx.record;
+  w.ctx.record = Object.create(real, { write: { value: (x) => (x.entity === 'fact' && x.id === REVERSE_FACT('U-1') ? { ok: false, reason: 'the Record was in use' } : real.write(x)) } });
+  await gatePass(w.ctx);
+  w.ctx.record = real;
+  assert.equal(w.env.record.read('fact', REVERSE_FACT('U-1')), null);
+  const c = w.env.record.read('card', 'U-1');
+  w.env.store.transaction((tx) => tx.commit([{ entity: 'card', id: 'U-1', doc: { ...c.doc, head: 'f'.repeat(40) } }], { actor: 'test', kind: 'seed' }));
+  await gatePass(w.ctx);
+  assert.equal(w.env.record.read('fact', REVERSE_FACT('U-1')), null);
+  assert.equal(w.env.record.read('card', 'U-1').doc.state, 'verified');
+});
+
+test('L980: a refused not_clean merge whose card is no longer an undo writes no fact', async () => {
+  const w = world();
+  await notCleanUndo(w);
+  const real = w.ctx.record;
+  w.ctx.record = Object.create(real, { write: { value: (x) => (x.entity === 'fact' && x.id === REVERSE_FACT('U-1') ? { ok: false, reason: 'the Record was in use' } : real.write(x)) } });
+  await gatePass(w.ctx);
+  w.ctx.record = real;
+  const c = w.env.record.read('card', 'U-1');
+  w.env.store.transaction((tx) => tx.commit([{ entity: 'card', id: 'U-1', doc: { ...c.doc, kind: 'ordinary' } }], { actor: 'test', kind: 'seed' }));
+  await gatePass(w.ctx);
+  assert.equal(w.env.record.read('fact', REVERSE_FACT('U-1')), null);
+});
+
+test('L980: the gate own reverse fact in another state is not its finding: not rewritten, told once', async () => {
+  const w = world();
+  await notCleanUndo(w);
+  must(w.env.record.write({ actor: 'merge_gate', entity: 'fact', id: REVERSE_FACT('U-1'), expectRev: 0, kind: 'undo_not_clean', doc: { type: 'undo_reverse', state: 'clean', reason: 'x', head: 'e'.repeat(40) } }), 'seed');
+  const rev = w.env.record.read('fact', REVERSE_FACT('U-1')).rev;
+  await gatePass(w.ctx);
+  await gatePass(w.ctx);
+  assert.equal(w.env.record.read('fact', REVERSE_FACT('U-1')).rev, rev);
+  assert.equal(w.env.record.read('card', 'U-1').doc.state, 'verified');
+  assert.equal(w.alerts.filter((a) => a.type === 'merge_gate_unsure' && a.card === 'U-1').length, 1, JSON.stringify(w.alerts));
+});
+
+test('L980: the first-cutover refusal (not a merge the gate made) writes no not_clean fact and fails no card', async () => {
+  const w = world({ values: { 'product.cutover_stage': 'first' } });
+  // A change put on main by hand, not by the gate, and its exact reverse.
+  const before = w.g.main;
+  w.g.main = w.g.commit([before], { 'src/a.mjs': 'by hand' }, { from: before });
+  verifiedCard(w, 'U-2', { pr: 9, files: { 'src/a.mjs': 'one' }, undo: w.g.main });
+  await gatePass(w.ctx);
+  const u = mergeOf(w, 'U-2');
+  assert.equal(u.doc.state, 'refused', JSON.stringify(u.doc));
+  assert.ok(u.doc.reasons.some((x) => /^9:.*first cutover/.test(x)), u.doc.reasons.join(' | '));
+  assert.equal(u.doc.not_clean, undefined);
+  assert.equal(w.env.record.read('fact', REVERSE_FACT('U-2')), null);
+  assert.notEqual(w.env.record.read('card', 'U-2').doc.state, 'failed');
 });
 
 // L123 m-1: the go-free read at gather (gather.mjs, refusal 10) goes by the value as the rules file gives it, text.

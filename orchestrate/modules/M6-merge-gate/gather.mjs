@@ -277,13 +277,35 @@ export async function gatherFacts(ctx, merge) {
   // An undo: recomputed from the files, never taken from the card (M10 exact-reverse.mjs); and whose merge it reverses.
   const reverses = undoneBy(record, card)?.commit ?? null;
   f.exactReverse = false;
+  f.exactReverseReasons = null;
   f.reversesGateMerge = false;
   let reversedAudit = 'none';
   if (kind === 'exact_reverse' && reverses && SHA.test(f.pr?.merge_commit_sha ?? '')) {
     // Each on watched reads: a read that failed leaves the answer unknown (exactReverseUnread, reversesGateMergeUnread),
     // so the judge waits instead of refusing the undo for good (L205).
     const unread = (key, which) => markFailed(which, () => { f[key] = true; });
-    f.exactReverse = (await attempt(async () => { const w = watchReads({ view }); return throwIfUnread(await checkExactReverse({ view: w.view, reverses, merged: f.pr.merge_commit_sha }), w.seen); }, { ok: false }, unread('exactReverseUnread', 'exact reverse'))).ok === true;
+    const er = await attempt(async () => { const w = watchReads({ view }); return throwIfUnread(await checkExactReverse({ view: w.view, reverses, merged: f.pr.merge_commit_sha }), w.seen); }, { ok: false }, unread('exactReverseUnread', 'exact reverse'));
+    f.exactReverse = er.ok === true;
+    // L980: what the check found, only when it read everything and answered no: the gate's not_clean fact says it. A
+    // check that threw ("could not check") says nothing about the change, so it is not kept. Nor is a finding on a commit
+    // that is not the card's (#466 r1 M1): GitHub's test merge must be of the pull request's head, and that head the
+    // card's, or the card would be failed on a change it was never verified at (the pull request pushed past the card:
+    // nothing is kept, 6 refuses, and the push brings the card back to be asked again). For the card's own head, the
+    // finding counts only on GitHub's current test merge: worked out (#466 r1 m1), of that head, on main as read now.
+    // A test merge not worked out yet, stale, or unreadable is judged on nothing: the answer is unread, so the undo
+    // waits (refusals.mjs 9, WAITING_HOLD) and a later pass judges it on the test merge GitHub redoes; the wait cap
+    // tells the owner if it never comes. It is never refused for good on a stale test merge.
+    const said = Array.isArray(er.reasons) ? er.reasons.map(String) : [];
+    if (er.ok === false && f.exactReverseUnread !== true && said.length && !said.some((x) => x.startsWith('could not check'))) {
+      const head = card.doc.head;
+      // Only an open, ready pull request waits on its test merge; a closed, draft or conflicted one is 3's, final.
+      if (SHA.test(head ?? '') && f.pr?.head?.sha === head && f.pr.state === 'open' && f.pr.draft === false && f.pr.mergeable !== false) {
+        const worked = f.pr.mergeable === true && f.pr.mergeable_state != null && f.pr.mergeable_state !== 'unknown';
+        const ps = worked ? await attempt(async () => (await view.commit(f.pr.merge_commit_sha))?.parents ?? null, null, unread('exactReverseUnread', 'test merge')) : null;
+        if (Array.isArray(ps) && ps.length === 2 && ps[1] === head && SHA.test(f.main?.sha ?? '') && ps[0] === f.main.sha) f.exactReverseReasons = said;
+        else f.exactReverseUnread = true;
+      }
+    }
     const robotBotId = botId(get('product_profile.robot'));
     f.reversesGateMerge = (await attempt(async () => { const w = watchReads({ gh }); return throwIfUnread(await readMark({ gh: w.gh, owner, repo, sha: reverses, robotBotId }), w.seen); }, { ok: false }, unread('reversesGateMergeUnread', 'robot mark'))).ok === true;
     const m = record.list('merge').find((x) => x.doc?.merge_commit === reverses);
