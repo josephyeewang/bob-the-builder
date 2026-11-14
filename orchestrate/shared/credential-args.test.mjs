@@ -439,6 +439,44 @@ test('R-0b-179 (b, #556 r5): the environment, read-named calls and env.X are rea
   assert.ok(said(H + "export function f(tokens) { spawnSync('x', ['--', tokens[0]]); }").some((x) => x.includes('one of a list of tokens')));
 });
 
+test('R-0b-179 (b, #556 r6): other names for process, an index into an environment, read verbs in any case, one of a list of tokens', () => {
+  const H = "import { spawnSync } from 'node:child_process';\nimport { readFileSync } from 'node:fs';\n";
+  const P = 'pro' + 'cess';
+  const plants = {
+    '1 const p = process': `const p = ${P};\nspawnSync('x', ['--', p.env.GH_PAT]);`,
+    '1 const { env } = process': `const { env } = ${P};\nspawnSync('x', ['--', env.GH_PAT]);`,
+    '1 let { env: e } = process': `let { env: e } = ${P};\nspawnSync('x', ['--', e.GH_PAT]);`,
+    "2 import { env } from 'node:process'": `import { env } from 'node:${P}';\nspawnSync('x', ['--', env.GH_PAT]);`,
+    "2 import proc from 'node:process'": `import proc from 'node:${P}';\nspawnSync('x', ['--', proc.env.GH_PAT]);`,
+    "2 require('node:process')": `const proc = require('node:${P}');\nspawnSync('x', ['--', proc.env.GH_PAT]);`,
+    '3 env[k]': "export function f(env, k) { spawnSync('x', ['--', env[k]]); }",
+    '3 gitEnv[0]': "export function f(gitEnv) { spawnSync('x', ['--', gitEnv[0]]); }",
+    '3 childEnv[k] after Object.assign': `const childEnv = {};\nObject.assign(childEnv, ${P}.env);\nexport function f(k) { spawnSync('x', ['--', childEnv[k]]); }`,
+    '3 childEnv[k] after a spread': `const childEnv = { ...${P}.env };\nexport function f(k) { spawnSync('x', ['--', childEnv[k]]); }`,
+    '3 childEnv[k] filled in a for-of': `const childEnv = {};\nfor (const k of Object.keys(${P}.env)) childEnv[k] = ${P}.env[k];\nexport function f(k) { spawnSync('x', ['--', childEnv[k]]); }`,
+    '4 ReadTokenPath': "import { ReadTokenPath } from './k.mjs';\nspawnSync('x', ['--', ReadTokenPath('/t')]);",
+    '4 vault.ReadTokenPath()': "export function f(vault) { spawnSync('x', ['--', vault.ReadTokenPath()]); }",
+    '4 decryptKeyPath': "import { decryptKeyPath } from './k.mjs';\nspawnSync('x', ['--', decryptKeyPath('/t')]);",
+    '4 retrieveSecretPath': "import { retrieveSecretPath } from './k.mjs';\nspawnSync('x', ['--', retrieveSecretPath('/t')]);",
+    '4 unsealPath': "import { unsealPath } from './k.mjs';\nspawnSync('x', ['--', unsealPath('/t')]);",
+    '4 openTokenPath': "import { openTokenPath } from './k.mjs';\nspawnSync('x', ['--', openTokenPath('/t')]);",
+    '5 tokens[0].value': "export function f(tokens) { spawnSync('x', ['--', tokens[0].value]); }",
+    '5 tokens[0].text': "export function f(tokens) { spawnSync('x', ['--', tokens[0].text]); }",
+    '5 const [first] = tokens': "export function f(tokens) { const [first] = tokens; spawnSync('x', ['--', first]); }",
+    '5 for (const first of tokens)': "export function f(tokens) { for (const first of tokens) spawnSync('x', ['--', first]); }",
+  };
+  for (const [what, src] of Object.entries(plants)) assert.ok(said(H + src).length > 0, `${what} passed in silence`);
+  // Each other name for process.env reads its variable as process.env's: a finding, not only a listing.
+  for (const k of Object.keys(plants).filter((x) => /^[12] /.test(x))) assert.ok(said(H + plants[k]).includes(`value:${P}.env.GH_PAT`), k);
+  // m-a: `let t; t = read…` and a destructured read at the top make the sites that use them reader sites.
+  const readerOf = (src) => said(H + src).filter((x) => x.startsWith('reader:'));
+  assert.equal(readerOf("const tokenPath = '/k/t';\nlet t;\nt = readFileSync(tokenPath, 'utf8');\nexport function f(io) { const h = t.slice(0); return io.run('x', ['--', h]); }").length, 1);
+  assert.equal(readerOf("const tokenPath = '/k/t';\nconst { v } = JSON.parse(readFileSync(tokenPath, 'utf8'));\nexport function f(io, w) { return io.run('x', ['--', w, v ? 'a' : 'b']); }").length, 1);
+  // Still quiet: an element of a list of files, a plain variable through another name for process.
+  assert.deepEqual(said(H + "const files = ['/a', '/b'];\nfor (const f of files) spawnSync('/bin/cat', [f]);"), []);
+  assert.deepEqual(said(H + `const { env } = ${P};\nspawnSync('/bin/x', [env.HOME]);`), []);
+});
+
 test('R-0b-179 (b): the safe ways pass: the environment, a file, a kind or a name, a count, a switch, and an options object after the list', () => {
   for (const src of [
     "spawnSync(bin, ['push'], { env: { GH_TOKEN: token } });",
