@@ -21,8 +21,9 @@
 // the proof's run, so the two never share a folder); and the runner's memory lists no session still live.
 //
 // A launch that stops before or after check 4 for a reason that is not runLocked's (launch check 0, the setting names
-// not yet confirmed on the pin, live proof L2; checks 12 and 13, not wired yet) makes the steps it blocks NOT RUN, with
-// that reason: never FAIL, which would blame runLocked, and never PASS. The run's last line names the check that
+// not yet confirmed on the pin, live proof L2; check 12 or 13 refusing, e.g. an input the runner's own launchInputs
+// could not load, L1092) makes the steps it blocks NOT RUN, with that reason: never FAIL, which would blame runLocked,
+// and never PASS. The run's last line names the check that
 // blocked it, and the run exits 1, so a blocked run can never be read as done (L989).
 // Capability note (Principle 9): step 6 reads claude's stream-json lines (`system`/`init` permissionMode, `tool_use`,
 // `tool_result` is_error, `result` permission_denials, and a `system` hook line naming PreToolUse) by names not yet
@@ -35,9 +36,8 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync, spawn as childSpawn, spawnSync } from 'node:child_process';
-import { readJobConfig } from '../../shared/job-config.mjs';
 import { makeLock } from '../../modules/M9-record/lock.mjs';
-import { checkRunnerConfig, launchInputs, lockedOf, lockedWiring } from '../../wiring/runner-main.mjs';
+import { checkRunnerConfig, launchInputs, lockedOf, lockedWiring, readRunnerConfig } from '../../wiring/runner-main.mjs';
 import { JOBS_DIR, lockedRunner, LOCKED_SAVE_MS, quoted } from '../../wiring/runner-locked.mjs';
 import { startPort, removeAll, chmodTree, saveSettingsName } from '../../wiring/runner-ports.mjs';
 import { loadMemory, processGroupPorts } from '../../wiring/runner-loop.mjs';
@@ -402,11 +402,29 @@ export async function proofInputs(c, inputsOf = launchInputs) {
   return { budget: r.budget ?? null, bobManifest: r.bobManifest ?? null, said };
 }
 
+/**
+ * The proof's run with the worker runner's lock held (L1121 m4): everything from the run folder on is inside one
+ * try/finally, so the lock is released whatever throws (the folder, the group ports, the proof). `run(dir, log)` → the
+ * steps. A throw anywhere makes every step NOT RUN with why. `inputs.said` is printed and logged first.
+ * → { results, dir } (dir null when the folder could not be made).
+ */
+export async function underLock({ lock, held, inputs, run, print = () => {}, mkTemp = () => mkdtempSync(join(tmpdir(), 'runlocked-proof-')) }) {
+  let dir = null;
+  try {
+    dir = mkTemp();
+    const log = (t) => appendFileSync(join(dir, 'runner.log'), `${new Date().toISOString()} ${t}\n`);
+    for (const t of inputs?.said ?? []) { log(t); print(`${t}\n`); }
+    return { results: await run(dir, log), dir };
+  } catch (e) {
+    return { results: STEPS.map(([k]) => notRun(k, `the proof stopped: ${e?.message ?? e}`)), dir };
+  } finally { try { lock.release(held.nonce); } catch { /* gone */ } }
+}
+
 export async function main(argv, { print = (t) => process.stdout.write(t), uid = process.getuid?.(), now = () => Date.now(), platform = process.platform, inputsOf = launchInputs } = {}) {
   const fails = (why) => { print(report(STEPS.map(([n]) => notRun(n, why))).text); return 1; };
   // macOS only (L1005): ps -g, pgrep and perl's setsid are read as the Mini's; anywhere else, a named skip, never a run.
   if (platform !== 'darwin') return fails(`SKIP: this proof runs on macOS only (the Mini), not on ${platform}`);
-  let c; try { c = checkRunnerConfig(readJobConfig(arg(argv, '--config'), { code: [], optionalCode: ['budget'], self: selfPath() })); } catch (e) { return fails(`the worker runner's config can't be read (${e?.message ?? e})`); }
+  let c; try { c = checkRunnerConfig(readRunnerConfig(arg(argv, '--config'), selfPath())); } catch (e) { return fails(`the worker runner's config can't be read (${e?.message ?? e})`); }
   const product = arg(argv, '--product');
   let ownDirUid; try { const st = lstatSync(c.ownDir); ownDirUid = st.isDirectory() && !st.isSymbolicLink() ? st.uid : null; } catch { ownDirUid = null; }
   let claudeVersion = null; try { claudeVersion = /^(\d+\.\d+\.\d+)/.exec(execFileSync(c.claudeBin, ['--version'], { encoding: 'utf8', timeout: 30_000 }).trim())?.[1] ?? null; } catch { /* not readable */ }
@@ -422,35 +440,33 @@ export async function main(argv, { print = (t) => process.stdout.write(t), uid =
   if (live.length) return fails(`the worker runner's memory lists ${live.length} session${live.length === 1 ? '' : 's'} that may still run (${live.slice(0, 3).map((s) => s.id).join(', ')}). Run this once none does`);
   const lock = makeLock({ dir: c.ownDir, timeoutMs: 2_000 }); let held;
   try { held = lock.acquire(); } catch (e) { return fails(/busy/.test(e?.message ?? '') ? 'the worker runner is running. Stop it first, then run this again' : `the worker runner's lock can't be taken (${e?.message ?? e})`); }
-  const dir = mkdtempSync(join(tmpdir(), 'runlocked-proof-'));
-  const log = (t) => appendFileSync(join(dir, 'runner.log'), `${new Date().toISOString()} ${t}\n`);
-  for (const t of inputs.said) { log(t); print(`${t}\n`); }
-  let n = 0; const tag = now().toString(36);
-  const { stopGroup } = processGroupPorts();
-  const io = {
-    wiring: realWiring(dir, log, { budget: inputs.budget, bobManifest: inputs.bobManifest }), stopGroup,
-    // ps answers exit 1 with nothing for an empty group, and also for a bad argument, which it says on stderr: only the first is "gone".
-    groupListed: (pid) => {
-      if (!Number.isInteger(pid) || pid <= 1) return null;
-      const r = spawnSync('/bin/ps', ['-g', String(pid), '-o', 'pid='], { encoding: 'utf8', env: { ...process.env, COMMAND_MODE: 'unix2003' } });
-      return r.status === 0 && r.stdout.trim() !== '' ? true : r.status === 1 && r.stdout.trim() === '' && !String(r.stderr ?? '').trim() ? false : null;
-    },
-    sleepers: () => {
-      const r = spawnSync('/usr/bin/pgrep', ['-u', String(uid), '-fx', SLOW_INSTALL], { encoding: 'utf8' });
-      return r.status === 0 ? r.stdout.trim().split('\n').map(Number).filter(Number.isInteger) : r.status === 1 ? [] : null;
-    },
-    verifyBundle: (mirror, file) => { const r = spawnSync('/usr/bin/git', ['--git-dir', mirror, 'bundle', 'verify', file], { encoding: 'utf8', timeout: 120_000 }); return r.status === 0 ? null : (r.stderr || `exit ${r.status}`).trim().slice(0, 300); },
-    exists: (p) => existsSync(p), read: (p) => readFileSync(p, 'utf8'),
-    write: (p, text, mode) => { writeFileSync(p, text); if (mode !== undefined) chmodSync(p, mode); }, mkdir: (p) => mkdirSync(p, { recursive: true }),
-    sleep: (ms) => new Promise((r) => { setTimeout(r, ms); }), now,
-    id: (prefix) => `${prefix}-${tag}-${(n += 1)}`,
-    reachable: () => spawnSync('/usr/bin/curl', ['-sS', '--max-time', '20', '-o', '/dev/null', 'https://github.com'], { timeout: 30_000 }).status === 0,
-    warn: (t) => { print(`${t}\n`); log(t); },
-    rm: (p) => rmSync(p, { force: true }),
-    cleanup: (x) => cleanupProof(x, log),
-  };
-  let results;
-  try { results = await proveRunLocked({ c, product, io }); } catch (e) { results = STEPS.map(([k]) => notRun(k, `the proof stopped: ${e?.message ?? e}`)); } finally { try { lock.release(held.nonce); } catch { /* gone */ } }
+  const { results, dir } = await underLock({ lock, held, inputs, run: async (d, log) => {
+    let n = 0; const tag = now().toString(36);
+    const { stopGroup } = processGroupPorts();
+    const io = {
+      wiring: realWiring(d, log, { budget: inputs.budget, bobManifest: inputs.bobManifest }), stopGroup,
+      // ps answers exit 1 with nothing for an empty group, and also for a bad argument, which it says on stderr: only the first is "gone".
+      groupListed: (pid) => {
+        if (!Number.isInteger(pid) || pid <= 1) return null;
+        const r = spawnSync('/bin/ps', ['-g', String(pid), '-o', 'pid='], { encoding: 'utf8', env: { ...process.env, COMMAND_MODE: 'unix2003' } });
+        return r.status === 0 && r.stdout.trim() !== '' ? true : r.status === 1 && r.stdout.trim() === '' && !String(r.stderr ?? '').trim() ? false : null;
+      },
+      sleepers: () => {
+        const r = spawnSync('/usr/bin/pgrep', ['-u', String(uid), '-fx', SLOW_INSTALL], { encoding: 'utf8' });
+        return r.status === 0 ? r.stdout.trim().split('\n').map(Number).filter(Number.isInteger) : r.status === 1 ? [] : null;
+      },
+      verifyBundle: (mirror, file) => { const r = spawnSync('/usr/bin/git', ['--git-dir', mirror, 'bundle', 'verify', file], { encoding: 'utf8', timeout: 120_000 }); return r.status === 0 ? null : (r.stderr || `exit ${r.status}`).trim().slice(0, 300); },
+      exists: (p) => existsSync(p), read: (p) => readFileSync(p, 'utf8'),
+      write: (p, text, mode) => { writeFileSync(p, text); if (mode !== undefined) chmodSync(p, mode); }, mkdir: (p) => mkdirSync(p, { recursive: true }),
+      sleep: (ms) => new Promise((r) => { setTimeout(r, ms); }), now,
+      id: (prefix) => `${prefix}-${tag}-${(n += 1)}`,
+      reachable: () => spawnSync('/usr/bin/curl', ['-sS', '--max-time', '20', '-o', '/dev/null', 'https://github.com'], { timeout: 30_000 }).status === 0,
+      warn: (t) => { print(`${t}\n`); log(t); },
+      rm: (p) => rmSync(p, { force: true }),
+      cleanup: (x) => cleanupProof(x, log),
+    };
+    return proveRunLocked({ c, product, io });
+  }, print });
   const r = report(results);
   print(r.text);
   print('Claude Code keeps its own transcripts of the proof\'s sessions in the workers\' home (<its config folder>/projects/); they are left there.\n');

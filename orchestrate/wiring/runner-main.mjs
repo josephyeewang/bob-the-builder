@@ -435,10 +435,10 @@ export function keepSnapshots(c, { fresh = keepSnapshotFresh, log = () => {}, re
  * memory (the memory reader), folderProblem (snapshotFolderProblem).
  * → the exit code.
  */
-export async function main(argv, { readConfig = (f) => { const self = selfPath(); if (!self) throw new Error('its own script\'s path can\'t be read, so it can\'t be checked'); return readJobConfig(f, { code: [], optionalCode: ['budget'], self }); }, lock = (dir) => makeLock({ dir, timeoutMs: 2_000 }),
+export async function main(argv, { readConfig = (f) => readRunnerConfig(f, selfPath()), lock = (dir) => makeLock({ dir, timeoutMs: 2_000 }),
   ports = {}, run = runRunner, log = (s) => process.stderr.write(`${new Date().toISOString()} ${s}\n`), onStop = listenStop, fresh = keepSnapshotFresh,
   realpath = (p) => realpathSync.native(p), memory = loadMemory, folderProblem = (dir) => snapshotFolderProblem(dir),
-  pinnedProblem = (root, files) => installProblem(root, files, { owner: 0 }), loadBudget = importBudget, readManifest = readRootFile, portsOf = realRunnerPorts, hooksOf = hookStoreOf } = {}) {
+  pinnedProblem, loadBudget, readManifest, portsOf = realRunnerPorts, hooksOf = hookStoreOf } = {}) {
   let c;
   try { c = checkRunnerConfig(readConfig(argv[0])); } catch (e) { log(`the worker runner did not start: ${e.message}`); return 1; }
   // The roots each deny is spelled from are their real paths (#378 r1 m4): the Mac's sandbox does not apply a deny reached
@@ -447,7 +447,8 @@ export async function main(argv, { readConfig = (f) => { const self = selfPath()
     let real; try { real = realpath(c[k]); } catch (e) { log(`the worker runner did not start: ${k} can't be read (${e?.code ?? e?.message})`); return 1; }
     if (real !== c[k]) { log(`the worker runner did not start: ${k} is reached through a link (it is ${real})`); return 1; }
   }
-  // Launch checks 12 and 13's inputs (L1001): one loader, shared with the runLocked proof (L1092).
+  // Launch checks 12 and 13's inputs (L1001): one loader, shared with the runLocked proof (L1092). Its own defaults are
+  // the real ones; main passes a loader only when a test sets one (undefined takes launchInputs' default).
   const inputs = await launchInputs(c, { pinnedProblem, loadBudget, readManifest, log });
   if (inputs.problem) { log(`the worker runner did not start: ${inputs.problem}`); return 1; }
   const { budget, bobManifest } = inputs;
@@ -493,7 +494,13 @@ export async function main(argv, { readConfig = (f) => { const self = selfPath()
   }
 }
 
-/** M11's budget module at `file`, called with the runner's config (budget.mjs `budget`). */
+/** The worker runner's config at `file`, read as its job reads it (shared/job-config.mjs): no code key, `budget` an
+ * optional one. `self` is the reading script's own real path. The one reading, used by main and the runLocked proof (L1121 m1). */
+export function readRunnerConfig(file, self) {
+  if (!self) throw new Error('its own script\'s path can\'t be read, so it can\'t be checked');
+  return readJobConfig(file, { code: [], optionalCode: ['budget'], self });
+}
+
 /** Launch checks 12 and 13's inputs, as the worker runner loads them at start (L1001), and as the runLocked proof loads
  * them (L1092), so the two can't drift. Their files are root's alone in the copy, as the review runner's are: the budget
  * module runs inside the runner, and the Bob file list decides check 13. One that isn't → { problem } (the caller stops).
@@ -517,6 +524,7 @@ export async function launchInputs(c, { pinnedProblem = (root, files) => install
   return { budget, bobManifest };
 }
 
+/** M11's budget module at `file`, called with the runner's config (budget.mjs `budget`). */
 export async function importBudget(file, config) { return (await import(pathToFileURL(file).href)).budget(config); }
 
 const MAX_MANIFEST_BYTES = 4 * 1024 * 1024;

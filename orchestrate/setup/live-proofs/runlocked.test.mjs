@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { tempDir } from '../../shared/test-tmp.mjs';
-import { CURL_UNREACHED, LEFTOVER_INSTALL, LEFTOVER_WAIT_MS, SLOW_INSTALL, STEPS, TEST_REPO, blockedBy, guardProblem, cleanupProof, hooksSet, main, proofInputs, proveRunLocked, readStream, realWiring, recordGroups, report, variant, walledInstall } from './runlocked.mjs';
+import { CURL_UNREACHED, LEFTOVER_INSTALL, LEFTOVER_WAIT_MS, SLOW_INSTALL, STEPS, TEST_REPO, blockedBy, guardProblem, cleanupProof, hooksSet, main, proofInputs, underLock, proveRunLocked, readStream, realWiring, recordGroups, report, variant, walledInstall } from './runlocked.mjs';
 import { JOBS_DIR, LOCKED_SAVE_MS, quoted } from '../../wiring/runner-locked.mjs';
 import { CLONE_CONFIG_TEMPLATE } from '../../modules/M4-workshop/git/save-work.mjs';
 
@@ -407,4 +407,51 @@ test('L1092: proofInputs loads checks 12 and 13 by the runner\'s own loader; fil
   assert.match((await proofInputs(c, async () => undefined)).problem, /gave no answer/);
   // The real loader, with neither in the config: both null, nothing said.
   assert.deepEqual(await proofInputs(c), { budget: null, bobManifest: null, said: [] });
+});
+
+test('L1121 m2: proofInputs with the runner\'s real loader stops on a budget file that is not root\'s alone', async () => {
+  if (process.getuid() === 0) return;
+  const copy = tempDir('orch-pi-');
+  const f = join(copy, 'b.mjs');
+  writeFileSync(f, 'export const budget = () => { throw new Error("loaded"); };\n');
+  const r = await proofInputs({ installRoot: copy, budget: f });
+  assert.match(r.problem ?? '', /^the worker runner would not start: its budget or Bob file list is not root's alone in the installed copy: /);
+  assert.equal(r.budget, undefined);
+});
+
+test('L1121 m3: a launch check that throws reads as refused (ok false), and its answer is the one recorded', async () => {
+  const c = { ...cfg(), home: '/nonexistent-proof-home', copiesRoot: '/nonexistent-proof/copies', outboxRoot: '/nonexistent-proof/outboxes', workerRunner: {}, path: '/usr/bin:/bin' };
+  c.products.trial.render.paths = { deny: {}, bobFolder: '/nonexistent-proof/bob' };
+  // A budget whose every read throws: check 12's own gate throws inside the check.
+  const boom = () => { throw new Error('budget boom'); };
+  const budget = { rules: { get: boom, may: boom, flag: boom }, rec: { read: boom, list: boom, meta: boom }, bandsNow: boom, runningNow: boom };
+  const x = { product: 'trial', kind: 'editing', sessionId: 'proof-rl-m3-1', card: 'proof-rl-m3-c', cardDoc: { state: 'claimed', tier: 2, product: 'trial' } };
+  const rec = { answers: {}, settingsText: null, runs: [] };
+  const k = realWiring('/nonexistent-proof/runs', () => {}, { budget })(c, rec).checksFor(x);
+  const ans = await k[12]();
+  assert.equal(ans.ok, false, 'planted: a thrown check read as ok');
+  assert.equal(typeof ans.reason, 'string');
+  assert.deepEqual(rec.answers[12], ans);
+});
+
+test('L1121 m4: the proof\'s run holds the runner\'s lock in one try/finally: released when the folder, the run or nothing fails', async () => {
+  const dir = tempDir('orch-ul-');
+  const run = async (fail) => {
+    const released = []; const printed = [];
+    const lock = { release: (n) => released.push(n) };
+    const out = await underLock({ lock, held: { nonce: 'n1' }, inputs: { said: ['worker runner: said'] }, print: (s) => printed.push(s),
+      mkTemp: () => { if (fail === 'folder') throw new Error('no folder'); return dir; },
+      run: async (d, log) => { assert.equal(d, dir); log('x'); if (fail === 'run') throw new Error('run boom'); return [{ step: 'ok' }]; } });
+    return { out, released, printed };
+  };
+  const good = await run(null);
+  assert.deepEqual(good.out, { results: [{ step: 'ok' }], dir });
+  assert.deepEqual(good.released, ['n1']);
+  assert.deepEqual(good.printed, ['worker runner: said\n']);
+  for (const f of ['folder', 'run']) {
+    const r = await run(f);
+    assert.deepEqual(r.released, ['n1'], `planted: the lock kept when the ${f} throws`);
+    assert.equal(r.out.results.length, STEPS.length);
+    assert.ok(r.out.results.every((s) => /the proof stopped: (no folder|run boom)/.test(JSON.stringify(s)) && !/"PASS"/.test(JSON.stringify(s))), f);
+  }
 });
