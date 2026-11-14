@@ -112,7 +112,7 @@ function robotConfigRead(io, cfg) {
 }
 
 /** Why config `name` in the installed copy is not root's alone (`bad`): one text for every config in the copy (I7). */
-export const inCopyNotRootsAlone = (name, bad) => `${name} in the copy is not root's alone: ${bad}`;
+export function inCopyNotRootsAlone(name, bad) { return `${name} in the copy is not root's alone: ${bad}`; }
 
 function robotConfigCheck(io, cfg, seen) {
   const P = installPaths(cfg); const root = io.at(P.installRoot); const file = join(root, ROBOT_CONFIG);

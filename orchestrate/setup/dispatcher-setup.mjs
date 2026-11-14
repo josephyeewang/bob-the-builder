@@ -151,11 +151,13 @@ export function copyKeeps(io, cfg, name = DISPATCHER_CONFIG) {
   if (cur.missing || cur.problem || !cur.link) return null;
   try { const u = JSON.parse(io.readText(join(P.installRoot, UPDATER_CONFIG))); return Array.isArray(u?.keep) && u.keep.includes(name); } catch { return null; }
 }
-/** Why a copy that does not keep `name` loses it (`who`: "the Dispatcher was", "the Sensors were"): one text for both configs (I7). */
-export const keepsNotText = (who, name) => `the installed copy was made before ${who} set up, so its updater does not keep ${name} and would drop it on the next update: install again (README, part 6)`;
+/** Why a copy that does not keep `name` loses it (`who`: "the Dispatcher was", "the Sensors were"): one text for both configs (I7).
+ * A function declaration, not a const: sensors-setup.mjs calls it at load, and the setup modules import each other, so it
+ * must be there before this module's body has run. */
+export function keepsNotText(who, name) { return `the installed copy was made before ${who} set up, so its updater does not keep ${name} and would drop it on the next update: install again (README, part 6)`; }
 const KEEPS_NOT = keepsNotText('the Dispatcher was', DISPATCHER_CONFIG);
 /** The stop a config writer gives when the copy is not root's alone: `bad` why, `install` the copy's folder, `src` the base file. */
-export const copyNotRootsStop = (bad, install, src) => `the installed copy is not root's alone (${bad}), so root won't write in it; install the copy again (unload the jobs, remove ${install}, run install), which carries ${src} into it`;
+export function copyNotRootsStop(bad, install, src) { return `the installed copy is not root's alone (${bad}), so root won't write in it; install the copy again (unload the jobs, remove ${install}, run install), which carries ${src} into it`; }
 
 /**
  * Null, or why the copy's config `name` is not root's alone in the copy and exactly `text`, with the copy keeping it
