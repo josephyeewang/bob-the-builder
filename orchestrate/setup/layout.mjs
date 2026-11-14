@@ -230,6 +230,8 @@ export const workerRunnerPath = (cfg) => join(cfg.base, 'worker-runner');
 export const WORKER_RUNNER_FOLDERS = Object.freeze({ requests: 'requests', state: 'runner', snapshots: 'snapshots' });
 /** The worker runner's status file, in its own folder (wiring/runner-main.mjs statusFile; the Dispatcher's workerStatusFile). */
 export const WORKER_STATUS_FILE = 'status.json';
+/** The worker runner's config in the installed copy, as its job names it: the products it runs, each with its rules (proofs.mjs reads their lists). */
+export const WORKER_RUNNER_CONFIG = 'worker-runner.json';
 export const workerRunnerPaths = (cfg) => Object.freeze(Object.fromEntries(Object.entries(WORKER_RUNNER_FOLDERS).map(([k, n]) => [k, join(workerRunnerPath(cfg), n)])));
 
 /**

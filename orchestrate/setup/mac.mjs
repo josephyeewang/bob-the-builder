@@ -6,7 +6,7 @@
 //   io.readConfig(path, {strict})   the config text; strict = root's own file at the fixed place (see readConfigFile)
 //   io.write/secureFile/list   make a new file (never overwrites), set a file's owner and mode, list a folder
 //   io.run(cmd, args)       → { status, stdout, stderr }; a fixed PATH, no shell, a time limit
-//   io.lstat/mkdir          on the logical path
+//   io.lstat/mkdir          on the logical path; io.realpath its real place (every link followed), logical again
 //   io.secure(path, want)   set a folder's owner and mode WITHOUT following a link (L90 M4): see secureFolder
 //   io.secureFile(path, want)   the same for a file: see secureFile
 //   io.readText/write/copyFile/copyTree/rm/list/readlink   on the logical path (write and copyFile make a NEW file and
@@ -171,6 +171,8 @@ export function realIo({ prefix = '' } = {}) {
     },
     lstat: (p) => lstatSync(at(p)),
     stat: (p) => statSync(at(p)),   // follows a link (the proofs judge a link by what it leads to, #528 r2 M1)
+    // Its real place, every link along the way followed (#528 r3 M1), as a logical path again (the prefix taken off).
+    realpath: (p) => { const r = realpathSync(at(p)); return prefix && r.startsWith(`${prefix}/`) ? r.slice(prefix.length) : r; },
     openRead: (p) => openRead(at(p)),   // one handle, never a link (owner-status.mjs; #528 r2 m4)
     mkdir: (p, mode) => mkdirSync(at(p), { mode }),
     secure: (p, want) => secureFolder(at(p), want),

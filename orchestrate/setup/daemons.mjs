@@ -21,13 +21,13 @@ import { dirname, join } from 'node:path';
 import { reviewDaemonPlists, updaterPlist } from '../modules/M4-workshop/launcher/review-daemons.mjs';
 import { RUNNER_CONFIG, aclProblem, chainProblem, currentCopy } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { homeOf } from './layout.mjs';
-
-// The worker runner's script, as its job starts it from the copy (wiring/runner-job.mjs): an old job is found by it (#528 r2 m7).
-const WORKER_RUNNER_SCRIPT = 'wiring/runner-main.mjs';
 import { checkInstall, installPaths } from './install.mjs';
 import { readUser } from './users-folders.mjs';
 import { watchPlist, WATCH_NO_HASH } from './watch-setup.mjs';
 import { watchRulesPath } from './layout.mjs';
+
+// The worker runner's script, as its job starts it from the copy (wiring/runner-job.mjs): an old job is found by it (#528 r2 m7).
+const WORKER_RUNNER_SCRIPT = 'wiring/runner-main.mjs';
 import { ROBOT_JOB, robotAppKeyItems, robotConfigProblem, robotPlist } from './robot-setup.mjs';
 import { DISPATCHER_JOB, DISPATCHER_OFF, DISPATCHER_RUN_LIMIT_S, dispatcherConfigProblem, dispatcherKeysProblem, dispatcherLoadProblem, dispatcherPlist, robotMatchProblem, writeAside } from './dispatcher-setup.mjs';
 import { answerRows } from './owner-answer-setup.mjs';
