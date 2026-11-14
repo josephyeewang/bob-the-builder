@@ -30,6 +30,12 @@ test('step 5: size reads the session\'s conversation file and its last write; a 
     const s = { id: SID, config_dir: join(d, 'cfg'), copy: '/copies/C-1' };
     assert.equal(projectFolderName('/copies/C-1'), '-copies-C-1');
     assert.equal(projectFolderName('/copies/a.b_c d'), '-copies-a-b-c-d', 'every character but a letter or digit');
+    // L1098: 2.1.316 cuts a name over 200 characters and adds the path's string hash in base 36 (values worked by hand from its code).
+    const at200 = '/' + 'a'.repeat(199);
+    assert.equal(projectFolderName(at200), '-' + 'a'.repeat(199), 'exactly 200: kept whole');
+    assert.equal(projectFolderName(at200 + 'b'), '-' + 'a'.repeat(199) + '-' + 'b6ymvk');   // b6ymvk: worked in Python from the rule, not by this code
+    assert.notEqual(projectFolderName('/' + 'x'.repeat(250)), projectFolderName('/' + 'x'.repeat(251)), 'two long paths sharing 200 characters still differ');
+    assert.equal(TRANSCRIPT_PLACE_CHECKED_AGAINST, null, 'read, not yet proved live (L1139): only a live run sets it');
     const f = transcriptPath({ configDir: s.config_dir, copy: s.copy, sessionId: SID });
     assert.equal(f, join(d, 'cfg', 'projects', '-copies-C-1', `${SID}.jsonl`));
     const size = sizePort();
@@ -435,6 +441,8 @@ test('step 5: a start refused before the copy makes nothing; one refused after i
     ['a Tier 1 card with no main_commit', { startCommit: cardStartCommit }, /main_commit/],
     ['a runner that is stopping', { stopped: () => true }, /is stopping$/],
     ['no sign-in', { account: () => ({ account: null, reason: 'not set up' }) }, /not set up/],
+    // R-0b-156: the start builds the environment through the launcher's one check (the allow-list).
+    ['a sign-in handing a session variable', { account: () => ({ account: 'a', dir: '/nowhere', env: { CLAUDE_CODE_SESSION_ID: 'x' } }) }, /allow-list.*CLAUDE_CODE_SESSION_ID/],
     ['no start commit', { startCommit: async () => { throw new Error('no main'); } }, /no main/],
     ['a copy that can\'t be made', { prepare: async () => ({ ok: false, reason: 'copy folder already exists' }) }, /already exists/],
   ];
