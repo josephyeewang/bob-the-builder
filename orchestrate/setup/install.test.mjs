@@ -550,11 +550,26 @@ test('#528 r1 m9 PLANT: daemons check names the worker runner\'s old LaunchAgent
   assert.equal(row().ok, true, 'no such folder: nothing left');
   mkdirSync(w.mac.at(dir), { recursive: true }); writeFileSync(w.mac.at(`${dir}/com.example.other.host-lock-copy.plist`), 'x');
   assert.equal(row().ok, true, 'the owner\'s other jobs are not the runner');
+  // Found by what it starts (#528 r2 m7): a file named for the runner that starts something else is not it; one under any
+  // name that starts the runner's script is.
   writeFileSync(w.mac.at(`${dir}/com.example.old.worker-runner.plist`), 'x');
-  assert.equal(row().ok, false); assert.match(row().why, /com\.example\.old\.worker-runner\.plist: the old worker runner, which would start a second runner as sam/);
+  assert.equal(row().ok, true, 'named like the runner, but starts something else');
+  const job = '<plist><dict><key>ProgramArguments</key><array><string>/usr/local/bin/node</string><string>/Users/sam/orch/install/wiring/runner-main.mjs</string></array></dict></plist>';
+  writeFileSync(w.mac.at(`${dir}/com.example.anything.plist`), job);
+  assert.equal(row().ok, false); assert.match(row().why, /com\.example\.anything\.plist: the old worker runner, which would start a second runner as sam/);
+  // A job file it can't read is said, never read as "not the runner".
+  chmodSync(w.mac.at(`${dir}/com.example.anything.plist`), 0o000);
+  try { assert.equal(row().ok, false); assert.match(row().why, /com\.example\.anything\.plist could not be read/); } finally { chmodSync(w.mac.at(`${dir}/com.example.anything.plist`), 0o644); }
   chmodSync(w.mac.at(dir), 0o000);
   try { assert.equal(row().ok, false); assert.match(row().why, /could not be listed \(EACCES\)/); } finally { chmodSync(w.mac.at(dir), 0o755); }
   assert.ok(!checkDaemons(w.mac, w.cfg, [JOBS[0]]).some((r) => what.test(r.what)), 'a check narrowed with --only leaves it out');
+  // P17 (#528 r2 m8): the owner's home can't be read from this Mac → FAIL, said, never "none there". The full check stops
+  // first at the job files, which are built from that home; with that row out of the way (a home that is not a full
+  // path cannot build them either) the LaunchAgents row is never reached, so the run as a whole FAILs, never passes.
+  delete w.mac.users.get('sam').NFSHomeDirectory;
+  const rows = checkDaemons(w.mac, w.cfg);
+  assert.ok(rows.some((r) => !r.ok), 'never a pass'); assert.ok(!rows.some((r) => what.test(r.what) && r.ok), 'never "none there"');
+  assert.match(rows.find((r) => !r.ok).why, /cannot be built from the owner's Mac user sam .*is its home folder set\?/);
 });
 
 test('daemons load / list / unload: load starts all three once; a second load does nothing; unload stops them; a second unload is not an error', async () => {

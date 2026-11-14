@@ -21,6 +21,9 @@ import { dirname, join } from 'node:path';
 import { reviewDaemonPlists, updaterPlist } from '../modules/M4-workshop/launcher/review-daemons.mjs';
 import { RUNNER_CONFIG, aclProblem, chainProblem, currentCopy } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { homeOf } from './layout.mjs';
+
+// The worker runner's script, as its job starts it from the copy (wiring/runner-job.mjs): an old job is found by it (#528 r2 m7).
+const WORKER_RUNNER_SCRIPT = 'wiring/runner-main.mjs';
 import { checkInstall, installPaths } from './install.mjs';
 import { readUser } from './users-folders.mjs';
 import { watchPlist, WATCH_NO_HASH } from './watch-setup.mjs';
@@ -386,7 +389,17 @@ export function checkDaemons(io, cfg, jobs = jobsFor(cfg)) {
     const u = readUser(io, cfg.owner); const dir = u.exists && u.home ? join(u.home, 'Library', 'LaunchAgents') : null;
     let agents = null; let why = null;
     if (!dir) why = `the owner ${cfg.owner}'s home could not be read from this Mac, so its LaunchAgents were not looked at`;
-    else { try { agents = io.list(dir).filter((n) => /\.worker-runner\.plist$/.test(n) && !n.startsWith('.')).sort(); } catch (e) { if (e?.code !== 'ENOENT') why = `${dir} could not be listed (${e?.code ?? 'error'}), so whether the old worker runner's job is left there is not known`; else agents = []; } }
+    else {
+      // Found by what it starts, not by its file's name (#528 r2 m7): every job file there is read, and one that names the
+      // worker runner's script is the old runner, under any label. One that can't be read is said, never read as "not it".
+      let names = null;
+      try { names = io.list(dir).filter((n) => n.endsWith('.plist') && !n.startsWith('.')).sort(); } catch (e) { if (e?.code !== 'ENOENT') why = `${dir} could not be listed (${e?.code ?? 'error'}), so whether the old worker runner's job is left there is not known`; else agents = []; }
+      if (names) {
+        agents = []; const unread = [];
+        for (const n of names) { let t; try { t = io.readText(join(dir, n)); } catch (e) { unread.push([n, e?.code ?? 'error']); continue; } if (t.includes(WORKER_RUNNER_SCRIPT)) agents.push(n); }
+        if (unread.length) why = `${unread.map(([n, code]) => `${join(dir, n)} could not be read (${code})`).join(', ')}, so whether ${unread.length === 1 ? 'it is' : 'one is'} the old worker runner's job is not known`;
+      }
+    }
     item(why === null && agents.length === 0, `no worker runner job left in the owner's LaunchAgents (since L1079 it runs as the builder user, never as the owner)`,
       why ?? `${agents.map((n) => join(dir, n)).join(', ')}: the old worker runner, which would start a second runner as ${cfg.owner}. As ${cfg.owner}: launchctl bootout gui/$(id -u)/<its label>, then delete the file (README, "Moving the workers to the builder user", step 1)`);
   }

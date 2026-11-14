@@ -198,6 +198,9 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, bobGitOf, man
     // check reads the plain config, which drops the entry: on only when the entry's own parser takes it (L807 c2, r1 c1).
     // An entry there that its parser refuses: check-dispatcher says so rather than leave its root rows out (L905 m1).
     o.dispatcherOn = (() => { try { return parseDispatcher(raw?.dispatcher, cfg) !== undefined; } catch (e) { if (raw?.dispatcher !== undefined) o.dispatcherWhy = e?.message ?? 'it can\'t be read'; return false; } })();
+    // proofs reads the plain config, which drops the entry (#528 r2 m1): the Dispatcher's rules-state and approvals
+    // proofs (L1112 (3)) need it, so it goes back on, through its own parser.
+    if (o.cmd === 'proofs' && o.dispatcherOn) cfg = { ...cfg, dispatcher: parseDispatcher(raw.dispatcher, cfg) };
     if (o.only !== null) o.jobs = onlyJobs(cfg, o.only, { anyKnown: o.cmd === 'daemons' && (o.sub === 'unload' || o.sub === 'list') });   // a name that is no job of this config is refused before anything runs (unload and list take any job setup makes)
   } catch (e) { err(`${e.message}\n${USAGE}`); return 2; }
 
@@ -245,6 +248,7 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, bobGitOf, man
   }
 
   if (o.cmd === 'proofs') {
+    if (o.dispatcherWhy) { err(`refused: the config's dispatcher entry can't be read (${o.dispatcherWhy}), so the proofs for its folders can't be built`); return 2; }
     if (o.dry) { for (const c of proofCommands(io, cfg)) out(c.startsWith('not tried') ? c : `would run: ${c}`); out('dry run: nothing was run.'); return 0; }
     const p = rootProblem(io); if (p) { err(`refused: ${p}`); return 2; }
     const res = runProofs(io, cfg);

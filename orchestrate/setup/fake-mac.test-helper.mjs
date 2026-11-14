@@ -6,7 +6,8 @@
 // invalid, a write with no value is a bad call, a record that is not there reads as exit 56; chown needs root; mkdir
 // needs the parent and refuses an existing folder (those two are the real mkdir's own refusals, since it is the real one).
 
-import { renameSync, unlinkSync, chmodSync, cpSync, fchmodSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync } from 'node:fs';
+import { renameSync, unlinkSync, chmodSync, cpSync, fchmodSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync } from 'node:fs';
+import { openRead } from '../wiring/owner-status.mjs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
@@ -195,6 +196,8 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
       const st = lstatSync(at(p)); const o = mac.owners.get(p);
       return { isDirectory: () => st.isDirectory(), isFile: () => st.isFile(), isSymbolicLink: () => st.isSymbolicLink(), mode: st.mode, size: st.size, nlink: st.nlink, ino: st.ino, dev: st.dev, uid: o ? o.uid : -1, gid: o ? o.gid : -1 };
     },
+    stat(p) { const st = statSync(at(p)); return { isDirectory: () => st.isDirectory(), isFile: () => st.isFile(), isSymbolicLink: () => false, mode: st.mode }; },
+    openRead: (p) => openRead(at(p)),
     mkdir(p, mode) { mac.log.push(`mkdir ${p}`); mkdirSync(at(p), { mode }); mac.owners.set(p, { uid: mac.rootUid, gid: 0 }); },
     // The setup's one way to change an owner and mode: the real handle-based change, with chown stood in for (a test is not root).
     secure(p, want) { secureFolder(at(p), want, ports(p)); },

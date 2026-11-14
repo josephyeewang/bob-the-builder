@@ -107,7 +107,7 @@ const plainOwned = (st, uid, what) => {
 export function openRead(file) {
   let fd;
   try { fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) {
-    throw new Error(e?.code === 'ELOOP' ? 'the worker runner\'s status is a link' : e?.code === 'ENOENT' ? 'the worker runner\'s status is missing' : `the worker runner's status can't be opened (${e?.code ?? e?.message})`);
+    throw Object.assign(new Error(e?.code === 'ELOOP' ? 'the worker runner\'s status is a link' : e?.code === 'ENOENT' ? 'the worker runner\'s status is missing' : `the worker runner's status can't be opened (${e?.code ?? e?.message})`), { code: e?.code });   // the code kept: setup tells missing from refused (#528 r2 m4)
   }
   try {
     const st = fstatSync(fd);
