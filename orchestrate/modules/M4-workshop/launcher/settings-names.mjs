@@ -5,7 +5,10 @@
 // Capability note: NOT VERIFIED against the pinned Claude Code. Each name comes from the design
 // (v4 §14.1) and must be re-checked at every pin change (live proof L2, "names check"). Until a
 // name is confirmed by the read-back or a break-it test, the launch refuses: `launch()` runs
-// `unconfirmedNames` on the rendered role file before check 1 (audit R-0b-44 M-1).
+// `unconfirmedNames` on the rendered role file before check 1 (audit R-0b-44 M-1). Read in 2.1.316's own code (13 Nov
+// 2026): every name here is in it except INIT_FIELDS.settingSources (`setting_sources`), which no start message carries
+// (readback.mjs's note); the read-back itself is still for the live proof (checked: claude-code 2.1.316, open until
+// 2027-01-20 (R-0b-177)).
 
 export const FLAGS = Object.freeze({
   print: '-p',

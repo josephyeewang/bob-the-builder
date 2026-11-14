@@ -11,6 +11,7 @@
 #   D-036: templates/wired.test.mjs (Phase Gate 17)
 #   R-3-16, R-3-17: skill-size/test-skill-size.sh · skill-review-check.mjs (skill size and review)
 #   R-3-25: find-polluter.sh (which test leaves a file behind)
+#   L1089: coherence-check.sh grep -q race + class guard · spec-audit.py joined headings · method-file pointers
 #
 # Rule 28's discipline applied to Bob's own checkers: each check is run against the defect it
 # was written for (must catch it) AND against a clean case (must pass it). Everything happens in
@@ -227,7 +228,7 @@ expect "tsconfig.json is NOT covered (known gap, documented in 6b)" 0 "" -- edit
 mkdir -p "$CPD/.claude"; echo '{"required":[]}' > "$CPD/.claude/required-checks.json"
 expect "the merge guard's list -> BLOCKED, with the right advice for that file (D-020)" 2 "owner's decision, not Claude's" -- edit_hook "$CPD/.claude/required-checks.json"
 expect "... and it says how to reset it" 2 "cp ~/.claude/skills/bob/../templates/required-checks.json .claude/required-checks.json" -- edit_hook "$CPD/.claude/required-checks.json"
-no_lint_advice() { ! edit_hook "$CPD/.claude/required-checks.json" 2>&1 | grep -q "Fix the source code"; }
+no_lint_advice() { ! grep -q "Fix the source code" <<<"$(edit_hook "$CPD/.claude/required-checks.json" 2>&1)"; }
 expect "... and never tells Claude to fix the source code" 0 "" -- no_lint_advice
 
 # ── 5. coverage-check.py (D-017) ─────────────────────────────────────────────
@@ -1205,6 +1206,47 @@ expect "find-polluter: a planted polluting test -> found and named" 1 "Test: \./
 expect "find-polluter: thing already there -> still says clean (why the template says delete it first)" 0 "No polluter found" -- fp
 rm -rf "$FP/leftover-cache" "$FP/tests/b.test.sh"
 expect "find-polluter: no polluting test -> clean, exit 0" 0 "No polluter found" -- fp
+
+# ── 26. Bob upkeep fixes: pipefail + grep -q race, joined-heading promises, pointers (L1089) ──
+echo "upkeep fixes: grep -q under pipefail · spec-audit joined headings · pointers"
+# The race: under pipefail, "list | grep -q X" fails at random when grep stops at the first match
+# and the writer gets SIGPIPE. coherence-check.sh reported existing decision IDs as MISSING.
+CL="$TMP/bigdlog"; mkdir -p "$CL"
+for n in $(seq 1 300); do printf '### D-%03d: entry\n' "$n"; done > "$CL/decision-log.md"
+expect "coherence: a 300-entry log with no gaps -> no ID reported missing" 0 "contiguous, no gaps" -- bash "$HERE/coherence-check.sh" "$CL"
+grep -v '^### D-150:' "$CL/decision-log.md" > "$CL/gap.md"; mv "$CL/gap.md" "$CL/decision-log.md"
+expect "coherence: ...and a real gap is still reported, exactly" 1 "MISSING: D-150$" -- bash "$HERE/coherence-check.sh" "$CL"
+# The class guard, deterministic: no script that sets pipefail may pipe into grep -q. Text inside
+# bash -c "..." or a hook's "command": string runs in a shell without pipefail, so it is skipped.
+early_grep_q() {
+  local f found hits=""
+  for f in "$1"/*.sh "$1"/*/*.sh; do
+    grep -q 'pipefail' "$f" || continue
+    found="$(grep -nE '(^|[^|])\|[[:space:]]*grep[[:space:]]+-[A-Za-z]*q' "$f" | grep -vE 'bash -c|"command":|^[0-9]+:[[:space:]]*#' | sed "s|^|$f:|")"
+    [ -z "$found" ] || hits+="$found"$'\n'
+  done
+  [ -z "$hits" ] && echo "no pipe into grep -q under pipefail" && return 0
+  printf '%s\n' "$hits"; return 1
+}
+expect "class guard: no script under pipefail pipes into grep -q" 0 "no pipe into grep -q" -- early_grep_q "$HERE"
+mkdir -p "$TMP/eg/sub"; printf 'set -o pipefail\nprintf "%%s\\n" a | %s a\n' 'grep -qx' > "$TMP/eg/sub/bad.sh"
+expect "class guard: a planted printf piped into grep -qx under pipefail -> FAIL, named" 1 "bad.sh:2:" -- early_grep_q "$TMP/eg"
+
+# spec-audit check 3: a plain heading that joins things promises each of them (the rule's origin case).
+SJ="$TMP/joined"; mkdir -p "$SJ"
+printf '# Spec\n## Themes\n#### Reusable agents and automations\n- Agents answer customer questions from the help centre\n- Agents hand a ticket to a person when unsure\n#### Reporting for managers\n- Managers see weekly ticket volume reports\n- Managers export reporting tables to a spreadsheet\n' > "$SJ/origin.md"
+expect "spec-audit: 'X and Y' heading with nothing about Y -> FAIL, names it" 1 "promises \['automations'\]" -- python3 "$SA" "$SJ/origin.md"
+printf '# Spec\n## Setup\n#### Install path\n- Install the package with the installer script\n- The installer checks the machine before installing\n#### Account setup for teams\n- Each team creates an account with an owner\n- The owner invites the team to the account setup page\n' > "$SJ/label.md"
+expect "spec-audit: a plain label heading ('Install path') -> not flagged" 0 "" -- python3 "$SA" "$SJ/label.md"
+printf '# Spec\n## Moves\n#### Manual -> automatic billing\n- Invoices are sent by hand each month today\n- Staff type invoice amounts into the billing form\n#### Reports for managers\n- Managers see weekly billing reports\n- Managers export report tables to a spreadsheet\n' > "$SJ/arrow.md"
+expect "spec-audit: an 'X -> Y' heading still checked as before" 1 "promises \['automatic'\]" -- python3 "$SA" "$SJ/arrow.md"
+
+# Pointers: each new method file is reachable from the file every session reads.
+points_to() { grep -qF "$2" "$HERE/../$1" && echo "found"; }
+expect "pointer: core -> templates/debugging-protocol.md" 0 "found" -- points_to build-protocol-core.md templates/debugging-protocol.md
+expect "pointer: build-protocol.md -> templates/debugging-protocol.md" 0 "found" -- points_to build-protocol.md templates/debugging-protocol.md
+expect "pointer: core Step 6.5a -> the document reviewers" 0 "found" -- points_to build-protocol-core.md prebuild-reviewers/_document-reviewers.md
+expect "pointer: core -> reference/skill-craft/README.md" 0 "found" -- points_to build-protocol-core.md reference/skill-craft/README.md
 
 echo
 echo "selftest-gate-scripts: $PASS passed, $FAIL failed"
