@@ -43,8 +43,12 @@ import { loginJobPlist } from '../../M11-dispatcher/login-job.mjs';
 import { watchPlist } from '../../../setup/watch-setup.mjs';
 import { robotPlist, ROBOT_MAIN } from '../../../setup/robot-setup.mjs';
 import { dispatcherPlist } from '../../../setup/dispatcher-setup.mjs';
+import { sensorsPlist } from '../../../setup/sensors-setup.mjs';
+import { ownerJobPlist, OWNER_SCRIPT } from '../../../setup/owner-answer-setup.mjs';
+import { copierPlist, COPIER_SCRIPT } from '../../../setup/host-lock-copy.mjs';
 import { sensorsJobPlist } from '../../M12-sensors/sensors-job.mjs';
 import { workerRunnerPlist } from '../../../wiring/runner-job.mjs';
+import { copierAgentPlist } from '../../M13-ledger/handoff-copier.mjs';
 import { updateOnce, MAIN } from './review-updater.mjs';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
@@ -81,6 +85,8 @@ const DISPATCHER_MAIN = 'modules/M11-dispatcher/main.mjs';
 // is not written yet either, so the script it starts is named here (L734 self-review c2).
 const SENSORS_LOOP = 'modules/M12-sensors/loop.mjs';
 const RUNNER_MAIN = 'wiring/runner-main.mjs';
+// R-1-32: the read-only handoff copier's own LaunchAgent (the owner's user, every 15 minutes) starts the copier itself.
+const HANDOFF_COPIER = 'modules/M13-ledger/handoff-copier.mjs';
 const JOB_BUILDERS = Object.freeze({
   'modules/M4-workshop/launcher/review-daemons.mjs': () => [
     ...Object.values(reviewDaemonPlists({ label: LABEL, installRoot: SAMPLE_ROOT, config: join(SAMPLE_ROOT, RUNNER_CONFIG), reviewRoot: join(SAMPLE_BASE, 'review'),
@@ -98,9 +104,18 @@ const JOB_BUILDERS = Object.freeze({
   // L734 self-review M1: the Sensors loop's job is built the same way, through loginJobPlist.
   'modules/M12-sensors/sensors-job.mjs': () => [sensorsJobPlist({ label: LABEL, node: join(SAMPLE_ROOT, NODE), script: join(SAMPLE_ROOT, SENSORS_LOOP),
     config: join(SAMPLE_BASE, 'sensors.json'), path: '/usr/bin:/bin', logDir: join(SAMPLE_BASE, 'logs'), workDir: SAMPLE_BASE })],
+  // L1049: setup's Sensors job is built through the Sensors loop's own builder, which is built through loginJobPlist.
+  'setup/sensors-setup.mjs': () => [sensorsPlist({ base: SAMPLE_BASE, label: LABEL })],
+  // L1051: the owner's answer job, in the owner's own LaunchAgents, through loginJobPlist.
+  'setup/owner-answer-setup.mjs': () => [ownerJobPlist({ base: SAMPLE_BASE, label: LABEL }, { home: join(SAMPLE_BASE, 'owner-home') })],
   // L874: the worker runner's LaunchAgent is built the same way, through loginJobPlist (#364, #378).
   'wiring/runner-job.mjs': () => [workerRunnerPlist({ label: LABEL, node: join(SAMPLE_ROOT, NODE), script: join(SAMPLE_ROOT, RUNNER_MAIN),
     config: join(SAMPLE_BASE, 'runner.json'), path: '/usr/bin:/bin', logDir: join(SAMPLE_BASE, 'logs'), workDir: SAMPLE_BASE, home: join(SAMPLE_BASE, 'owner-home') })],
+  // L1029 E: the owner's host.lock copier, a LaunchAgent built the same way, through loginJobPlist.
+  'setup/host-lock-copy.mjs': () => [copierPlist({ label: LABEL, installRoot: SAMPLE_ROOT, node: NODE, configPath: join(SAMPLE_BASE, 'setup.json'),
+    copy: join(SAMPLE_BASE, 'owner-home', '.orchestrate', 'host.lock'), home: join(SAMPLE_BASE, 'owner-home') })],
+  'modules/M13-ledger/handoff-copier.mjs': () => [copierAgentPlist({ label: LABEL, node: join(SAMPLE_ROOT, NODE), script: join(SAMPLE_ROOT, HANDOFF_COPIER),
+    from: join(SAMPLE_BASE, 'ledger-handoffs'), to: join(SAMPLE_BASE, 'dropbox-handoffs'), stateDir: join(SAMPLE_BASE, 'copier'), products: ['p1'] })],
 });
 /** The one script of the copy a job file starts: the .mjs file under the copy's link in its start command. */
 function startedScript(text) {
@@ -113,7 +128,9 @@ function startedScript(text) {
 }
 // Builders that write their start command through another listed builder (so they never name one themselves), each with
 // the builder it uses; the tripwire checks each still imports it.
-const BUILT_THROUGH = Object.freeze({ 'setup/robot-setup.mjs': 'modules/M11-dispatcher/login-job.mjs', 'setup/dispatcher-setup.mjs': 'modules/M11-dispatcher/login-job.mjs', 'modules/M12-sensors/sensors-job.mjs': 'modules/M11-dispatcher/login-job.mjs', 'wiring/runner-job.mjs': 'modules/M11-dispatcher/login-job.mjs' });
+const BUILT_THROUGH = Object.freeze({ 'setup/robot-setup.mjs': 'modules/M11-dispatcher/login-job.mjs', 'setup/dispatcher-setup.mjs': 'modules/M11-dispatcher/login-job.mjs', 'modules/M12-sensors/sensors-job.mjs': 'modules/M11-dispatcher/login-job.mjs', 'wiring/runner-job.mjs': 'modules/M11-dispatcher/login-job.mjs',
+  'setup/owner-answer-setup.mjs': 'modules/M11-dispatcher/login-job.mjs', 'setup/sensors-setup.mjs': 'modules/M12-sensors/sensors-job.mjs',
+  'setup/host-lock-copy.mjs': 'modules/M11-dispatcher/login-job.mjs' });
 // The functions that build a job file's text, each with the module that exports it (L734 self-review M1; #352 m1, r2 M1).
 // The scan reads each module of the copy through lex() below, so comments, strings and template text are never read as
 // code. A module that brings a builder in, by a named import or re-export (`import { … } from`, `import d, { … } from`,
@@ -135,8 +152,10 @@ const BUILT_THROUGH = Object.freeze({ 'setup/robot-setup.mjs': 'modules/M11-disp
 //   when node ships import defer).
 const JOB_FILE_FNS = Object.freeze({ loginJobPlist: 'modules/M11-dispatcher/login-job.mjs', watchPlist: 'setup/watch-setup.mjs',
   reviewDaemonPlists: 'modules/M4-workshop/launcher/review-daemons.mjs', updaterPlist: 'modules/M4-workshop/launcher/review-daemons.mjs',
-  sensorsJobPlist: 'modules/M12-sensors/sensors-job.mjs', robotPlist: 'setup/robot-setup.mjs', dispatcherPlist: 'setup/dispatcher-setup.mjs', workerRunnerPlist: 'wiring/runner-job.mjs' });
-const USES_JOB_FILES = Object.freeze({ 'setup/daemons.mjs': 'places the job files the listed builders make; it builds none of its own' });
+  sensorsJobPlist: 'modules/M12-sensors/sensors-job.mjs', robotPlist: 'setup/robot-setup.mjs', dispatcherPlist: 'setup/dispatcher-setup.mjs', workerRunnerPlist: 'wiring/runner-job.mjs', copierPlist: 'setup/host-lock-copy.mjs',
+  copierAgentPlist: 'modules/M13-ledger/handoff-copier.mjs' });
+const USES_JOB_FILES = Object.freeze({ 'setup/daemons.mjs': 'places the job files the listed builders make; it builds none of its own',
+  'setup/setup.mjs': 'prints the copier\'s job file (host-lock-copier, L1029 E) for the owner to place; it builds none of its own' });
 /**
  * The job-file functions module `r`'s real imports bring in, each with the module (copy-relative) it imports them
  * from. An `import * as` or an `import()` of a builder's module brings in every function that module exports.
@@ -521,7 +540,7 @@ test('L92 item 4, L106 M-1: every module of the installed copy loads from the co
 // static imports do not, and on the same module without it.
 test('L136 m1: the programs to start come from every job-file builder of the copy, and a new builder must be listed', () => {
   // Every launchd job file of today, read from its builder: the three LaunchDaemons, the watch-only week, the Dispatcher, the robot job and the Sensors loop.
-  assert.deepEqual(ENTRY_POINTS, [...new Set([...Object.values(SCRIPTS), DISPATCHER_MAIN, 'modules/M6-merge-gate/watch-run.mjs', ROBOT_MAIN, SENSORS_LOOP, RUNNER_MAIN])].sort());
+  assert.deepEqual(ENTRY_POINTS, [...new Set([...Object.values(SCRIPTS), DISPATCHER_MAIN, 'modules/M6-merge-gate/watch-run.mjs', ROBOT_MAIN, SENSORS_LOOP, RUNNER_MAIN, OWNER_SCRIPT, COPIER_SCRIPT, HANDOFF_COPIER])].sort());
   // The tripwire: a module of the copy (test code aside) that writes a launchd start command is a job-file builder, and
   // each one must be on JOB_BUILDERS, so the script its jobs start is started through the link above. A listed
   // builder that no longer writes one is stale.
@@ -537,7 +556,7 @@ test('L136 m1: the programs to start come from every job-file builder of the cop
   assert.deepEqual(users.map((x) => x.r).sort(), [...Object.keys(BUILT_THROUGH), ...Object.keys(USES_JOB_FILES)].sort(),
     'every module that imports a job-file builder is on BUILT_THROUGH or USES_JOB_FILES, and only those');
   for (const [f, via] of Object.entries(BUILT_THROUGH)) {
-    assert.ok(f in JOB_BUILDERS && writers.includes(via), `${f} builds through ${via}, a listed builder`);
+    assert.ok(f in JOB_BUILDERS && (writers.includes(via) || via in BUILT_THROUGH), `${f} builds through ${via}, a listed builder`);   // or through one that is itself through one, checked in this same loop (L1049)
     const uses = users.find((x) => x.r === f)?.uses ?? [];
     assert.ok(uses.some((u) => JOB_FILE_FNS[u.name] === via && u.from === via), `${f} imports its job file's builder from ${via}`);
   }

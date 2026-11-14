@@ -87,6 +87,8 @@ For AI products specifically: dependence on a single model vendor (Anthropic / O
    - What's the switch-over time if vendor is gone (RTO)?
    - For AI model providers specifically: is there a gateway abstraction (LiteLLM, OpenRouter) so swapping is a config change vs code change?
 
+**Upstream independence and freshness:** identify the original data/source dependency behind each fallback, not only its vendor name. Several providers can share the same access barrier. Before declaring a source recovered, retrieve a known item published after the incident and record publication and retrieval times. A responding endpoint or old cached content does not establish recovery; an unverified substitute remains unverified.
+
 5. **Concentration risk audit.**
    - How many critical vendors are owned by the same parent? (e.g., multiple AWS services = AWS as the single risk.)
    - Are any vendors hosted in same region / data center?
