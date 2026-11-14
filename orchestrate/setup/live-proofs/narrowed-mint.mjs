@@ -16,9 +16,11 @@
 //     refused to the push's token. That the App reaches it is shown by a second mint, narrowed to it and to metadata
 //     read only, which is revoked too. Not named, or the App not on it: NOT RUN (L626: the App was installed on the
 //     test repository only), never a pass;
-//   5 nothing kept: no line printed or written holds either token (both stay in this process's memory);
-//   6 revoked: each token is revoked (DELETE /installation/token, 204), and the push's token is then refused (401).
-//     Revoking runs whatever happened before it.
+//   5 nothing kept: no line printed or written holds a token (they stay in this process's memory);
+//   6 revoked: every token GitHub gave is revoked (DELETE /installation/token, 204; one retry on any other answer),
+//     a token token.mjs refused included (watchMint holds each one GitHub's answer carried), and the push's token is
+//     then refused (401). Revoking runs whatever happened before it: in a `finally` for a step that throws, and on
+//     Ctrl-C or a stop (SIGINT, SIGTERM), which wait for a mint in flight, revoke every token held, and exit 1.
 // It makes no write on GitHub but the mints and the revokes, and writes nothing but its result file, made new, 0600,
 // only when --result is given (slice-dry-run.mjs writeNew). The product must be the test product (runlocked.mjs
 // TEST_REPO). RESULT: PASS only when all six PASS; exit 0 then, 1 otherwise, 2 when it could not run.
@@ -57,18 +59,22 @@ const sameKeys = (a, b) => {
 };
 
 /**
- * fetchFn, seeing GitHub's answer to the token request: its permissions, repository_selection and repository names,
- * never the token. → { fetchFn, seen: () => answer | null }
+ * fetchFn, seeing GitHub's answer to the token request: its permissions, repository_selection and repository names
+ * for the lines, and, kept apart in memory only so it can be revoked, any token the answer carried, whether token.mjs
+ * then takes it or not (#584 r1 m2). → { fetchFn, seen: () => answer | null, minted: () => token | null }
  */
 export function watchMint(fetchFn) {
   let seen = null;
+  let minted = null;
   return {
     seen: () => seen,
+    minted: () => minted,
     fetchFn: async (url, init) => {
       const res = await fetchFn(url, init);
       if (init?.method === 'POST' && /\/access_tokens$/.test(String(url))) {
         try {
           const j = await res.clone().json();
+          if (typeof j?.token === 'string' && j.token) minted = j.token;
           seen = { permissions: j?.permissions ?? null, repository_selection: j?.repository_selection ?? null,
             repositories: Array.isArray(j?.repositories) ? j.repositories.map((r) => (typeof r?.name === 'string' ? r.name : null)) : null };
         } catch { seen = null; }
@@ -93,11 +99,24 @@ export function tokenClient({ fetchFn }) {
 
 const said = (r) => (r.status === null ? `no answer (${r.why})` : `GitHub answered ${r.status}`);
 
+/** One token revoked: DELETE, and once more on any answer but 204 (#584 r1 m4). → { status, line } */
+export async function revoke(call, token) {
+  const first = await call(token, 'DELETE', '/installation/token');
+  if (first.status === 204) return { status: 204, line: said(first) };
+  const again = await call(token, 'DELETE', '/installation/token');
+  return { status: again.status, line: `${said(first)}, then on the retry ${said(again).replace(/^GitHub answered/, 'answered')}` };
+}
+
 /**
- * The whole proof → { lines, pass }. Ports for tests: read (robot.json), products (products.json), fetchFn, uid, now.
+ * The whole proof → { lines, pass }. Ports for tests: read (robot.json), products (products.json), fetchFn, uid, now,
+ * and for a stop: signals (on/off, process's), exit and tell (one line to stderr).
  * Throws only when it can't start (config, product); from the first mint on, every step gets a line.
  */
-export async function proof({ config, otherRepo, read = readJson, products = readProducts, fetchFn = globalThis.fetch, uid = process.getuid?.(), now = Date.now }) {
+export async function proof({ config, otherRepo, read = readJson, products = readProducts, fetchFn = globalThis.fetch, uid = process.getuid?.(), now = Date.now,
+  signals = process, exit = (code) => process.exit(code), tell = (s) => process.stderr.write(`${s}\n`), mint }) {
+  // `mint` (tests only) stands in for token.mjs, so a test can show this proof's own checks catch an answer token.mjs
+  // were to let through.
+  if (mint !== undefined && !process.env.NODE_TEST_CONTEXT) throw new Error('proof: mint is for tests only');
   const c = read(config);
   const bad = appProblem(c, { none: 'the config names no robot App (appId, appInstallation, alertRepo, alertOwner)' });
   if (bad) throw new Error(`${config}: ${bad}`);
@@ -111,18 +130,47 @@ export async function proof({ config, otherRepo, read = readJson, products = rea
   const results = new Map();
   const put = (n, result, what, extra = []) => results.set(n, { result, what, extra });
 
-  // 1 — the mint, the push's own way.
-  const pushWatch = watchMint(fetchFn);
-  const m = await pushTokenFor(c, { fetchFn: pushWatch.fetchFn, uid, now })(PUSH_SCOPE(entry.repo))();
-  const token = m?.ok === true && typeof m.token === 'string' ? m.token : null;
-  const tokens = token ? [token] : [];
-  const answer = pushWatch.seen();
-  if (token) put(1, 'PASS', `minted for ${full}${m.expires_at ? `, until ${m.expires_at}` : ''}`);
-  // A token GitHub gave but token.mjs refused is never handed back, so it can't be revoked here: it lasts its hour.
-  else put(1, 'FAIL', `no token: ${m?.reason ?? 'no answer'}${answer ? ' (GitHub did answer: a token it gave is not used, and ends within the hour)' : ''}`);
+  // Every token GitHub gives, in the order given, with what it is for: what step 6 and a stop revoke.
+  const watches = [];
+  const held = () => watches.map((w) => [w.minted(), w.label]).filter(([t]) => t);
+  const done = new Set();   // tokens shown revoked (204)
+  const inFlight = new Set();
+  const track = (p) => { inFlight.add(p); p.then(() => inFlight.delete(p), () => inFlight.delete(p)); return p; };
+  const mintFor = (label, scope) => {
+    const w = watchMint(fetchFn); w.label = label; watches.push(w);
+    return { w, answer: track(pushTokenFor(c, { fetchFn: w.fetchFn, uid, now, mint })(scope)()) };
+  };
 
-  let other = null;
+  // A stop (Ctrl-C, SIGTERM) after a mint would leave its token alive for its hour (#584 r1 m1): wait for a mint in
+  // flight, revoke every token held and not yet revoked, say how many, never which, and exit 1.
+  let stopping = false;
+  const onStop = async (sig) => {
+    if (stopping) return;
+    stopping = true;
+    try {
+      await Promise.allSettled([...inFlight]);
+      const left = held().filter(([t]) => !done.has(t));
+      let ok = 0;
+      for (const [t] of left) if ((await revoke(call, t)).status === 204) { done.add(t); ok += 1; }
+      tell(`stopped by ${sig}: ${ok} of ${left.length} token(s) revoked${ok < left.length ? '; the rest end within the hour' : ''}. No result.`);
+    } finally { exit(1); }
+  };
+  const stops = ['SIGINT', 'SIGTERM'].map((s) => [s, () => { onStop(s); }]);
+  for (const [s, h] of stops) signals.on(s, h);
+
+  let token = null;
+  let pushWatch = null;
   try {
+    // 1 — the mint, the push's own way.
+    const first = mintFor('the push\'s token', PUSH_SCOPE(entry.repo));
+    pushWatch = first.w;
+    const m = await first.answer;
+    token = m?.ok === true && typeof m.token === 'string' ? m.token : null;
+    const answer = pushWatch.seen();
+    if (token) put(1, 'PASS', `minted for ${full}${m.expires_at ? `, until ${m.expires_at}` : ''}`);
+    // A token GitHub gave but token.mjs refused is not used; watchMint holds it, so step 6 still revokes it (m2, m3).
+    else put(1, 'FAIL', `no token: ${m?.reason ?? 'no answer'}${pushWatch.minted() ? ' (GitHub did give a token: it is not used, and step 6 revokes it)' : ''}`);
+
     if (token) {
       // 2 — one repository.
       const listed = await call(token, 'GET', '/installation/repositories?per_page=100');
@@ -144,30 +192,40 @@ export async function proof({ config, otherRepo, read = readJson, products = rea
       // 4 — another repository.
       if (otherRepo === undefined) put(4, 'NOT RUN', `no --other-repo named: name a private repository under ${entry.owner} the App is installed on (L626: it was on ${entry.repo} only)`);
       else {
-        const probeWatch = watchMint(fetchFn);
-        const p = await pushTokenFor(c, { fetchFn: probeWatch.fetchFn, uid, now })({ repositories: [otherRepo], permissions: { ...PROBE_PERMISSIONS } })();
-        if (p?.ok === true && typeof p.token === 'string') { other = p.token; tokens.push(other); }
-        if (!other) put(4, 'NOT RUN', `the App could not be shown on ${entry.owner}/${otherRepo} (${p?.reason ?? 'no answer'}): install it there, or name one it is on`);
+        const probe = mintFor('the second token', { repositories: [otherRepo], permissions: { ...PROBE_PERMISSIONS } });
+        const p = await probe.answer;
+        // GitHub minting a token for it shows the App is there, whether token.mjs takes the answer or not (m2).
+        if (!probe.w.minted()) put(4, 'NOT RUN', `GitHub gave no token for ${entry.owner}/${otherRepo} (${p?.reason ?? 'no answer'}): the App is not shown there; install it there, or name one it is on`);
         else {
           const r = await call(token, 'GET', `/repos/${entry.owner}/${otherRepo}`);
           const no = r.status === 403 || r.status === 404;
           put(4, no ? 'PASS' : 'FAIL', no ? `${entry.owner}/${otherRepo} is refused to the push's token` : `${entry.owner}/${otherRepo} was not refused${r.status === 200 ? ' (a public repository is open to any token: name a private one)' : ''}`,
-            [`the App is on ${entry.owner}/${otherRepo} (a metadata-read token was minted for it)`, `reading it with the push's token: ${said(r)}`]);
+            [`the App is on ${entry.owner}/${otherRepo} (GitHub minted a metadata-read token for it${p?.ok === true ? '' : `; token.mjs refused its answer: ${p?.reason ?? 'no answer'}`})`, `reading it with the push's token: ${said(r)}`]);
         }
       }
     } else for (const n of [2, 3, 4]) put(n, 'NOT RUN', 'no token was minted (step 1)');
   } finally {
-    // 6 — revoked, whatever happened above.
-    if (!token) put(6, 'NOT RUN', 'no token was minted (step 1)');
+    // 6 — revoked, whatever happened above: every token GitHub gave, used or not.
+    const all = held();
+    if (!all.length) put(6, 'NOT RUN', 'GitHub gave no token (step 1), so there is none to revoke');
     else {
-      const gone = await call(token, 'DELETE', '/installation/token');
-      const goneOther = other ? await call(other, 'DELETE', '/installation/token') : null;
-      const after = await call(token, 'GET', '/installation/repositories?per_page=1');
-      const ok = gone.status === 204 && after.status === 401 && (goneOther === null || goneOther.status === 204);
-      put(6, ok ? 'PASS' : 'FAIL', ok ? 'revoked, and refused after' : 'not shown revoked: it lasts until its hour is up; revoke it on GitHub (the App\'s page) if this repeats',
-        [`revoking the push's token: ${said(gone)}`, ...(goneOther ? [`revoking the second token: ${said(goneOther)}`] : []), `the push's token after: ${said(after)}`]);
+      const found = [];
+      let ok = true;
+      for (const [t, label] of all) {
+        if (done.has(t)) { found.push(`revoking ${label}: revoked already`); continue; }
+        // Tracked, so a stop now waits for this revoke rather than sending its own beside it.
+        const r = await track(revoke(call, t).then((x) => { if (x.status === 204) done.add(t); return x; }));
+        if (r.status !== 204) ok = false;
+        found.push(`revoking ${label}: ${r.line}`);
+      }
+      const pushT = pushWatch?.minted() ?? null;
+      const after = pushT ? await call(pushT, 'GET', '/installation/repositories?per_page=1') : null;
+      if (after) { found.push(`the push's token after: ${said(after)}`); if (after.status !== 401) ok = false; }
+      put(6, ok ? 'PASS' : 'FAIL', ok ? `${all.length} token(s) revoked, and the push's refused after` : 'not shown revoked: a token lasts until its hour is up; revoke it on GitHub (the App\'s page) if this repeats', found);
     }
+    for (const [s, h] of stops) signals.off(s, h);
   }
+  const tokens = held().map(([t]) => t);
 
   // 5 — nothing kept: built last, over every other line, which is also all the result file holds.
   const body = [];
@@ -193,7 +251,7 @@ export function parseArgs(argv) {
   const o = { config };
   for (let i = 0; i < rest.length; i += 2) {
     const k = rest[i]; const v = rest[i + 1];
-    if (!['--other-repo', '--result'].includes(k) || v === undefined) throw new Error(`unknown or empty argument ${k}`);
+    if (!['--other-repo', '--result'].includes(k) || v === undefined || v.startsWith('--')) throw new Error(`unknown or empty argument ${k}`);
     o[{ '--other-repo': 'otherRepo', '--result': 'result' }[k]] = v;
   }
   if (!config?.startsWith('/')) throw new Error('usage: node narrowed-mint.mjs <the copy\'s robot.json, full path> [--other-repo <name>] [--result <file>]');
@@ -205,7 +263,7 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
   let r; try { r = await proof({ ...o, ...ports }); } catch (e) { err(`stopped: ${String(e?.message ?? e).slice(0, 300)}`); return 2; }
   for (const l of r.lines) out(l);
   if (o.result) {
-    try { write(o.result, `${new Date().toISOString()}\n${r.lines.join('\n')}\n`); } catch (e) { err(`stopped: the result file ${o.result} can't be made new (${e.code ?? e.message}): the proof never writes over a file, so name a new one`); return 2; }
+    try { write(o.result, `${new Date().toISOString()}\n${r.lines.join('\n')}\n`); } catch (e) { err(`ran, no result file: ${o.result} can't be made new (${e.code ?? e.message}); the proof never writes over a file, so name a new one`); return 2; }
   }
   return r.pass ? 0 : 1;
 }
