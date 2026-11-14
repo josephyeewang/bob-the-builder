@@ -209,6 +209,21 @@ export function workerCheckInputs(c, x, { log = () => {}, runLocked = null, budg
     testCommand: p.render.product?.commands?.test, budget, bobFolder: p.render.paths.bobFolder, bobManifest };
 }
 
+/**
+ * The test-product gate (L1125): until a session's rules snapshot is written by a user other than the session's own (the
+ * cutover checklist's gate), this runner starts sessions only for a product whose rules, as the Dispatcher's snapshot
+ * holds them, say `product.test_product: true`. Read on every start through the budget's rules (M11 budget.mjs), so a
+ * rules change is seen; no budget, a snapshot refused, or anything but an exact true holds the product. → null or why.
+ */
+export function testProductProblem(budget, product) {
+  const not = `only a test product runs on the worker runner until its sessions' rules snapshot is written by another user (L1125)`;
+  if (!budget?.rules || typeof budget.rules.flag !== 'function') return `the Dispatcher's rules are not loaded (the config names no budget, or it could not be loaded), so whether ${product} is a test product can't be read; ${not}`;
+  let f; try { f = budget.rules.flag('product.test_product', { product }); } catch (e) { return `whether ${product} is a test product can't be read (${e?.message ?? e}); ${not}`; }
+  return f === true ? null : `${product}'s rules do not say product.test_product: true; ${not}`;
+}
+/** The start port's productHeld with the test-product gate first: `held` is the snapshots' own (keepSnapshots). */
+export const testProductHeld = (budget, held, problem = testProductProblem) => (product) => problem(budget, product) ?? held(product);
+
 /** The checks run once more just before claude starts (#369 M1, r1 m1 and m2): the copy (its folder and HEAD), its setup
  * files, the outbox, and the rules snapshot written afresh. */
 export const RECHECK = Object.freeze([1, 2, 3, 8]);
@@ -461,7 +476,7 @@ export function keepSnapshots(c, { fresh = keepSnapshotFresh, log = () => {}, re
 export async function main(argv, { readConfig = (f) => readRunnerConfig(f, selfPath()), lock = (dir) => makeLock({ dir, timeoutMs: 2_000 }),
   ports = {}, run = runRunner, log = (s) => process.stderr.write(`${new Date().toISOString()} ${s}\n`), onStop = listenStop, fresh = keepSnapshotFresh,
   realpath = (p) => realpathSync.native(p), memory = loadMemory, asUser = () => personUserProblem(process.getuid(), readGroups(), readName()), folderProblem = (dir) => snapshotFolderProblem(dir),
-  pinnedProblem, loadBudget, readManifest, portsOf = realRunnerPorts, hooksOf = hookStoreOf } = {}) {
+  pinnedProblem, loadBudget, readManifest, portsOf = realRunnerPorts, hooksOf = hookStoreOf, testProduct = testProductProblem } = {}) {
   // Who it runs as comes first, before the config is read (L1079): never root, never a person's user.
   { let who; try { who = asUser(); } catch (e) { who = `its user can't be checked (${e?.message ?? e})`; } if (who) { log(`the worker runner did not start: ${who}`); return 1; } }
   let c;
@@ -500,7 +515,7 @@ export async function main(argv, { readConfig = (f) => readRunnerConfig(f, selfP
   const snaps = keepSnapshots(c, { fresh: guarded, log, recheck: (path) => folderProblem(dirname(path))?.reason ?? null });
   let P;
   try {
-    P = portsOf(c, ports, { stopped: () => stopping, log, productHeld: snaps.held, budget, bobManifest });
+    P = portsOf(c, ports, { stopped: () => stopping, log, productHeld: testProductHeld(budget, snaps.held, testProduct), budget, bobManifest });
     // A memory that can't be read is the loop's to refuse; one read is checked for carried-over sessions first.
     let m = null; try { m = memory(c.memoryFile, { uid: process.getuid() }); } catch { m = null; }
     const why = m ? carriedOverProblem(c, m, { groupGone: P.groupGone }) : null;

@@ -156,8 +156,11 @@ export function copyKeeps(io, cfg, name = DISPATCHER_CONFIG) {
  * must be there before this module's body has run. */
 export function keepsNotText(who, name) { return `the installed copy was made before ${who} set up, so its updater does not keep ${name} and would drop it on the next update: install again (README, part 6)`; }
 const KEEPS_NOT = keepsNotText('the Dispatcher was', DISPATCHER_CONFIG);
+/** What a config writer says when there is no install yet, and when the copy is not root's alone (`bad` why); I7: one text each. */
+export const NO_INSTALL = 'the install is not there yet (run the install first)';
+export function notRootsAlone(bad) { return `the installed copy is not root's alone (${bad}), so root won't write in it; install the copy again`; }
 /** The stop a config writer gives when the copy is not root's alone: `bad` why, `install` the copy's folder, `src` the base file. */
-export function copyNotRootsStop(bad, install, src) { return `the installed copy is not root's alone (${bad}), so root won't write in it; install the copy again (unload the jobs, remove ${install}, run install), which carries ${src} into it`; }
+export function copyNotRootsStop(bad, install, src) { return `${notRootsAlone(bad)} (unload the jobs, remove ${install}, run install), which carries ${src} into it`; }
 
 /**
  * Null, or why the copy's config `name` is not root's alone in the copy and exactly `text`, with the copy keeping it
@@ -166,7 +169,7 @@ export function copyNotRootsStop(bad, install, src) { return `the installed copy
 export function copyConfigProblem(io, cfg, name, text, keepsNot) {
   const P = installPaths(cfg); const root = io.at(P.installRoot); const file = join(P.installRoot, name);
   const keeps = copyKeeps(io, cfg, name);
-  if (keeps === null) return 'the install is not there yet (run the install first)';
+  if (keeps === null) return NO_INSTALL;
   let here = true; try { io.lstatReal(join(root, name)); } catch { here = false; }
   if (!here) return keeps ? `${file} is not in the copy (run dispatcher-config)` : keepsNot;
   const bad = installProblem(root, [join(root, name)], { owner: io.rootUid, top: io.prefix || '/' });

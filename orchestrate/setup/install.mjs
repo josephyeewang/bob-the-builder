@@ -30,6 +30,7 @@ import { reviewUserProblem } from '../modules/M9-record/outbox.mjs';
 import { PLAN_REVIEW_ROLE, RUNNER_ROLES } from '../shared/review-roles.mjs';
 import { COPY_CLAUDE_CODE as CLAUDE_CODE, COPY_HOOKS as HOOKS, managedGuardDir, parseConfig, scannerDir } from './layout.mjs';
 import { parseRobot } from './robot-setup.mjs';
+import { WORKER_RUNNER_CONFIG, parseWorkerRunner } from './worker-runner-setup.mjs';
 import { DISPATCHER_CONFIG, dispatcherConfigFor, dispatcherConfigText, dispatcherSourcePath, parseDispatcher } from './dispatcher-setup.mjs';
 import { SENSORS_CONFIG, sensorsConfigFor, sensorsConfigText, sensorsSourcePath } from './sensors-setup.mjs';
 import { readUser } from './users-folders.mjs';
@@ -50,7 +51,7 @@ const KEEP_NAME = /^(?!\.\.?$)[A-Za-z0-9._-]{1,128}$/;
 /** Config for the install and the jobs: the setup config (layout.mjs) plus these keys. */
 export function parseInstallConfig(raw) {
   const base = parseConfig(raw);
-  const { address, gitBin = '/usr/bin/git', label, runnerConfig, extras = [], nodeBin = realpathSync(process.execPath), robot, dispatcher } = raw;
+  const { address, gitBin = '/usr/bin/git', label, runnerConfig, extras = [], nodeBin = realpathSync(process.execPath), robot, dispatcher, workerRunner } = raw;
   if (typeof address !== 'string' || !HTTPS.test(address)) throw new Error('config: address must be the https address of the repository');
   if (!PLAIN_ABS(gitBin)) throw new Error('config: gitBin must be a full path');
   if (typeof label !== 'string' || !LABEL_RE.test(label)) throw new Error('config: label must be letters, digits, . and - (it starts the jobs\' names)');
@@ -59,13 +60,15 @@ export function parseInstallConfig(raw) {
   // A code home's name is main's alone (L257 (B)), in any case (lane 2 on #144: macOS's disk ignores case), and said so.
   const home = Array.isArray(extras) ? extras.find((e) => typeof e === 'string' && MODULE_HOMES.includes(posix.basename(e).toLowerCase())) : undefined;
   if (home) throw new Error(`config: extras must not hold ${home}: ${posix.basename(home)} is the name of a folder of the copy's own code (main's alone)`);
-  if (!Array.isArray(extras) || extras.length > 20 || extras.some((e) => !PLAIN_ABS(e) || !KEEP_NAME.test(posix.basename(e)) || [...Object.keys(MUST_KEEP), STAMP, UPDATER_CONFIG, RUNNER_CONFIG, DISPATCHER_CONFIG, SENSORS_CONFIG].map((n) => n.toLowerCase()).includes(posix.basename(e).toLowerCase()))) {
+  if (!Array.isArray(extras) || extras.length > 20 || extras.some((e) => !PLAIN_ABS(e) || !KEEP_NAME.test(posix.basename(e)) || [...Object.keys(MUST_KEEP), STAMP, UPDATER_CONFIG, RUNNER_CONFIG, DISPATCHER_CONFIG, SENSORS_CONFIG, WORKER_RUNNER_CONFIG].map((n) => n.toLowerCase()).includes(posix.basename(e).toLowerCase()))) {
     throw new Error('config: extras must be full paths of files or folders to carry into the copy (the review runner\'s claude program and its hooks), each with a plain name of its own');
   }
   // The robot job (robot-setup.mjs): on only when asked, and only with its config among the extras.
   // The Dispatcher job (dispatcher-setup.mjs): on only with its entry, which names what setup can't know itself.
   const d = parseDispatcher(dispatcher, base);
-  return { ...base, address, gitBin, label, runnerConfig, extras, nodeBin, ...(parseRobot(robot, extras) ? { robot: true } : {}), ...(d ? { dispatcher: d } : {}) };
+  // The worker runner's job (worker-runner-setup.mjs, L1092): on only with its entry, which names its one product (L1112).
+  const w = parseWorkerRunner(workerRunner, base);
+  return { ...base, address, gitBin, label, runnerConfig, extras, nodeBin, ...(parseRobot(robot, extras) ? { robot: true } : {}), ...(d ? { dispatcher: d } : {}), ...(w ? { workerRunner: w } : {}) };
 }
 
 export function installPaths(cfg) {
@@ -110,7 +113,7 @@ function ownTree(io, p) {
 /** The updater's own config, as the copy keeps it. Paths are the ones the updater will see (io.at). */
 export function updaterConfigFor(io, cfg) {
   const P = installPaths(cfg);
-  return { installRoot: io.at(P.installRoot), clone: io.at(P.clone), address: cfg.address, keep: ['bin', UPDATER_CONFIG, RUNNER_CONFIG, ...(cfg.dispatcher ? [DISPATCHER_CONFIG, SENSORS_CONFIG] : []), ...cfg.extras.map((e) => posix.basename(e))], gitBin: cfg.gitBin };
+  return { installRoot: io.at(P.installRoot), clone: io.at(P.clone), address: cfg.address, keep: ['bin', UPDATER_CONFIG, RUNNER_CONFIG, ...(cfg.dispatcher ? [DISPATCHER_CONFIG, SENSORS_CONFIG] : []), ...(cfg.workerRunner ? [WORKER_RUNNER_CONFIG] : []), ...cfg.extras.map((e) => posix.basename(e))], gitBin: cfg.gitBin };
 }
 
 /**
