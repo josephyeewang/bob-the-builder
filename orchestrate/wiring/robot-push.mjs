@@ -18,8 +18,8 @@
 //                robot key folder, and counts only when layout.mjs keysPath(base) is that key folder again. From it: the
 //                mirror (mirrorPath), the outboxes (outboxRootPath), the private folder (privatePath). No path is a
 //                config key of its own.
-//   scanner      `scannerAt(base)` → { bin, version, config, ignoreFile } for push.mjs's gitleaks. Until lane 4's scanner
-//                setting lands (#525, L1123) it is null, and the pass refuses. The swap is the one line at SCANNER_AT below.
+//   scanner      `scannerAt(base)` → { bin, version, config, ignoreFile } for push.mjs's gitleaks: SCANNER_AT below, lane 4's
+//                one setting (#525, L1123). gitleaks.mjs checks the file against its hash pin before each scan.
 //   owner        the owner's Mac user id: the config's hostLockUid, the Dispatcher config's key for it, which setup holds
 //                to the owner's Mac user (robot-setup.mjs robotConfigCheck, #536 r1 m3). The config's ownerUid is the
 //                Record's owner, orchestrate, so it is never used as Joe's. Missing: the pass refuses. push.mjs takes it as
@@ -66,7 +66,7 @@ import { GIT_TIMEOUT_MS } from '../modules/M4-workshop/git/safe-git.mjs';
 import { SCAN_BUDGET_MS, SCAN_TIMEOUT_MS } from '../modules/M4-workshop/git/gitleaks.mjs';
 import { holdAlert } from '../modules/M11-dispatcher/pass.mjs';
 import { outbox } from '../modules/M11-dispatcher/alerts.mjs';
-import { BUILDER, keysPath, mirrorPath, outboxRootPath, privatePath } from '../setup/layout.mjs';
+import { BUILDER, keysPath, mirrorPath, outboxRootPath, privatePath, scannerSetting } from '../setup/layout.mjs';
 import { readUser } from '../setup/users-folders.mjs';
 import { realIo } from '../setup/mac.mjs';
 import { refusing } from './not-wired.mjs';
@@ -89,10 +89,9 @@ export const PUSH_NOT_WIRED = Object.freeze({
   scanner: 'robot.push: the secret scanner\'s paths are not wired (lane 4, #525)',
   owner: 'robot.push: the config names no owner\'s Mac user id (hostLockUid), so the builder user can\'t be held apart from the owner (L1079)',
 });
-// THE SCANNER PORT (L1115, L1123). Null until lane 4's #525 lands with the scanner's hash check; the swap is this one line:
-//   export const SCANNER_AT = (base) => scannerSetting({ base });
-// with scannerSetting from ../setup/layout.mjs: lane 4's one setting (paths, version and hash pin). Never assembled here.
-export const SCANNER_AT = null;
+// THE SCANNER PORT (L1115, L1123): lane 4's one setting, layout.mjs scannerSetting (paths and version), never assembled
+// here. The scanner's hash and owner are checked by gitleaks.mjs checkScanner on every scan (#525), not by this port.
+export const SCANNER_AT = (base) => scannerSetting({ base });
 
 /** Why the config's outside check keys can't be used, or null. `none` is the answer when no key is set at all. */
 export function outsideKeysProblem(c, { none = null } = {}) {

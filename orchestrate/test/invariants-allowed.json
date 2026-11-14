@@ -333,12 +333,12 @@
   },
   {
    "file": "modules/M13-ledger/alerts.mjs",
-   "line": "const seen = Math.max(Date.parse(at.f.told) || 0, Date.parse(/ \u00b7 last seen (\\S+) \u00b7 /.exec(lastSeenPart(at.i.body))?.[1]) || 0);",
+   "line": "const seen = Math.max(Date.parse(at.f.told) || 0, Date.parse(/ · last seen (\\S+) · /.exec(lastSeenPart(at.i.body))?.[1]) || 0);",
    "why": "baseline (L1078)"
   },
   {
    "file": "modules/M13-ledger/alerts.mjs",
-   "line": "const seen = Math.max(Date.parse(at.f.told) || 0, Date.parse(/ \u00b7 last seen (\\S+) \u00b7 /.exec(lastSeenPart(at.i.body))?.[1]) || 0);",
+   "line": "const seen = Math.max(Date.parse(at.f.told) || 0, Date.parse(/ · last seen (\\S+) · /.exec(lastSeenPart(at.i.body))?.[1]) || 0);",
    "why": "baseline (L1078)"
   },
   {
@@ -1091,13 +1091,14 @@
    "copy": "SUDO = '/usr/bin/sudo'",
    "files": [
     "setup/bob-manifest.mjs",
+    "setup/builder-wall.mjs",
     "setup/dispatcher-check.mjs",
     "setup/extras.mjs",
     "setup/proofs.mjs",
     "setup/users-folders.mjs",
     "setup/watch-setup.mjs"
    ],
-   "why": "baseline (L1078)"
+   "why": "baseline (L1078); setup/builder-wall.mjs (#556, R-0b-179): its probes start the listener and client as the builder and the owner, as the others start theirs; no module exports one"
   },
   {
    "kind": "definition",
@@ -1335,9 +1336,10 @@
    "copy": "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">",
    "files": [
     "modules/M11-dispatcher/login-job.mjs",
-    "modules/M4-workshop/launcher/review-daemons.mjs"
+    "modules/M4-workshop/launcher/review-daemons.mjs",
+    "setup/builder-wall.mjs"
    ],
-   "why": "baseline (L1078)"
+   "why": "baseline (L1078); setup/builder-wall.mjs (#556, R-0b-179): the wall's job file, written as review-daemons.mjs writes its own (whose plist helpers are not exported)"
   },
   {
    "kind": "text",
@@ -1687,6 +1689,15 @@
     "modules/M2-approvals/payload.mjs"
    ],
    "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": " is not safe for root to write in (",
+   "files": [
+    "setup/builder-wall.mjs",
+    "setup/daemons.mjs"
+   ],
+   "why": "#556 (R-0b-179): the wall's refusal for a folder root can't safely write in says it the way daemons.mjs says it for the job folder, so one message reads the same wherever setup stops"
   }
  ]
 }

@@ -48,6 +48,7 @@ import { ownerJobPlist, OWNER_SCRIPT } from '../../../setup/owner-answer-setup.m
 import { copierPlist, COPIER_SCRIPT } from '../../../setup/host-lock-copy.mjs';
 import { sensorsJobPlist } from '../../M12-sensors/sensors-job.mjs';
 import { workerRunnerPlist } from '../../../wiring/runner-job.mjs';
+import { wallPlist } from '../../../setup/builder-wall.mjs';
 import { copierAgentPlist } from '../../M13-ledger/handoff-copier.mjs';
 import { updateOnce, MAIN } from './review-updater.mjs';
 
@@ -116,6 +117,15 @@ const JOB_BUILDERS = Object.freeze({
     copy: join(SAMPLE_BASE, 'owner-home', '.orchestrate', 'host.lock'), home: join(SAMPLE_BASE, 'owner-home') })],
   'modules/M13-ledger/handoff-copier.mjs': () => [copierAgentPlist({ label: LABEL, node: join(SAMPLE_ROOT, NODE), script: join(SAMPLE_ROOT, HANDOFF_COPIER),
     from: join(SAMPLE_BASE, 'ledger-handoffs'), to: join(SAMPLE_BASE, 'dropbox-handoffs'), stateDir: join(SAMPLE_BASE, 'copier'), products: ['p1'] })],
+});
+// R-0b-179: modules that name a start command but start no script of the copy, so nothing they start goes through the
+// link above. Each is checked below: a job builder here must still start no copy script, and a reader must write none.
+const NO_COPY_SCRIPT = Object.freeze({
+  // The pf wall's LaunchDaemon runs /bin/sh with its own script text, as root, and loads no module of the copy.
+  'setup/builder-wall.mjs': () => [wallPlist({ base: SAMPLE_BASE, label: LABEL })],
+});
+const READS_JOB_FILES = Object.freeze({
+  'shared/credential-args.mjs': 'the no-credential-as-argument scan reads every job file\'s start command; it builds none',
 });
 /** The one script of the copy a job file starts: the .mjs file under the copy's link in its start command. */
 function startedScript(text) {
@@ -549,7 +559,24 @@ test('L136 m1: the programs to start come from every job-file builder of the cop
   const writers = tracked([SOURCE]).filter((f) => f.endsWith('.mjs')).map((f) => f.slice(SOURCE.length + 1))
     .filter((r) => !isTestCode(r) && /ProgramArguments/.test(readFileSync(join(REPO, SOURCE, r), 'utf8')));
   const direct = Object.keys(JOB_BUILDERS).filter((f) => !(f in BUILT_THROUGH));
-  assert.deepEqual(writers.sort(), direct.sort(), 'every module that builds a job file is on JOB_BUILDERS, and only those');
+  assert.deepEqual(writers.sort(), [...direct, ...Object.keys(NO_COPY_SCRIPT), ...Object.keys(READS_JOB_FILES)].sort(),
+    'every module that builds a job file is on JOB_BUILDERS (or NO_COPY_SCRIPT), every other that names a start command is on READS_JOB_FILES, and only those');
+  for (const [f, build] of Object.entries(NO_COPY_SCRIPT)) {
+    const jobs = build();
+    assert.ok(jobs.length >= 1, `${f} builds a job file`);
+    for (const j of jobs) {
+      const args = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(j)?.[1];
+      assert.ok(args, `${f}: its job file has a start command`);
+      assert.ok(!args.includes(SAMPLE_ROOT) && !/\.mjs\b/.test(args), `${f}: its job starts no script of the copy, so it belongs on JOB_BUILDERS if it ever does`);
+    }
+  }
+  // A reader writes no job file however the key is spelled (#556 r2 c1): it holds no `<key>` at all, and it imports
+  // nothing, so it has no way to write a file or build one through a helper.
+  for (const f of Object.keys(READS_JOB_FILES)) {
+    const text = readFileSync(join(REPO, SOURCE, f), 'utf8');
+    assert.ok(!/<key>/.test(text), `${f} writes no start command (it holds a <key>)`);
+    assert.ok(!/^\s*import\b|\bimport\s*\(|\brequire\s*\(\s*['"]/m.test(text), `${f} imports nothing, so it writes no job file`);
+  }
   // Builders through another builder, found from their real import lines (L734 self-review M1, m1).
   const users = tracked([SOURCE]).filter((f) => f.endsWith('.mjs')).map((f) => f.slice(SOURCE.length + 1))
     .filter((r) => !isTestCode(r) && !writers.includes(r))
