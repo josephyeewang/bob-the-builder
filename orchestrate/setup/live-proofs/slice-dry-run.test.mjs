@@ -93,12 +93,19 @@ test('test_product unquoted reads the same as quoted (the parser gives text)', (
   assert.deepEqual(failed(rows(swap(SLICE, "  test_product: 'true'\n", '  test_product: true\n'))), []);
 });
 
-test('test_product missing, false or yes fails its own row', () => {
-  for (const to of ['', "  test_product: 'false'\n", '  test_product: yes\n']) {
+test('test_product missing or false fails its own row', () => {
+  for (const to of ['', "  test_product: 'false'\n"]) {
     const t = swap(SLICE, "  test_product: 'true'\n", to);
     const f = failed(rows(t));
     assert.ok(f.length >= 1 && f.every((w) => /test_product|module checks/.test(w)) && f.some((w) => /test_product/.test(w)), `${JSON.stringify(to)}: ${JSON.stringify(f)}`);
   }
+});
+
+// Since #523 (L1144 landing) the rules parser itself refuses a test_product that is not true or false, so `yes` fails
+// one step earlier, at "the rules parse", and nothing after it can PASS (L1155).
+test('test_product: yes is refused when the rules are read', () => {
+  const f = failed(rows(swap(SLICE, "  test_product: 'true'\n", '  test_product: yes\n')));
+  assert.ok(f.includes('the rules parse'), JSON.stringify(f));
 });
 
 test('a third lane fails the lanes row', () => {
