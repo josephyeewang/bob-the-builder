@@ -23,10 +23,13 @@
 // What happened is read from the disk wherever it can be (a marker file a hook or command writes), not from the
 // stream's names, which are themselves unproven. A test passes only when both runs show what they must.
 //
-// A side counts only if it ran properly (audit L1124 m1): a start message, a result line that is not an error (an API
-// error, a crash, a run past its time), and, for a test that asks for a command, a tool call holding it. A side the
-// pair expects refused also needs claude's refusal: an error or denial for that call. Anything else makes the test NOT
-// TRIED, with the reason, never PASS: a run that broke shows nothing about the name.
+// A side counts only if it ran properly (audit L1124 m1): a start message, a result line that is a success (readResult,
+// the dispatcher's one reading of it, and no "API Error"), and, for a test that asks for a command, a tool call holding
+// it. A side the pair expects refused also needs claude's refusal of that call, of the kind the test expects (a
+// permission denial, the sandbox, the network, a hook). Anything else makes the test NOT TRIED, with the reason, never
+// PASS: a run that broke shows nothing about the name. One thing outranks that (L1128 m1): a marker on a side where the
+// setting must stop it is the setting failing, so FAIL, however that run ended. And a name passes only when every test
+// of it passed (L1128 M1): one NOT TRIED test leaves the name NOT TRIED.
 //
 // Every run uses the runner's own environment for a session (wiring/runner-ports.mjs sessionEnv: its PATH, the
 // sessions' home, the account in use) and `--setting-sources ""` (settings-names.mjs sourcesArgs) unless the test is
@@ -51,7 +54,7 @@
 
 import { closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync, writeSync, fsyncSync, chmodSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { execFileSync, spawn as childSpawn } from 'node:child_process';
@@ -59,7 +62,8 @@ import { readJobConfig } from '../../shared/job-config.mjs';
 import { makeLock } from '../../modules/M9-record/lock.mjs';
 import { checkRunnerConfig } from '../../wiring/runner-main.mjs';
 import { sessionEnv } from '../../wiring/runner-ports.mjs';
-import { accountInUse } from '../../modules/M4-workshop/launcher/accounts.mjs';
+import { ACCOUNT_NAMES, accountDir, accountInUse } from '../../modules/M4-workshop/launcher/accounts.mjs';
+import { readResult } from '../../modules/M11-dispatcher/headless-result.mjs';
 import { FLAGS as F, SETTINGS as S, HOOK_FIELDS as H, HOOK_EVENTS as E, ENV, REFUSED_SETTINGS, CONFIRMED, SPELLING_ONLY, noToolServerArgs, proofCounts, sourcesArgs } from '../../modules/M4-workshop/launcher/settings-names.mjs';
 import { roleArgs, findInit, checkInit } from '../../modules/M4-workshop/launcher/readback.mjs';
 import { renderRoleSettings } from '../../modules/M4-workshop/launcher/render-settings.mjs';
@@ -89,7 +93,7 @@ const bashOnce = (cmd) => `Use the Bash tool to run exactly this shell command, 
 /**
  * One headless start's words. `o.settingsFile` is the --settings file; the rest say what differs from the plain run:
  * tools, mode (null: no --permission-mode), sources (false: no --setting-sources), mcp (false: no tool-server lock),
- * model, maxTurns, extra (words before the prompt).
+ * model (null: no --model, the account's own model, as a review start has), maxTurns, extra (words before the prompt).
  */
 export function runArgs(o) {
   const a = [F.print, F.outputFormat, F.streamJson, F.verbose, F.settings, o.settingsFile];
@@ -97,7 +101,8 @@ export function runArgs(o) {
   if (o.mcp !== false) a.push(...noToolServerArgs());
   a.push(F.tools, o.tools ?? 'Bash');
   if (o.mode !== null) a.push(F.permissionMode, o.mode ?? 'dontAsk');
-  a.push(F.model, o.model ?? RUN_MODEL, F.maxTurns, String(o.maxTurns ?? 3), ...(o.extra ?? []), o.prompt ?? 'Reply with the word ready.');
+  if (o.model !== null) a.push(F.model, o.model ?? RUN_MODEL);
+  a.push(F.maxTurns, String(o.maxTurns ?? 3), ...(o.extra ?? []), o.prompt ?? 'Reply with the word ready.');
   return a;
 }
 
@@ -106,18 +111,22 @@ export function runArgs(o) {
 // dir/work is claude's working folder, dir/settings.json the --settings file, dir/out a folder outside the working one.
 // `files(side, dir)` → { path: text } written before the run; `user(side, dir)` → the user settings for the run, or
 // undefined to leave the file alone. `expect(side, dir)` → what a proper run of that side shows (runProblem): `tool` and
-// `needle`, a call of that tool holding that text; `refused`, claude refuses that call; `turnsEnd`, the run ends on its
-// turn limit; `refusedStart`, claude refuses to start, naming that text; `startOrWarns`, no start is proper only if
-// claude's warnings name that text. `see` also gets the run itself, { out, err, … }, as its fifth argument.
+// `needle`, a call of that tool holding that text (`exact`: a command that is exactly it); `refused`, the kind of refusal
+// of that call the side must show (REFUSAL); `turnsEnd`, the run ends on its turn limit; `startOrWarns`, no start is
+// proper only if claude's warnings name that text. `repeatOn`: the on side runs twice, and counts only if both runs
+// show the same. `see` also gets the run itself, { out, err, … }, as its fifth argument. A judge made by sameBut carries
+// its `want`, so a marker on a side that wants none is a FAIL however that run ended (L1128 m1).
 const mark = (dir, name = 'mark') => join(dir, 'work', name);
 const there = (p) => existsSync(p);
-const sameBut = (want) => (on, off) => (on === want.on && off === want.off ? null : `the setting on gave ${JSON.stringify(on)}, off gave ${JSON.stringify(off)}; want ${JSON.stringify(want.on)} and ${JSON.stringify(want.off)}`);
+const sameBut = (want) => Object.assign((on, off) => (on === want.on && off === want.off ? null : `the setting on gave ${JSON.stringify(on)}, off gave ${JSON.stringify(off)}; want ${JSON.stringify(want.on)} and ${JSON.stringify(want.off)}`), { want });
 const ALLOW_TOUCH = (m) => [`Bash(touch ${m})`];
 const touchIn = (dir, name = 'mark') => `touch ${mark(dir, name)}`;
 const hook = (command, extra = {}) => ({ [H.type]: 'command', [H.command]: command, ...extra });
 const markerHook = (event, file) => ({ [S.hooks]: { [event]: [{ [H.hooks]: [hook(`touch ${q(file)}`)] }] } });
 const init = (out) => findInit(out);
 const bashUse = (needle) => ({ tool: 'Bash', needle });
+// A command that is exactly `cmd` (L1128 c1): 'true' or 'env' alone would match any call holding the word.
+const bashExact = (cmd) => ({ tool: 'Bash', needle: cmd, exact: true });
 const writeUse = (needle) => ({ tool: 'Write', needle });
 
 // ---- what a proper run shows (audit L1124 m1) ----
@@ -130,14 +139,30 @@ const toolResults = (out) => events(out).filter((e) => e.type === 'user').flatMa
 /** What claude warned about: its stderr and its stream's system lines other than the start message (not the start
  * message itself, whose folder names the run). */
 export const warningsOf = (r) => [String(r?.err ?? ''), ...events(r?.out).filter((e) => e.type === 'system' && e.subtype !== 'init').map((e) => JSON.stringify(e))].join('\n');
-const usesFor = (out, want) => toolUses(out).filter((u) => (!want.tool || u.name === want.tool) && JSON.stringify(u.input ?? {}).includes(want.needle));
-const DENIAL = /denied|not permitted|not allowed|blocked|refused/i;
-/** Whether claude refused the side's call: an error, or a denial, for it. */
+const usesFor = (out, want) => toolUses(out).filter((u) => (!want.tool || u.name === want.tool) &&
+  (want.exact ? String(u.input?.command ?? '').trim() === want.needle : JSON.stringify(u.input ?? {}).includes(want.needle)));
+/**
+ * The refusals a side may be expected to show (L1128 m3), each read only for the asked-for call (its tool_use id):
+ * permission, claude's permission check (the call is in the result's permission_denials, or its error result says it
+ * was denied); sandbox, the OS refusing the command inside the sandbox; network, the sandbox's proxy refusing the host;
+ * hook, a PreToolUse hook blocking the call. Any other error (a timeout, a missing file) is not the setting's.
+ */
+export const REFUSAL = Object.freeze({
+  permission: { denials: true, text: /denied/i },
+  sandbox: { text: /operation not permitted|permission denied/i },
+  network: { text: /blocked|not allowed|forbidden|denied|\b403\b/i },
+  hook: { text: /hook/i },
+});
+/** Whether claude refused the side's asked-for call the way `want.refused` names. */
 export function refusalSeen(r, want = {}) {
+  const kind = REFUSAL[want.refused];
+  if (!kind) return false;
   const ids = new Set(usesFor(r?.out, want).map((u) => u.id));
   const res = events(r?.out).filter((e) => e.type === 'result').at(-1);
-  if ((res?.permission_denials ?? []).some((d) => ids.has(d?.tool_use_id))) return true;
-  return toolResults(r?.out).some((t) => ids.has(t.tool_use_id) && (t.is_error === true || DENIAL.test(JSON.stringify(t.content ?? ''))));
+  const denied = (res?.permission_denials ?? []).some((d) => ids.has(d?.tool_use_id));
+  if (kind.denials && denied) return true;
+  if (!kind.denials && denied) return false;
+  return toolResults(r?.out).some((t) => ids.has(t.tool_use_id) && t.is_error === true && kind.text.test(JSON.stringify(t.content ?? '')));
 }
 /** Why a side's run shows nothing about the name, or null when it ran properly. `r` is { out, err, code, signal,
  * timedOut, error }. */
@@ -147,14 +172,14 @@ export function runProblem(r, want = {}) {
   if (r.error) return `it could not start (${r.error})`;
   const said = String(r.err ?? '').trim().slice(0, 200);
   if (findInit(r.out) === null) {
-    if (want.refusedStart && String(r.err ?? '').includes(want.refusedStart)) return null;
     if (want.startOrWarns && warningsOf(r).includes(want.startOrWarns)) return null;
     return `no start message${said ? ` (it said: ${said})` : ''}`;
   }
   const res = events(r.out).filter((e) => e.type === 'result').at(-1);
   if (!res) return `no result line${said ? ` (it said: ${said})` : ''}`;
   if (want.turnsEnd) { if (res.subtype !== 'error_max_turns') return `it did not end on its turn limit (result ${JSON.stringify(res.subtype ?? null)})`; }
-  else if (res.is_error === true || /^API Error/i.test(String(res.result ?? ''))) return `its result is an error: ${String(res.result ?? res.subtype ?? '').slice(0, 200)}`;
+  // One reading of a result (L1128 m2): the dispatcher's readResult, success and not is_error; and no "API Error".
+  else if (readResult(JSON.stringify(res)).outcome !== 'success' || /^API Error/i.test(String(res.result ?? ''))) return `its result is not a success (${JSON.stringify(res.subtype ?? null)}): ${String(res.result ?? '').slice(0, 200)}`;
   if (want.needle && !usesFor(r.out, want).length) return `no ${want.tool ?? 'tool'} call holding ${want.needle}`;
   return null;
 }
@@ -172,87 +197,93 @@ const SPELLING_CONTROL = 'loaded|-';
  * a --settings file that also holds a SessionStart marker hook. Each side shows `loaded` or `skipped` (whether the
  * marker hook ran, so whether the file was read) and `named` or `-` (whether claude's warnings, its stderr and its
  * non-start system lines, name the key). The control must be the normal run, `loaded|-`: claude passes an unknown key
- * by. The pair proves the CLI reads the name only when the name's side then differs from it: the file skipped, or the
- * key named. The same as the control, or a control that was not normal, leaves the name NOT TRIED (L1124 m2).
+ * by. The pair proves the CLI reads the name only on positive evidence from the name's side (L1128 m4): the key named,
+ * or the file skipped on both of its two runs (repeatOn), as one run's marker could be missing by chance. The same as
+ * the control, two runs that disagree, or a control that was not normal, leave the name NOT TRIED (L1124 m2).
  */
 function spelling(name, place) {
-  return { id: `spelling-${name}`, title: `${name}: a bad value under its name changes the run; under a misspelling it does not`, kind: 'spelling', names: [name],
+  return { id: `spelling-${name}`, title: `${name}: a bad value under its name changes the run; under a misspelling it does not`, kind: 'spelling', names: [name], repeatOn: true,
     run: (side, dir) => ({ settings: { ...place(side === 'on' ? name : misspell(name), 'sometimes-7c'), ...markerHook(E.sessionStart, mark(dir, 'start')) } }),
     expect: (side) => (side === 'on' ? { startOrWarns: name } : {}),
     see: (side, dir, out, x, r) => `${there(mark(dir, 'start')) ? 'loaded' : 'skipped'}|${warningsOf(r).includes(name) ? 'named' : '-'}`,
     judge: (on, off) => (off !== SPELLING_CONTROL ? { notTried: `the control (the misspelt key) did not run normally (${off}; want ${SPELLING_CONTROL}), so the pair shows nothing` }
-      : on !== off ? null : { notTried: `the spelling pair showed no difference (${on} both ways), so the name is not proven` }) };
+      : on === off ? { notTried: `the spelling pair showed no difference (${on} both ways), so the name is not proven` }
+        : /^(loaded|skipped)\|named$/.test(on) || on === 'skipped|-' ? null
+          : { notTried: `the name's side showed ${on}, not the same on both of its runs, so the pair shows nothing` }) };
 }
 
-// --effort (L1114, L1124 m7): a value pair for each level a review launch passes. Nothing a run shows reports the
-// effort, so this proves the flag and the level are read (the level starts; a made-up one is refused, by name, at the
-// start; an unknown flag would be refused both ways), not the review depth.
+// --effort (L1114, L1124 m7, L1128): a value pair for each level a review launch passes, on the model a review start
+// uses (no --model). 2.1.316 does not refuse a level it doesn't know: it starts, warning "Unknown --effort value '<v>'
+// — ignoring it and using the default effort" (its own words, read in its code). So both sides must start, and only the
+// made-up level's side may carry that warning, naming it. That proves the flag and the level are read (an unknown flag
+// would be refused both ways; a level ignored would warn on its side too), not the review depth.
 export const BAD_EFFORT = 'not-a-level-7c';
-const effortTest = (level) => ({ id: `effort-${level}`, title: `--effort ${level} starts, and a made-up level is refused by name`, kind: 'readback', names: [F.effort],
-  run: (side) => ({ extra: [F.effort, side === 'on' ? level : BAD_EFFORT] }),
-  expect: (side) => (side === 'on' ? {} : { refusedStart: BAD_EFFORT }),
-  see: (side, dir, out) => init(out) !== null, judge: sameBut({ on: true, off: false }) });
+export const effortWarning = (v) => `Unknown --effort value '${v}'`;
+const effortTest = (level) => ({ id: `effort-${level}`, title: `--effort ${level} is taken with no warning, and a made-up level is named in claude's warning`, kind: 'readback', names: [F.effort],
+  run: (side) => ({ model: null, extra: [F.effort, side === 'on' ? level : BAD_EFFORT] }),
+  see: (side, dir, out, x, r) => `${init(out) !== null ? 'start' : '-'}|${warningsOf(r).includes(effortWarning(side === 'on' ? level : BAD_EFFORT)) ? 'warned' : '-'}`,
+  judge: sameBut({ on: 'start|-', off: 'start|warned' }) });
 
 export const TESTS = Object.freeze([
   // permissions: the mode leaves a command alone unless a rule lets it run.
   { id: 'allow', title: 'an allow rule lets a command run that the mode refuses', kind: 'break-it', names: [S.permissions, S.allow, F.permissionMode],
     run: (side, dir) => ({ settings: side === 'on' ? { [S.permissions]: { [S.allow]: ALLOW_TOUCH(mark(dir)) } } : {}, prompt: bashOnce(touchIn(dir)) }),
-    expect: (side, dir) => ({ ...bashUse(mark(dir)), refused: side === 'off' }),
+    expect: (side, dir) => ({ ...bashUse(mark(dir)), refused: side === 'off' && 'permission' }),
     see: (side, dir) => there(mark(dir)), judge: sameBut({ on: true, off: false }) },
   { id: 'deny', title: 'a deny rule refuses a command an allow rule lets run', kind: 'break-it', names: [S.permissions, S.deny],
     run: (side, dir) => ({ settings: { [S.permissions]: { [S.allow]: ALLOW_TOUCH(mark(dir)), ...(side === 'on' ? { [S.deny]: ALLOW_TOUCH(mark(dir)) } : {}) } }, prompt: bashOnce(touchIn(dir)) }),
-    expect: (side, dir) => ({ ...bashUse(mark(dir)), refused: side === 'on' }),
+    expect: (side, dir) => ({ ...bashUse(mark(dir)), refused: side === 'on' && 'permission' }),
     see: (side, dir) => there(mark(dir)), judge: sameBut({ on: false, off: true }) },
   { id: 'ask', title: 'an ask rule, with no one to ask, refuses a command an allow rule lets run', kind: 'break-it', names: [S.ask],
     run: (side, dir) => ({ settings: { [S.permissions]: { [S.allow]: ALLOW_TOUCH(mark(dir)), ...(side === 'on' ? { [S.ask]: ALLOW_TOUCH(mark(dir)) } : {}) } }, prompt: bashOnce(touchIn(dir)) }),
-    expect: (side, dir) => ({ ...bashUse(mark(dir)), refused: side === 'on' }),
+    expect: (side, dir) => ({ ...bashUse(mark(dir)), refused: side === 'on' && 'permission' }),
     see: (side, dir) => there(mark(dir)), judge: sameBut({ on: false, off: true }) },
   { id: 'defaultMode', title: 'the settings\' mode, with no --permission-mode, decides a file write', kind: 'break-it', names: [S.defaultMode],
     run: (side, dir) => ({ mode: null, tools: 'Write', settings: { [S.permissions]: { [S.defaultMode]: side === 'on' ? 'dontAsk' : 'acceptEdits' } },
       prompt: `Use the Write tool, once, to write the word x to the file ${mark(dir)}. Then reply with the word done.` }),
-    expect: (side, dir) => ({ ...writeUse(mark(dir)), refused: side === 'on' }),
+    expect: (side, dir) => ({ ...writeUse(mark(dir)), refused: side === 'on' && 'permission' }),
     see: (side, dir) => there(mark(dir)), judge: sameBut({ on: false, off: true }) },
   { id: 'additionalDirectories', title: 'an added folder lets a file write outside the working folder', kind: 'break-it', names: [S.additionalDirectories],
     run: (side, dir) => ({ mode: 'acceptEdits', tools: 'Write', settings: { [S.permissions]: side === 'on' ? { [S.additionalDirectories]: [join(dir, 'out')] } : {} },
       prompt: `Use the Write tool, once, to write the word x to the file ${join(dir, 'out', 'mark')}. Then reply with the word done.` }),
-    expect: (side, dir) => ({ ...writeUse(join(dir, 'out', 'mark')), refused: side === 'off' }),
+    expect: (side, dir) => ({ ...writeUse(join(dir, 'out', 'mark')), refused: side === 'off' && 'permission' }),
     see: (side, dir) => there(join(dir, 'out', 'mark')), judge: sameBut({ on: true, off: false }) },
   // sandbox: a command inside it, with a rule letting the command run.
   { id: 'sandbox', title: 'the sandbox refuses a write outside the working folder', kind: 'break-it', names: [S.sandbox, S.sandboxEnabled],
     run: (side, dir) => ({ settings: { [S.permissions]: { [S.allow]: ALLOW_TOUCH(join(dir, 'out', 'mark')) }, [S.sandbox]: { [S.sandboxEnabled]: side === 'on', [S.allowUnsandboxedCommands]: false } },
       prompt: bashOnce(`touch ${join(dir, 'out', 'mark')}`) }),
-    expect: (side, dir) => ({ ...bashUse(join(dir, 'out', 'mark')), refused: side === 'on' }),
+    expect: (side, dir) => ({ ...bashUse(join(dir, 'out', 'mark')), refused: side === 'on' && 'sandbox' }),
     see: (side, dir) => there(join(dir, 'out', 'mark')), judge: sameBut({ on: false, off: true }) },
   { id: 'denyWrite', title: 'a denyWrite folder is refused inside the working folder', kind: 'break-it', names: [S.filesystem, S.denyWrite],
     run: (side, dir) => ({ settings: { [S.permissions]: { [S.allow]: ALLOW_TOUCH(mark(dir, 'sub/mark')) },
       [S.sandbox]: { [S.sandboxEnabled]: true, [S.allowUnsandboxedCommands]: false, ...(side === 'on' ? { [S.filesystem]: { [S.denyWrite]: [join(dir, 'work', 'sub')] } } : {}) } },
     prompt: bashOnce(touchIn(dir, 'sub/mark')) }),
     files: (side, dir) => ({ [join(dir, 'work', 'sub', '.keep')]: '' }),
-    expect: (side, dir) => ({ ...bashUse(mark(dir, 'sub/mark')), refused: side === 'on' }),
+    expect: (side, dir) => ({ ...bashUse(mark(dir, 'sub/mark')), refused: side === 'on' && 'sandbox' }),
     see: (side, dir) => there(mark(dir, 'sub/mark')), judge: sameBut({ on: false, off: true }) },
   { id: 'denyRead', title: 'a denyRead file can\'t be read by a command', kind: 'break-it', names: [S.filesystem, S.denyRead],
     run: (side, dir) => ({ settings: { [S.permissions]: { [S.allow]: [`Bash(cat ${join(dir, 'out', 'secret')})`] },
       [S.sandbox]: { [S.sandboxEnabled]: true, [S.allowUnsandboxedCommands]: false, ...(side === 'on' ? { [S.filesystem]: { [S.denyRead]: [join(dir, 'out', 'secret')] } } : {}) } },
     prompt: `Use the Bash tool to run exactly this shell command, once, and nothing else: cat ${join(dir, 'out', 'secret')}\nThen reply with exactly what it printed, or the word nothing.` }),
     files: (side, dir) => ({ [join(dir, 'out', 'secret')]: `seen-${side}-7c1f\n` }),
-    expect: (side, dir) => ({ ...bashUse(join(dir, 'out', 'secret')), refused: side === 'on' }),
+    expect: (side, dir) => ({ ...bashUse(join(dir, 'out', 'secret')), refused: side === 'on' && 'sandbox' }),
     see: (side, dir, out) => String(out).includes(`seen-${side}-7c1f`), judge: sameBut({ on: false, off: true }) },
   { id: 'allowedDomains', title: 'an allowed host is reached from inside the sandbox, and only then', kind: 'break-it', names: [S.network, S.allowedDomains],
     run: (side, dir) => ({ settings: { [S.permissions]: { [S.allow]: [`Bash(curl -sS -o ${join(dir, 'work', 'got')} https://example.com)`] },
       [S.sandbox]: { [S.sandboxEnabled]: true, [S.allowUnsandboxedCommands]: false, [S.network]: { [S.allowedDomains]: side === 'on' ? ['example.com'] : [] } } },
     prompt: bashOnce(`curl -sS -o ${join(dir, 'work', 'got')} https://example.com`) }),
-    expect: (side) => ({ ...bashUse('https://example.com'), refused: side === 'off' }),
+    expect: (side) => ({ ...bashUse('https://example.com'), refused: side === 'off' && 'network' }),
     see: (side, dir) => there(join(dir, 'work', 'got')), judge: sameBut({ on: true, off: false }) },
   { id: 'excludedCommands', title: 'an excluded command runs outside the sandbox (the launcher refuses the setting; proven for its name)', kind: 'break-it', names: [S.excludedCommands],
     run: (side, dir) => ({ settings: { [S.permissions]: { [S.allow]: ALLOW_TOUCH(join(dir, 'out', 'mark')) },
       [S.sandbox]: { [S.sandboxEnabled]: true, ...(side === 'on' ? { [S.excludedCommands]: ['touch'] } : {}) } }, prompt: bashOnce(`touch ${join(dir, 'out', 'mark')}`) }),
-    expect: (side, dir) => ({ ...bashUse(join(dir, 'out', 'mark')), refused: side === 'off' }),
+    expect: (side, dir) => ({ ...bashUse(join(dir, 'out', 'mark')), refused: side === 'off' && 'sandbox' }),
     see: (side, dir) => there(join(dir, 'out', 'mark')), judge: sameBut({ on: true, off: false }) },
   // hooks
   { id: 'preToolUse', title: 'a PreToolUse hook with a Bash matcher runs before the command', kind: 'break-it', names: [S.hooks, E.preToolUse, H.matcher, H.hooks, H.type, H.command],
     run: (side, dir) => ({ settings: { [S.permissions]: { [S.allow]: ['Bash(true)'] },
       ...(side === 'on' ? { [S.hooks]: { [E.preToolUse]: [{ [H.matcher]: 'Bash', [H.hooks]: [hook(`touch ${q(mark(dir, 'hook'))}`)] }] } } : {}) }, prompt: bashOnce('true') }),
-    expect: () => bashUse('true'),
+    expect: () => bashExact('true'),
     see: (side, dir) => there(mark(dir, 'hook')), judge: sameBut({ on: true, off: false }) },
   { id: 'timeout', title: 'a hook past its timeout is stopped before it writes', kind: 'break-it', names: [H.timeout],
     run: (side, dir) => ({ settings: { [S.permissions]: { [S.allow]: ['Bash(true)'] },
@@ -260,12 +291,12 @@ export const TESTS = Object.freeze([
     // The stopped hook would have written 4 s in; the run is read once claude has ended, and a short wait covers a hook
     // left running.
     settle: 6_000,
-    expect: () => bashUse('true'),
+    expect: () => bashExact('true'),
     see: (side, dir) => there(join(dir, 'out', 'late')), judge: sameBut({ on: false, off: true }) },
   { id: 'onFailure', title: 'a failing hook with onFailure block stops the command; with continue it runs', kind: 'break-it', names: [H.onFailure],
     run: (side, dir) => ({ settings: { [S.permissions]: { [S.allow]: ALLOW_TOUCH(mark(dir)) },
       [S.hooks]: { [E.preToolUse]: [{ [H.matcher]: 'Bash', [H.hooks]: [hook('exit 1', { [H.onFailure]: side === 'on' ? 'block' : 'continue' })] }] } }, prompt: bashOnce(touchIn(dir)) }),
-    expect: (side, dir) => ({ ...bashUse(mark(dir)), refused: side === 'on' }),
+    expect: (side, dir) => ({ ...bashUse(mark(dir)), refused: side === 'on' && 'hook' }),
     see: (side, dir) => there(mark(dir)), judge: sameBut({ on: false, off: true }) },
   { id: 'sessionStart', title: 'a SessionStart hook in the --settings file runs at the start', kind: 'break-it', names: [E.sessionStart, F.settings],
     run: (side, dir) => ({ settings: side === 'on' ? markerHook(E.sessionStart, mark(dir, 'start')) : {} }),
@@ -278,7 +309,7 @@ export const TESTS = Object.freeze([
   { id: 'env', title: 'the settings\' variables are set inside a Bash call', kind: 'break-it', names: [S.env, ENV.autoCompactWindow, ENV.disableUpdates],
     run: (side, dir) => ({ settings: { [S.permissions]: { [S.allow]: ['Bash(env)'] }, ...(side === 'on' ? { [S.env]: { ORCH_PROOF_VAR: 'on-5a1', [ENV.autoCompactWindow]: '190001', [ENV.disableUpdates]: '1' } } : {}) },
       prompt: 'Use the Bash tool to run exactly this shell command, once, and nothing else: env\nThen reply with each line it printed that begins with ORCH_PROOF_VAR=, CLAUDE_CODE_AUTO_COMPACT_WINDOW= or DISABLE_UPDATES=, exactly, or the word none.' }),
-    expect: () => bashUse('env'),
+    expect: () => bashExact('env'),
     see: (side, dir, out) => ['ORCH_PROOF_VAR=on-5a1', `${ENV.autoCompactWindow}=190001`, `${ENV.disableUpdates}=1`].map((x) => (String(out).includes(x) ? 1 : 0)).join(''),
     judge: sameBut({ on: '111', off: '000' }) },
   // the rest of the settings
@@ -373,10 +404,11 @@ export function judgeNames({ outcomes, readback, version, confirmed = CONFIRMED,
   for (const name of allNames()) {
     if (REFUSED_SETTINGS.includes(name)) { out.push({ name, result: 'REFUSED', why: 'not proven: the launcher refuses it in every role file (REFUSED_SETTINGS)' }); continue; }
     if (Object.hasOwn(NOT_USED, name)) { out.push({ name, result: 'NOT USED', why: NOT_USED[name] }); continue; }
-    const by = []; const bad = []; const open = []; let ran = false; let spelt = false; let fallback;
+    const by = []; const bad = []; const open = []; const missing = []; let ran = false; let spelt = false; let fallback;
     for (const t of tests.filter((x) => x.names.includes(name))) {
       const o = outcomes?.[t.id];
-      if (!o) continue;
+      // Every test of a name must pass (L1128 M1): one that did not run, or could not show it, leaves the name open.
+      if (!o) { missing.push(`"${t.title}" did not run`); continue; }
       // A pair that could not show the name (L1114) is as if not run, with its reason.
       if (o.ok === null && typeof o.notTried === 'string') { open.push(o.notTried); fallback ??= o.fallback; continue; }
       // A spelling pair confirms only the names the lead ruled it may (SPELLING_ONLY, L1124 m3).
@@ -390,9 +422,10 @@ export function judgeNames({ outcomes, readback, version, confirmed = CONFIRMED,
     }
     const c = Object.hasOwn(confirmed, name) ? confirmed[name] : null;
     if (bad.length) out.push(failN(name, bad.join('; ')));
-    else if (by.length) out.push({ ...pass(name, by[0], version), ...(spelt && by.every((b) => b.startsWith('spelling:')) ? { proof: SPELLING_LABEL } : {}) });
+    else if (by.length && !open.length && !missing.length) out.push({ ...pass(name, by[0], version), ...(spelt && by.every((b) => b.startsWith('spelling:')) ? { proof: SPELLING_LABEL } : {}) });
     else if (!ran && !open.length && c && c.version === version && proofCounts(name, c.by)) out.push({ ...pass(name, c.by, version), already: true });
-    else out.push({ ...notTried(name, open.length ? open.join('; ') : ran ? 'no test that ran proves it' : NOT_TRIED[name] ?? 'no test ran it'), ...(fallback ? { fallback } : {}) });
+    // (A name no test of this run touched may stand on its confirmed proof above; one only partly run may not.)
+    else out.push({ ...notTried(name, open.length || (ran && missing.length) ? [...open, ...missing].join('; ') : ran ? 'no test that ran proves it' : NOT_TRIED[name] ?? 'no test ran it'), ...(fallback ? { fallback } : {}) });
   }
   return out;
 }
@@ -491,9 +524,9 @@ export async function runAll({ base, io, tests = TESTS }) {
     if (t.byGuard) { if (io.guardPassed === true) outcomes[t.id] = { ok: true }; continue; }
     const seen = {}; const sick = []; const quiet = [];
     try {
-      for (const side of ['on', 'off']) {
+      const runSide = async (side, k) => {
         // A neutral folder name (L1124 m2): the start message shows the folder, and it must not hold a name.
-        const d = mkdtempSync(join(base, `run${i}-${side}-`));
+        const d = mkdtempSync(join(base, `run${i}-${side}-${k}-`));
         const x = { sessionId: randomUUID() };
         mkdirSync(join(d, 'work'), { recursive: true }); mkdirSync(join(d, 'out'), { recursive: true });
         for (const [p, text] of Object.entries(t.files?.(side, d) ?? {})) { mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, text); }
@@ -509,11 +542,19 @@ export async function runAll({ base, io, tests = TESTS }) {
         const problem = runProblem(r, want);
         if (problem) sick.push(`the ${side} side: ${problem}`);
         else if (want.refused && !refusalSeen(r, want)) quiet.push(side);
-        seen[side] = t.see(side, d, r?.out ?? '', x, r);
+        return t.see(side, d, r?.out ?? '', x, r);
+      };
+      for (const side of ['on', 'off']) {
+        const vals = [];
+        for (let k = 1; k <= (side === 'on' && t.repeatOn ? 2 : 1); k += 1) vals.push(await runSide(side, k));
+        seen[side] = vals.every((v) => v === vals[0]) ? vals[0] : vals.join(' then ');
       }
       const why = t.judge(seen.on, seen.off);
+      // A marker on a side that must have none is the setting failing, however that run ended (L1128 m1).
+      const breach = ['on', 'off'].filter((sd) => t.judge.want?.[sd] === false && seen[sd] === true);
       // A side that did not run properly shows nothing about the name (L1124 m1): NOT TRIED, whatever the judge says.
-      outcomes[t.id] = sick.length ? { ok: null, notTried: `a run did not go properly, so the pair shows nothing: ${sick.join('; ')}`, seen }
+      outcomes[t.id] = breach.length ? { ok: false, why: `the ${breach.join(' and ')} side shows what the setting must stop, so it does not hold: ${why}${sick.length ? ` (and ${sick.join('; ')})` : ''}`, seen }
+        : sick.length ? { ok: null, notTried: `a run did not go properly, so the pair shows nothing: ${sick.join('; ')}`, seen }
         : why && typeof why === 'object' ? { ok: null, notTried: why.notTried, ...(why.fallback ? { fallback: why.fallback } : {}), seen }
           : why ? { ok: false, why, seen }
             : quiet.length ? { ok: null, notTried: `the ${quiet.join(' and ')} side ran the call with no refusal from claude (no error or denial for it), so its missing result is not the setting's`, seen }
@@ -574,16 +615,25 @@ export function guardProblem({ c, uid, ownDirUid, claudeVersion, account }) {
 function selfPath() { try { return realpathSync.native(fileURLToPath(import.meta.url)); } catch { return undefined; } }
 const arg = (argv, k) => { const i = argv.indexOf(k); return i >= 0 ? argv[i + 1] : undefined; };
 
+// How long after claude exits its pipes may still drain (L1128 c3): a child it left holding them can't keep the run open.
+export const DRAIN_MS = 2_000;
 /** Runs claude to its end, or its time limit. → { out, err, code, signal, timedOut, error } */
-export function runToEnd(bin, args, { cwd, env, timeoutMs = RUN_MS }) {
+export function runToEnd(bin, args, { cwd, env, timeoutMs = RUN_MS, drainMs = DRAIN_MS }) {
   return new Promise((resolve) => {
-    let out = ''; let err = ''; let child; let timedOut = false;
+    let out = ''; let err = ''; let child; let timedOut = false; let done = false; let drain;
     try { child = childSpawn(bin, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] }); } catch (e) { resolve({ out: '', err: '', error: e?.message ?? String(e) }); return; }
+    const end = (x) => {
+      if (done) return; done = true; clearTimeout(t); clearTimeout(drain);
+      try { child.stdout.destroy(); child.stderr.destroy(); } catch { /* gone */ }
+      resolve({ out, err, timedOut, ...x });
+    };
     const t = setTimeout(() => { timedOut = true; try { child.kill('SIGKILL'); } catch { /* gone */ } }, timeoutMs);
+    child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
     child.stdout.on('data', (d) => { out += d; });
     child.stderr.on('data', (d) => { if (err.length < 65_536) err += d; });
-    child.on('error', (e) => { clearTimeout(t); resolve({ out, err, timedOut, error: e?.message ?? String(e) }); });
-    child.on('close', (code, signal) => { clearTimeout(t); resolve({ out, err, code, signal, timedOut }); });
+    child.on('error', (e) => end({ error: e?.message ?? String(e) }));
+    child.on('exit', (code, signal) => { drain = setTimeout(() => end({ code, signal }), drainMs); });
+    child.on('close', (code, signal) => end({ code, signal }));
   });
 }
 
@@ -631,7 +681,34 @@ export function finish({ res, pin, base, home, at, print }) {
   return r.ok ? 0 : 1;
 }
 
-export async function main(argv, { print = (t) => process.stdout.write(t), uid = process.getuid?.(), now = () => Date.now(), home = homedir() } = {}) {
+/** The settings files of both account folders under `home`, each as the file a link leads to, once each (account b's
+ * links to a's). → [{ name, file }] or throws for a link that leads nowhere. */
+export function accountSettingsFiles(home) {
+  const out = [];
+  for (const name of ACCOUNT_NAMES) {
+    // Each as its real path (a link followed; the folders' own links too), so one file is never listed twice.
+    let f = join(accountDir(home, name), 'settings.json');
+    if (lstatSync(f, { throwIfNoEntry: false })?.isSymbolicLink()) f = realpathSync.native(f);
+    else { try { f = join(realpathSync.native(dirname(f)), 'settings.json'); } catch { /* no folder: as named */ } }
+    if (!out.some((x) => x.file === f)) out.push({ name, file: f });
+  }
+  return out;
+}
+/** The command that puts a cut-off run's user settings file back: this run's own, with --restore (L1128 c3: the user is
+ * the config's home folder's, the runner's user). */
+export const restoreCommand = (c, argv) => ['sudo', '-H', '-u', basename(c.home), process.execPath, selfPath() ?? PROOF, ...argv.filter((a) => a !== '--restore'), '--restore'].join(' ');
+
+const REAL = {
+  readConfig: (path) => checkRunnerConfig(readJobConfig(path, { code: [], optionalCode: ['budget'], self: selfPath() })),
+  accountInUse, sessionEnv, makeLock, runAll,
+  claudeVersion: (bin, env) => /^(\d+\.\d+\.\d+)/.exec(execFileSync(bin, [F.version], { encoding: 'utf8', timeout: 30_000, env: env ?? {} }).trim())?.[1] ?? null,
+  makeBase: () => mkdtempSync(join(tmpdir(), 'settings-names-proof-')),
+  // The uid owning the runner's own folder, or null when it is not a plain folder.
+  ownDirOwner: (dir) => { const st = lstatSync(dir); return st.isDirectory() && !st.isSymbolicLink() ? st.uid : null; },
+};
+
+export async function main(argv, { print = (t) => process.stdout.write(t), uid = process.getuid?.(), now = () => Date.now(), home = homedir(), deps = {} } = {}) {
+  const d = { ...REAL, ...deps };
   const names = allNames();
   const restoring = argv.includes('--restore');
   const stop = (why, version) => {
@@ -642,39 +719,45 @@ export async function main(argv, { print = (t) => process.stdout.write(t), uid =
     try { print(`Written to ${writeReceipt({ home, at: now(), header: { pin: version ?? null, runs: null, ok: false, refused: why }, lines })}\n`); } catch (e) { print(`The record of this run could not be written (${e?.code ?? e?.message})\n`); }
     print(`${r.verdict}\n`); return 1;
   };
-  let c; try { c = checkRunnerConfig(readJobConfig(arg(argv, '--config'), { code: [], optionalCode: ['budget'], self: selfPath() })); } catch (e) { return stop(`the worker runner's config can't be read (${e?.message ?? e})`); }
-  let ownDirUid; try { const st = lstatSync(c.ownDir); ownDirUid = st.isDirectory() && !st.isSymbolicLink() ? st.uid : null; } catch { ownDirUid = null; }
-  const account = accountInUse({ home: c.home });
+  let c; try { c = d.readConfig(arg(argv, '--config')); } catch (e) { return stop(`the worker runner's config can't be read (${e?.message ?? e})`); }
+  let ownDirUid; try { ownDirUid = d.ownDirOwner(c.ownDir); } catch { ownDirUid = null; }
   if (restoring) {
-    // --restore (L1124 m4): puts the user settings file back from a cut-off run's backup. It runs as the same user.
-    if (!Number.isInteger(uid) || uid === 0 || ownDirUid !== uid) return stop('run it as the worker runner\'s own user (sudo -H -u builder …), not root');
-    if (!account?.account) return stop(`no account is in use for the sessions (${account?.reason ?? 'no answer'})`);
-    let f = join(account.dir, 'settings.json');
-    if (lstatSync(f, { throwIfNoEntry: false })?.isSymbolicLink()) { try { f = realpathSync.native(f); } catch { return stop(`${f} is a link that leads nowhere`); } }
-    try { print(`${restoreUserFile(f, realFs)}\n`); return 0; } catch (e) { return stop(e?.message ?? String(e)); }
+    // --restore (L1124 m4, L1128 m6): puts back the user settings file of each account folder a cut-off run left a
+    // backup beside, whichever account is in use now. It runs as the same user.
+    if (!Number.isInteger(uid) || uid === 0 || ownDirUid !== uid) return stop(`run it as the worker runner's own user (sudo -H -u ${basename(String(c.home ?? 'builder'))} …), not root`);
+    let files; try { files = accountSettingsFiles(c.home); } catch (e) { return stop(`an account folder's settings file is a link that leads nowhere (${e?.message ?? e})`); }
+    const left = files.filter((x) => backupLeft(x.file));
+    if (!left.length) { print(`Nothing to put back: no backup beside ${files.map((x) => x.file).join(' or ')}\n`); return 0; }
+    for (const x of left) { try { print(`${restoreUserFile(x.file, realFs)}\n`); } catch (e) { return stop(e?.message ?? String(e)); } }
+    return 0;
   }
-  const env = account?.account ? sessionEnv(c, account) : null;
-  let claudeVersion = null; try { claudeVersion = /^(\d+\.\d+\.\d+)/.exec(execFileSync(c.claudeBin, [F.version], { encoding: 'utf8', timeout: 30_000, env: env ?? {} }).trim())?.[1] ?? null; } catch { /* not readable */ }
+  // Every refusal from here on ends in a receipt and NOT DONE (L1128 m5), a throw too.
+  let account; try { account = d.accountInUse({ home: c.home }); } catch (e) { return stop(`the account in use can't be read (${e?.message ?? e})`, c.pin); }
+  let env = null; try { env = account?.account ? d.sessionEnv(c, account) : null; } catch (e) { return stop(`the sessions' variables can't be made (${e?.message ?? e})`, c.pin); }
+  let claudeVersion = null; try { claudeVersion = d.claudeVersion(c.claudeBin, env); } catch { /* not readable */ }
   const bad = guardProblem({ c, uid, ownDirUid, claudeVersion, account });
   if (bad) return stop(bad, c.pin);
   // Account b's settings.json is a link to account a's (accounts.mjs SHARED): the file claude reads is the one it leads to.
   let userFile = join(account.dir, 'settings.json');
   if (lstatSync(userFile, { throwIfNoEntry: false })?.isSymbolicLink()) { try { userFile = realpathSync.native(userFile); } catch { return stop(`${userFile} is a link that leads nowhere`, c.pin); } }
-  if (backupLeft(userFile)) return stop(`${userFile}${BACKUP_SUFFIX} ${LEFTOVER}: ${['sudo', '-H', '-u', 'builder', process.execPath, selfPath() ?? PROOF, ...argv, '--restore'].join(' ')}`, c.pin);
-  const lock = makeLock({ dir: c.ownDir, timeoutMs: 2_000 }); let held;
-  try { held = lock.acquire(); } catch (e) { return stop(/busy/.test(e?.message ?? '') ? 'the worker runner is running. Stop it first, then run this again' : `the worker runner's lock can't be taken (${e?.message ?? e})`, c.pin); }
-  const base = mkdtempSync(join(tmpdir(), 'settings-names-proof-'));
-  let res;
+  if (backupLeft(userFile)) return stop(`${userFile}${BACKUP_SUFFIX} ${LEFTOVER}: ${restoreCommand(c, argv)}`, c.pin);
+  let lock; let held;
+  try { lock = d.makeLock({ dir: c.ownDir, timeoutMs: 2_000 }); held = lock.acquire(); } catch (e) { return stop(/busy/.test(e?.message ?? '') ? 'the worker runner is running. Stop it first, then run this again' : `the worker runner's lock can't be taken (${e?.message ?? e})`, c.pin); }
+  let res; let base;
   try {
+    // Made inside the try (L1128 m5): a throw here still lets the lock go.
+    base = d.makeBase();
     const io = {
       claude: (args, { cwd }) => runToEnd(c.claudeBin, args, { cwd, env }),
       readbackAll: () => roleReadback({ base, pin: c.pin, start: (args, cwd) => runToInit(c.claudeBin, args, { cwd, env }) }),
       guardPassed: true, userFile, fs: realFs, sleep: (ms) => new Promise((r) => { setTimeout(r, ms); }),
     };
-    res = await runAll({ base, io });
+    res = await d.runAll({ base, io });
   } catch (e) {
     return stop(`the run stopped: ${e?.message ?? e}`, c.pin);
   } finally { try { lock.release(held.nonce); } catch { /* gone */ } }
+  // A put-back that failed mid-run leaves the backup (L1128 m6): say how to put the file back, in this same run.
+  if (backupLeft(userFile)) print(`${userFile} could not be put back during the run; its backup is beside it. To put it back: ${restoreCommand(c, argv)}\n`);
   // The version counts only because claude --version said it before the run (the guard): a name is proven on that pin.
   return finish({ res, pin: c.pin, base, home, at: now(), print });
 }
