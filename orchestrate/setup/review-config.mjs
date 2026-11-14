@@ -105,6 +105,27 @@ export const pinFields = (cfg, pin) => ({ pin, claudeBin: pinnedBinary(installPa
 export const pinProblem = (pin) => (pin === TOOLS_CHECKED.claude_code ? null
   : `--pin is ${String(pin).slice(0, 20)}, but the role tool lists were checked on Claude Code ${TOOLS_CHECKED.claude_code} (M10 TOOLS_CHECKED); re-check them before the pin moves`);
 
+/**
+ * Why `r` is not the rules the hooks read (production.{env_files, programs, hosts}, secrets.paths: each a list of names, an
+ * empty one saying none; nothing else), or []. `who` names the file in each message. The one shape check for the rules:
+ * review-config's input and managed-settings' copy of review.json both use it.
+ */
+export function rulesProblems(r, who) {
+  const problems = [];
+  if (!plainObject(r)) return [`${who}'s rules must be an object with production and secrets`];
+  for (const k of Object.keys(r)) if (!Object.hasOwn(RULE_LISTS, k)) problems.push(`${who}'s rules hold ${JSON.stringify(k.slice(0, 40))}, which the hooks do not read`);
+  for (const [part, lists] of Object.entries(RULE_LISTS)) {
+    if (!Object.hasOwn(r, part)) { problems.push(`${who} must set rules.${part} (there is no default)`); continue; }
+    if (!plainObject(r[part])) { problems.push(`${who}'s rules.${part} must be an object`); continue; }
+    for (const k of Object.keys(r[part])) if (!lists.includes(k)) problems.push(`${who}'s rules.${part} holds ${JSON.stringify(k.slice(0, 40))}, which the hooks do not read`);
+    for (const k of lists) {
+      if (!Object.hasOwn(r[part], k)) problems.push(`${who} must set rules.${part}.${k} (there is no default; an empty list says none)`);
+      else if (!Array.isArray(r[part][k]) || !r[part][k].every((v) => typeof v === 'string' && v.length > 0)) problems.push(`${who}'s rules.${part}.${k} must be a list of names`);
+    }
+  }
+  return problems;
+}
+
 /** The owner's fields, from their input file's parsed value: every key required, no other key allowed. → { fields, problems } */
 export function ownerFields(cfg, input) {
   const problems = [];
@@ -121,22 +142,7 @@ export function ownerFields(cfg, input) {
   if (Object.hasOwn(input, 'machineWide') && !absPath(input.machineWide)) problems.push('the input file\'s machineWide must be the full path of the machine-wide Claude Code settings file');
   // L909: claude reads only its fixed managed file, so a guard in any other would never apply (launch check 10 refuses it too).
   else if (Object.hasOwn(input, 'machineWide') && input.machineWide !== CLAUDE_FILE) problems.push(`the input file's machineWide must be ${CLAUDE_FILE}: claude ${MANAGED_SOURCES_CHECKED_ON} reads only that file`);
-  if (Object.hasOwn(input, 'rules')) {
-    const r = input.rules;
-    if (!plainObject(r)) problems.push('the input file\'s rules must be an object with production and secrets');
-    else {
-      for (const k of Object.keys(r)) if (!Object.hasOwn(RULE_LISTS, k)) problems.push(`the input file's rules hold ${JSON.stringify(k.slice(0, 40))}, which the hooks do not read`);
-      for (const [part, lists] of Object.entries(RULE_LISTS)) {
-        if (!Object.hasOwn(r, part)) { problems.push(`the input file must set rules.${part} (there is no default)`); continue; }
-        if (!plainObject(r[part])) { problems.push(`the input file's rules.${part} must be an object`); continue; }
-        for (const k of Object.keys(r[part])) if (!lists.includes(k)) problems.push(`the input file's rules.${part} holds ${JSON.stringify(k.slice(0, 40))}, which the hooks do not read`);
-        for (const k of lists) {
-          if (!Object.hasOwn(r[part], k)) problems.push(`the input file must set rules.${part}.${k} (there is no default; an empty list says none)`);
-          else if (!Array.isArray(r[part][k]) || !r[part][k].every((v) => typeof v === 'string' && v.length > 0)) problems.push(`the input file's rules.${part}.${k} must be a list of names`);
-        }
-      }
-    }
-  }
+  if (Object.hasOwn(input, 'rules')) problems.push(...rulesProblems(input.rules, 'the input file'));
   if (problems.length) return { fields: null, problems };
   const rules = { production: Object.fromEntries(RULE_LISTS.production.map((k) => [k, [...input.rules.production[k]]])), secrets: { paths: [...input.rules.secrets.paths] } };
   return { fields: { recordRoot: storePath(cfg, input.product), dispatcherRules: dispatcherRulesPath(cfg, input.product), machineWide: input.machineWide, rules }, problems };

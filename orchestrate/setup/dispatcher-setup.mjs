@@ -144,12 +144,13 @@ export function dispatcherPlist(cfg) {
   });
 }
 
-/** Whether the installed copy's updater keeps dispatcher.json: true, false, or null when there is no copy (or no readable updater.json). */
-function copyKeeps(io, cfg) {
+/** Whether the installed copy's updater keeps `name` (dispatcher.json, or the Sensors' sensors.json): true, false, or null when
+ *  there is no copy (or no readable updater.json). */
+export function copyKeeps(io, cfg, name = DISPATCHER_CONFIG) {
   const P = installPaths(cfg);
   const cur = currentCopy(io.at(P.installRoot), { owner: io.rootUid });
   if (cur.missing || cur.problem || !cur.link) return null;
-  try { const u = JSON.parse(io.readText(join(P.installRoot, UPDATER_CONFIG))); return Array.isArray(u?.keep) && u.keep.includes(DISPATCHER_CONFIG); } catch { return null; }
+  try { const u = JSON.parse(io.readText(join(P.installRoot, UPDATER_CONFIG))); return Array.isArray(u?.keep) && u.keep.includes(name); } catch { return null; }
 }
 const KEEPS_NOT = `the installed copy was made before the Dispatcher was set up, so its updater does not keep ${DISPATCHER_CONFIG} and would drop it on the next update: install again (README, part 6)`;
 
@@ -157,7 +158,7 @@ const KEEPS_NOT = `the installed copy was made before the Dispatcher was set up,
  * Null, or why a root file is not exactly `want`: root's 0644, a plain file with one name, this text. `inCopy`: the file is in
  * the installed copy, read by its real path as the copy's checks read it (install-check.mjs), not through the base's folders.
  */
-function fileProblem(io, file, want, { inCopy = false } = {}) {
+export function fileProblem(io, file, want, { inCopy = false } = {}) {
   const lstat = inCopy ? (p) => io.lstatReal(io.at(p)) : (p) => io.lstat(p);
   let st; try { st = lstat(file); } catch { return `${file} is not there`; }
   if (st.isSymbolicLink() || !st.isFile()) return `${file} is not a plain file`;

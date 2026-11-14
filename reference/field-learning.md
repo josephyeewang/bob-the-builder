@@ -19,15 +19,15 @@ Put these four things in the existing change plan, with links rather than copied
 3. **Prior failures and prevention:** each relevant class, the existing control that missed it, why it missed, and the check the builder will run before handing off. A prevention check must detect a newly introduced instance outside the original incident list.
 4. **Finish condition:** the actual user journey and its retained evidence; what is built but not connected; the next activation blocker and owner. Use the existing capability matrix and deferred-actions list. If completed work is waiting for activation, prefer finishing it before starting more in the same area, unless a dependency or owner decision justifies otherwise.
 
-A reviewer recommendation is a proposed repair, not an approved design. Inspect the current behavior and callers before accepting it. A repair introducing a new state, flag, persisted file, permission or subsystem goes back through E2/E3 for the affected design; the existing authorization rules still apply.
+A reviewer recommendation is a proposed repair, not an approved design. Inspect the current behavior and callers before accepting it. A repair introducing a new mechanism (a state, key, flag, list, command, persisted file, permission or subsystem) goes back through E2/E3 for the affected design; the existing authorization rules still apply.
 
 ## Repair without creating the next finding
 
 Keep the supported scope and severity criteria stable across review rounds. For each repair:
 
 - Name the violated requirement and reproduce the defect through the actual caller.
-- List the newly touched callers, state transitions and guarantees. Treat those changes as new work, not merely proof that an old line was edited.
-- Re-run the prior round's relevant failing cases **and verified-good behavior**, plus a clean control. A test that rejects every input is not a useful safety fix.
+- List, in the fix's hand-in, the newly touched functions, callers, files, state transitions and guarantees. Treat those changes as new work, not merely proof that an old line was edited; about a fifth of the findings in one study were created by the previous fix (Rule 30(j)).
+- Re-run the prior round's relevant failing cases, its planted defects (`audit-lenses/_evidence-accounting.md` § "Fixed coverage for a change review") **and its verified-good behavior**, plus a clean control. A test that rejects every input is not a useful safety fix.
 - Check neighboring paths and new instances discovered from the current source. A handwritten list of yesterday's sites is not a class-level census.
 - Preserve the reviewed revision, commands, environment assumptions and results. If the code, tool version or relevant assumptions change, refresh affected evidence. An unavailable old test is an explicit evidence gap, not a permanent excuse or an automatic pass.
 
@@ -38,12 +38,12 @@ Use the smallest applicable boundary checks, not another full panel:
 | Filtering, sharing or derived outputs | Changing only excluded input must not change the allowed output; include every derived field and actual output producer. |
 | State changes and asynchronous work | Pause before and after validation, locking and writing; change the underlying state or selected context; retry/reopen. Verify authority and freshness at the action point. |
 | Verifiers, generators or test harnesses | Run one real producer → artifact → real consumer journey; corrupt one relevant field; preserve unrelated valid content; distinguish product failure from verifier failure. |
-| Safety guards | State the actor and trust boundary. Prefer enforced permissions, bounded allowed operations and shared checks over endless lists of bad spellings. Prove containment before relying on it; never remove a safety boundary solely because a test is inconvenient. |
+| Safety guards | State the actor and trust boundary. Prefer enforced permissions, bounded allowed operations and shared checks over endless lists of bad spellings. Prove containment before relying on it; never remove a safety boundary solely because a test is inconvenient (Engineering Principle 12). |
 | Scheduling or blocking rules | Name the resource/conflict they prevent and current evidence. Recommend narrowing obsolete constraints; retain real locks, user approvals and applicable safety obligations. |
 
 ## Grade consequences consistently
 
-Rule 30 remains the severity authority. A Material finding names the scenario, actual or planned supported entry point, failed boundary, and consequential outcome. For security, adversarial actors can be legitimate inputs to the threat model. Corrupt state and clock changes are not automatically out of scope. A safety assumption counts only when independently evidenced in the relevant environment.
+Rule 30 remains the severity authority. A Material finding states Rule 30(j)'s four lines: trigger, path, outcome and reach. For security, adversarial actors can be legitimate inputs to the threat model. Corrupt state, clock changes and deliberate evasion are out of scope only while containment is independently evidenced in the relevant environment (Engineering Principle 12); an unevidenced safety assumption does not count.
 
 Separate product defects, verifier defects, missing evidence, and proposed scope expansion. Missing evidence can still block a required safety or release gate without pretending a product failure has been demonstrated. Latent code becomes a release blocker when the approved change activates it. Never improve a rate by relabeling serious findings, narrowing coverage silently, or treating unverified containment as installed.
 
