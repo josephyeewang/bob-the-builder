@@ -40,7 +40,7 @@
 //   check-safe-directory (read only; sudo to look)
 //   approve-rules <product> [--dry-run]  the owner approves the rules version on the product's GitHub main: shown, then the
 //                                       product's name typed at the terminal; added to M10's approval list (approve-rules.mjs)
-//                                       (sudo -u orchestrate, from the owner's own login; never root, never --config)
+//                                       (sudo -k -u orchestrate, from the owner's own login; never root, never --config)
 //   token  [--dry-run]  save the watch-only token (typed hidden, never shown)  (root)
 //   prove-token  the repository is the config's watch.repo (private, not archived); read works, a no-op pull-request write is refused as "this token may not"; each kind of read the watch job makes works (the check runs with the watcher App's token, minted as orchestrate); then a note to check the token page by eye  (sudo: the token is read as orchestrate)
 //   watch-rules --rules-source <full path> [--dry-run]  put the watch-only week's rules in place (the file's hash must match the config)  (root)

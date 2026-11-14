@@ -2,23 +2,32 @@
 // product's GitHub main, by appending its blob to M10's approval list (approved-rules.json, the stopgap until 0b-5; the
 // M10 reader adopts a new rules version only when the list names it, forward only: reader.mjs allowListVerifier).
 //
-//   sudo -u orchestrate /usr/local/bin/node <the installed copy>/setup/setup.mjs approve-rules <product>
+//   sudo -k -u orchestrate /usr/local/bin/node <the installed copy>/setup/setup.mjs approve-rules <product>
+//
+// (-k: sudo forgets any password it remembers, so it asks the owner's password every time.)
 //
 // WHY A COMMAND. Approving the rules is the owner's act. A hand-written JSON line would mean typing a 40-hex hash copied from
-// somewhere, and anything that can write the file could approve; so this reads main's version itself, shows it, and only an
-// owner at the keyboard can say yes.
+// somewhere, and anything that can write the file could approve; so this reads main's version itself and shows it.
+//
+// WHAT GUARDS IT (L1132 m1). The guard is sudo asking the owner's password: only `orchestrate` can write the list, and
+// becoming `orchestrate` takes that password. SUDO_UID is only an environment variable, and a script can answer a terminal
+// prompt through a pseudo-terminal (`script`), so neither is a guard on its own; Claude sessions run as the owner's Mac user,
+// so they rest on sudo too. The SUDO_UID match and the retyped name are second checks: they stop a mistaken run (another
+// user's sudo, a pipe, an answer for another product), not a determined one.
 //
 // WHAT IT DOES, in order, each a refusal (exit 1 or 2, nothing written) when it fails:
 //   1. who: run as the Dispatcher's user (orchestrate, who owns the list), through sudo by the owner (SUDO_UID is the
-//      owner's Mac user id from root's setup config). Root, the owner run directly, or anyone else is refused.
+//      owner's Mac user id from root's setup config; a second check, see above). Root, the owner run directly, or anyone
+//      else is refused.
 //   2. which: the Dispatcher's own config in the installed copy (root's file, read as root's are), whose product must be
 //      <product>, and its products.json entry (owner/repo). Nothing is taken from the command line but the product name.
 //   3. main's version: the branch's commit, then the rules file at that commit, read only (the read-only client and the
 //      Dispatcher's own token file) and checked as the reader checks it (rulesFileOf): its blob is what is approved.
 //   4. shown: the product, the repository, the commit, the blob, whether it parses and passes M10's module checks (a file
 //      that doesn't parse is refused: the reader would never adopt it), what the list holds now, and the file's top lines.
-//   5. the owner's yes: the product's name typed again at the terminal itself (/dev/tty), so a pipe, a script or a Claude
-//      session (which has no terminal) can't answer. Anything else is a no.
+//   5. the owner's yes: the product's name typed again at the terminal itself (/dev/tty), with standard input a terminal
+//      too; a pipe or no terminal is refused. A second check, not the guard: a pseudo-terminal can answer it. Anything but
+//      the exact name is a no.
 //   6. still main's: main is read again; a commit or blob that moved since step 3 is refused ("run it again").
 //   7. forward only: the list is read again and must be what step 4 showed; the new list is that one with the blob added at
 //      the end, written to a new file in the same private folder and renamed over the old (never edited in place).
@@ -29,7 +38,8 @@
 // back, and approving it again needs the same yes.
 
 import { closeSync, constants, fsyncSync, fstatSync, openSync, readSync, renameSync, unlinkSync, writeSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { isatty } from 'node:tty';
 import { RULES_PATH, BRANCH, allowListVerifier, readProducts, rulesFileOf } from '../modules/M10-rules/reader.mjs';
 import { parsePolicy } from '../modules/M10-rules/policy.mjs';
 import { moduleProblems } from '../modules/M10-rules/first-cutover.mjs';
@@ -83,12 +93,21 @@ export function writeListFile(file, text) {
   try { writeSync(fd, text); fsyncSync(fd); } catch (e) { closeSync(fd); try { unlinkSync(tmp); } catch { /* gone */ } throw e; }
   closeSync(fd);
   try { renameSync(tmp, file); } catch (e) { try { unlinkSync(tmp); } catch { /* gone */ } throw e; }
+  // The rename itself made lasting: the folder flushed too (L1132 c1).
+  const dfd = openSync(dirname(file), constants.O_RDONLY);
+  try { fsyncSync(dfd); } finally { closeSync(dfd); }
 }
 
-/** One line typed at the terminal itself, shown as typed. Refuses when there is no terminal (a pipe or a session). */
-export function readLineFromTty(prompt, { maxBytes = 200 } = {}) {
+/**
+ * One line typed at the terminal itself, shown as typed. Refuses when standard input is not a terminal (a pipe) or there
+ * is no terminal (a session without one). `isTty` and `ttyPath` are for tests.
+ */
+/** The terminal itself, never standard input: the yes must come from the keyboard of the window sudo ran in. */
+export const TTY_PATH = '/dev/tty';
+export function readLineFromTty(prompt, { maxBytes = 200, isTty = () => isatty(0), ttyPath = TTY_PATH } = {}) {
+  if (!isTty()) throw new Error('standard input is not a terminal (a pipe or a script?); run this yourself in the Terminal app');
   let fd;
-  try { fd = openSync('/dev/tty', 'r+'); } catch { throw new Error('there is no terminal to type the answer into; run this in the Terminal app'); }
+  try { fd = openSync(ttyPath, 'r+'); } catch { throw new Error('there is no terminal to type the answer into; run this in the Terminal app'); }
   try {
     writeSync(fd, prompt);
     const bytes = []; const one = Buffer.alloc(1);
@@ -142,7 +161,7 @@ export async function approveRules({ io, cfg, product, dry = false, env, ports, 
   const me = readUser(io, DISPATCHER_USER);
   const owner = readUser(io, cfg.owner);
   if (!me.exists || !owner.exists) { err(`refused: ${!me.exists ? DISPATCHER_USER : cfg.owner} is not a user on this Mac`); return 2; }
-  if (io.euid() !== me.uid) { err(`refused: run this as ${DISPATCHER_USER}, who owns the approval list: sudo -u ${DISPATCHER_USER} … approve-rules ${product}`); return 2; }
+  if (io.euid() !== me.uid) { err(`refused: run this as ${DISPATCHER_USER}, who owns the approval list: sudo -k -u ${DISPATCHER_USER} … approve-rules ${product}`); return 2; }
   if (owner.uid === me.uid || owner.uid === io.rootUid) { err(`refused: the owner in root's setup config (${cfg.owner}) can't be ${DISPATCHER_USER} or root`); return 2; }
   if (env.SUDO_UID !== String(owner.uid)) { err(`refused: only the owner (${cfg.owner}) approves rules, through sudo from their own login (SUDO_UID is ${env.SUDO_UID === undefined ? 'not set' : 'another user'})`); return 2; }
 
@@ -178,6 +197,8 @@ export async function approveRules({ io, cfg, product, dry = false, env, ports, 
   if (mine.at(-1) === m.blob) { out(`already approved: ${m.blob} is the last on the list. Nothing written.`); return 0; }
   // The reader moves forward only from a version the list names (allowListVerifier): one it holds that the list doesn't
   // name can never be moved on from, so writing would approve nothing.
+  // One that can't be read can't be checked against the list, so it is a refusal, never a skip (L1132 m4).
+  if (held === undefined) { err(`refused: the reader's last good copy in ${dir} can't be read, so it can't be checked against the list. Look at it first.`); return 1; }
   if (typeof held === 'string' && !mine.includes(held)) { err(`refused: the version the reader holds (${held}) is not on the list, so the reader can't move forward from it; nothing an approval adds would be adopted. Look at ${file}.`); return 1; }
   if (mine.includes(m.blob)) out(`NOTE         this version was approved before and later replaced: approving it again lets the reader go back to it`);
   out(`--- the first ${TOP_LINES} lines of main's ${RULES_PATH} ---`);

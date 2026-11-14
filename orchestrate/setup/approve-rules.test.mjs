@@ -10,7 +10,7 @@ import { tempDir } from '../shared/test-tmp.mjs';
 import { FIRST, ENTRY } from '../modules/M10-rules/first-cutover.test-helper.mjs';
 import { blobSha, allowListVerifier, RULES_PATH } from '../modules/M10-rules/reader.mjs';
 import { reviewConfig } from '../wiring/review-ports.test-helper.mjs';
-import { APPROVED_FILE, approveRules, mainRules, parseList, readListFile, writeListFile } from './approve-rules.mjs';
+import { APPROVED_FILE, approveRules, mainRules, parseList, readLineFromTty, readListFile, realPorts, TTY_PATH, writeListFile } from './approve-rules.mjs';
 import { main as setupMain, parseArgs } from './setup.mjs';
 
 const P = ENTRY.product;
@@ -182,7 +182,7 @@ test('--dry-run shows everything and asks nothing, writes nothing', async () => 
 });
 
 test('main moved between the look and the yes (a new commit, or a new blob at the same commit): refused, nothing written', async () => {
-  for (const after of [{ commit: 'd'.repeat(40) }, { commit: 'd'.repeat(40), text: `${FIRST}# more\n` }]) {
+  for (const after of [{ commit: 'd'.repeat(40) }, { text: `${FIRST}# more\n` }]) {
     const w = world();
     w.gh.afterFirst = after;
     assert.equal(await w.run(), 1);
@@ -243,10 +243,42 @@ test('a list that can\'t be trusted is never written over: not JSON, not lists o
   linkSync(h.file, join(h.dir, 'other-name.json'));
   assert.equal(await h.run(), 1);
   assert.match(h.err.join('\n'), /another name/);
-  const g = world({ list: {} });
-  chmodSync(g.file, 0o622);
-  assert.equal(await g.run(), 1);
-  assert.match(g.err.join('\n'), /can be written by others/);
+  for (const mode of [0o622, 0o620, 0o602]) {   // others, the group (L1132 m3), or both
+    const g = world({ list: {} });
+    chmodSync(g.file, mode);
+    assert.equal(await g.run(), 1, mode.toString(8));
+    assert.match(g.err.join('\n'), /can be written by others/);
+    assert.equal(readFileSync(g.file, 'utf8'), '{}');
+  }
+});
+
+test('the reader\'s last good copy can\'t be read: refused, never a skip of the held-version check (L1132 m4)', async () => {
+  const w = world({ list: { [P]: ['b'.repeat(40)] } });
+  w.ports.lastGood = () => undefined;
+  const before = readFileSync(w.file, 'utf8');
+  assert.equal(await w.run(), 1);
+  assert.match(w.err.join('\n'), /last good copy .* can't be read/);
+  assert.equal(w.asked.length, 0);
+  assert.equal(readFileSync(w.file, 'utf8'), before);
+  // The real port: a copy that isn't JSON, or that others can write, reads as undefined (can't be read), not as none.
+  const lg = realPorts(ioOf(), CFG).lastGood;
+  writeFileSync(join(w.rulesStateDir, `${P}.last-good.json`), '{', { mode: 0o600 });
+  assert.equal(lg(w.rulesStateDir, P), undefined);
+  writeFileSync(join(w.rulesStateDir, `${P}.last-good.json`), JSON.stringify({ blob: 'c'.repeat(40) }), { mode: 0o600 });
+  chmodSync(join(w.rulesStateDir, `${P}.last-good.json`), 0o620);
+  assert.equal(lg(w.rulesStateDir, P), undefined);
+  chmodSync(join(w.rulesStateDir, `${P}.last-good.json`), 0o600);
+  assert.equal(lg(w.rulesStateDir, P), 'c'.repeat(40));
+  assert.equal(lg(join(w.rulesStateDir, 'none'), P), null, 'no copy yet is null');
+});
+
+test('the real yes is read from the terminal: realPorts().ask is readLineFromTty, which refuses a pipe or no terminal (L1132 m1, m2)', () => {
+  assert.equal(realPorts(ioOf(), CFG).ask, readLineFromTty);
+  assert.equal(TTY_PATH, '/dev/tty', 'the answer is read from the terminal itself, never from standard input');
+  assert.throws(() => readLineFromTty('x: ', { isTty: () => false }), /standard input is not a terminal/);
+  assert.throws(() => readLineFromTty('x: ', { isTty: () => true, ttyPath: join(tempDir('orch-approve-'), 'no-tty') }), /no terminal to type the answer into/);
+  // Under the test runner, standard input is not a terminal, so the real check refuses before /dev/tty is opened.
+  assert.throws(() => readLineFromTty('x: '), /standard input is not a terminal|no terminal/);
 });
 
 test('parseList and writeListFile: lists of 40-hex blobs only; the written file is 0600 and replaces the old by rename', () => {
