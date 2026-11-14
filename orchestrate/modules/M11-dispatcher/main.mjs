@@ -95,7 +95,8 @@ export async function main(argv, { now, clock, log = (s) => process.stderr.write
     if (dog && runDeadlineMs === undefined && config.runDeadlineMs !== undefined) { dog.terminate(); dog = startWatchdog(config.runDeadlineMs + WATCHDOG_MARGIN_MS); }
     const mod = await import(pathToFileURL(config.wiring).href);
     if (typeof mod.wire !== 'function') throw new Error('the wiring module has no wire()');
-    // Every synchronous port runs its command through limitedSync (sync-limit.mjs): a time limit each.
+    // Every synchronous port runs its command through limitedSync (sync-limit.mjs): a time limit each. This is the maker;
+    // wire() makes the runner with node's spawnSync, which this folder can't import (L1180).
     wired = await mod.wire(config, { limitedSync });
     const keys = wired && typeof wired === 'object' ? Object.keys(wired) : [];
     const extra = keys.filter((k) => !WIRED_KEYS.includes(k));

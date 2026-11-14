@@ -27,6 +27,7 @@ import { NOT_WIRED_PHONE, phonePorts } from './phone-ports.mjs';
 import { fakeGitHubFetch, blobOf } from './fake-github.test-helper.mjs';
 import { reviewConfig } from './review-ports.test-helper.mjs';
 import { tempDir } from '../shared/test-tmp.mjs';
+import { limitedSync } from '../modules/M11-dispatcher/sync-limit.mjs';
 import { readRulesSnapshot } from '../modules/M11-dispatcher/budget.mjs';
 import { FETCH_GRACE_MS } from '../modules/M10-rules/reader.mjs';
 
@@ -291,7 +292,8 @@ test('the seam: each port has one home; a port file gets ctx and fills its ports
 
   const seen = [];
   const opts = { fetchFn: fakeGitHubFetch(w.fake), log: () => {} };
-  const filled = await wire(w.config, { ...opts, limitedSync: 'the sync', groups: rest(['sessions', 'hostLock', 'launch', 'probe', 'board'],
+  const made = [];
+  const filled = await wire(w.config, { ...opts, limitedSync: (sp) => { made.push(sp); return 'the sync'; }, spawnSync: 'a spawnSync', groups: rest(['sessions', 'hostLock', 'launch', 'probe', 'board'],
     { notWired: ['launch', 'probe'], build: (ctx) => { seen.push(ctx); return { sessions: 'a real port' }; } },
     { notWired: ['board'], build: () => ({ hostLock: 'another' }) }) });
   assert.deepEqual([filled.ports.sessions, filled.ports.hostLock], ['a real port', 'another']);
@@ -304,9 +306,36 @@ test('the seam: each port has one home; a port file gets ctx and fills its ports
   assert.deepEqual(Object.keys(seen[0].gh).sort(), ['get', 'post']);
   await assert.rejects(seen[0].gh.post('/repos/o/r/pulls', {}), /only write-shaped/);
   await assert.rejects(seen[0].gh.get('/user'), /only repository reads/);
-  assert.equal(seen[0].limitedSync, 'the sync');
+  assert.equal(seen[0].limitedSync, 'the sync', 'ctx holds the runner the maker made, not the maker (L1180)');
+  assert.deepEqual(made, ['a spawnSync'], 'made once, with the spawnSync given');
   assert.equal(seen[0].rec, filled.rec);
   assert.equal(seen[0].rules, filled.rules);
+});
+
+// L1180: main.mjs hands wire() limitedSync's maker. The ports that run commands get the runner it makes, so their run
+// call succeeds; before, ctx held the maker, so on a real Mac every filesOf threw and hostLock always read "not known".
+test('L1180: through wire() with the real limitedSync maker, filesOf and hostLock run their commands', async () => {
+  const w = world();
+  const calls = [];
+  const spawnSync = (cmd, args, o) => {
+    calls.push([cmd, args]);
+    assert.equal(o.shell, false);
+    assert.ok(o.timeout > 0, 'held to a time limit');
+    if (args.includes('diff-tree')) return { status: 0, stdout: 'a.txt\0b/c.txt\0' };
+    if (args.includes('config')) return { status: 0, stdout: '' };
+    if (args[0] === '-e') return { status: 0, stdout: JSON.stringify({ text: 'host: the-mini\n' }) };
+    return { status: 1, stdout: '' };
+  };
+  const { ports } = await wire(w.config, { log: () => {}, fetchFn: fakeGitHubFetch(w.fake), limitedSync, spawnSync });
+  assert.deepEqual(ports.filesOf(COMMIT), ['a.txt', 'b/c.txt']);
+  assert.ok(calls.some(([cmd, a]) => cmd === '/usr/bin/env' && a.includes('diff-tree') && a.includes(COMMIT)), 'filesOf ran git through the runner');
+  assert.equal(ports.hostLock(), 'host: the-mini\n');
+  assert.ok(calls.some(([cmd, a]) => cmd === process.execPath && a.includes(w.config.hostLockPath)), 'hostLock ran its reader through the runner');
+  // Given no maker, the ports say so rather than read as "no host" or an empty list.
+  const none = world();
+  const bare = await wire(none.config, { log: () => {}, fetchFn: fakeGitHubFetch(none.fake) });
+  assert.throws(() => bare.ports.filesOf(COMMIT), /given no limitedSync/);
+  assert.throws(() => bare.ports.hostLock(), /given no limitedSync/);
 });
 
 // Every way a port can lose its one home stops a start: the groups the wiring is given, what stops it, the port it names.
