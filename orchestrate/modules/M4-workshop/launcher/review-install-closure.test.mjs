@@ -110,7 +110,7 @@ const JOB_BUILDERS = Object.freeze({
   'setup/owner-answer-setup.mjs': () => [ownerJobPlist({ base: SAMPLE_BASE, label: LABEL }, { home: join(SAMPLE_BASE, 'owner-home') })],
   // L874: the worker runner's LaunchAgent is built the same way, through loginJobPlist (#364, #378).
   'wiring/runner-job.mjs': () => [workerRunnerPlist({ label: LABEL, node: join(SAMPLE_ROOT, NODE), script: join(SAMPLE_ROOT, RUNNER_MAIN),
-    config: join(SAMPLE_BASE, 'runner.json'), path: '/usr/bin:/bin', logDir: join(SAMPLE_BASE, 'logs'), workDir: SAMPLE_BASE, home: join(SAMPLE_BASE, 'owner-home') })],
+    config: join(SAMPLE_BASE, 'runner.json'), path: '/usr/bin:/bin', logDir: join(SAMPLE_BASE, 'logs'), workDir: SAMPLE_BASE, home: join(SAMPLE_BASE, 'home', 'builder') })],
   // L1029 E: the owner's host.lock copier, a LaunchAgent built the same way, through loginJobPlist.
   'setup/host-lock-copy.mjs': () => [copierPlist({ label: LABEL, installRoot: SAMPLE_ROOT, node: NODE, configPath: join(SAMPLE_BASE, 'setup.json'),
     copy: join(SAMPLE_BASE, 'owner-home', '.orchestrate', 'host.lock'), home: join(SAMPLE_BASE, 'owner-home') })],

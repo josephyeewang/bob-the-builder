@@ -85,7 +85,7 @@ import { launch } from '../modules/M4-workshop/launcher/launch.mjs';
 import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.mjs';
 import { prepareWorkerCopy } from '../modules/M4-workshop/launcher/worker-copy.mjs';
 import { sessionArgs, spawnClaude } from '../modules/M4-workshop/launcher/review-launch.mjs';
-import { accountInUse } from '../modules/M4-workshop/launcher/accounts.mjs';
+import { accountDir, accountEnv, accountInUse, isSetUp, readAccountFile } from '../modules/M4-workshop/launcher/accounts.mjs';
 import { startEnv } from '../modules/M4-workshop/launcher/env-check.mjs';
 import { readCardFile } from '../modules/M4-workshop/launcher/review-runner-main.mjs';
 import { createSaveWork } from '../modules/M4-workshop/git/save-work.mjs';
@@ -412,11 +412,26 @@ export function liveWallProblem(live, product, places, read) {
 /** The start's default prompt (L970): the worker prompt's text, or null (and the start is refused) when it gives none. */
 export const workerPromptText = (x) => { const p = workerPrompt(x); return p.ok ? p.text : { ok: false, reason: p.reason }; };
 
+/**
+ * The account a worker session signs in with (L1079). The runner runs as the builder user, so its own home's account file
+ * is not the owner's choice: with `accountCopy` (root's copy of the owner's choice, setup's, as the review runner reads it,
+ * review-runner-main.mjs) the choice is read there, and the sign-in folder is the builder's own for that account. A copy
+ * named but not readable is refused, never read as account a: a wrong account spends the other budget. Without
+ * `accountCopy`, the builder home's own file (accountInUse). → accountInUse's shape: { account, dir, env } or { account: null, reason }.
+ */
+export function workerAccount(c, { readCopy = readAccountFile, inUse = accountInUse, setUp = isSetUp } = {}) {
+  if (c.accountCopy === undefined) return inUse({ home: c.home });
+  const r = readCopy({ file: c.accountCopy, uid: 0 });
+  if (!r?.ok) return { account: null, reason: `the owner's account choice could not be read (${r?.reason ?? 'no answer'})` };
+  if (!setUp(c.home, r.account)) return { account: null, reason: `account ${r.account} (the owner's choice) is not set up in ${c.home}` };
+  return { account: r.account, dir: accountDir(c.home, r.account), env: accountEnv(c.home, r.account) };
+}
+
 export function startPort(c, deps = {}) {
   const {
     readCard = (card) => readCardFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, card }),
     startCommit = cardStartCommit, prepare = prepareWorkerCopy, checksFor = () => ({}), promptFor = workerPromptText,
-    names = {}, account = () => accountInUse({ home: c.home }), spawn = childSpawn, pidStartOf = leaderStart, kill, there, launchFn = launch,
+    names = {}, account = () => workerAccount(c), spawn = childSpawn, pidStartOf = leaderStart, kill, there, launchFn = launch,
     walled = walledLaunchSettings, ownUid = () => process.getuid(), stopped = () => false, beforeStart, mainOf = mirrorMain,
     readSettings = sessionSettingsOf(c.settingsDir), undoCheck = undoCommitProblem,
   } = deps;

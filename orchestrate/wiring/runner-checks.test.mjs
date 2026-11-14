@@ -529,3 +529,12 @@ test('#463 r3 m5: check 4, save-work and checks 12 and 13 all stay wired through
   assert.deepEqual([got.budget, got.bobManifest, got.runLocked], [null, null, runLocked]);
   assert.deepEqual(Object.keys(lockedWiring(c, { runLocked }).startDeps.checksFor(wx)).map(Number), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
 });
+
+test('#528 r4 c2: a worker product\'s rules.secrets.paths, when there, must be a list of text; no rules at all is allowed', () => {
+  const prod = (rules) => ({ repo: 'o/p', mirror: '/m', render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] }, hooksDir: '/h', snapshot: '/snap/s.json' }, product: { commands: { install: 'npm ci', test: 'npm test' } }, registryHosts: [] }, ...(rules === undefined ? {} : { rules }) });
+  const conf = (rules) => () => checkRunnerConfig({ installRoot: '/i', requestsDir: '/r', statusFile: '/o/status.json', orchestrateUid: 501, outboxRoot: '/ob', copiesRoot: '/c', home: '/home',
+    path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/rec', recordUid: 502, claimMs: 1, products: { p1: prod(rules) } });
+  const production = { env_files: [], programs: [], hosts: [] };
+  conf(undefined)(); conf({ production })(); conf({ production, secrets: { paths: ['/a/k'] } })();
+  for (const secrets of [{ paths: '/a/k' }, { paths: [1] }, {}, null]) assert.throws(conf({ production, secrets }), /rules\.secrets\.paths must list/, JSON.stringify(secrets));
+});
