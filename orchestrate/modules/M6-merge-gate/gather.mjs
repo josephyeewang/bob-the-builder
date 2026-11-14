@@ -274,24 +274,6 @@ export async function gatherFacts(ctx, merge) {
   f.tier = c && (c.tier === 1 || c.tier === 2) ? c.tier : null;
   const risky = c?.risky ?? ['unclassifiable'];
 
-  // An undo: recomputed from the files, never taken from the card (M10 exact-reverse.mjs); and whose merge it reverses.
-  const reverses = undoneBy(record, card)?.commit ?? null;
-  f.exactReverse = false;
-  f.reversesGateMerge = false;
-  let reversedAudit = 'none';
-  if (kind === 'exact_reverse' && reverses && SHA.test(f.pr?.merge_commit_sha ?? '')) {
-    // Each on watched reads: a read that failed leaves the answer unknown (exactReverseUnread, reversesGateMergeUnread),
-    // so the judge waits instead of refusing the undo for good (L205).
-    const unread = (key, which) => markFailed(which, () => { f[key] = true; });
-    f.exactReverse = (await attempt(async () => { const w = watchReads({ view }); return throwIfUnread(await checkExactReverse({ view: w.view, reverses, merged: f.pr.merge_commit_sha }), w.seen); }, { ok: false }, unread('exactReverseUnread', 'exact reverse'))).ok === true;
-    const robotBotId = botId(get('product_profile.robot'));
-    f.reversesGateMerge = (await attempt(async () => { const w = watchReads({ gh }); return throwIfUnread(await readMark({ gh: w.gh, owner, repo, sha: reverses, robotBotId }), w.seen); }, { ok: false }, unread('reversesGateMergeUnread', 'robot mark'))).ok === true;
-    const m = record.list('merge').find((x) => x.doc?.merge_commit === reverses);
-    reversedAudit = m?.doc?.state === 'audit_flagged' ? 'failure' : m?.doc?.state === 'audited_ok' ? 'success' : 'none';
-  }
-  const reversesFiles = reverses ? await attempt(async () => { const k = await view.commit(reverses); return (await view.files(k.parents[0], reverses)).flatMap((x) => [x.path, ...(x.previous_path ? [x.previous_path] : [])]); }, []) : undefined;
-  f.lane = f.files ? (() => { try { return rules.may('merge', { product, card: { id: card.id, ...card.doc }, truncated: false, labels: f.pr?.labels ?? [], declared_tier: card.doc.tier, kind, reverses: reverses ?? undefined, exact_reverse_ok: f.exactReverse, reversed_audit: reversedAudit, reverses_files: reversesFiles, files: f.files }); } catch { return null; } })() : null;
-
   // Carry-over, when the pull request's head is no longer the head that was reviewed.
   const catchUps = Array.isArray(merge.doc.catch_ups) ? merge.doc.catch_ups : [];
   f.carried = null;
@@ -320,6 +302,49 @@ export async function gatherFacts(ctx, merge) {
       return throwIfUnread(await carryOver({ reviewed: { base: B0, head: H0 }, current: { base: B1, head }, between, catchUps, tier1MergesSince, gh: w.view }), w.seen);
     }, { review: false, audit: false, unread: true, reasons: ['carry-over could not be read'] }, markFailed('carry-over'));
   }
+
+  // An undo: recomputed from the files, never taken from the card (M10 exact-reverse.mjs); and whose merge it reverses.
+  const reverses = undoneBy(record, card)?.commit ?? null;
+  f.exactReverse = false;
+  f.exactReverseReasons = null;
+  f.reversesGateMerge = false;
+  let reversedAudit = 'none';
+  if (kind === 'exact_reverse' && reverses && SHA.test(f.pr?.merge_commit_sha ?? '')) {
+    // Each on watched reads: a read that failed leaves the answer unknown (exactReverseUnread, reversesGateMergeUnread),
+    // so the judge waits instead of refusing the undo for good (L205).
+    const unread = (key, which) => markFailed(which, () => { f[key] = true; });
+    const er = await attempt(async () => { const w = watchReads({ view }); return throwIfUnread(await checkExactReverse({ view: w.view, reverses, merged: f.pr.merge_commit_sha }), w.seen); }, { ok: false }, unread('exactReverseUnread', 'exact reverse'));
+    // L980: what the check found, only when it read everything and answered no: the gate's not_clean fact says it. A
+    // check that threw ("could not check") says nothing about the change, so it is not kept.
+    // Either answer, yes or no, counts only on GitHub's current test merge of the card's change (#466 r1 M1, m1; r2 M1,
+    // m3): the pull request open and ready, its head the card's head or the last recorded catch-up of it with the review
+    // carried over (carry-over above: only main's changes came in), and the test merge worked out, of that head, on main
+    // as read now. A pull request pushed past the card, closed, draft or conflicted is judged no with nothing kept (6 or 3
+    // refuses it; a push brings the card back to be asked again): the card is never failed on a change it was not verified
+    // at, nor merged as an undo on one. A test merge not worked out yet, stale, or unreadable is judged on nothing: the
+    // answer is unread, so the undo waits (refusals.mjs 9, WAITING_HOLD) and a later pass judges it on the test merge
+    // GitHub redoes; the wait cap tells the owner if it never comes.
+    const said = Array.isArray(er.reasons) ? er.reasons.map(String) : [];
+    const answered = er.ok === true || (er.ok === false && said.length > 0 && !said.some((x) => x.startsWith('could not check')));
+    if (answered && f.exactReverseUnread !== true) {
+      const lastUp = catchUps.at(-1);
+      const cardsHead = SHA.test(H0 ?? '') && head !== null && (head === H0 || (lastUp?.after_sha === head && f.carried?.review === true));
+      if (cardsHead && f.pr?.state === 'open' && f.pr.draft === false && f.pr.mergeable !== false) {
+        const worked = f.pr.mergeable === true && f.pr.mergeable_state != null && f.pr.mergeable_state !== 'unknown';
+        const ps = worked ? await attempt(async () => (await view.commit(f.pr.merge_commit_sha))?.parents ?? null, null, unread('exactReverseUnread', 'test merge')) : null;
+        if (Array.isArray(ps) && ps.length === 2 && ps[1] === head && SHA.test(f.main?.sha ?? '') && ps[0] === f.main.sha) {
+          f.exactReverse = er.ok === true;
+          if (er.ok === false) f.exactReverseReasons = said;
+        } else f.exactReverseUnread = true;
+      }
+    }
+    const robotBotId = botId(get('product_profile.robot'));
+    f.reversesGateMerge = (await attempt(async () => { const w = watchReads({ gh }); return throwIfUnread(await readMark({ gh: w.gh, owner, repo, sha: reverses, robotBotId }), w.seen); }, { ok: false }, unread('reversesGateMergeUnread', 'robot mark'))).ok === true;
+    const m = record.list('merge').find((x) => x.doc?.merge_commit === reverses);
+    reversedAudit = m?.doc?.state === 'audit_flagged' ? 'failure' : m?.doc?.state === 'audited_ok' ? 'success' : 'none';
+  }
+  const reversesFiles = reverses ? await attempt(async () => { const k = await view.commit(reverses); return (await view.files(k.parents[0], reverses)).flatMap((x) => [x.path, ...(x.previous_path ? [x.previous_path] : [])]); }, []) : undefined;
+  f.lane = f.files ? (() => { try { return rules.may('merge', { product, card: { id: card.id, ...card.doc }, truncated: false, labels: f.pr?.labels ?? [], declared_tier: card.doc.tier, kind, reverses: reverses ?? undefined, exact_reverse_ok: f.exactReverse, reversed_audit: reversedAudit, reverses_files: reversesFiles, files: f.files }); } catch { return null; } })() : null;
 
   // The review (refusal 5; L44, L65, L66 M1, L68, L69). Read from review's own stores only, through M9's one check:
   // every session the review runner launched for this card at H0, or at any head with H0's tree (its launch records),

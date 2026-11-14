@@ -247,7 +247,11 @@ export function judge(f) {
     if (kind === 'exact_reverse' && (f.exactReverseUnread === true || (first && reverse && f.reversesGateMergeUnread === true))) {
       return { decision: 'hold', refusals: [{ n: 9, reason: f.exactReverseUnread === true ? 'whether the undo is an exact reverse could not be read' : 'whether the undo reverses a merge the gate made could not be read', temporary: true }], hold: WAITING_HOLD, notes };
     }
-    if (kind === 'exact_reverse' && !reverse) no(9, 'an undo card whose change is not an exact reverse');
+    if (kind === 'exact_reverse' && !reverse) {
+      no(9, 'an undo card whose change is not an exact reverse');
+      // L980: final and what the check found, so the gate records it (reverse-<card> not_clean) and M11 writes the fix card.
+      if (Array.isArray(f.exactReverseReasons) && f.exactReverseReasons.length) refusals.at(-1).not_clean = f.exactReverseReasons.slice(0, 20);
+    }
     else if (first && kind === 'exact_reverse' && f.reversesGateMerge !== true) no(9, 'first cutover: an undo merges only when it reverses a merge the gate made');
 
     // 1, 6. The checks, on this commit. An exact reverse skips 1 (it must be able to undo a red main), never 6.
