@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { FIRST, swap } from '../../modules/M10-rules/first-cutover.test-helper.mjs';
 import { blobSha, RULES_PATH } from '../../modules/M10-rules/reader.mjs';
-import { existsSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { rulesRows, mergeRow, dryRun, parseArgs, main, writeNew, NOT_WIRED } from './slice-dry-run.mjs';
@@ -298,4 +298,52 @@ test('m3: writeNew makes a new 0600 file, and refuses a file already there or a 
   writeFileSync(target, 'kept\n');
   assert.throws(() => writeNew(link, 'x'));
   assert.equal(readFileSync(target, 'utf8'), 'kept\n');
+});
+
+test('L1146 c: writeNew is exactly 0600 under any umask, and a failed write leaves no part file', () => {
+  const d = tempDir('orch-slice-');
+  const old = process.umask(0o277);
+  try { writeNew(join(d, 'u.txt'), 'x\n'); } finally { process.umask(old); }
+  assert.equal(statSync(join(d, 'u.txt')).mode & 0o777, 0o600);
+  const f = join(d, 'half.txt');
+  assert.throws(() => writeNew(f, 'x\n', { write: () => { throw Object.assign(new Error('disk full'), { code: 'ENOSPC' }); } }), /disk full/);
+  assert.equal(existsSync(f), false);
+});
+
+// L1146 m1: the production GitHub port, with only fetch replaced: the Dispatcher's own token file, exactly two GETs.
+test('L1146 m1: with no gh port, dryRun reads main through the read-only client and the config\'s token file: two GETs, its token', async () => {
+  const d = tempDir('orch-slice-');
+  const s = state(SLICE);
+  const rs = join(d, 'rs');
+  mkdirSync(rs, { mode: 0o700 });
+  writeFileSync(join(rs, 'approved-rules.json'), JSON.stringify(s.approved));
+  writeFileSync(join(rs, `${P}.last-good.json`), JSON.stringify(s.lastGood));
+  writeFileSync(join(d, 'products.json'), JSON.stringify([ENTRY]));
+  const secret = 'y'.repeat(40);
+  writeFileSync(join(d, 'tok'), `${secret}\n`, { mode: 0o600 });
+  const cfg = { product: P, rulesStateDir: rs, productsFile: join(d, 'products.json'), tokenFile: join(d, 'tok') };
+  writeFileSync(join(d, 'c.json'), JSON.stringify(cfg));
+  const seen = [];
+  const answer = mainAnswer({ text: SLICE });
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    seen.push({ url, method: init?.method, auth: init?.headers?.authorization });
+    const r = answer(url.replace('https://api.github.com', ''));
+    return { status: r.status, headers: { get: () => null }, json: async () => r.json, text: async () => '' };
+  };
+  try {
+    const r = await dryRun({ config: join(d, 'c.json'), product: P, bot: BOT });
+    assert.ok(r.lines.some((l) => /PASS  GitHub main's rules \(commit cccccccccccc…\) are the copy in force/.test(l)), r.lines.join('\n'));
+    assert.deepEqual(seen.map((x) => [x.method, x.url]), [
+      ['GET', 'https://api.github.com/repos/o/r/git/ref/heads/main'],
+      ['GET', `https://api.github.com/repos/o/r/contents/${RULES_PATH}?ref=${COMMIT}`],
+    ]);
+    assert.ok(seen.every((x) => x.auth === `Bearer ${secret}`), 'the token is the config\'s token file');
+    // The token file is the config's: another path, or one others can read, is a FAIL on the main row, with no GET.
+    seen.length = 0;
+    writeFileSync(join(d, 'c.json'), JSON.stringify({ ...cfg, tokenFile: join(d, 'nope') }));
+    const r2 = await dryRun({ config: join(d, 'c.json'), product: P, bot: BOT });
+    assert.ok(r2.lines.some((l) => /FAIL  GitHub main's rules .*main can't be read: the watch-only token file could not be opened/.test(l)), r2.lines.join('\n'));
+    assert.deepEqual(seen, []);
+  } finally { globalThis.fetch = realFetch; }
 });

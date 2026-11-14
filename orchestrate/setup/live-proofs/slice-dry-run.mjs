@@ -20,10 +20,10 @@
 //     merges the robot's PR by hand (L1122 m1).
 // Steps 2-6 (the jobs, the go, the card, the push, the PR) say NOT WIRED and name what they wait for, until it lands.
 // The result is PASS only when every step PASSes; a NOT WIRED step is never read as a pass.
-// The config must be the Dispatcher's for this product. The result file is made new (never one already there, never
-// through a link), 0600.
+// The config must be the Dispatcher's for this product. The result file is made new (never one already there; its final
+// name is never a link, though a folder link on the way is followed, which O_EXCL makes harmless), exactly 0600.
 
-import { closeSync, constants, fsyncSync, openSync, readFileSync, realpathSync, writeSync } from 'node:fs';
+import { closeSync, constants, fchmodSync, fsyncSync, openSync, readFileSync, realpathSync, unlinkSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parsePolicy } from '../../modules/M10-rules/policy.mjs';
@@ -154,10 +154,18 @@ export function parseArgs(argv) {
   return o;
 }
 
-/** The result file, made new: never one already there, never through a link (O_EXCL refuses both), 0600. */
-export function writeNew(file, text) {
+/**
+ * The result file, made new: never one already there, and its final name is never a link (O_EXCL refuses both; a folder
+ * link on the way is followed, harmless with O_EXCL). Exactly 0600 whatever the umask; a failed write or sync leaves no
+ * part file behind. `write` is a port for tests.
+ */
+export function writeNew(file, text, { write = writeSync } = {}) {
   const fd = openSync(file, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-  try { writeSync(fd, text); fsyncSync(fd); } finally { closeSync(fd); }
+  let done = false;
+  try { fchmodSync(fd, 0o600); write(fd, text); fsyncSync(fd); done = true; } finally {
+    closeSync(fd);
+    if (!done) { try { unlinkSync(file); } catch { /* already gone */ } }
+  }
 }
 
 export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), err = (s) => process.stderr.write(`${s}\n`), write = writeNew, ...ports } = {}) {
