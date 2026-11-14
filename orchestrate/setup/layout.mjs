@@ -17,12 +17,23 @@ import { PRODUCT, productRoleClash, runnerPlaces, PRODUCT_OUTBOX_ROLES } from '.
 import { RUNNER_ROLES } from '../shared/review-roles.mjs';
 import { RULES_VERSION } from '../modules/M4-workshop/git/gitleaks.mjs';
 
-// The three plain-script Mac users (L44, R-0b-05). `review` is also REVIEW_USER in the launcher; the setup test pins them equal.
-export const USERS = Object.freeze(['orchestrate', 'pages', 'review']);
+// The plain-script Mac users (L44, R-0b-05). `review` is also REVIEW_USER in the launcher; the setup test pins them equal.
+// `builder` (L1078, L1079) is the workers' user: the worker runner and every session it starts (worker, undo, script) run
+// as it, so a builder session has no production credentials and cannot read the owner's home. It holds no GitHub sign-in:
+// the robot pushes its branch (fetching from its copy as data, never running git in it) and only the owner or the merge
+// gate merges.
+export const BUILDER = 'builder';
+export const USERS = Object.freeze(['orchestrate', 'pages', 'review', BUILDER]);
 // New user numbers come from here, a range Apple does not hand out (it uses the low hundreds for its own accounts, and a
 // macOS update can add one at any time). What hides these users from the login screen is IsHidden=1, not the number (L90 M5).
 export const USER_ID_RANGE = Object.freeze({ low: 600, high: 699 });
 export const NO_SHELL = '/usr/bin/false';
+/** The builder's shell (#487 r5 m1): its sessions' Bash tool runs the user's shell, and the production guard's message shapes
+ *  are read as zsh reads them (macOS's bash 3.2 ends a "$(cat <<'EOF' …)" body early at an unbalanced `)"`). Its
+ *  password stays `*`, so it still can't log in. */
+export const BUILDER_SHELL = '/bin/zsh';
+/** The shell each of USERS must have: the builder's zsh, every other robot user none. */
+export const shellOf = (name) => (name === BUILDER ? BUILDER_SHELL : NO_SHELL);
 // The PATH every background job of this setup runs with (the Dispatcher's, the robot's and the Sensors' plists), and the
 // one launchctl the setup calls: one home each (I7).
 export const JOB_PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
@@ -140,15 +151,17 @@ export const sealRootPath = (cfg) => join(cfg.base, 'seals');
  * from this config: the one place their values come from. hostLockPath is the owner's own file, so it is the config's;
  * hostLockUid is the owner's Mac user id (the reader takes host.lock only when the opened file is that user's, L763), which
  * the caller reads from this Mac (dispatcher-check.mjs dispatcherKeysOn). The worker runner's requests folder and status file
- * (L921, made by this setup) and its user, workerUid: the runner runs as the owner's own user (wiring/runner-job.mjs), so it
- * is hostLockUid's same user, read the same way (L896).
+ * (L921, made by this setup) and its user, workerUid: the runner runs as BUILDER (wiring/runner-job.mjs, L1079), whose uid
+ * the caller reads from this Mac the same way. It may never be the owner's: a builder session must not be the owner (I1).
  */
-export function dispatcherKeys(cfg, { hostLockUid } = {}) {
+export function dispatcherKeys(cfg, { hostLockUid, workerUid } = {}) {
   if (cfg.hostLockPath === undefined) throw new Error('config: hostLockPath is not set (the full path of the owner\'s host.lock); the Dispatcher can\'t start without it');
   if (!Number.isSafeInteger(hostLockUid) || hostLockUid < 0) throw new Error(`the owner ${cfg.owner} is not a user on this Mac, so host.lock's owner (hostLockUid) can't be named`);
+  if (!Number.isSafeInteger(workerUid) || workerUid <= 0) throw new Error(`the ${BUILDER} user is not on this Mac, so the worker runner's user (workerUid) can't be named; run setup users-folders first (L1079)`);
+  if (workerUid === hostLockUid) throw new Error(`workerUid is the owner's own uid (${workerUid}); the worker runner must run as ${BUILDER}, never as the owner (L1079)`);
   // outboxRoot and copiesRoot: the TOP folders, never a product's (L887).
   return { reviewRoot: join(cfg.base, 'review'), mirror: mirrorPath(cfg), sealRoot: sealRootPath(cfg), outboxRoot: outboxRootPath(cfg), copiesRoot: workerCopiesPath(cfg), hostLockPath: cfg.hostLockPath, hostLockUid,
-    workerRequestsDir: workerRunnerPaths(cfg).requests, workerStatusFile: join(workerRunnerPaths(cfg).state, WORKER_STATUS_FILE), workerUid: hostLockUid };
+    workerRequestsDir: workerRunnerPaths(cfg).requests, workerStatusFile: join(workerRunnerPaths(cfg).state, WORKER_STATUS_FILE), workerUid };
 }
 
 /**
@@ -224,6 +237,8 @@ export const workerRunnerPath = (cfg) => join(cfg.base, 'worker-runner');
 export const WORKER_RUNNER_FOLDERS = Object.freeze({ requests: 'requests', state: 'runner', snapshots: 'snapshots' });
 /** The worker runner's status file, in its own folder (wiring/runner-main.mjs statusFile; the Dispatcher's workerStatusFile). */
 export const WORKER_STATUS_FILE = 'status.json';
+/** The worker runner's config in the installed copy, as its job names it: the products it runs, each with its rules (proofs.mjs reads their lists). */
+export const WORKER_RUNNER_CONFIG = 'worker-runner.json';
 export const workerRunnerPaths = (cfg) => Object.freeze(Object.fromEntries(Object.entries(WORKER_RUNNER_FOLDERS).map(([k, n]) => [k, join(workerRunnerPath(cfg), n)])));
 
 /**
@@ -247,7 +262,7 @@ export const COPIES_CLEANUP_ACL = Object.freeze({ who: 'user:orchestrate', perms
 // orchestrate's own, 0644 whatever its job's umask (owner-status.mjs writeNewReadable), which the runner checks before it
 // reads one (runner-files.mjs readRequest).
 export const WORKER_REQUESTS_ACL = Object.freeze({ who: 'user:orchestrate', perms: Object.freeze(['search', 'add_file']) });
-// The rules-in-force folder (L1002): one entry each for the review user and the owner, read only (list a folder is read of
+// The rules-in-force folder (L1002): one entry each for the review user and the worker runner's user (builder, L1079), read only (list a folder is read of
 // its files), inherited by the file the Dispatcher writes there. No write, no delete: the file is orchestrate's alone.
 export const RULES_READ_ACL = (who) => Object.freeze({ who, perms: Object.freeze(['list', 'search', 'readattr', 'readextattr', 'readsecurity', 'file_inherit', 'directory_inherit']) });
 // The proposals folders are read only for orchestrate: no delete_child (that is for the outbox folders, which it clears).
@@ -267,7 +282,7 @@ export function folderTable(cfg) {
   const p = (...s) => join(cfg.base, ...s);
   const rows = [
     [cfg.base, 'root', 0o755, 'the base: root\'s, so the folders under it cannot be renamed away'],
-    [p('home'), 'root', 0o755, 'the three users\' home folders'],
+    [p('home'), 'root', 0o755, 'the plain-script users\' home folders'],
     ...USERS.map((u) => [homeOf(cfg, u), u, 0o700, `${u}'s home`]),
     [keysPath(cfg), 'orchestrate', 0o700, 'robot keys: nothing else reads them'],
     [privatePath(cfg), 'orchestrate', 0o700, 'private data: attempt logs, raw facts before masking'],
@@ -286,27 +301,30 @@ export function folderTable(cfg) {
     [p('claude-code'), 'orchestrate', 0o755, 'the roles\' pinned Claude Code copies'],
     [p('review'), 'review', 0o755, 'the review runner\'s folder (its subfolders are made by the runner)'],
     [reviewCopiesPath(cfg), 'review', 0o755, 'the review sessions\' copies of the code under review'],
-    [workerCopiesPath(cfg), 'owner', 0o755, 'the workers\' clones (kept apart from the review copies); orchestrate lists, reads and deletes through one access-list entry (cleanup), never writes', [COPIES_CLEANUP_ACL]],
+    [workerCopiesPath(cfg), BUILDER, 0o755, 'the workers\' clones (kept apart from the review copies); orchestrate lists, reads and deletes through one access-list entry (cleanup), never writes', [COPIES_CLEANUP_ACL]],
     [sealRootPath(cfg), 'orchestrate', 0o700, 'cleanup\'s sealed bundles (the Dispatcher\'s sealRoot): orchestrate\'s alone'],
     // The one outbox root (L71): root's, so no role's Mac user can rename another role's folder away. Under it one folder
     // per role, so the record's intake and the Merge Gate read every role through the same root (L90 M1).
     [outboxRootPath(cfg), 'root', 0o755, 'the outbox root (L71): a folder per role and one per product (L836) under it'],
     ...RUNNER_ROLES.map((r) => [join(outboxRootPath(cfg), r), 'review', 0o755, `the ${r}'s outboxes: only review writes them (L44, L722); others read`]),
     // Not the worker runner's roles: theirs are in each product's folder below (L914).
-    ...FLAT_OUTBOX_ROLES.map((r) => [join(outboxRootPath(cfg), r), 'owner', 0o750, `the ${r}'s outboxes (the workers' user writes; orchestrate reads through one access-list entry)`, [ORCHESTRATE_READ_ACL]]),
+    // The owner's own interactive roles (the Lead, the Front Door and the rest): not builder sessions, so still the owner's.
+    ...FLAT_OUTBOX_ROLES.map((r) => [join(outboxRootPath(cfg), r), 'owner', 0o750, `the ${r}'s outboxes (the owner's sessions write; orchestrate reads through one access-list entry)`, [ORCHESTRATE_READ_ACL]]),
     [workerRunnerPath(cfg), 'root', 0o755, 'the worker runner\'s folders (L921): root\'s, so none can be renamed away'],
-    [workerRunnerPaths(cfg).requests, 'owner', 0o700, 'the worker runner\'s requests: orchestrate only adds (one access-list entry), the runner reads and removes, no one else sees in', [WORKER_REQUESTS_ACL]],
-    [workerRunnerPaths(cfg).state, 'owner', 0o755, 'the worker runner\'s own folder: its status (orchestrate reads it; owner-status.mjs refuses a folder others can write), memory (0600), settings and lock'],
-    [workerRunnerPaths(cfg).snapshots, 'owner', 0o755, 'the worker runner\'s rules snapshots, one per product: its sessions\' hooks read them'],
+    [workerRunnerPaths(cfg).requests, BUILDER, 0o700, 'the worker runner\'s requests: orchestrate only adds (one access-list entry), the runner reads and removes, no one else sees in', [WORKER_REQUESTS_ACL]],
+    [workerRunnerPaths(cfg).state, BUILDER, 0o755, 'the worker runner\'s own folder: its status (orchestrate reads it; owner-status.mjs refuses a folder others can write), memory (0600), settings and lock'],
+    [workerRunnerPaths(cfg).snapshots, BUILDER, 0o755, 'the worker runner\'s rules snapshots, one per product: its sessions\' hooks read them'],
     ...(cfg.products.length ? [[p('products'), 'root', 0o755, 'one folder set per product']] : []),
     // A copies folder and an outbox folder per product (L836): the worker runner denies each session every other
     // product's whole folder. Same owner, mode and access list as the folder above; the product's role folders as the
     // role folders above (the runner starts worker and script sessions).
     // Named by the one rule the runner uses (shared/product-paths.mjs runnerPlaces, #378 r1 m1).
     ...cfg.products.map((prod) => [prod, runnerPlaces({ copiesRoot: workerCopiesPath(cfg), outboxRoot: outboxRootPath(cfg), product: prod })]).flatMap(([prod, at]) => [
-      [at.copies, 'owner', 0o755, `${prod}: the workers' clones (cleanup as above)`, [COPIES_CLEANUP_ACL]],
+      [at.copies, BUILDER, 0o755, `${prod}: the workers' clones (cleanup as above)`, [COPIES_CLEANUP_ACL]],
       [at.outboxes, 'root', 0o755, `${prod}: its worker runner outboxes, a folder per worker runner role`],
-      ...PRODUCT_OUTBOX_ROLES.map((r) => [join(at.outboxes, r), 'owner', 0o750, `${prod}: the ${r}'s outboxes (as the ${r} folder above)`, [ORCHESTRATE_READ_ACL]]),
+      // The builder's outboxes (L1079): group-readable by the robot user only. Their group is orchestrate's own group (no
+      // members), so the robot reads a hand-in through the group as well as through the one access-list entry; no one else does.
+      ...PRODUCT_OUTBOX_ROLES.map((r) => [join(at.outboxes, r), BUILDER, 0o750, `${prod}: the ${r}'s outboxes (the builder writes; orchestrate reads, through its group and one access-list entry)`, [ORCHESTRATE_READ_ACL], 'orchestrate']),
     ]),
     ...cfg.products.flatMap((prod) => [
       // Root's (L100 m2): its children belong to different users, and a folder one of them owns could rename another's away.
@@ -314,14 +332,18 @@ export function folderTable(cfg) {
       [storePath(cfg, prod), 'orchestrate', 0o755, `${prod}: the record (the owner reads it)`],
       [p('products', prod, 'pages'), 'pages', 0o755, `${prod}: built pages (only pages writes them)`],
       [p('products', prod, 'handoffs'), 'orchestrate', 0o755, `${prod}: handoff copies`],
-      [dispatcherRulesDir(cfg, prod), 'orchestrate', 0o700, `${prod}: the rules in force, written by the Dispatcher each pass; read by the review user and the owner only (check 12)`, [RULES_READ_ACL('user:review'), RULES_READ_ACL(`user:${cfg.owner}`)]],
+      [dispatcherRulesDir(cfg, prod), 'orchestrate', 0o700, `${prod}: the rules in force, written by the Dispatcher each pass; read by the review user and the worker runner's user (${BUILDER}, L1079) only (check 12)`, [RULES_READ_ACL('user:review'), RULES_READ_ACL(`user:${BUILDER}`)]],
       [p('products', prod, 'pages-in'), 'orchestrate', 0o755, `${prod}: the page builder's input`],
     ]),
   ];
   // `group`: 'root' pins the folder's group to wheel (0) where the owner is the person's own user, whose Mac group would
-  // otherwise be taken as it comes (L100 m1): every such folder, so one whose mode gives its group nothing today (the
-  // worker runner's requests, L921) gets no group to open to later. Set on apply, compared in check.
-  return rows.map(([path, owner, mode, why, acl = []]) => ({ path, owner, mode, why, acl, ...(owner === 'owner' ? { group: 'root' } : {}) }));
+  // otherwise be taken as it comes (L100 m1): every such folder, so one whose mode gives its group nothing today gets no
+  // group to open to later. A row may instead name one of USERS, whose own group (no members) the folder takes (L1079: the
+  // builder's outboxes take orchestrate's). Otherwise a robot user's folder has that user's own group. Set on apply, compared in check.
+  return rows.map(([path, owner, mode, why, acl = [], group]) => {
+    if (group !== undefined && !USERS.includes(group)) throw new Error(`folder table: ${path}'s group ${group} is not one of the setup's users`);
+    return { path, owner, mode, why, acl, ...(group !== undefined ? { group } : owner === 'owner' ? { group: 'root' } : {}) };
+  });
 }
 
 /** The rules draft the watch-only week judges by (R-0b-122): root's copy, in orchestrate's watch folder; the config holds its hash. */

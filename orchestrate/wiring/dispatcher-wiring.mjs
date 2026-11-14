@@ -55,13 +55,13 @@
 //                  link or a swap in the owner's folder never puts another user's file in the Record (L763). It may not
 //                  be the Dispatcher's own user (which could then write who the host is), root or the review user; it is
 //                  checked before the start makes anything (L805)
-//   workerRequestsDir  the worker runner's requests folder (setup layout.mjs workerRunnerPaths: requests, the owner's,
+//   workerRequestsDir  the worker runner's requests folder (setup layout.mjs workerRunnerPaths: requests, the builder's,
 //                  which orchestrate may add files to, L921): a stop request goes there. It must be there at start; its
 //                  owner (workerUid), mode and access list are checked on each write (L943 m4)
 //   workerStatusFile   the worker runner's status.json in its own folder (runner/status.json): what runs. Missing, stale
-//                  or not the owner's makes sessions, board, outboxSessions, probe and stopSession "not known" (a throw)
-//   workerUid      the owner's Mac user id, which the worker runner runs as (wiring/runner-job.mjs): hostLockUid's same
-//                  user, or the start is refused
+//                  or not the worker runner user's makes sessions, board, outboxSessions, probe and stopSession "not known" (a throw)
+//   workerUid      the builder user's Mac user id, which the worker runner runs as (wiring/runner-job.mjs, L1079): not
+//                  the owner's (hostLockUid), the Dispatcher's own or the review user's, or the start is refused
 //
 // THE APPROVALS PORT (L270). Approvals' schedule pass runs for this product each tick: it turns the product on the
 // first time its rules file says onboarding.state: active (M2 onboard.mjs), which is all the first cutover needs from it.
@@ -144,8 +144,8 @@ export function checkConfig(c, { keys = CONFIG_KEYS, paths = PATHS, optional = k
   // host.lock's owner, with the rest of the config: before wire() makes any folder or opens the Record (L805 m1). The
   // Dispatcher's own user is this process's; workerPorts checks it again with the start's selfUid.
   if (keys.includes('hostLockUid')) { const bad = hostLockOwnerProblem(c.hostLockUid, selfUid, c.reviewUid); if (bad) throw new Error(`config: ${bad}`); }
-  // The worker runner's user, the same owner's (L896), before wire() makes a folder (L943 m3).
-  if (keys.includes('workerUid')) { const bad = workerUidProblem(c); if (bad) throw new Error(`config: ${bad}`); }
+  // The worker runner's user, the builder user and never the owner (L1079), before wire() makes a folder (L943 m3).
+  if (keys.includes('workerUid')) { const bad = workerUidProblem(c, selfUid); if (bad) throw new Error(`config: ${bad}`); }
   return c;
 }
 

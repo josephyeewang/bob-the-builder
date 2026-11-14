@@ -20,15 +20,17 @@ import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { reviewDaemonPlists, updaterPlist } from '../modules/M4-workshop/launcher/review-daemons.mjs';
 import { RUNNER_CONFIG, aclProblem, chainProblem, currentCopy } from '../modules/M4-workshop/launcher/install-check.mjs';
-import { LAUNCHCTL, homeOf } from './layout.mjs';
+import { LAUNCHCTL, homeOf, watchRulesPath } from './layout.mjs';
 import { checkInstall, installPaths } from './install.mjs';
 import { readUser } from './users-folders.mjs';
 import { watchPlist, WATCH_NO_HASH } from './watch-setup.mjs';
-import { watchRulesPath } from './layout.mjs';
 import { ROBOT_JOB, robotAppKeyItems, robotConfigProblem, robotPlist } from './robot-setup.mjs';
 import { DISPATCHER_JOB, DISPATCHER_OFF, DISPATCHER_RUN_LIMIT_S, dispatcherConfigProblem, dispatcherKeysProblem, dispatcherLoadProblem, dispatcherPlist, robotMatchProblem, writeAside } from './dispatcher-setup.mjs';
 import { answerRows } from './owner-answer-setup.mjs';
 import { SENSORS_JOB, SENSORS_RUN_LIMIT_S, sensorsConfigProblem, sensorsLoadProblem, sensorsPlist } from './sensors-setup.mjs';
+
+// The worker runner's script, as its job starts it from the copy (wiring/runner-job.mjs): an old job is found by it (#528 r2 m7).
+const WORKER_RUNNER_SCRIPT = 'wiring/runner-main.mjs';
 
 export const DAEMON_DIR = '/Library/LaunchDaemons';
 export const JOBS = Object.freeze(['review-updater', 'review-account', 'review-runner']);   // load order: the updater first
@@ -383,6 +385,27 @@ export function checkDaemons(io, cfg, jobs = jobsFor(cfg)) {
     ...(other.length ? [`${other.map((n) => join(DAEMON_DIR, n)).join(', ')}: under another label than ${cfg.label}; check ${other.length === 1 ? 'it is' : 'they are'} setup's (a write cut off under an old label) before deleting ${other.length === 1 ? 'it' : 'them'}`] : []),
   ];
   item(sideWhy.length === 0, `no half-written job file${subset ? ` for ${jobs.join(', ')}` : ''} in ${DAEMON_DIR}`, sideWhy.join('; '));   // --only: the row names its jobs, as every row then does
+  // The worker runner's job from before L1079 (#528 r1 m9): a LaunchAgent of the owner's, in the owner's own
+  // ~/Library/LaunchAgents. Left there it starts a second runner, as the owner, at the owner's next login. Named by its
+  // file, whatever its label; a folder that can't be listed is said, never read as "none there".
+  if (!subset) {
+    const u = readUser(io, cfg.owner); const dir = u.exists && u.home ? join(u.home, 'Library', 'LaunchAgents') : null;
+    let agents = null; let why = null;
+    if (!dir) why = `the owner ${cfg.owner}'s home could not be read from this Mac, so its LaunchAgents were not looked at`;
+    else {
+      // Found by what it starts, not by its file's name (#528 r2 m7): every job file there is read, and one that names the
+      // worker runner's script is the old runner, under any label. One that can't be read is said, never read as "not it".
+      let names = null;
+      try { names = io.list(dir).filter((n) => n.endsWith('.plist') && !n.startsWith('.')).sort(); } catch (e) { if (e?.code !== 'ENOENT') why = `${dir} could not be listed (${e?.code ?? 'error'}), so whether the old worker runner's job is left there is not known`; else agents = []; }
+      if (names) {
+        agents = []; const unread = [];
+        for (const n of names) { let t; try { t = io.readText(join(dir, n)); } catch (e) { unread.push([n, e?.code ?? 'error']); continue; } if (t.includes(WORKER_RUNNER_SCRIPT)) agents.push(n); }
+        if (unread.length) why = `${unread.map(([n, code]) => `${join(dir, n)} could not be read (${code})`).join(', ')}, so whether ${unread.length === 1 ? 'it is' : 'one is'} the old worker runner's job is not known`;
+      }
+    }
+    item(why === null && agents.length === 0, `no worker runner job left in the owner's LaunchAgents (since L1079 it runs as the builder user, never as the owner)`,
+      why ?? `${agents.map((n) => join(dir, n)).join(', ')}: the old worker runner, which would start a second runner as ${cfg.owner}. As ${cfg.owner}: launchctl bootout gui/$(id -u)/<its label>, then delete the file (README, "Moving the workers to the builder user", step 1)`);
+  }
   // Each job the config leaves off: none placed or loaded (listed only when there is one).
   const offWhy = { 'watch-only': 'the config names no rules fingerprint', [ROBOT_JOB]: 'the config does not turn the robot job on', [DISPATCHER_JOB]: 'the config has no dispatcher entry', [SENSORS_JOB]: 'the config has no dispatcher entry' };
   for (const off of subset ? [] : OPTIONAL_JOBS.filter((j) => !jobsFor(cfg).includes(j))) {

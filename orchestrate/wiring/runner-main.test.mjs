@@ -9,8 +9,11 @@ import { spawnSync } from 'node:child_process';
 import { writeSnapshot } from '../modules/M4-workshop/hooks/snapshot.mjs';
 import { makeLock } from '../modules/M9-record/lock.mjs';
 import { loginJobPlist } from '../modules/M11-dispatcher/login-job.mjs';
-import { DENY_KEYS, aclWriteEntries, carriedOverProblem, checkRunnerConfig, hookStoreOf, keepSnapshots, launchInputs, readRunnerConfig, snapshotFolderProblem, startDeps, listenStop, main, readRootFile, realRunnerPorts } from './runner-main.mjs';
-import { RUNNER_JOB_LOG, RUNNER_JOB_UMASK, fullPath, workerRunnerPlist } from './runner-job.mjs';
+import { DENY_KEYS, personUserProblem, aclWriteEntries, carriedOverProblem, checkRunnerConfig, hookStoreOf, keepSnapshots, launchInputs, readRunnerConfig, snapshotFolderProblem, startDeps, listenStop, main, readRootFile, realRunnerPorts } from './runner-main.mjs';
+import { RUNNER_JOB_LOG, RUNNER_JOB_UMASK, RUNNER_JOB_USER, fullPath, workerRunnerPlist } from './runner-job.mjs';
+import { BUILDER } from '../setup/layout.mjs';
+// The tests run as a person's user; main's own check of that is tested apart (L1079).
+const AS_BUILDER = () => null;
 
 const config = (d, over = {}) => ({ installRoot: join(d, 'install'), requestsDir: join(d, 'requests'), statusFile: join(d, 'runner', 'status.json'), orchestrateUid: 501,
   outboxRoot: join(d, 'outboxes'), copiesRoot: join(d, 'copies'), home: join(d, 'home'), path: '/usr/bin:/bin', claudeBin: join(d, 'install', 'claude'),
@@ -54,7 +57,7 @@ test('step 5: main runs the loop with the config\'s paths, holds one lock for it
   try {
     mkdirSync(join(d, 'runner'), { recursive: true });
     const logs = []; let stop; let ctx;
-    const code = await main(['/cfg.json'], { readConfig: () => config(d), log: (s) => logs.push(s), onStop: (fn) => { stop = fn; },
+    const code = await main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: () => config(d), log: (s) => logs.push(s), onStop: (fn) => { stop = fn; },
       run: async (x) => { ctx = x; assert.ok(existsSync(join(d, 'runner', 'lock')), 'the lock is held while the loop runs');
         assert.throws(() => makeLock({ dir: join(d, 'runner'), timeoutMs: 50 }).acquire(), /busy/, 'a second runner can\'t take it');
         assert.equal(x.stopWhen(), false); stop(); assert.equal(x.stopWhen(), true);
@@ -76,33 +79,35 @@ test('step 5: main does not start on a bad config, while another runner holds th
     const logs = [];
     let ran = false;
     const run = async () => { ran = true; };
-    assert.equal(await main(['/cfg.json'], { readConfig: () => { throw new Error('job config /cfg.json: is owned by uid 9'); }, log: (s) => logs.push(s), run }), 1);
+    assert.equal(await main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: () => { throw new Error('job config /cfg.json: is owned by uid 9'); }, log: (s) => logs.push(s), run }), 1);
     assert.match(logs.at(-1), /did not start: job config/);
     const other = makeLock({ dir: join(d, 'runner') }); const h = other.acquire();
     try {
-      assert.equal(await main(['/cfg.json'], { readConfig: () => config(d), log: (s) => logs.push(s), run, lock: (dir) => makeLock({ dir, timeoutMs: 50 }), onStop: () => {} }), 1);
+      assert.equal(await main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: () => config(d), log: (s) => logs.push(s), run, lock: (dir) => makeLock({ dir, timeoutMs: 50 }), onStop: () => {} }), 1);
       assert.match(logs.at(-1), /another worker runner is running/);
     } finally { other.release(h.nonce); }
     assert.equal(ran, false);
-    assert.equal(await main(['/cfg.json'], { readConfig: () => config(d), log: (s) => logs.push(s), run: async () => { throw new Error('the memory can\'t be read'); }, onStop: () => {} }), 1);
+    assert.equal(await main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: () => config(d), log: (s) => logs.push(s), run: async () => { throw new Error('the memory can\'t be read'); }, onStop: () => {} }), 1);
     assert.match(logs.at(-1), /stopped: the memory can't be read/);
     assert.equal(existsSync(join(d, 'runner', 'lock')), false);
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
-test('step 5: the LaunchAgent file is loginJobPlist\'s, with its own logs, the owner\'s HOME and Umask 077, and no UserName', () => {
-  const o = { label: 'org.example.worker-runner', node: '/usr/local/bin/node', script: '/i/wiring/runner-main.mjs', config: '/i/runner.json', path: '/usr/bin:/bin', logDir: '/logs', workDir: '/Users/o', home: '/Users/o' };
+test('step 5 (L1079): the job file is loginJobPlist\'s, run as the builder user, with its own logs, the builder\'s HOME and Umask 077', () => {
+  const o = { label: 'org.example.worker-runner', node: '/usr/local/bin/node', script: '/i/wiring/runner-main.mjs', config: '/i/runner.json', path: '/usr/bin:/bin', logDir: '/logs', workDir: '/B/home/builder', home: '/B/home/builder' };
   assert.throws(() => workerRunnerPlist({ ...o, home: 'o' }), /home must be/);
-  for (const home of ['/', '//', '/.', '/..', '/./', '/Users/o/', '/Users//o', '/Users/../o', '/Users/o o']) assert.throws(() => workerRunnerPlist({ ...o, home }), /simplest form, not \/ itself/, home);
-  assert.equal(RUNNER_JOB_UMASK, 0o077, 'what the runner makes is the owner\'s alone');
-  // Before #292 lands, loginJobPlist has no home or umask option; the builder refuses rather than drop them.
-  const hasHome = loginJobPlist({ ...o, home: '/h', umask: 0o77 }).includes('<key>HOME</key>');
-  if (!hasHome) { assert.throws(() => workerRunnerPlist(o), /needs the loginJobPlist with home and umask \(#292\)/); return; }
+  for (const home of ['/', '//', '/.', '/..', '/./', '/B/home/builder/', '/B//home', '/B/../home', '/B/h o']) assert.throws(() => workerRunnerPlist({ ...o, home }), /simplest form, not \/ itself/, home);
+  // A person's home is refused: the builder's is setup's, under the base (I1: nothing falls back to the owner).
+  for (const home of ['/Users/o', '/users/o', '/Users']) assert.throws(() => workerRunnerPlist({ ...o, home }), /not a person's home under \/Users \(L1079\)/, home);
+  assert.equal(RUNNER_JOB_UMASK, 0o077, 'what the runner makes is the builder\'s alone');
+  assert.equal(RUNNER_JOB_USER, BUILDER);
+  assert.equal(BUILDER, 'builder');
   const t = workerRunnerPlist(o);
-  assert.match(t, /<key>HOME<\/key><string>\/Users\/o<\/string>/);
+  assert.match(t, /<key>HOME<\/key><string>\/B\/home\/builder<\/string>/);
   assert.match(t, /<key>Umask<\/key><integer>63<\/integer>/);
+  assert.match(t, /<key>UserName<\/key><string>builder<\/string>/, 'a LaunchDaemon run as the builder, never root and never the owner');
+  assert.equal(t.match(/<key>UserName<\/key>/g).length, 1);
   assert.ok(t.includes(`/logs/${RUNNER_JOB_LOG}.out.log`) && t.includes(`/logs/${RUNNER_JOB_LOG}.err.log`));
-  assert.ok(!t.includes('UserName'), 'the owner\'s own LaunchAgent');
   assert.match(t, /<array><string>\/usr\/local\/bin\/node<\/string><string>\/i\/wiring\/runner-main.mjs<\/string><string>\/i\/runner.json<\/string><\/array>/);
 });
 
@@ -110,7 +115,7 @@ test('#364 self-review m6: main never makes the runner\'s own folder (setup does
   const d = roots(tempDir('orch-rmain-'));
   try {
     const logs = [];
-    assert.equal(await main(['/cfg.json'], { readConfig: () => config(d), log: (s) => logs.push(s), run: async () => {}, onStop: () => {} }), 1);
+    assert.equal(await main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: () => config(d), log: (s) => logs.push(s), run: async () => {}, onStop: () => {} }), 1);
     assert.equal(existsSync(join(d, 'runner')), false);
     assert.match(logs.join('\n'), /did not start: .*ENOENT/);
   } finally { rmSync(d, { recursive: true, force: true }); }
@@ -145,7 +150,7 @@ test('#364 r1 m4: main listens with listenStop by default, so a second SIGTERM i
   try {
     mkdirSync(join(d, 'runner'), { recursive: true });
     let heard = 0;
-    const code = await main(['/cfg.json'], { readConfig: () => config(d), log: () => {}, run: async (x) => {
+    const code = await main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: () => config(d), log: () => {}, run: async (x) => {
       process.emit('SIGTERM'); if (x.stopWhen()) heard += 1;
       assert.equal(process.listeners('SIGTERM').length, before.length + 1, 'still listening after the first');
     } });
@@ -182,7 +187,7 @@ test('#369 r1 m2: main keeps each product\'s rules snapshot fresh for its life, 
     const kept = []; const logs = [];
     const fresh = (path, r) => { const k = { path, r, stopped: false }; kept.push(k); return { stop: () => { k.stopped = true; }, error: () => (path.endsWith('p1.json') ? Object.assign(new Error('x'), { code: 'ENOSPC' }) : null) }; };
     let during;
-    const code = await main(['/cfg.json'], { readConfig: () => cfg, log: (s) => logs.push(s), onStop: () => {}, fresh, folderProblem: rootParentCheck, run: async () => { during = kept.map((k) => k.stopped); } });
+    const code = await main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: () => cfg, log: (s) => logs.push(s), onStop: () => {}, fresh, folderProblem: rootParentCheck, run: async () => { during = kept.map((k) => k.stopped); } });
     assert.equal(code, 0, logs.join('\n'));
     assert.deepEqual(kept.map((k) => [k.path, k.r]), [[join(d, 'snapshots', 'rules-p1.json'), rules]], 'only a product with rules and a snapshot');
     assert.deepEqual(during, [false], 'kept fresh while the loop runs'); assert.equal(kept[0].stopped, true, 'stopped at the end');
@@ -251,7 +256,7 @@ test('#369 r2 m2 self-review: main gives the start port its keeper, so a product
     const cfg = config(d, { products: { p1: { repo: 'o/p1', mirror: join(d, 'mirror'), rules, render: { paths: { deny: DENY(d), snapshot: join(d, 'snapshots', 'rules-p1.json') } } } } });
     const logs = []; let r;
     const fresh = () => { throw Object.assign(new Error('x'), { code: 'EROFS' }); };
-    const code = await main(['/cfg.json'], { readConfig: () => cfg, log: (s) => logs.push(s), onStop: () => {}, fresh, folderProblem: rootParentCheck,
+    const code = await main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: () => cfg, log: (s) => logs.push(s), onStop: () => {}, fresh, folderProblem: rootParentCheck,
       run: async (ctx) => { r = await ctx.ports.start({ card: 'C-1', kind: 'editing', product: 'p1', sessionId: '0f8fad5b-d9cb-469f-a165-70867728950e' }); } });
     assert.equal(code, 0, logs.join('\n'));
     assert.equal(r.ok, false); assert.match(r.reason, /p1's rules snapshot is not kept fresh \(EROFS\)/);
@@ -290,14 +295,14 @@ test('#378 r1 m4: main does not start when the copies or outbox root is reached 
     const logs = []; let ran = false; const run = async () => { ran = true; };
     mkdirSync(join(d, 'real-copies'));
     symlinkSync(join(d, 'real-copies'), join(d, 'linked'));
-    assert.equal(await main(['/cfg.json'], { readConfig: () => config(d, { copiesRoot: join(d, 'linked') }), log: (s) => logs.push(s), run, onStop: () => {} }), 1);
+    assert.equal(await main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: () => config(d, { copiesRoot: join(d, 'linked') }), log: (s) => logs.push(s), run, onStop: () => {} }), 1);
     assert.match(logs.at(-1), /did not start: copiesRoot is reached through a link/);
-    assert.equal(await main(['/cfg.json'], { readConfig: () => config(d, { outboxRoot: join(d, 'linked') }), log: (s) => logs.push(s), run, onStop: () => {} }), 1);
+    assert.equal(await main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: () => config(d, { outboxRoot: join(d, 'linked') }), log: (s) => logs.push(s), run, onStop: () => {} }), 1);
     assert.match(logs.at(-1), /did not start: outboxRoot is reached through a link/);
-    assert.equal(await main(['/cfg.json'], { readConfig: () => config(d, { outboxRoot: join(d, 'none') }), log: (s) => logs.push(s), run, onStop: () => {} }), 1);
+    assert.equal(await main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: () => config(d, { outboxRoot: join(d, 'none') }), log: (s) => logs.push(s), run, onStop: () => {} }), 1);
     assert.match(logs.at(-1), /did not start: outboxRoot can't be read \(ENOENT\)/);
     assert.equal(ran, false);
-    assert.equal(await main(['/cfg.json'], { readConfig: () => config(d), log: (s) => logs.push(s), run, onStop: () => {} }), 0, logs.join('\n'));
+    assert.equal(await main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: () => config(d), log: (s) => logs.push(s), run, onStop: () => {} }), 0, logs.join('\n'));
     assert.equal(ran, true);
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
@@ -315,7 +320,7 @@ test('#378 r1 M1: a runner restart carrying over a product A session whose setti
     writeFileSync(join(c.settingsDir, `${SA}.json`), JSON.stringify(w.settings));
     const A = { id: SA, product: 'p1', kind: 'editing', card: 'C-1', pgid: 4242, pid: 4242, pid_start: '2026-11-10T10:00:00Z', alive: true };
     const logs = []; let ran = false; const run = async () => { ran = true; };
-    const go = (memory, groupGone) => main(['/cfg.json'], { readConfig: () => c0, log: (s) => logs.push(s), run, onStop: () => {}, memory: () => memory, ports: { groupGone } });
+    const go = (memory, groupGone) => main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: () => c0, log: (s) => logs.push(s), run, onStop: () => {}, memory: () => memory, ports: { groupGone } });
     assert.equal(await go({ sessions: [A], requests: {} }, () => false), 1);
     assert.match(logs.at(-1), new RegExp(`did not start: session ${SA} \\(product p1\\) started before product p2's folders were on its deny list`));
     assert.equal(await go({ sessions: [A] }, () => { throw new Error('can\'t tell'); }), 1, 'a group the port can\'t tell about is live');
@@ -337,6 +342,8 @@ test('#378 r1 M1: a runner restart carrying over a product A session whose setti
     assert.match(carriedOverProblem(c, {}, { groupGone: () => false, listSettings: () => { throw Object.assign(new Error('x'), { code: 'EACCES' }); } }), /settings folder can't be listed \(EACCES\)/);
     // n3 (A11): a carried-over session that names no product can't be told about: the runner does not start.
     assert.match(carriedOverProblem(c, { sessions: [{ ...A, product: undefined }], requests: {} }, { groupGone: () => false }), /names no product/);
+    // #528 r2 m3: an entry that is not a session refuses the start, never skipped as "not live" (I1).
+    for (const x of [null, 'abc', 42, []]) assert.match(carriedOverProblem(c, { sessions: [x, { ...A, alive: false, ended: true }], requests: {} }, { groupGone: () => false }) ?? '', /lists a session that is not what the runner writes/, JSON.stringify(x));
     // A first run (no memory, no settings files) starts.
     rmSync(join(c.settingsDir, `${SA}.json`));
     assert.equal(carriedOverProblem(c, {}, { groupGone: () => false }), null);
@@ -511,7 +518,7 @@ test('L926 (#419 r3 M1, c2): main refuses to start for a snapshot folder linked 
     const fresh = (path, r) => { writeSnapshot(path, r); wrote.push(path); return { stop: () => {}, error: () => null }; };
     let ran = false; let locked = 0;
     const lock = (dir) => { locked++; return makeLock({ dir }); };
-    const code = await main(['/cfg.json'], { readConfig: () => cfg, log: (s) => logs.push(s), onStop: () => {}, fresh, lock, run: async () => { ran = true; } });
+    const code = await main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: () => cfg, log: (s) => logs.push(s), onStop: () => {}, fresh, lock, run: async () => { ran = true; } });
     assert.equal(code, 1); assert.equal(ran, false); assert.deepEqual(wrote, []);
     assert.equal(locked, 0, 'refused before the lock (self-review m4)'); assert.equal(existsSync(join(d, 'runner', 'settings')), false, 'and before settings/ is made');
     assert.ok(logs.some((l) => l === `the worker runner did not start: product p1's rules snapshot: its folder ${join(d, 'snapshots')} is a link`), logs.join('\n'));
@@ -519,7 +526,7 @@ test('L926 (#419 r3 M1, c2): main refuses to start for a snapshot folder linked 
     // #419 r4 M1, with main's own check and the real uid: a right folder whose parent is the runner's user's (here the
     // test's temp folder) is refused before the lock, nothing written.
     rmSync(join(d, 'snapshots')); mkdirSync(join(d, 'snapshots')); chmodSync(join(d, 'snapshots'), 0o755); logs.length = 0;
-    assert.equal(await main(['/cfg.json'], { readConfig: () => cfg, log: (s) => logs.push(s), onStop: () => {}, fresh, run: async () => { ran = true; } }), 1);
+    assert.equal(await main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: () => cfg, log: (s) => logs.push(s), onStop: () => {}, fresh, run: async () => { ran = true; } }), 1);
     assert.equal(ran, false); assert.deepEqual(wrote, []); assert.deepEqual(readdirSync(join(d, 'snapshots')), []);
     assert.ok(logs.some((l) => l.startsWith(`the worker runner did not start: product p1's rules snapshot: its folder ${join(d, 'snapshots')} sits in ${d}, which is not root's alone (its owner is uid ${process.getuid()}, mode `)), logs.join('\n'));
     // Missing: the runner starts, the product is held, saying which folder to make; made as a link later, still held;
@@ -527,7 +534,7 @@ test('L926 (#419 r3 M1, c2): main refuses to start for a snapshot folder linked 
     rmSync(join(d, 'snapshots'), { recursive: true });
     logs.length = 0; const reasons = [];
     const start = (ctx) => ctx.ports.start({ card: 'C-1', kind: 'editing', product: 'p1', sessionId: '0f8fad5b-d9cb-469f-a165-70867728950e' });
-    const code2 = await main(['/cfg.json'], { readConfig: () => cfg, log: (s) => logs.push(s), onStop: () => {}, fresh, folderProblem: rootParentCheck, run: async (ctx) => {
+    const code2 = await main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: () => cfg, log: (s) => logs.push(s), onStop: () => {}, fresh, folderProblem: rootParentCheck, run: async (ctx) => {
       reasons.push((await start(ctx)).reason);
       symlinkSync(card, join(d, 'snapshots'));
       reasons.push((await start(ctx)).reason);
@@ -617,13 +624,13 @@ test('L1001: main stops when the budget or Bob file list is not root\'s alone in
     const cfg = config(d, PIN_OPTS(d));
     // The real check: this test's copy is not root's, so the runner does not start.
     let logs = []; let ran = false;
-    assert.equal(await main(['/cfg.json'], { readConfig: () => cfg, log: (s) => logs.push(s), run: async () => { ran = true; }, onStop: () => {} }), 1);
+    assert.equal(await main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: () => cfg, log: (s) => logs.push(s), run: async () => { ran = true; }, onStop: () => {} }), 1);
     assert.match(logs.join('\n'), /^the worker runner did not start: its budget or Bob file list is not root's alone in the installed copy: /m);
     assert.equal(ran, false);
     // Root's alone (stood in for): each is loaded once, with the runner's own status file and user, and handed to the ports.
     const loads = []; const reads = []; const got = [];
     const budget = { rules: {}, rec: {}, bandsNow: () => ({}), runningNow: () => [] };
-    const opts = (o = {}) => ({ readConfig: () => cfg, log: (s) => logs.push(s), onStop: () => {}, run: async () => {},
+    const opts = (o = {}) => ({ asUser: AS_BUILDER, readConfig: () => cfg, log: (s) => logs.push(s), onStop: () => {}, run: async () => {},
       pinnedProblem: (root, files) => { got.push(['pinned', root, files]); return null; },
       loadBudget: async (file, c) => { loads.push([file, c]); return budget; }, readManifest: (f) => { reads.push(f); return '{"a.md":"x"}'; },
       portsOf: (c, ports, x) => { got.push(['ports', x.budget, x.bobManifest]); return realRunnerPorts(c, ports, x); }, ...o });
@@ -662,6 +669,45 @@ test('L1001: the Bob file list is read only as root\'s own plain file, never thr
     const l = join(d, 'l.json'); symlinkSync(f, l);
     assert.throws(() => readRootFile(l, { uid: process.getuid() }), /ELOOP|link/);
   } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test('L1079 (I1): the runner runs as the builder user only (an allowed list, #528 r1 m1), never root or a person\'s user, checked first, before its config is read', async () => {
+  const B = 'builder';
+  assert.equal(personUserProblem(601, [601, 12, 61, 100, 701], B), null, 'the builder: its own group and the Mac\'s all-users groups');
+  assert.match(personUserProblem(0, [0], 'root'), /runs as root/);
+  // An allowed list (#528 r1 m1): any other user is refused, a setup user with none of a person's groups too.
+  for (const n of ['orchestrate', 'review', 'pages', 'sam', 'Builder', 'builder ']) assert.match(personUserProblem(602, [602, 12], n), /only the builder user may run it/, n);
+  for (const n of [null, undefined, '']) assert.match(personUserProblem(601, [601], n), /name can't be read/, String(n));
+  assert.match(personUserProblem(501, [20, 12, 80], B), /in staff and admin \(a person's user\)/);
+  assert.match(personUserProblem(601, [601, 20], B), /in staff/, 'the builder added to staff is a person\'s user to it');
+  assert.match(personUserProblem(601, [601, 80], B), /in admin/);
+  for (const g of [null, undefined, [], ['20'], [601, NaN]]) assert.match(personUserProblem(601, g, B), /groups can't be read/, String(g));
+  const logs = []; let read = false;
+  const code = await main(['/cfg.json'], { asUser: () => personUserProblem(501, [20, 80], 'builder'), readConfig: () => { read = true; return {}; }, log: (s) => logs.push(s) });
+  assert.equal(code, 1);
+  assert.equal(read, false, 'refused before the config is read');
+  assert.match(logs.join('\n'), /did not start: it runs as a user in staff and admin/);
+  assert.equal(await main(['/cfg.json'], { asUser: () => { throw new Error('no'); }, readConfig: () => { read = true; return {}; }, log: (s) => logs.push(s) }), 1);
+  assert.equal(read, false);
+  // The real default checks this process: a test run as a person's user is refused.
+  const me = personUserProblem(process.getuid(), process.getgroups(), (await import('node:os')).userInfo().username);
+  if (me) assert.equal(await main(['/cfg.json'], { readConfig: () => { read = true; return {}; }, log: () => {} }), 1);
+});
+
+test('L1079: a worker signs in with the owner\'s account choice, read from root\'s copy, in the builder\'s own account folders', async () => {
+  const { workerAccount } = await import('./runner-ports.mjs');
+  const c = { home: '/B/home/builder', accountCopy: '/B/account-copy.json' };
+  const seen = [];
+  const read = (r) => ({ file, uid }) => { seen.push([file, uid]); return r; };
+  const b = workerAccount(c, { readCopy: read({ ok: true, account: 'b' }), setUp: () => true, inUse: () => assert.fail('the builder\'s own file is not the owner\'s choice') });
+  assert.deepEqual(b, { account: 'b', dir: '/B/home/builder/.claude-b', env: { CLAUDE_CONFIG_DIR: '/B/home/builder/.claude-b' } });
+  assert.deepEqual(seen, [['/B/account-copy.json', 0]], 'root\'s copy, owned by root');
+  assert.deepEqual(workerAccount(c, { readCopy: read({ ok: true, account: 'a' }), setUp: () => true }), { account: 'a', dir: '/B/home/builder/.claude', env: {} });
+  // PLANT: the copy unreadable → refused, never account a by default; the chosen account not set up → refused.
+  assert.match(workerAccount(c, { readCopy: read({ ok: false, reason: 'x is missing' }), inUse: () => ({ account: 'a' }) }).reason, /owner's account choice could not be read \(x is missing\)/);
+  assert.match(workerAccount(c, { readCopy: read({ ok: true, account: 'b' }), setUp: () => false }).reason, /account b \(the owner's choice\) is not set up in \/B\/home\/builder/);
+  // No accountCopy: the builder home's own file, as before.
+  assert.deepEqual(workerAccount({ home: '/h' }, { inUse: ({ home }) => ({ account: 'a', home }) }), { account: 'a', home: '/h' });
 });
 
 test('L1092: launchInputs, the one loader of checks 12 and 13 (the runner\'s and the runLocked proof\'s): root\'s alone first, each loaded once with the caller\'s user', async () => {
@@ -733,7 +779,7 @@ test('R-0b-175a: main opens the hook store in a 0700 folder it makes, hands it t
   try {
     mkdirSync(join(d, 'runner'), { recursive: true });
     const logs = []; let ctx;
-    const code = await main(['/cfg.json'], { readConfig: () => config(d, { hookStateDir: join(d, 'hookstate'), start_timeout_s: { lead: 30 } }), log: (s) => logs.push(s), onStop: () => {},
+    const code = await main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: () => config(d, { hookStateDir: join(d, 'hookstate'), start_timeout_s: { lead: 30 } }), log: (s) => logs.push(s), onStop: () => {},
       run: async (x) => { ctx = x; } });
     assert.equal(code, 0, logs.join('\n'));
     for (const f of ['hookstate', 'hookstate/hooks']) assert.equal(statSync(join(d, f)).mode & 0o777, 0o700, f);
@@ -741,11 +787,11 @@ test('R-0b-175a: main opens the hook store in a 0700 folder it makes, hands it t
     assert.equal(ctx.hooks.addSession('lead-1', { role: 'lead', product: 'p1' }), true);
     assert.equal(statSync(join(d, 'hookstate', 'activity.json')).mode & 0o777, 0o600);
     // Without the key, the loop has no store.
-    await main(['/cfg.json'], { readConfig: () => config(d), log: () => {}, onStop: () => {}, run: async (x) => { ctx = x; } });
+    await main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: () => config(d), log: () => {}, onStop: () => {}, run: async (x) => { ctx = x; } });
     assert.equal('hooks' in ctx, false);
     chmodSync(join(d, 'hookstate'), 0o750);
     const l2 = [];
-    assert.equal(await main(['/cfg.json'], { readConfig: () => config(d, { hookStateDir: join(d, 'hookstate') }), log: (s) => l2.push(s), onStop: () => {}, run: async () => assert.fail('ran') }), 1);
+    assert.equal(await main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: () => config(d, { hookStateDir: join(d, 'hookstate') }), log: (s) => l2.push(s), onStop: () => {}, run: async () => assert.fail('ran') }), 1);
     assert.match(l2.join('\n'), /did not start: hookStateDir .* can be opened by others; it must be 0700/);
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
@@ -764,7 +810,7 @@ test('R-0b-175a: hookStoreOf refuses a hook folder that is a link or another use
     const r = roots(tempDir('orch-rmain-'));
     try {
       mkdirSync(join(r, 'runner'), { recursive: true });
-      assert.equal(await main(['/cfg.json'], { readConfig: () => config(r, { hookStateDir: join(d, 'hs') }), log: (s) => logs.push(s), onStop: () => {}, run: async () => {} }), 0);
+      assert.equal(await main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: () => config(r, { hookStateDir: join(d, 'hs') }), log: (s) => logs.push(s), onStop: () => {}, run: async () => {} }), 0);
       assert.match(logs.join('\n'), /hook store can't be read .*no Lead, Front Door or Mini Base session is typed into until it is fixed by hand/);
     } finally { rmSync(r, { recursive: true, force: true }); }
   } finally { rmSync(d, { recursive: true, force: true }); }

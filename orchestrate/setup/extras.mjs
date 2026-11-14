@@ -18,6 +18,7 @@ import { chainProblem } from '../modules/M4-workshop/launcher/install-check.mjs'
 import { WATCH_READS, proveWatchReads } from '../modules/M6-merge-gate/watch-only.mjs';
 import { mirrorPath, proposalRows, proposalsParentOf } from './layout.mjs';
 import { aclEntries, folderChecks, planFolders, readUser } from './users-folders.mjs';
+import { refusedWhy } from './proofs.mjs';
 
 const SUDO = '/usr/bin/sudo';
 const GIT = '/usr/bin/git';
@@ -87,10 +88,13 @@ export function checkProposals(io, cfg) {
     item(control.status === 0, `${cfg.owner} CAN write ${f} (the control: the "cannot" lines below mean something)`, `did not work (${control.stderr.trim().slice(0, 100) || `exit ${control.status}`})`);
     const rd = asUser(io, 'orchestrate', [LS, f]);
     item(rd.status === 0, `as orchestrate, reading ${f} works`, `failed (${rd.stderr.trim().slice(0, 100) || `exit ${rd.status}`})`);
-    const wr = asUser(io, 'orchestrate', [TEST, '-w', f]);
-    item(wr.status !== 0, `as orchestrate, writing ${f} fails`, 'orchestrate CAN write it, and must not');
-    const rv = asUser(io, 'review', [LS, f]);
-    item(rv.status !== 0, `as review, reading ${f} fails`, 'review CAN read it, and must not');
+    // A "fails" line passes only on the one "no" (#528 r2 m9, as the proofs since r1 M1): test's plain exit 1, and ls's own
+    // "Permission denied" for this folder. Any other failure (a sudo error, a missing folder, a killed program) proves nothing.
+    const no = (args, r, can) => (r.status === 0 ? `${can}, and must not` : refusedWhy({ args, expect: args[0] === LS ? 'denied' : 'fail' }, r));
+    const wr = asUser(io, 'orchestrate', [TEST, '-w', f]); const wrWhy = no([TEST, '-w', f], wr, 'orchestrate CAN write it');
+    item(wrWhy === null, `as orchestrate, writing ${f} fails`, wrWhy);
+    const rv = asUser(io, 'review', [LS, f]); const rvWhy = no([LS, f], rv, 'review CAN read it');
+    item(rvWhy === null, `as review, reading ${f} fails`, rvWhy);
   }
   return out;
 }
