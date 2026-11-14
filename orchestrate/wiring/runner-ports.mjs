@@ -157,7 +157,8 @@ function nameCause(id, name) {
 }
 // The bundle taken by its push (L898): the attempt from the session's own doc, its push fact pushed with these bytes.
 // → null when taken, else its cause.
-function bundleHeld(s, path, { readFact, readSession, hashOf }) {
+// Exported (lane N, I7): the robot's push pass asks this same rule whether a bundle is already taken, so the two can't drift.
+export function bundleHeld(s, path, { readFact, readSession, hashOf }) {
   let sd; try { sd = readSession(s.id); } catch { return 'record-unreadable'; }
   if (sd?.ok !== true) return sd?.missing === true ? 'bundle-no-attempt' : 'record-unreadable';
   const doc = sd.doc;
@@ -171,7 +172,7 @@ function bundleHeld(s, path, { readFact, readSession, hashOf }) {
   let hash; try { hash = hashOf(path); } catch (e) { return hashCause(e); }
   return hash === d.bundle_sha256 ? null : 'bundle-changed';
 }
-function fileSha256(p) {
+export function fileSha256(p) {
   const fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try { if (!fstatSync(fd).isFile()) throw new Error('not a plain file'); return createHash('sha256').update(readFileSync(fd)).digest('hex'); } finally { closeSync(fd); }
 }
