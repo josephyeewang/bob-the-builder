@@ -72,6 +72,7 @@ import { REQUEST_ID } from '../modules/M4-workshop/launcher/review-runner.mjs';
 import { CLOCK_SKEW_MS, RUNNER_KEEP_USED_UP_MS, RUNNER_KINDS, RUNNER_ROLE_OF, RUNNER_STATUS_EVERY_MS, UNDO_COMMIT, USED_UP, checkSession } from './owner-status.mjs';
 import { launchAnswerWrong } from './owner-asks.mjs';
 import { DRAIN_CAUSES, drainHeldOk } from '../modules/M11-dispatcher/drain-alerts.mjs';
+import { heldOk } from '../modules/M4-workshop/send-safe/hook-store.mjs';
 import { FUTURE_SKEW_MS } from '../shared/still-waiting.mjs';
 
 /** How long the runner waits on one port before it answers for it, or (a start) leaves it to a later pass. Under the
@@ -131,7 +132,7 @@ const isLive = (s) => s.alive === true || (s.alive !== false && s.ended !== true
 
 /**
  * One pass. ctx: { state, requests: [{ name, body }] (read by readRequest, oldest first), now, uid, outboxRoot, copiesRoot,
- * claimMs, portMs?, clock? (the time of each write; default the pass's now), ports: { start, groupGone, stopGroup, saveWork, pauseLead, outboxDrained, size? }, write(statusDoc),
+ * claimMs, portMs?, clock? (the time of each write; default the pass's now), hooks? ({ tick, held }: R-0b-175a's hook store), ports: { start, groupGone, stopGroup, saveWork, pauseLead, outboxDrained, size? }, write(statusDoc),
  * keep(state) (called before every write), pending (a Map the caller holds across passes: starts still on), realpath?,
  * remove(name), note(text) }. → { state, status } (the state to keep, the status last written).
  */
@@ -158,11 +159,21 @@ export async function workerRunnerPass(ctx) {
     delete s.drain_held;
     if (open) s.undrained_since = now - RUNNER_DRAIN_HELD_MS;
   }
+  // R-0b-175a: the interactive sessions' hook lines (send-safe/hook-store.mjs), when the runner has a hook store. Its
+  // new lines are applied each pass, and its `held` list is in every status written. A list that can't be had, or is
+  // not the store's shape, is one entry naming no session: the Dispatcher tells it, never reads it as "nothing held".
+  const hooks = ctx.hooks && typeof ctx.hooks === 'object' ? ctx.hooks : null;
+  if (hooks) { try { hooks.tick(); } catch (e) { note(`the hook store's new lines could not all be applied (${e?.message ?? e}); the next pass tries again`); } }
+  const storeHeld = (why) => [{ sessionId: null, role: null, product: null, reason: `the hook store ${why}`, since: new Date(now).toISOString(), launchId: null }];
+  const heldNow = () => {
+    let h; try { h = hooks.held(); } catch (e) { return storeHeld(`gave no held list (${String(e?.message ?? e).slice(0, 200)})`); }
+    return Array.isArray(h) && h.every(heldOk) ? h : storeHeld('gave a held list not of its shape');
+  };
   const find = (id) => state.sessions.find((s) => s.id === id);
   const answer = (key, a) => { state.answers[key] = { ...a, at: now }; };
   const statusDoc = () => ({ written_at: new Date(Math.max(now, clock())).toISOString(), sessions: state.sessions.map(project),
     requests: Object.fromEntries(Object.entries(state.requests).map(([id, r]) => [id, { state: r.state }])),
-    answers: Object.fromEntries(Object.entries(state.answers).map(([k, { at, ...a }]) => [k, a])) });
+    answers: Object.fromEntries(Object.entries(state.answers).map(([k, { at, ...a }]) => [k, a])), ...(hooks ? { held: heldNow() } : {}) });
   // The memory is kept first, then the status written: a status never runs ahead of what the runner will remember.
   // A settled start leaves `pending` only after a keep that holds it succeeded (#358 r1 m3, #362 r1 M1).
   const settled = new Set();

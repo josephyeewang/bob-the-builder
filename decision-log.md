@@ -682,3 +682,13 @@ ADRs that describe the decision without consequences are useless. The Consequenc
 **Why:** A source inventory did not prove original requirements were retained; a completed process did not prove its report passed; a score from one workload did not certify another. Format conversions, optional work and rollback could silently lose meaning or accepted state. The intervention is concrete negative controls and precise evidence contracts in existing tools, not more audit rounds.
 
 **Limits:** Legacy coverage remains supported without a new claim of report verification. Receipt checks cannot establish semantic correctness or reviewer judgment. No private project details, new audit panel, fixed audit cap, other-project changes or parallel-owned implementation changes are included. Effectiveness must be measured after use.
+
+### D-040: Build rules from one autonomous build become Bob's: grade, fix, guard and cover the same way every time
+
+**Date:** 2026-11-13
+
+**Decision:** Fold one build's working rules into Bob's existing homes rather than a new file. Rule 30 gains (j), the four-line Material test (trigger, path, outcome, reach) with the list of what is Minor, and tiers a product that acts on its own by the harm its code can reach. Rule 26's caller list becomes a collision table in each change's description. Engineering Principle 12: contain first, then guard with short allowed lists, never lists of bad inputs. `reference/global-invariants.md` gives each invariant an automatic check and adds a set for products that act on their own. `audit-lenses/_evidence-accounting.md` fixes what a change review must cover and adds a catalogue of planted defects reported as caught or missed. `reference/field-learning.md` extends its repair steps (new mechanisms, touched files, planted defects). The core's Verification Additions gain "build, then apply" and "whole suite in CI".
+
+**Why:** A study of ~200 findings marked Material in that build found about a quarter were not Material, about a fifth were created by the previous fix, about one in eight came from designs that listed bad inputs and about one in twelve were collisions with existing code. Each cause now has a fixed step aimed at it: a grading test, a repair hand-in that lists what it touches, an allowed-list rule and a collision table.
+
+**Limits:** All new text is `PROSE`; no checker reads the four lines, the collision table or the plant report yet (Rule 31: climb a rung if they are skipped twice). Bob already had most of the fix protocol (D-038); this extends it rather than restating it. Builder misses and spec gaps (the remaining causes) keep their existing homes (Rules 24, 28, 30). The source build's names, numbers and internal references are left out.

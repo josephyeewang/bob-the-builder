@@ -11,6 +11,8 @@
 // boundary, or the session's end says the dialog is gone. Helper (subagent) traffic,
 // notifications and a lost hook never clear it. When unsure, it stays blocked.
 
+import { LAUNCH_EVENT, withChange } from './changes.mjs';
+
 export const State = Object.freeze({
   ACTIVE: 'active',
   IDLE: 'idle',
@@ -41,10 +43,15 @@ const isTurnBoundaryEvent = (e) => ['user-prompt-submit', 'stop', 'stop-failure'
 // prompt is never evidence that the person answered anything (design §8.2 act 3).
 export const WATCHDOG_PREFIX = '[watchdog]';
 export const isWatchdogText = (text) => typeof text === 'string' && text.trimStart().toLowerCase().startsWith(WATCHDOG_PREFIX);
+// R-0b-175a: a hook line never carries the prompt text, only `watchdog` (the emitter's isWatchdogText of it). A signal
+// that carries the flag is judged by it; one without is judged by its text, as before (hook-store.mjs sets the flag to
+// true on a line that has neither, so such a line is never the person).
+export const notThePerson = (s) => (typeof s?.watchdog === 'boolean' ? s.watchdog : isWatchdogText(s?.prompt));
 
 /**
  * Tracks every session's activity from hook signals. `store` holds session records:
- * { id, activity: { state, at }, firstSignalAt, terminated }. In-flight tool state is
+ * { id, activity: { state, at }, firstSignalAt, terminated, seq, changes } (seq and changes: R-0b-155b, changes.mjs).
+ * In-flight tool state is
  * in memory only: a restart loses it and the session clears at its next turn boundary. This assumes one
  * permission dialog on screen at a time (README open items: a live check next to L1).
  */
@@ -98,7 +105,7 @@ export class ActivityTracker {
     if (!Array.isArray(rec.openAsks) && asks.length) keep(asks);
     if (s.event === 'ask-user-question-open') { asks.push(s.toolUseId || '*'); keep(asks); }
     if (asks.length && s.event !== 'ask-user-question-open') {
-      const realPrompt = s.event === 'user-prompt-submit' && !isWatchdogText(s.prompt);
+      const realPrompt = s.event === 'user-prompt-submit' && !notThePerson(s);
       const ends = s.state === State.EXITED;
       if (s.event === 'ask-user-question-answered') {
         const i = asks.indexOf(s.toolUseId || '*');
@@ -142,7 +149,7 @@ export class ActivityTracker {
     if (cur === State.BLOCKED) {
       if (isTurnBoundaryEvent(s.event)) {
         // Ours: a typed [watchdog] line is not the person answering, so it never lifts a block.
-        if (s.event === 'user-prompt-submit' && isWatchdogText(s.prompt)) return suppressed;
+        if (s.event === 'user-prompt-submit' && notThePerson(s)) return suppressed;
         this.flights.delete(id);
         return s;
       }
@@ -161,39 +168,53 @@ export class ActivityTracker {
     // Ours: a notification never takes a session out of waiting (only a real boundary does).
     if (isSticky(cur) && s.event === 'notification' && !needsInput(s.state)) return suppressed;
     // Ours: a [watchdog] line can't take a session out of "waiting on the person" either.
-    if (isSticky(cur) && s.event === 'user-prompt-submit' && isWatchdogText(s.prompt)) return suppressed;
+    if (isSticky(cur) && s.event === 'user-prompt-submit' && notThePerson(s)) return suppressed;
     if (isTurnBoundaryEvent(s.event)) this.flights.delete(id);
     return s;
   }
 
   // Ours, as upstream's launch check (audit 0b-3 R29 m3): a restart under the same name gets a
   // new launch id. Until its first hook it has sent no signal, so the startup gate stays shut.
+  // R-0b-175a (d)(3): a new launch of an exited or terminated session clears both and is startup pending again.
   beginLaunch(id, launchId) {
     const rec = this.store.get(id);
     if (!rec || typeof launchId !== 'string' || !launchId) return false;
     this.flights.delete(id);
-    this.store.set(id, { ...rec, launchId, firstSignalAt: null, openAsks: [], activity: { state: State.ACTIVE, at: this.now() } });
+    const { terminated, ...rest } = rec;
+    const at = this.now();
+    // R-0b-155b: a launch is a change of its own, so a "took" wait from before it ends aborted.
+    this.store.set(id, withChange({ ...rest, launchId, firstSignalAt: null, openAsks: [], activity: { state: State.ACTIVE, at } }, { event: LAUNCH_EVENT, launchId, at }));
     return true;
   }
 
-  // Applies one hook signal { valid, state, event, toolName, toolUseId, prompt, at, launchId }.
+  // Applies one hook signal { valid, state, event, toolName, toolUseId, prompt | watchdog, at, launchId }.
+  // → 'applied', 'same' (nothing to write) or 'dropped'; callers before R-0b-175a ignore it.
+  // R-0b-155b: every line taken for the current launch, 'applied' or 'same', is numbered (changes.mjs): a typed prompt
+  // often leaves the state as it was, and the "took" wait must still see it. A dropped line is not numbered.
   applySignal(id, signal) {
     const rec = this.store.get(id);
-    if (!rec || rec.terminated) return;
+    if (!rec || rec.terminated) return 'dropped';
     let s = signal;
     // A late hook from a stopped launch (or one that names none) never moves the new one.
-    if (rec.launchId && s?.launchId !== rec.launchId) return;
+    if (rec.launchId && s?.launchId !== rec.launchId) return 'dropped';
+    // R-0b-175a (d)(1): a hook naming a launch, at a record that has none, is dropped and counted.
+    if (!rec.launchId && typeof s?.launchId === 'string' && s.launchId) {
+      this.store.set(id, { ...rec, dropped_hooks: (rec.dropped_hooks ?? 0) + 1, dropped_hook_at: s.at ?? this.now() });
+      return 'dropped';
+    }
+    // R-0b-175a (d)(2): a session-start is a first signal only, applied to a record still startup pending.
+    if (s?.event === 'session-start' && rec.firstSignalAt) return 'dropped';
     // Ours, as upstream (audit 0b-3 R29 MAT-2): an exited session's terminal may now be a plain
     // shell. Late hooks from the old process never bring it back; only a real prompt does.
     if (rec.activity.state === State.EXITED && s.state !== State.EXITED
-      && !(s.event === 'user-prompt-submit' && !isWatchdogText(s.prompt))) return;
+      && !(s.event === 'user-prompt-submit' && !notThePerson(s))) return 'dropped';
     if (s.valid) s = this.applyToolPrecedence(id, rec.activity.state, s);
-    if (!s.valid) return;
+    if (!s.valid) return this.numbered(id, signal, 'same');
     const now = this.store.get(id) ?? rec; // precedence may have stored the open questions
     const at = s.at ?? this.now();
     const prev = rec.activity.state;
     // A same-state repeat after the first signal is not a write.
-    if (prev === s.state && (rec.activity.reason ?? null) === (s.reason ?? null) && rec.firstSignalAt) return;
+    if (prev === s.state && (rec.activity.reason ?? null) === (s.reason ?? null) && rec.firstSignalAt) return this.numbered(id, signal, 'same');
     // `reason: 'question'` marks a wait on an open AskUserQuestion (nudgeUrgent never types into it).
     const next = { ...now, activity: { state: s.state, at, ...(s.reason ? { reason: s.reason } : {}) } };
     if (!next.firstSignalAt) next.firstSignalAt = at;
@@ -201,6 +222,12 @@ export class ActivityTracker {
     this.store.set(id, next);
     // Entering the needs-input family pings the person once; escalation inside it doesn't.
     if (!needsInput(prev) && needsInput(next.activity.state)) this.notify({ type: 'needs_input', id });
+    return this.numbered(id, signal, 'applied');
+  }
+
+  numbered(id, signal, did) {
+    this.store.set(id, withChange(this.store.get(id), { event: signal.event, launchId: signal.launchId, at: signal.at ?? this.now(), promptHash: signal.promptHash }));
+    return did;
   }
 
   // A crash or kill fires no session-end hook, so the reaper is the last chance to

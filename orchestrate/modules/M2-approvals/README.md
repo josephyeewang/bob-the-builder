@@ -38,7 +38,7 @@ See LANES.md for who builds this folder, and the build rows (0b-5, R-0b-48..53) 
 
 ## What the tests cover, and what they don't
 
-- **Typed and tapped can't be told apart in the log.** Claude Code writes a typed "Other" answer and a tap the same way; a typed answer that equals an option label counts as that tap. Checked on Claude Code 2.1.312, 30 Oct 2026; void at its next release.
+- **Typed and tapped can't be told apart in the log.** Claude Code writes a typed "Other" answer and a tap the same way; a typed answer that equals an option label counts as that tap. Checked on Claude Code 2.1.312, 30 Oct 2026 (checked: claude-code 2.1.312, open until 2027-01-20 (R-0b-84)); void at its next release.
 - **GitHub is faked.** `fixtures/fake-github.mjs` behaves like the REST endpoints M2 calls; the real API is not called in tests.
 
 ## Not built here (logged)

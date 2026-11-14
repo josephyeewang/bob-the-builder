@@ -1,0 +1,1941 @@
+{
+ "I3": [
+  {
+   "file": "modules/M11-dispatcher/lead-restart.mjs",
+   "line": "tellThen(alert, gaveUpText(sid, why, asked), { fact: RESTART_FACT(sid), fields: { gave_up_told: true }, kind: 'lead_gave_up_alert' });",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M11-dispatcher/lead-restart.mjs",
+   "line": "tellThen(alert, `the Lead ${sid} is at ${size.tokens} tokens, past ${hard} + ${HARD_MARGIN}: its compaction did not happen`, { fact: RESTART_FACT(sid), fields: { hard_told: true }, kind: 'lead_hard_alert' });",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M11-dispatcher/lead-restart.mjs",
+   "line": "if (st.phase === 'gave_up' && !st.gave_up_told) tellThen(alert, gaveUpText(sid, st.gave_up_why, st.gave_up_asked !== false), { fact: RESTART_FACT(sid), fields: { gave_up_told: true }, kind: 'lead_gave_up_alert' });",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M11-dispatcher/lead-restart.mjs",
+   "line": "if (!st.start_failed_told) tellThen(alert, startFailedText(sid, again?.reason), { fact: RESTART_FACT(sid), fields: { start_failed_told: true }, kind: 'lead_start_failed_alert' });",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M11-dispatcher/lead-restart.mjs",
+   "line": "if (!st.stop_told) tellThen(alert, `the Lead ${sid} handed off but could not be stopped (${stopped?.reason ?? 'no answer'}); no new Lead starts until it is`, { fact: RESTART_FACT(sid), fields: { stop_told: true }, kind: 'lead_stop_failed' });",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M11-dispatcher/lead-restart.mjs",
+   "line": "tellThen(alert, startFailedText(sid, started?.reason), { fact: RESTART_FACT(sid), fields: { start_failed_told: true }, kind: 'lead_start_failed_alert' });",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M11-dispatcher/phone-link.mjs",
+   "line": "else if (!toldOn(rec, FD_RESTART_FACT)) tellThen(alert, `the Front Door was not running and did not restart: ${r?.reason ?? 'no answer'}`, { fact: FD_RESTART_FACT, fields: { told: true }, kind: 'front_door_restart' });",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M11-dispatcher/phone-link.mjs",
+   "line": "if (!toldOn(rec, FD_STRAY_FACT)) tellThen(alert, `a Front Door may still run on the other account: ${r?.reason ?? 'no answer'}; two under the one name can confuse the phone`, { fact: FD_STRAY_FACT, fields: { told: true }, kind: 'front_door_stray' });",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M11-dispatcher/phone-link.mjs",
+   "line": "tellThen(alert, `the phone cannot reach the Front Door; ${st.failures} tries to reconnect it failed`, { fact: LINK_FACT, fields: { told: true }, kind: 'phone_link' });",
+   "why": "baseline (L1078)"
+  }
+ ],
+ "I4": [
+  {
+   "file": "modules/M1-front-door/fixtures.mjs",
+   "line": "export const T0 = Date.parse('2026-11-03T09:00:00Z');",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M1-front-door/outbox.mjs",
+   "line": "if (until !== null && !(typeof until === 'string' && ISO_DATE.test(until) && Number.isFinite(Date.parse(until)) && realDay(until))) return refuse('until is not a date');",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M1-front-door/restart.mjs",
+   "line": "const last = timed.length ? Math.max(...timed) : (startedAt ? Date.parse(startedAt) : null);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M1-front-door/transcript.mjs",
+   "line": "return { text, at: Number.isFinite(Date.parse(a.timestamp)) ? Date.parse(a.timestamp) : at(e) };",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M1-front-door/transcript.mjs",
+   "line": "return { text, at: Number.isFinite(Date.parse(a.timestamp)) ? Date.parse(a.timestamp) : at(e) };",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M1-front-door/transcript.mjs",
+   "line": "const at = (e) => { const t = Date.parse(e?.timestamp); return Number.isFinite(t) ? t : null; };",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M1-front-door/trip.mjs",
+   "line": "const ageMin = (iso, now) => { const t = Date.parse(iso ?? ''); const a = Number.isFinite(t) ? (now - t) / 60e3 : Infinity; return a < -5 ? Infinity : Math.max(a, 0); };",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M10-rules/engine.mjs",
+   "line": "const readAt = Date.parse(s.usage?.read_at ?? '');",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M10-rules/from-text.mjs",
+   "line": "clock = () => Date.parse('2026-10-14T14:00:00Z'), rolesDir = ROLES_DIR } = {}) {",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M10-rules/snapshot.mjs",
+   "line": "const at = Date.parse(doc.written_at);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M11-dispatcher/budget.mjs",
+   "line": "const at = Date.parse(r.fetched_at);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M11-dispatcher/budget.mjs",
+   "line": "const at = Date.parse(d.written_at ?? '');",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M11-dispatcher/budget.mjs",
+   "line": "const f = Date.parse(r?.fetched_at ?? '');",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M11-dispatcher/cleanup.mjs",
+   "line": "const at = (m) => Date.parse(m.doc.requested_at ?? '') || Date.parse(rec.meta?.('merge', m.id)?.ts ?? '') || 0;",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M11-dispatcher/cleanup.mjs",
+   "line": "const at = (m) => Date.parse(m.doc.requested_at ?? '') || Date.parse(rec.meta?.('merge', m.id)?.ts ?? '') || 0;",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M11-dispatcher/drain-alerts.mjs",
+   "line": "&& typeof h.since === 'string' && Number.isFinite(Date.parse(h.since)) && Object.keys(h).every((k) => k === 'cause' || k === 'since');",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M11-dispatcher/joe-waits.mjs",
+   "line": "const gap = Math.abs(Date.parse(c.wait.since) - Date.parse(f.since));",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M11-dispatcher/joe-waits.mjs",
+   "line": "const gap = Math.abs(Date.parse(c.wait.since) - Date.parse(f.since));",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M11-dispatcher/lead-restart.mjs",
+   "line": "const since = Date.parse(st.wrap_at ?? st.sent_at);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M11-dispatcher/lead-restart.mjs",
+   "line": "const fresh = used?.state === 'applied' && Date.parse(used.applied_at ?? '') > since;",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M11-dispatcher/pass.mjs",
+   "line": "const late = now - Date.parse(pending.since) >= limit;",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M11-dispatcher/pass.mjs",
+   "line": "const counted = `${Math.round((after - Date.parse(pending.since)) / 60_000)} min${pending.restarted ? ' counted from a restart (its start time could not be read, so it waited longer)' : ''}`;",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M11-dispatcher/pass.mjs",
+   "line": "const seen = Date.parse(lf?.observed_at ?? '');",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M11-dispatcher/pass.mjs",
+   "line": "const resets = Date.parse(lf?.resets_at ?? '');",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M11-dispatcher/phone-link.mjs",
+   "line": "const seen = Date.parse(d?.observed_at ?? '');",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M11-dispatcher/tick.mjs",
+   "line": "const seen = Date.parse(d.observed_at ?? '');",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M11-dispatcher/transcript.mjs",
+   "line": "const at = turnEnded ? Date.parse(tail.timestamp ?? '') : NaN;",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M11-dispatcher/usage.mjs",
+   "line": "const time = (s) => (typeof s === 'string' && /^\\d{4}-\\d\\d-\\d\\dT/.test(s) ? Date.parse(s) : NaN);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M12-sensors/air-health.mjs",
+   "line": "const t = Date.parse(doc.checked_at);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M12-sensors/air-health.mjs",
+   "line": "const t = Date.parse(doc?.checked_at);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M12-sensors/air-health.mjs",
+   "line": "if (Date.parse(stored?.checked_at) >= t) return null;",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M12-sensors/fact-shapes.mjs",
+   "line": ": shape === 'time' ? typeof v === 'string' && ISO.test(v) && Number.isFinite(Date.parse(v))",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M12-sensors/outside-watch.mjs",
+   "line": "const done = runs.filter((r) => r.status === 'completed').sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))[0];",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M12-sensors/outside-watch.mjs",
+   "line": "const done = runs.filter((r) => r.status === 'completed').sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))[0];",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M12-sensors/outside-watch.mjs",
+   "line": "const createdMs = Date.parse(done.created_at);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M12-sensors/outside-watch.mjs",
+   "line": "const runGap = !!prevDoc && newRun && ranAt !== null && (prevRunAt === null || Date.parse(ranAt) - prevRunAt > UNSEEN_GAP_MS);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M12-sensors/outside-watch.mjs",
+   "line": "const cleared = Date.parse(ownerFile?.cleared?.[label]);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M12-sensors/outside-watch.mjs",
+   "line": "if (redSince && green && !sinceBad && !redBad && Number.isFinite(cleared) && cleared >= Date.parse(redSince) && !(lastRed && cleared < Date.parse(lastRed))",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M12-sensors/outside-watch.mjs",
+   "line": "if (redSince && green && !sinceBad && !redBad && Number.isFinite(cleared) && cleared >= Date.parse(redSince) && !(lastRed && cleared < Date.parse(lastRed))",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M12-sensors/outside-watch.mjs",
+   "line": "run_id: stepsRead ? done.id ?? null : prevDoc?.run_id ?? null, run_at: stepsRead ? ranAt : prevDoc?.run_at ?? null, green, last_green_at: green && !(pastTime(prev, now()) > Date.parse(ranAt)) ? ranAt : prev,",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M12-sensors/outside-watch.mjs",
+   "line": "const npAge = (now() - Date.parse(np?.at)) / 60e3;",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M12-sensors/outside-watch.mjs",
+   "line": "const age = (now() - Date.parse(d.last_green_at)) / 60e3;",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M12-sensors/probes/github-pr.mjs",
+   "line": ".map((m) => ({ pr: m.doc.pr, ts: Date.parse(rec.meta?.('merge', m.id)?.ts ?? '') || 0 }))",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M12-sensors/start-gate.mjs",
+   "line": "const t = typeof now() === 'number' ? now() : Date.parse(now());",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M12-sensors/start-gate.mjs",
+   "line": "const age = (t - Date.parse(d.read_at)) / 60000;",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M12-sensors/state-facts.mjs",
+   "line": "const timeOrNull = (t) => (typeof t === 'string' && Number.isFinite(Date.parse(t)) ? t : null);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M12-sensors/state-facts.mjs",
+   "line": "return Date.parse(theirs) < Date.parse(ours) ? new Date(Date.parse(theirs)).toISOString() : ours;",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M12-sensors/state-facts.mjs",
+   "line": "return Date.parse(theirs) < Date.parse(ours) ? new Date(Date.parse(theirs)).toISOString() : ours;",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M12-sensors/state-facts.mjs",
+   "line": "return Date.parse(theirs) < Date.parse(ours) ? new Date(Date.parse(theirs)).toISOString() : ours;",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M12-sensors/state-facts.mjs",
+   "line": "const at = Date.parse(started);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M12-sensors/state-facts.mjs",
+   "line": "const open = (w) => known(w) && Date.parse(w.resets_at) > at;",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M12-sensors/state-facts.mjs",
+   "line": "if (resets_at !== null && Date.parse(resets_at) < Date.parse(observed_at) - PAST_SLACK_MS) resets_at = null;",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M12-sensors/state-facts.mjs",
+   "line": "if (resets_at !== null && Date.parse(resets_at) < Date.parse(observed_at) - PAST_SLACK_MS) resets_at = null;",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M12-sensors/state-facts.mjs",
+   "line": "if (kept && Date.parse(kept) > Date.parse(observed_at)) resets_at = kept;",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M12-sensors/state-facts.mjs",
+   "line": "if (kept && Date.parse(kept) > Date.parse(observed_at)) resets_at = kept;",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/alert-channel.mjs",
+   "line": "const d = Date.parse(res.headers?.get?.('date') ?? '');",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/alert-channel.mjs",
+   "line": "created_at: typeof r.json.created_at === 'string' && Number.isFinite(Date.parse(r.json.created_at)) ? r.json.created_at : null };",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/alert-channel.mjs",
+   "line": "if (!Number.isFinite(Date.parse(c.created_at))) return false;",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/alert-channel.mjs",
+   "line": "if (!latest || Date.parse(c.created_at) >= Date.parse(latest.at)) latest = { at: c.created_at, body: String(c.body ?? '') };",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/alert-channel.mjs",
+   "line": "if (!latest || Date.parse(c.created_at) >= Date.parse(latest.at)) latest = { at: c.created_at, body: String(c.body ?? '') };",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/alert-channel.mjs",
+   "line": "const at = Date.parse(h?.at ?? '');",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/alerts.mjs",
+   "line": "const lookFrom = (at) => { const t = Date.parse(at); return new Date(Number.isFinite(t) ? t - LOOK_BACK_MS : 0).toISOString(); };",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/alerts.mjs",
+   "line": "const toldAt = (at, t) => { const p = pastTime(at, Date.parse(t)); return new Date(p ?? githubNow(gh, Date.parse(t))).toISOString(); };",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/alerts.mjs",
+   "line": "const toldAt = (at, t) => { const p = pastTime(at, Date.parse(t)); return new Date(p ?? githubNow(gh, Date.parse(t))).toISOString(); };",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/alerts.mjs",
+   "line": "sayClock(Date.parse(t)); // after a GitHub answer, so its time is this pass's; on every path, not only the quiet one",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/alerts.mjs",
+   "line": "const issue = await gh.open({ title, body: bodyOf(id, { status, since: t, told: new Date(githubNow(gh, Date.parse(t))).toISOString(), cleared: NONE, count: 1, owed: NONE, owed_at: NONE }, body, t), assignee: owner });",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/alerts.mjs",
+   "line": "const told = stillWaiting({ now: githubNow(gh, Date.parse(t)), waiting: true, clear: () => {}, read: () => ({ told_at: f.told }), tell: () => tell(still, 'reminded') });",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/alerts.mjs",
+   "line": "const seen = Math.max(Date.parse(at.f.told) || 0, Date.parse(/ · last seen (\\S+) · /.exec(lastSeenPart(at.i.body))?.[1]) || 0);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/alerts.mjs",
+   "line": "const seen = Math.max(Date.parse(at.f.told) || 0, Date.parse(/ · last seen (\\S+) · /.exec(lastSeenPart(at.i.body))?.[1]) || 0);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/alerts.mjs",
+   "line": "if (!(seen < Date.parse(proof.at))) return 'kept';",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/alerts.mjs",
+   "line": "const ms = Date.parse(t);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/caught-up.mjs",
+   "line": "const gapMin = lastGoodPass ? (now() - Date.parse(lastGoodPass)) / 60e3 : 0;",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/caught-up.mjs",
+   "line": "const whileDown = (a) => reached.get(a.id)?.state === a.state && Date.parse(reached.get(a.id).ts) >= Date.parse(downSince);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/caught-up.mjs",
+   "line": "const whileDown = (a) => reached.get(a.id)?.state === a.state && Date.parse(reached.get(a.id).ts) >= Date.parse(downSince);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/caught-up.mjs",
+   "line": "const ideasWhileDown = rec.list('fact').filter((f) => f.doc.kind === 'fact.idea-issue' && ours(f) && Date.parse(f.doc.ts) >= Date.parse(downSince)).length;",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/caught-up.mjs",
+   "line": "const ideasWhileDown = rec.list('fact').filter((f) => f.doc.kind === 'fact.idea-issue' && ours(f) && Date.parse(f.doc.ts) >= Date.parse(downSince)).length;",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/heartbeat.mjs",
+   "line": "const dParsed = d.ok && d.v ? Date.parse(d.v) : NaN;",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/heartbeat.mjs",
+   "line": "since = was?.kind === NONE_SINCE ? Date.parse(was.ts) : NaN;",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/heartbeat.mjs",
+   "line": "const savedTs = typeof lastRec?.ts === 'string' && Number.isFinite(Date.parse(lastRec.ts)) ? lastRec.ts : t.toISOString();",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/outside-check/keep-alive.mjs",
+   "line": "const newest = Math.max(Date.parse(head.commit.committer.date), Date.parse(side?.commit?.committer?.date) || 0);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/outside-check/keep-alive.mjs",
+   "line": "const newest = Math.max(Date.parse(head.commit.committer.date), Date.parse(side?.commit?.committer?.date) || 0);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/outside-check/notify.mjs",
+   "line": "const t = typeof told === 'string' ? Date.parse(told) : NaN;",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/outside-check/notify.mjs",
+   "line": "const pastOr = (at, stamp) => (Date.parse(at) <= Date.parse(stamp) + FUTURE_SKEW_MS ? new Date(Date.parse(at)).toISOString() : stamp);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/outside-check/notify.mjs",
+   "line": "const pastOr = (at, stamp) => (Date.parse(at) <= Date.parse(stamp) + FUTURE_SKEW_MS ? new Date(Date.parse(at)).toISOString() : stamp);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/outside-check/notify.mjs",
+   "line": "const pastOr = (at, stamp) => (Date.parse(at) <= Date.parse(stamp) + FUTURE_SKEW_MS ? new Date(Date.parse(at)).toISOString() : stamp);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/outside-check/notify.mjs",
+   "line": "const times = comments.filter((c) => c?.user?.login === BOT).map((c) => Date.parse(c.created_at)).filter((t) => nowMs - t < RETELL_MS);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/outside-check/notify.mjs",
+   "line": "const due = dueToTell(toldOf(i.body) ?? sinceOf(i.body), Date.parse(stamp));",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/outside-check/notify.mjs",
+   "line": "const spoke = due ? await spokeLately(api, i.number, Date.parse(stamp)) : null;",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/outside-check/outside-check.mjs",
+   "line": ".map((i) => /^mini_alive_at: (\\S+)$/m.exec(i.body ?? '')?.[1]).map((t) => Date.parse(t)).filter(Number.isFinite);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/outside-check/outside-check.mjs",
+   "line": "const future = (await firstParent(api, p.repo, 100)).filter((c) => Date.parse(c.commit?.committer?.date) > t + FUTURE_SLACK);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/outside-check/outside-check.mjs",
+   "line": "const seen = acts.map((a) => Date.parse(a?.timestamp)).filter(Number.isFinite);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/outside-check/outside-check.mjs",
+   "line": "const malformed = updates.filter((a) => !/^[0-9a-f]{40}$/.test(a.after ?? '') || !Number.isFinite(Date.parse(a.timestamp))).length;",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/outside-check/outside-check.mjs",
+   "line": "const age = t - Date.parse(a.timestamp);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/outside-check/outside-check.mjs",
+   "line": "for (const d of deps.sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))) {",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/outside-check/outside-check.mjs",
+   "line": "for (const d of deps.sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))) {",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/outside-check/outside-check.mjs",
+   "line": "const times = acts.map((a) => Date.parse(a?.timestamp));",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M13-ledger/store-stopped.mjs",
+   "line": "const opened = Date.parse(issue.created_at ?? OPENED.exec(issue.body)?.[1] ?? '');",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M2-approvals/binding.mjs",
+   "line": "const ms = (s) => { const t = Date.parse(s); return Number.isFinite(t) ? t : null; };",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M2-approvals/decision.mjs",
+   "line": "if (Date.parse(v.review.submitted_at) >= lapseAt(doc, ctx.now())) return { ok: true, counted: false, lapsed: true };",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M2-approvals/github-review.mjs",
+   "line": "const ms = (s) => { const t = Date.parse(s); return Number.isFinite(t) ? t : null; };",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M2-approvals/kinds.mjs",
+   "line": "const t = Date.parse(theirs ?? '');",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M2-approvals/schedule.mjs",
+   "line": "const ms = (s) => { const t = Date.parse(s ?? ''); return Number.isFinite(t) ? t : null; };",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M3-lead/task-brief.mjs",
+   "line": "return day.getUTCMonth() === +mo - 1 && +h < 24 && !Number.isNaN(Date.parse(v));",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M4-workshop/git/start-gate.mjs",
+   "line": "const age = (now, at) => { const t = Date.parse(at); return Number.isFinite(t) && now - t >= -FUTURE_ALLOWANCE_MS ? now - t : Infinity; };",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M4-workshop/hooks/snapshot.mjs",
+   "line": "const at = Date.parse(s.written_at);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M4-workshop/launcher/review-runner.mjs",
+   "line": ".sort((x, y) => (Date.parse(y.launched_at) || 0) - (Date.parse(x.launched_at) || 0));",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M4-workshop/launcher/review-runner.mjs",
+   "line": ".sort((x, y) => (Date.parse(y.launched_at) || 0) - (Date.parse(x.launched_at) || 0));",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M4-workshop/launcher/review-runner.mjs",
+   "line": "const stamp = (s) => typeof s === 'string' && Number.isFinite(Date.parse(s));",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M4-workshop/launcher/review-runner.mjs",
+   "line": "const t = Date.parse(value);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M4-workshop/launcher/review-runner.mjs",
+   "line": "const at = Date.parse(s?.written_at ?? '');",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M4-workshop/send-safe/hook-store.mjs",
+   "line": "&& typeof h.since === 'string' && Number.isFinite(Date.parse(h.since)) && (h.sessionId === null) === (h.role === null);",
+   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
+  },
+  {
+   "file": "modules/M6-merge-gate/gate.mjs",
+   "line": ".filter((x) => typeof x === 'string' && Number.isFinite(Date.parse(x))).sort()[0] ?? iso();",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M6-merge-gate/watch-only.mjs",
+   "line": "const commitTime = Date.parse((await got(READ.commit.read(r, { sha }), 'the commit')).commit?.committer?.date ?? '');",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M6-merge-gate/watch-only.mjs",
+   "line": "const release = takeLock(dir, Date.parse(at));",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M6-merge-gate/watch-only.mjs",
+   "line": "const facts = await gatherMerged({ gh, checksGh, owner, repo, policy: r.policy, sha, now: () => Date.parse(at) });",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M6-merge-gate/watch-only.mjs",
+   "line": "const end = Date.parse(`${endDay}T00:00:00Z`);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M6-merge-gate/watch-only.mjs",
+   "line": "const pinDay = Date.parse(`${day(pin.at)}T00:00:00Z`);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M6-merge-gate/watch-only.mjs",
+   "line": "const firstDay = Date.parse(pin.at) === pinDay ? pinDay : pinDay + 86_400_000;",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M6-merge-gate/watch-only.mjs",
+   "line": "const firstFinal = Date.parse(clean.find((l) => Date.parse(l.at) >= end + 86_400_000)?.at ?? '') || -Infinity;",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M6-merge-gate/watch-only.mjs",
+   "line": "const firstFinal = Date.parse(clean.find((l) => Date.parse(l.at) >= end + 86_400_000)?.at ?? '') || -Infinity;",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M6-merge-gate/watch-only.mjs",
+   "line": "const lateGrace = (l) => l.direct && Date.parse(l.seen_at ?? l.at) <= Math.max(end + 86_400_000 + EDGE_MS, firstFinal);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M6-merge-gate/watch-only.mjs",
+   "line": "const finalPass = clean.some((l) => Date.parse(l.at) >= finalAt);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M9-record/guard.mjs",
+   "line": "if (typeof at === 'string' && Number.isFinite(Date.parse(at))) out.wait.run_started = at;",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M9-record/guard.mjs",
+   "line": "const since = Date.parse(wait?.since);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M9-record/outbox.mjs",
+   "line": "if (!Number.isFinite(Date.parse(d.ended_at ?? ''))) return no(`the ended record of session ${sessionId} has no ended_at`);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M9-record/outbox.mjs",
+   "line": "if (d.by !== 'joe' || !Number.isFinite(Date.parse(d.set_aside_at ?? ''))) return no(`the set-aside record of session ${sessionId} does not say Joe set it aside, and when`);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M9-record/writer.mjs",
+   "line": "const next = Date.parse(wait.next_check);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "modules/M9-record/writer.mjs",
+   "line": "} else if (d.doc.wait?.next_check && nowMs > Date.parse(d.doc.wait.next_check)) {",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "setup/host-lock-copy.mjs",
+   "line": "try { at = Date.parse(JSON.parse(io.readText(p))?.at); } catch { at = NaN; }",
+   "why": "#489 (landed after the baseline): host.lock stamp age read with Date.parse; follow-up for the lead: read it through pastTime"
+  },
+  {
+   "file": "shared/still-waiting.mjs",
+   "line": "const t = typeof value === 'string' ? Date.parse(value) : NaN;",
+   "why": "pastTime itself: the one home of the stored-time read (I4)"
+  },
+  {
+   "file": "wiring/gate-ports.mjs",
+   "line": "const byNew = [...runs].sort((a, b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0));",
+   "why": "#516 landing (L1138): lane 1b reads it through pastTime"
+  },
+  {
+   "file": "wiring/gate-ports.mjs",
+   "line": "const byNew = [...runs].sort((a, b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0));",
+   "why": "#516 landing (L1138): lane 1b reads it through pastTime"
+  },
+  {
+   "file": "wiring/heartbeat-probes.mjs",
+   "line": "const seen = Date.parse(at ?? '');",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "wiring/heartbeat-probes.mjs",
+   "line": "at = EVERY_PASS.map((id) => [id, Date.parse(sensorsFact(rec, id)?.doc?.observed_at ?? '')]).filter(([, s]) => Number.isFinite(s));",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "wiring/owner-answer.mjs",
+   "line": "if (r !== null && r !== undefined && !(typeof r === 'string' && Number.isFinite(Date.parse(r)))) return refuse(`the ${name} row's reset time is not a time`);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "wiring/owner-answer.mjs",
+   "line": "return { ok: true, w: { used_pct: row.percent, resets_at: r ? new Date(Date.parse(r)).toISOString() : null } };",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "wiring/owner-status.mjs",
+   "line": "const at = Date.parse(s?.written_at ?? '');",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "wiring/robot-main.mjs",
+   "line": "const takenAt = Date.parse(l.held?.taken_at ?? '');",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "wiring/robot-wiring.mjs",
+   "line": "const t = Date.parse(w.doc?.at);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "wiring/robot-wiring.mjs",
+   "line": "const e = Date.parse(l.ts);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "wiring/robot-wiring.mjs",
+   "line": "const s = Date.parse(w.doc?.started_at);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "wiring/robot-wiring.mjs",
+   "line": "const t = Date.parse(held?.taken_at ?? '');",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "wiring/robot-wiring.mjs",
+   "line": "const at = Date.parse(rec.read('fact', LAST_PASS_FACT)?.doc?.at ?? '');",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "wiring/runner-locked.mjs",
+   "line": "const after = (x) => typeof since === 'string' && Date.parse(x) >= Date.parse(since);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "wiring/runner-locked.mjs",
+   "line": "const after = (x) => typeof since === 'string' && Date.parse(x) >= Date.parse(since);",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "wiring/sensors-ports.mjs",
+   "line": "const isTime = (t) => typeof t === 'string' && Number.isFinite(Date.parse(t));",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "wiring/sensors-ports.mjs",
+   "line": "if (w.resets_at !== null && Date.parse(w.resets_at) - Date.parse(a.observed_at) > WINDOW_MS[k] + SAME_WINDOW_MS) return `the ${k} reset time is further out than one ${k === 'h5' ? '5-hour' : 'weekly'} window from the reading`;",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "wiring/sensors-ports.mjs",
+   "line": "if (w.resets_at !== null && Date.parse(w.resets_at) - Date.parse(a.observed_at) > WINDOW_MS[k] + SAME_WINDOW_MS) return `the ${k} reset time is further out than one ${k === 'h5' ? '5-hour' : 'weekly'} window from the reading`;",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "wiring/sensors-ports.mjs",
+   "line": "const age = nowMs - Date.parse(a.observed_at);",
+   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
+  },
+  {
+   "file": "wiring/sensors-ports.mjs",
+   "line": "const r = Date.parse(sw?.resets_at ?? '');",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "wiring/sensors-ports.mjs",
+   "line": "const r = Date.parse(w?.resets_at ?? '');",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "wiring/sensors-ports.mjs",
+   "line": "const r = Date.parse(w?.resets_at ?? '');",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "wiring/sensors-ports.mjs",
+   "line": "const r = Date.parse(w?.resets_at ?? '');",
+   "why": "baseline (L1078)"
+  },
+  {
+   "file": "wiring/worker-ports.mjs",
+   "line": "try { const d = JSON.parse(text); at = typeof d?.at === 'string' ? Date.parse(d.at) : NaN; } catch { at = NaN; }",
+   "why": "#489 (landed after the baseline): host.lock stamp age read with Date.parse; follow-up for the lead: read it through pastTime"
+  },
+  {
+   "file": "wiring/worker-runner.mjs",
+   "line": "const asked = Date.parse(body?.asked_at ?? '');",
+   "why": "baseline (L1078)"
+  }
+ ],
+ "I7": [
+  {
+   "kind": "definition",
+   "copy": "ABS = /^\\/[^\\0\\n]*$/",
+   "files": [
+    "modules/M11-dispatcher/login-job.mjs",
+    "modules/M4-workshop/launcher/review-daemons.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "definition",
+   "copy": "ACTOR = 'merge_gate'",
+   "files": [
+    "modules/M6-merge-gate/gate.mjs",
+    "modules/M6-merge-gate/merge-outcome.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "definition",
+   "copy": "ADDING = '.adding'",
+   "files": [
+    "setup/bob-manifest.mjs",
+    "setup/install.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "definition",
+   "copy": "ALWAYS_TOLERATED = Object.freeze(['EndConversation'])",
+   "files": [
+    "modules/M1-front-door/readback.mjs",
+    "modules/M4-workshop/launcher/role-profiles.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "definition",
+   "copy": "APP_ID = /^[A-Za-z0-9.]{1,64}$/",
+   "files": [
+    "modules/M6-merge-gate/token.mjs",
+    "wiring/robot-wiring.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "definition",
+   "copy": "BLOB = /^[0-9a-f]{40}$/",
+   "files": [
+    "modules/M6-merge-gate/refusals.mjs",
+    "modules/M6-merge-gate/workflow-route.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "definition",
+   "copy": "BODY_MAX = 60_000",
+   "files": [
+    "modules/M13-ledger/alert-channel.mjs",
+    "wiring/pr-writer.mjs"
+   ],
+   "why": "#516 landing (L1138): lane 1b folds it into one home or gives its reason"
+  },
+  {
+   "kind": "definition",
+   "copy": "CARD = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/",
+   "files": [
+    "modules/M11-dispatcher/cleanup.mjs",
+    "modules/M4-workshop/git/push.mjs",
+    "modules/M4-workshop/git/save-work.mjs",
+    "modules/M4-workshop/launcher/worker-copy.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "definition",
+   "copy": "CHECKED_AGAINST = null",
+   "files": [
+    "modules/M11-dispatcher/headless-result.mjs",
+    "modules/M11-dispatcher/transcript.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "definition",
+   "copy": "DAY_MS = 24 * 60 * 60 * 1000",
+   "files": [
+    "modules/M4-workshop/git/safe-git.mjs",
+    "wiring/robot-wiring.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "definition",
+   "copy": "DISPATCHER_USER = 'orchestrate'",
+   "files": [
+    "setup/dispatcher-check.mjs",
+    "setup/dispatcher-setup.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "definition",
+   "copy": "FUTURE_SKEW_MS = 60_000",
+   "files": [
+    "modules/M13-ledger/outside-check/notify.mjs",
+    "shared/still-waiting.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "definition",
+   "copy": "GIT_SOURCES = Object.freeze(['git'])",
+   "files": [
+    "modules/M12-sensors/supported.mjs",
+    "modules/M13-ledger/outside-check/supported.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "definition",
+   "copy": "GUARD_STEP = 'product 1 / repo-guard'",
+   "files": [
+    "modules/M12-sensors/outside-watch.mjs",
+    "wiring/gate-ports.mjs"
+   ],
+   "why": "#516 landing (L1138): lane 1b folds it into one home or gives its reason"
+  },
+  {
+   "kind": "definition",
+   "copy": "HEX40 = /^[0-9a-f]{40}$/",
+   "files": [
+    "modules/M11-dispatcher/budget.mjs",
+    "modules/M11-dispatcher/research-intake.mjs",
+    "modules/M11-dispatcher/review-requests.mjs",
+    "modules/M4-workshop/launcher/install-check.mjs",
+    "modules/M4-workshop/launcher/review-runner.mjs",
+    "modules/M4-workshop/launcher/review-updater.mjs",
+    "modules/M5-review-audit/review-package.mjs",
+    "modules/M5-review-audit/worker-prompt.mjs",
+    "modules/M9-record/outbox.mjs",
+    "modules/M9-record/writer.mjs",
+    "wiring/worker-ports.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "definition",
+   "copy": "HEX64 = /^[0-9a-f]{64}$/",
+   "files": [
+    "modules/M11-dispatcher/research-intake.mjs",
+    "modules/M11-dispatcher/review-requests.mjs",
+    "modules/M4-workshop/launcher/review-runner.mjs",
+    "modules/M6-merge-gate/watch-only.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "definition",
+   "copy": "HTTPS = /^https:\\/\\/[A-Za-z0-9.-]+(:\\d+)?\\/[^\\s]+$/",
+   "files": [
+    "modules/M4-workshop/launcher/review-updater.mjs",
+    "setup/install.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "definition",
+   "copy": "ID = /^[A-Za-z0-9._-]{1,200}$/",
+   "files": [
+    "modules/M2-approvals/payload.mjs",
+    "modules/M9-record/read-view.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "definition",
+   "copy": "INSTALL_ID = /^[1-9][0-9]{0,19}$/",
+   "files": [
+    "modules/M6-merge-gate/token.mjs",
+    "wiring/robot-wiring.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "definition",
+   "copy": "ISSUE = (n) => Number.isSafeInteger(n) && n > 0",
+   "files": [
+    "modules/M13-ledger/alert-channel.mjs",
+    "modules/M13-ledger/alerts.mjs",
+    "modules/M13-ledger/heartbeat.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "definition",
+   "copy": "LABEL = /^[A-Za-z0-9][A-Za-z0-9.-]{0,127}$/",
+   "files": [
+    "modules/M11-dispatcher/login-job.mjs",
+    "modules/M4-workshop/launcher/review-daemons.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "definition",
+   "copy": "LAUNCHCTL = '/bin/launchctl'",
+   "files": [
+    "setup/daemons.mjs",
+    "setup/owner-answer-setup.mjs"
+   ],
+   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
+  },
+  {
+   "kind": "definition",
+   "copy": "LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/",
+   "files": [
+    "modules/M13-ledger/alert-channel.mjs",
+    "wiring/robot-wiring.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "definition",
+   "copy": "LS = '/bin/ls'",
+   "files": [
+    "setup/extras.mjs",
+    "setup/proofs.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "definition",
+   "copy": "MAX_FILE_BYTES = 32 * 1024 * 1024",
+   "files": [
+    "modules/M4-workshop/git/gitleaks.mjs",
+    "setup/bob-manifest.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "definition",
+   "copy": "MAX_LIST = 100",
+   "files": [
+    "modules/M6-merge-gate/gather.mjs",
+    "modules/M6-merge-gate/watch-only.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "definition",
+   "copy": "MIN_CLAUDE_CODE = '2.1.295'",
+   "files": [
+    "modules/M10-rules/policy.mjs",
+    "modules/M4-workshop/launcher/settings-names.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "definition",
+   "copy": "NAME = /^[A-Za-z0-9_.-]+$/",
+   "files": [
+    "modules/M10-rules/git-view.mjs",
+    "modules/M10-rules/reader.mjs",
+    "modules/M6-merge-gate/audit-run.mjs",
+    "modules/M6-merge-gate/build-skip.mjs",
+    "modules/M6-merge-gate/checker-entry.mjs",
+    "modules/M6-merge-gate/watch-only.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "definition",
+   "copy": "OUTBOX_NAME = /^[a-z]+-[A-Za-z0-9-]+\\.(md|json|txt)$/",
+   "files": [
+    "modules/M4-workshop/hooks/plain-files.mjs",
+    "modules/M4-workshop/launcher/outbox.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "definition",
+   "copy": "PATH = '/usr/bin:/bin:/usr/sbin:/sbin'",
+   "files": [
+    "setup/dispatcher-setup.mjs",
+    "setup/robot-setup.mjs",
+    "setup/sensors-setup.mjs"
+   ],
+   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
+  },
+  {
+   "kind": "definition",
+   "copy": "RETRY_MS = 15 * 60_000",
+   "files": [
+    "modules/M11-dispatcher/research-intake.mjs",
+    "modules/M4-workshop/launcher/review-runner.mjs",
+    "wiring/push-pass.mjs"
+   ],
+   "why": "#516 landing (L1138): lane 1b folds it into one home or gives its reason"
+  },
+  {
+   "kind": "definition",
+   "copy": "ROUTE_STATES = Object.freeze(['ready', 'claimed', 'running'])",
+   "files": [
+    "modules/M11-dispatcher/proposal-route.mjs",
+    "modules/M11-dispatcher/research-intake.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "definition",
+   "copy": "RULES_PATH = 'orchestrate/policy.yaml'",
+   "files": [
+    "modules/M10-rules/reader.mjs",
+    "modules/M6-merge-gate/checker-entry.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "definition",
+   "copy": "SETTLE_MS = 2000",
+   "files": [
+    "modules/M11-dispatcher/outbox-intake.mjs",
+    "modules/M4-workshop/git/push.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "definition",
+   "copy": "SHA = /^[0-9a-f]{40}$/",
+   "files": [
+    "modules/M10-rules/carry-over.mjs",
+    "modules/M10-rules/engine.mjs",
+    "modules/M10-rules/exact-reverse.mjs",
+    "modules/M10-rules/git-view.mjs",
+    "modules/M10-rules/reader.mjs",
+    "modules/M11-dispatcher/cleanup.mjs",
+    "modules/M11-dispatcher/undo.mjs",
+    "modules/M12-sensors/probes/github-pr.mjs",
+    "modules/M2-approvals/decision.mjs",
+    "modules/M2-approvals/github-review.mjs",
+    "modules/M2-approvals/go.mjs",
+    "modules/M2-approvals/undo-flag.mjs",
+    "modules/M4-workshop/git/push.mjs",
+    "modules/M4-workshop/launcher/worker-copy.mjs",
+    "modules/M6-merge-gate/audit-run.mjs",
+    "modules/M6-merge-gate/build-checker.mjs",
+    "modules/M6-merge-gate/build-skip.mjs",
+    "modules/M6-merge-gate/checker-entry.mjs",
+    "modules/M6-merge-gate/gate.mjs",
+    "modules/M6-merge-gate/gather.mjs",
+    "modules/M6-merge-gate/mark.mjs",
+    "modules/M6-merge-gate/merge-outcome.mjs",
+    "modules/M6-merge-gate/refusals.mjs",
+    "modules/M6-merge-gate/undo.mjs",
+    "modules/M6-merge-gate/watch-only.mjs",
+    "setup/bob-manifest.mjs",
+    "wiring/review-ports.mjs",
+    "wiring/runner-checks.mjs",
+    "wiring/runner-ports.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "definition",
+   "copy": "SHA256 = /^[0-9a-f]{64}$/",
+   "files": [
+    "modules/M11-dispatcher/proposal-route.mjs",
+    "modules/M2-approvals/go-view.mjs",
+    "modules/M4-workshop/git/push.mjs",
+    "modules/M6-merge-gate/workflow-route.mjs",
+    "shared/plan-review.mjs",
+    "wiring/runner-ports.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "definition",
+   "copy": "SLEEP = new Int32Array(new SharedArrayBuffer(4))",
+   "files": [
+    "modules/M9-record/lock.mjs",
+    "modules/M9-record/unsent.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "definition",
+   "copy": "STAGES = Object.freeze(['first', 'second'])",
+   "files": [
+    "modules/M12-sensors/supported.mjs",
+    "modules/M13-ledger/outside-check/supported.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "definition",
+   "copy": "SUDO = '/usr/bin/sudo'",
+   "files": [
+    "setup/bob-manifest.mjs",
+    "setup/dispatcher-check.mjs",
+    "setup/extras.mjs",
+    "setup/proofs.mjs",
+    "setup/users-folders.mjs",
+    "setup/watch-setup.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "definition",
+   "copy": "TEST = '/bin/test'",
+   "files": [
+    "setup/extras.mjs",
+    "setup/proofs.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "definition",
+   "copy": "VERSION = /^\\d+\\.\\d+\\.\\d+$/",
+   "files": [
+    "modules/M10-rules/policy.mjs",
+    "modules/M4-workshop/launcher/hooks-check.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": " (M10 TOOLS_CHECKED); re-check them before the pin moves",
+   "files": [
+    "modules/M4-workshop/launcher/review-runner-main.mjs",
+    "setup/review-config.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": " alert could not be queued; it is tried again next pass",
+   "files": [
+    "modules/M11-dispatcher/drain-alerts.mjs",
+    "modules/M11-dispatcher/interactive-holds.mjs"
+   ],
+   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
+  },
+  {
+   "kind": "text",
+   "copy": " and would drop it on the next update: install again (README, part 6)",
+   "files": [
+    "setup/dispatcher-setup.mjs",
+    "setup/sensors-setup.mjs"
+   ],
+   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
+  },
+  {
+   "kind": "text",
+   "copy": " are not safe for root to work in (",
+   "files": [
+    "setup/extras.mjs",
+    "setup/guard.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": " can be written by its group or others",
+   "files": [
+    "setup/host-lock-copy.mjs",
+    "setup/robot-setup.mjs"
+   ],
+   "why": "#489 (landed after the baseline): the same file-permission text in two setup checks; follow-up for the lead: one shared text"
+  },
+  {
+   "kind": "text",
+   "copy": " can be written by others than root",
+   "files": [
+    "modules/M4-workshop/launcher/install-check.mjs",
+    "modules/M4-workshop/launcher/review-updater.mjs",
+    "setup/mac.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": " exists but is not a plain file; nothing was changed",
+   "files": [
+    "setup/daemons.mjs",
+    "setup/extras.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": " in the copy is not root's alone: ",
+   "files": [
+    "setup/dispatcher-setup.mjs",
+    "setup/robot-setup.mjs",
+    "setup/sensors-setup.mjs"
+   ],
+   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
+  },
+  {
+   "kind": "text",
+   "copy": " is not a plain file with one name",
+   "files": [
+    "modules/M4-workshop/launcher/accounts.mjs",
+    "modules/M9-record/unsent.mjs",
+    "wiring/sensors-ports.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": " is not a plain file; nothing was changed",
+   "files": [
+    "setup/mac.mjs",
+    "setup/managed-settings.mjs"
+   ],
+   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
+  },
+  {
+   "kind": "text",
+   "copy": " is not in the copy (run dispatcher-config)",
+   "files": [
+    "setup/dispatcher-setup.mjs",
+    "setup/sensors-setup.mjs"
+   ],
+   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
+  },
+  {
+   "kind": "text",
+   "copy": " is not one this command takes (it is not shown, in case it is a secret)",
+   "files": [
+    "modules/M6-merge-gate/watch-run.mjs",
+    "setup/setup.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": " is not orchestrate's own 0700 folder (run users-folders first)",
+   "files": [
+    "setup/extras.mjs",
+    "setup/watch-setup.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": " is not owned by the review user",
+   "files": [
+    "modules/M4-workshop/launcher/review-runner.mjs",
+    "modules/M9-record/outbox.mjs",
+    "wiring/worker-ports.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": " is not the owner's (its owner is uid ",
+   "files": [
+    "setup/host-lock-copy.mjs",
+    "wiring/worker-ports.mjs"
+   ],
+   "why": "#489 (landed after the baseline): the same file-permission text in two setup checks; follow-up for the lead: one shared text"
+  },
+  {
+   "kind": "text",
+   "copy": " is not there (run users-folders first)",
+   "files": [
+    "setup/extras.mjs",
+    "setup/watch-setup.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": " is paused: only its undo starts",
+   "files": [
+    "modules/M11-dispatcher/gate.mjs",
+    "modules/M11-dispatcher/pass.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": " is root's 0644 and the config this setup writes",
+   "files": [
+    "setup/dispatcher-setup.mjs",
+    "setup/sensors-setup.mjs"
+   ],
+   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
+  },
+  {
+   "kind": "text",
+   "copy": " is that config, and the copy keeps it",
+   "files": [
+    "setup/dispatcher-setup.mjs",
+    "setup/sensors-setup.mjs"
+   ],
+   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
+  },
+  {
+   "kind": "text",
+   "copy": " minutes old; the runner may be stopped",
+   "files": [
+    "modules/M4-workshop/launcher/review-runner.mjs",
+    "wiring/owner-status.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": " ms; exiting so the next start can run",
+   "files": [
+    "modules/M11-dispatcher/main.mjs",
+    "modules/M12-sensors/loop.mjs",
+    "wiring/robot-main.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": " must be set with budget (launch check 12 reads it)",
+   "files": [
+    "modules/M4-workshop/launcher/review-runner-main.mjs",
+    "wiring/runner-main.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": " user does not exist (run users-folders first)",
+   "files": [
+    "setup/dispatcher-setup.mjs",
+    "setup/robot-setup.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "), so root won't write in it; install the copy again (unload the jobs, remove ",
+   "files": [
+    "setup/dispatcher-setup.mjs",
+    "setup/sensors-setup.mjs"
+   ],
+   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
+  },
+  {
+   "kind": "text",
+   "copy": ", above the installed copy, is a link (name the copy by its real path)",
+   "files": [
+    "modules/M4-workshop/launcher/install-check.mjs",
+    "shared/job-config.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": ", above the installed copy, is missing",
+   "files": [
+    "modules/M4-workshop/launcher/install-check.mjs",
+    "shared/job-config.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": ", above the installed copy, is not a folder",
+   "files": [
+    "modules/M4-workshop/launcher/install-check.mjs",
+    "shared/job-config.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": ", but the role tool lists were checked on Claude Code ",
+   "files": [
+    "modules/M4-workshop/launcher/review-runner-main.mjs",
+    "setup/review-config.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": ", run install), which carries ",
+   "files": [
+    "setup/dispatcher-setup.mjs",
+    "setup/sensors-setup.mjs"
+   ],
+   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
+  },
+  {
+   "kind": "text",
+   "copy": ", when set, must be a whole number of minutes, at least 1",
+   "files": [
+    "modules/M6-merge-gate/required-keys.mjs",
+    "modules/M9-record/required-keys.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "--commit must be the full commit: 40 lower-case hex characters",
+   "files": [
+    "setup/bob-manifest.mjs",
+    "setup/setup.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "; write the command out plainly",
+   "files": [
+    "modules/M4-workshop/hooks/merge-guard.mjs",
+    "modules/M4-workshop/hooks/no-verify-block.mjs",
+    "modules/M4-workshop/hooks/production-write-guard.mjs",
+    "modules/M4-workshop/hooks/secret-file-block.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">",
+   "files": [
+    "modules/M11-dispatcher/login-job.mjs",
+    "modules/M4-workshop/launcher/review-daemons.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "Git deploy with no commit recorded",
+   "files": [
+    "modules/M12-sensors/supported.mjs",
+    "modules/M13-ledger/outside-check/supported.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "a fix card names the card it fixes (fix_of)",
+   "files": [
+    "modules/M9-record/guard.mjs",
+    "modules/M9-record/writer.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "a go names its plan fingerprint",
+   "files": [
+    "modules/M2-approvals/go-view.mjs",
+    "modules/M2-approvals/payload.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "a tab claim is never broken; it lapses",
+   "files": [
+    "modules/M9-record/writer.mjs",
+    "shared/record.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "a wait on a date needs a reason",
+   "files": [
+    "modules/M3-lead/task-brief.mjs",
+    "modules/M9-record/writer.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "an undo is already running for ",
+   "files": [
+    "modules/M10-rules/engine.mjs",
+    "modules/M11-dispatcher/gate.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "config: product must be a product name (lower case letters, digits and -, a letter or digit first)",
+   "files": [
+    "wiring/dispatcher-wiring.mjs",
+    "wiring/sensors-wiring.mjs"
+   ],
+   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
+  },
+  {
+   "kind": "text",
+   "copy": "is a plain folder, not the link the updater flips",
+   "files": [
+    "setup/bob-manifest.mjs",
+    "setup/install.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "its ended record names a verdict file",
+   "files": [
+    "modules/M4-workshop/launcher/review-runner.mjs",
+    "modules/M9-record/outbox.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "its folders could not be read: ",
+   "files": [
+    "modules/M4-workshop/git/safe-git.mjs",
+    "wiring/review-ports.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "its lapsed run could not be taken back (",
+   "files": [
+    "modules/M11-dispatcher/proposal-route.mjs",
+    "modules/M11-dispatcher/research-intake.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "its launch could not be recorded (",
+   "files": [
+    "modules/M11-dispatcher/proposal-route.mjs",
+    "modules/M11-dispatcher/research-intake.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "main commit without the merge gate / audit evidence",
+   "files": [
+    "modules/M12-sensors/supported.mjs",
+    "modules/M13-ledger/outside-check/supported.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "no round cap in the rules (caps.rounds)",
+   "files": [
+    "modules/M9-record/ready.mjs",
+    "modules/M9-record/writer.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "not told: the alert could not be queued",
+   "files": [
+    "modules/M11-dispatcher/cleanup.mjs",
+    "modules/M11-dispatcher/phone-link.mjs",
+    "modules/M11-dispatcher/tick.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "only an undo launch names a reversed commit",
+   "files": [
+    "wiring/owner-asks.mjs",
+    "wiring/runner-ports.mjs",
+    "wiring/worker-runner.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "only repository reads are allowed",
+   "files": [
+    "modules/M10-rules/reader.mjs",
+    "modules/M6-merge-gate/watch-only.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "production writes are not allowed in this phase",
+   "files": [
+    "modules/M10-rules/engine.mjs",
+    "modules/M10-rules/snapshot.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "that product is not this record\\'s",
+   "files": [
+    "modules/M2-approvals/research-ask.mjs",
+    "modules/M2-approvals/undo-flag.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "the baseline's throwaway copy can't be made (",
+   "files": [
+    "wiring/runner-checks.mjs",
+    "wiring/runner-ports.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "the command touches git\\'s own settings or hooks files",
+   "files": [
+    "modules/M4-workshop/hooks/merge-guard.mjs",
+    "modules/M4-workshop/hooks/no-verify-block.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "the file count is not a whole number",
+   "files": [
+    "modules/M10-rules/classify.mjs",
+    "modules/M10-rules/lane-check.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "the folder is orchestrate-only; needs root to look; run with sudo",
+   "files": [
+    "setup/extras.mjs",
+    "setup/watch-setup.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "the install is not there yet (run the install first)",
+   "files": [
+    "setup/dispatcher-setup.mjs",
+    "setup/sensors-setup.mjs"
+   ],
+   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
+  },
+  {
+   "kind": "text",
+   "copy": "the installed copy is not root's alone (",
+   "files": [
+    "setup/dispatcher-setup.mjs",
+    "setup/sensors-setup.mjs"
+   ],
+   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
+  },
+  {
+   "kind": "text",
+   "copy": "the label count is not a whole number",
+   "files": [
+    "modules/M10-rules/classify.mjs",
+    "modules/M10-rules/lane-check.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "the notes folder must be apart from the outbox",
+   "files": [
+    "modules/M4-workshop/hooks/compact-note.mjs",
+    "modules/M4-workshop/launcher/render-settings.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "the orchestrate user does not exist",
+   "files": [
+    "setup/extras.mjs",
+    "setup/watch-setup.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "the orchestrate user does not exist yet (run users-folders first)",
+   "files": [
+    "setup/extras.mjs",
+    "setup/watch-setup.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "the outbox is not a plain folder",
+   "files": [
+    "modules/M4-workshop/git/push.mjs",
+    "modules/M4-workshop/launcher/outbox.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "the record refused the answer: ",
+   "files": [
+    "modules/M2-approvals/decision.mjs",
+    "modules/M2-approvals/schedule.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "the request could not be written (",
+   "files": [
+    "modules/M11-dispatcher/review-requests.mjs",
+    "wiring/owner-asks.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "the request id is not letters, digits and dashes",
+   "files": [
+    "modules/M11-dispatcher/review-requests.mjs",
+    "modules/M4-workshop/launcher/review-runner.mjs",
+    "modules/M4-workshop/launcher/review-stop.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "the review threads could not be read",
+   "files": [
+    "modules/M12-sensors/probes/github-pr.mjs",
+    "modules/M6-merge-gate/refusals.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "the rules snapshot could not be written (",
+   "files": [
+    "modules/M4-workshop/launcher/review-launch.mjs",
+    "modules/M4-workshop/launcher/review-runner-main.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "the same name with new content",
+   "files": [
+    "modules/M11-dispatcher/outbox-intake.mjs",
+    "modules/M11-dispatcher/proposals-intake.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "the stop\\'s reason is not a short plain word",
+   "files": [
+    "modules/M4-workshop/launcher/review-runner.mjs",
+    "modules/M4-workshop/launcher/review-stop.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "the undo launch names no reversed commit",
+   "files": [
+    "wiring/runner-ports.mjs",
+    "wiring/worker-runner.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "the wiring module has no wire()",
+   "files": [
+    "modules/M11-dispatcher/main.mjs",
+    "modules/M12-sensors/loop.mjs",
+    "wiring/robot-main.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "the worker runner does not start ",
+   "files": [
+    "wiring/owner-asks.mjs",
+    "wiring/runner-launch.mjs",
+    "wiring/runner-ports.mjs",
+    "wiring/worker-runner.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "too many statuses to read them all",
+   "files": [
+    "modules/M6-merge-gate/checker-entry.mjs",
+    "modules/M6-merge-gate/mark.mjs"
+   ],
+   "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "unknown or inactive ask kind \"",
+   "files": [
+    "modules/M10-rules/engine.mjs",
+    "modules/M2-approvals/binding.mjs",
+    "modules/M2-approvals/payload.mjs"
+   ],
+   "why": "baseline (L1078)"
+  }
+ ]
+}
