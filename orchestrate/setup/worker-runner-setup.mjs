@@ -21,6 +21,7 @@ import { fullPath, workerRunnerPlist } from '../wiring/runner-job.mjs';
 import { BUILDER, WORKER_RUNNER_CONFIG, WORKER_STATUS_FILE, homeOf, keysPath, mirrorPath, outboxRootPath, privatePath, proposalsParentOf, storePath, workerCopiesPath, workerRunnerPaths } from './layout.mjs';
 import { installPaths, keepsNotWarning } from './install.mjs';
 import { readUser } from './users-folders.mjs';
+import * as layout from './layout.mjs';
 import { BUILDER_ROLE, rulesProblems } from './review-config.mjs';
 import { NO_INSTALL, keysDiffer, notRootsAlone, writeAside } from './dispatcher-setup.mjs';
 
@@ -109,9 +110,10 @@ const plainObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
 /**
  * The worker runner's config as its job will see it (every path written into it through io.at; every file read by its
  * plain path, since io.readText adds the prefix itself). → { config, problems, denied }: `denied` when a read was refused
- * (EACCES, EPERM), which a check without root can't tell from a broken source (L1043). `userOf` is a port for tests.
+ * (EACCES, EPERM), which a check without root can't tell from a broken source (L1043). `userOf` and `wallMod` (where the
+ * builder wall's status file is: layout.mjs wallStatusPath) are ports for tests.
  */
-export function workerRunnerConfigFor(io, cfg, { userOf = (n) => readUser(io, n) } = {}) {
+export function workerRunnerConfigFor(io, cfg, { userOf = (n) => readUser(io, n), wallMod = layout } = {}) {
   const w = cfg.workerRunner;
   if (!w) return { config: null, problems: [WORKER_RUNNER_OFF] };
   if (!cfg.dispatcher) return { config: null, problems: ['the worker runner needs the Dispatcher\'s entry too: its products.json names the product\'s repository, and its rules-state and approvals folders go on the sessions\' deny list (L1112)'] };
@@ -145,6 +147,13 @@ export function workerRunnerConfigFor(io, cfg, { userOf = (n) => readUser(io, n)
     const entry = checkProducts(JSON.parse(io.readText(cfg.dispatcher.productsFile))).find((p) => p.product === product);
     if (!entry) problems.push(`${cfg.dispatcher.productsFile} does not list ${product}`); else repo = `${entry.owner}/${entry.repo}`;
   } catch (e) { denied ||= deniedCode(e); problems.push(`${cfg.dispatcher.productsFile} can't be used (${e?.code ?? e?.message})`); }
+  // The builder wall's status file (L1193): its place is root's wall job's (lane A), named once in layout.mjs as wallStatusPath,
+  // never a second copy here (I7). Not builder-wall.mjs itself: it imports daemons.mjs, which imports this file, a loop that
+  // leaves names unset at load. While layout names none, the config names none, and the runner holds every start, saying so.
+  let wallStatus;
+  if (typeof wallMod?.wallStatusPath === 'function') {
+    try { wallStatus = at(wallMod.wallStatusPath(cfg)); } catch (e) { problems.push(`the builder wall's status file can't be placed (${e?.message ?? e})`); }
+  }
   if (problems.length) return { config: null, problems, denied };
 
   const W = workerRunnerPaths(cfg); const home = at(homeOf(cfg, BUILDER));
@@ -172,6 +181,7 @@ export function workerRunnerConfigFor(io, cfg, { userOf = (n) => readUser(io, n)
     ...opt('pin'), ...opt('machineWide'), ...opt('accountCopy'), ...opt('bobManifest'),
     // Check 12 (L1001): M11's module and the Dispatcher's rules, as the review runner names them, with the review runner's status.
     budget: rc.budget, dispatcherRules: rc.dispatcherRules, reviewStatusFile: at(join(P.reviewRoot, REVIEW_FOLDERS.status)), reviewUid: rev.uid,
+    ...(wallStatus !== undefined ? { wallStatus } : {}),
   };
   try { checkRunnerConfig(config); } catch (e) { return { config: null, problems: [`the config this would write is one the worker runner refuses (${e.message})`], denied }; }
   return { config, problems: [], denied };
