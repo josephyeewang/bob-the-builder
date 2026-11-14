@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { parseInstallConfig } from './install.mjs';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { jobsFor, onlyJobs, OPTIONAL_JOBS, planLoad, planPlace, runRows, startChecks } from './daemons.mjs';
+import { checkDaemons, jobsFor, onlyJobs, OPTIONAL_JOBS, planLoad, planPlace, runRows, startChecks } from './daemons.mjs';
 import { WORKER_CLAIM_MS, WORKER_RUNNER_CONFIG, WORKER_RUNNER_JOB, parseWorkerRunner, planWorkerRunnerConfig, workerRunnerConfigFor, workerRunnerConfigText, workerRunnerJobPlist, workerRunnerLoadCheck, workerRunnerLoadProblem } from './worker-runner-setup.mjs';
 import { fakeMac, macTest } from './fake-mac.test-helper.mjs';
 import { updaterConfigFor } from './install.mjs';
@@ -258,4 +258,20 @@ test('#537 r1 m7: without root, a read refused is not known (L1043): never a rea
   assert.equal(workerRunnerConfigFor(refuse(DISP.productsFile), cfgOn(), { userOf }).denied, true);
   assert.equal(workerRunnerConfigFor(refuse(`${R}/review.json`), cfgOn(), { userOf }).denied, true);
   assert.equal(workerRunnerConfigFor(ioOf({ [`${R}/review.json`]: JSON.stringify(RC) }), cfgOn(), { userOf }).denied, false, 'ENOENT is known');
+});
+
+test('#537 r1 (L1188): daemons check\'s worker-runner.json row: not known without root is a NEEDS ROOT skip; a file that differs FAILs; the one setup writes passes', () => {
+  const cfg = cfgOn(); const P = (p) => `${NO_COPY}${p}`;
+  const dsclRun = (cmd, args) => { const n = /^\/Users\/(\w+)$/.exec(args?.[2] ?? '')?.[1]; const u = n && userOf(n);
+    return u?.exists ? { status: 0, stdout: `UniqueID: ${u.uid}\nPrimaryGroupID: 20\nNFSHomeDirectory: ${u.home}\n`, stderr: '' } : { status: 56, stdout: '', stderr: '' }; };
+  const io = (files, o) => ({ ...gateIo(files, o), run: dsclRun });
+  const src = FILES({ ...RC, installRoot: P(R), recordRoot: P(`${BASE}/products/alpha/store`), budget: P(RC.budget) });
+  const built = workerRunnerConfigFor(io(src), cfg); assert.deepEqual(built.problems, [], 'the sources build a config');
+  const row = (files, o) => checkDaemons(io(files, o), cfg, [WORKER_RUNNER_JOB]).find((r) => /worker-runner\.json\) is the one this setup writes/.test(r.what));
+  const unknown = row({}, { euid: 501, deny: 'EACCES' });
+  assert.equal(unknown.skip, true, 'NEEDS ROOT'); assert.equal(unknown.ok, true, 'a skip, never a FAIL'); assert.match(unknown.why, /can't be checked without root/);
+  const differs = row({ ...src, [WF]: workerRunnerConfigText({ ...built.config, claimMs: 1 }) });
+  assert.equal(differs.ok, false); assert.ok(!differs.skip); assert.match(differs.why, /worker-runner\.json/);
+  const same = row({ ...src, [WF]: workerRunnerConfigText(built.config) });
+  assert.deepEqual(same, { ok: true, what: same.what }, 'PASS: no reason, no skip');
 });
