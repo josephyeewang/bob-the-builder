@@ -2,9 +2,9 @@
 // The always-on Mac's one-time setup commands (R-0b-05 and the install). Every command has a --dry-run (changing commands)
 // or is read only; every changing command is safe to run twice and refuses clearly when it needs root and does not have it.
 //
-//   users-folders        [--dry-run]    the three Mac users and their folders                                  (root)
+//   users-folders        [--dry-run]    the plain-script Mac users and their folders                             (root)
 //   check                               PASS, FAIL or NEEDS ROOT per item for the above; exit 3 if some need root (read only)
-//   proofs               [--dry-run]    the owner's own Mac user cannot write the record, hooks,
+//   proofs               [--dry-run]    the builder user (L1079) cannot write the record, hooks,
 //                                       settings, launcher... or read the keys                                 (root, read only)
 //   install              [--dry-run]    the link layout, then the updater's first run                          (root)
 //   check-install        [--main <sha>] [--watch-only] the copy, its link, every install folder, access lists; --watch-only
@@ -225,6 +225,9 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, bobGitOf, man
     // check reads the plain config, which drops the entry: on only when the entry's own parser takes it (L807 c2, r1 c1).
     // An entry there that its parser refuses: check-dispatcher says so rather than leave its root rows out (L905 m1).
     o.dispatcherOn = (() => { try { return parseDispatcher(raw?.dispatcher, cfg) !== undefined; } catch (e) { if (raw?.dispatcher !== undefined) o.dispatcherWhy = e?.message ?? 'it can\'t be read'; return false; } })();
+    // proofs reads the plain config, which drops the entry (#528 r2 m1): the Dispatcher's rules-state and approvals
+    // proofs (L1112 (3)) need it, so it goes back on, through its own parser.
+    if (o.cmd === 'proofs' && o.dispatcherOn) cfg = { ...cfg, dispatcher: parseDispatcher(raw.dispatcher, cfg) };
     if (o.only !== null) o.jobs = onlyJobs(cfg, o.only, { anyKnown: o.cmd === 'daemons' && (o.sub === 'unload' || o.sub === 'list') });   // a name that is no job of this config is refused before anything runs (unload and list take any job setup makes)
   } catch (e) { err(`${e.message}\n${USAGE}`); return 2; }
 
@@ -279,13 +282,16 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, bobGitOf, man
   }
 
   if (o.cmd === 'proofs') {
-    if (o.dry) { for (const c of proofCommands(cfg)) out(`would run: ${c}`); out('dry run: nothing was run.'); return 0; }
+    if (o.dispatcherWhy) { err(`refused: the config's dispatcher entry can't be read (${o.dispatcherWhy}), so the proofs for its folders can't be built`); return 2; }
+    if (o.dry) { for (const c of proofCommands(io, cfg)) out(c.startsWith('not tried') ? c : `would run: ${c}`); out('dry run: nothing was run.'); return 0; }
     const p = rootProblem(io); if (p) { err(`refused: ${p}`); return 2; }
     const res = runProofs(io, cfg);
-    for (const r of res) out(r.ok ? `PASS  ${r.what}` : `FAIL  ${r.what} — ${r.why}`);
-    const bad = res.filter((r) => !r.ok).length;
-    out(bad ? `${bad} of ${res.length} proofs FAILED` : `all ${res.length} proofs PASS`);
-    return bad ? 1 : 0;
+    // NOT TRIED is not a pass (L1079, as L707 c1): containment is proven only when every line is PASS.
+    // NOT TRIED is read first (#528 r3 m2): a line marked so prints NOT TRIED and counts as untried whatever else it says.
+    for (const r of res) out(r.notTried ? `NOT TRIED  ${r.what} — ${r.why}` : r.ok ? `PASS  ${r.what}` : `FAIL  ${r.what} — ${r.why}`);
+    const failed = res.filter((r) => !r.ok && !r.notTried).length; const untried = res.filter((r) => r.notTried).length;
+    out(failed || untried ? `${failed} of ${res.length} proofs FAILED, ${untried} NOT TRIED: containment is not proven` : `all ${res.length} proofs PASS: containment is proven on this Mac`);
+    return failed || untried ? 1 : 0;
   }
 
   // The owner's answer job is the one command root does not run: it is the owner's, in the owner's session (owner-answer-setup.mjs).

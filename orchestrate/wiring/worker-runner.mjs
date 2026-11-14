@@ -69,7 +69,7 @@
 import { CARD_ID } from '../modules/M9-record/outbox.mjs';
 import { PRODUCT } from '../shared/product-paths.mjs';
 import { REQUEST_ID } from '../modules/M4-workshop/launcher/review-runner.mjs';
-import { CLOCK_SKEW_MS, RUNNER_KEEP_USED_UP_MS, RUNNER_KINDS, RUNNER_ROLE_OF, RUNNER_STATUS_EVERY_MS, UNDO_COMMIT, USED_UP, checkSession } from './owner-status.mjs';
+import { CLOCK_SKEW_MS, RUNNER_KEEP_USED_UP_MS, RUNNER_KINDS, RUNNER_ROLE_OF, RUNNER_STATUS_EVERY_MS, UNDO_COMMIT, USED_UP, checkSession, live } from './owner-status.mjs';
 import { launchAnswerWrong } from './owner-asks.mjs';
 import { DRAIN_CAUSES, drainHeldOk } from '../modules/M11-dispatcher/drain-alerts.mjs';
 import { heldOk } from '../modules/M4-workshop/send-safe/hook-store.mjs';
@@ -128,7 +128,7 @@ function bodyMatches(k, body) {
 }
 
 const project = (s) => Object.fromEntries(STATUS_SESSION_FIELDS.filter((f) => s[f] !== undefined).map((f) => [f, s[f]]));
-const isLive = (s) => s.alive === true || (s.alive !== false && s.ended !== true);
+const isLive = live;   // the one live-session rule (owner-status.mjs, #528 r1 m4, I7)
 
 /**
  * One pass. ctx: { state, requests: [{ name, body }] (read by readRequest, oldest first), now, uid, outboxRoot, copiesRoot,
