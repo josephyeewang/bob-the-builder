@@ -30,7 +30,7 @@ import { NODE, aclProblem, chainProblem, installProblem } from '../modules/M4-wo
 import { CONFIG_KEYS as ROBOT_KEYS, appProblem } from '../wiring/robot-wiring.mjs';
 // The robot App's key file name: token.mjs owns it (L1471) and mints from it when the wiring names no keyFile (it names none).
 import { ROBOT_KEY_FILE } from '../modules/M6-merge-gate/token.mjs';
-import { homeOf, keysPath } from './layout.mjs';
+import { JOB_PATH as PATH, homeOf, keysPath } from './layout.mjs';
 import { installPaths } from './install.mjs';
 import { readUser } from './users-folders.mjs';
 import { keyFileItems } from './watch-setup.mjs';
@@ -63,7 +63,6 @@ export function lockFolderProblem(io, file, owners) {
   const acl = aclProblem([io.at(dir)]);
   return acl ? `its folder: ${acl}` : null;
 }
-const PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
 /** Said wherever the config turns the robot on but its extras carry no robot.json. */
 export const ROBOT_NO_CONFIG = `config: "robot": true needs the robot's config among the extras, as a file named ${ROBOT_CONFIG} (the install carries it into the copy, and every update keeps it)`;
 
@@ -112,12 +111,15 @@ function robotConfigRead(io, cfg) {
   return { problem, config: problem === null ? config : null };
 }
 
+/** Why config `name` in the installed copy is not root's alone (`bad`): one text for every config in the copy (I7). */
+export function inCopyNotRootsAlone(name, bad) { return `${name} in the copy is not root's alone: ${bad}`; }
+
 function robotConfigCheck(io, cfg, seen) {
   const P = installPaths(cfg); const root = io.at(P.installRoot); const file = join(root, ROBOT_CONFIG);
   let here = true; try { io.lstatReal(file); } catch { here = false; }
   if (!here) return `${join(P.installRoot, ROBOT_CONFIG)} is not in the copy (it comes in as one of the install's extras)`;
   const bad = installProblem(root, [file], { owner: io.rootUid, top: io.prefix || '/' });
-  if (bad) return `${ROBOT_CONFIG} in the copy is not root's alone: ${bad}`;
+  if (bad) return inCopyNotRootsAlone(ROBOT_CONFIG, bad);
   let c; try { c = JSON.parse(io.readText(join(P.installRoot, ROBOT_CONFIG))); } catch { return `${ROBOT_CONFIG} in the copy is not JSON`; }   // never the parser's words: they quote the file
   if (!c || typeof c !== 'object' || Array.isArray(c)) return `${ROBOT_CONFIG} in the copy is not a JSON object`;
   seen(c);

@@ -116,6 +116,7 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
     const reach = (f) => { for (let d = dirname(f); d !== '/'; d = dirname(d)) if (!can(d, false, true)) return false; return true; };
     if (prog === '/bin/test' && rest[0] === '-w') return { status: reach(rest[1]) && can(rest[1], true) ? 0 : 1, stdout: '', stderr: '' };
     if (prog === '/bin/test' && rest[0] === '-r') return { status: reach(rest[1]) && can(rest[1], false) ? 0 : 1, stdout: '', stderr: '' };
+    // No `test -O` (#528 r6 M-A, M-B): who owns a place is root's own look in the proofs, never a test run as the user.
     if (prog === '/bin/test' && rest[0] === '-x') return { status: reach(rest[1]) && can(rest[1], false, true) ? 0 : 1, stdout: '', stderr: '' };
     // `head -c 1 <file>` (the proofs' read, L1079) is a read as `cat` is: the folder walk, then the file's read bits; a folder it can read answers "Error reading", as macOS's head does.
     if (prog === '/usr/bin/head' && rest[0] === '-c' && rest[1] === '1') {
@@ -196,7 +197,7 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
       const st = lstatSync(at(p)); const o = mac.owners.get(p);
       return { isDirectory: () => st.isDirectory(), isFile: () => st.isFile(), isSymbolicLink: () => st.isSymbolicLink(), mode: st.mode, size: st.size, nlink: st.nlink, ino: st.ino, dev: st.dev, uid: o ? o.uid : -1, gid: o ? o.gid : -1 };
     },
-    stat(p) { const st = statSync(at(p)); return { isDirectory: () => st.isDirectory(), isFile: () => st.isFile(), isSymbolicLink: () => false, mode: st.mode }; },
+    stat(p) { const st = statSync(at(p)); return { isDirectory: () => st.isDirectory(), isFile: () => st.isFile(), isSymbolicLink: () => false, mode: st.mode, nlink: st.nlink }; },
     realpath(p) { const r = realpathSync(at(p)); return r.startsWith(`${prefix}/`) ? r.slice(prefix.length) : r; },
     openRead: (p) => openRead(at(p)),
     mkdir(p, mode) { mac.log.push(`mkdir ${p}`); mkdirSync(at(p), { mode }); mac.owners.set(p, mac.as === 0 ? { uid: mac.rootUid, gid: 0 } : { uid: mac.as, gid: 20 }); },

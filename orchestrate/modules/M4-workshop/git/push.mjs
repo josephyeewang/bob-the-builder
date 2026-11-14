@@ -54,11 +54,15 @@ import { proposalFolder } from '../launcher/proposal-wall.mjs';
 import { plainFd } from '../../M9-record/unsent.mjs';
 import { researchPath, researchFileName, RESEARCH_ID } from '../../M2-approvals/research-ask.mjs';
 import { intakeFactId } from '../../M11-dispatcher/intake-facts.mjs';
+import { SHA256 } from '../../../shared/plan-fingerprint.mjs';
 
 export { BRANCH };
 export const BUNDLE_CAP = 200 * 1024 * 1024;
 // A file changed this recently may still be being written. One value: the proposals intake's too.
 export const SETTLE_MS = 2000;
+/** How long a push (or the pull request it asks for) that did not go waits before it is tried again: research-intake.mjs and
+ * wiring/push-pass.mjs both use it, as RETRY_MS (I7: one home). */
+export const PUSH_RETRY_MS = 15 * 60_000;
 // A research copy refused with this reason is told to the owner at once (M11 researchCopyPass).
 export const REPORT_CHANGED = 'the report\'s bytes are not the ones the intake recorded';
 // The bits a proposals folder may not have: anything looser than 750. One value: the intake's folder check too.
@@ -69,7 +73,6 @@ const CARD = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
 const ATTEMPT = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
 const REPO = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/;
 const SHA = /^[0-9a-f]{40}$/;
-const SHA256 = /^[0-9a-f]{64}$/;
 const isUid = (u) => Number.isSafeInteger(u) && u > 0;
 // An attempt id starting p- or r- is a proposal's or a research copy's (their facts live under it); a worker's never does.
 const DOOR_ATTEMPT = /^[pr]-/;
@@ -301,6 +304,8 @@ async function messages(mirror, shas, names, about) {
  *                           never passes it, so every address is https://github.com/<repo>.git.
  *   testFstat(fd)           tests only, refused outside them: stands in for fstat on the bundle's handle.
  *   testGit                 tests only, refused outside them: { bin, timeouts, failStart } for every git call (gitTest).
+ *   testScannerPin          tests only, refused outside them: { sha, uid } of a stand-in gitleaks, in place of root's
+ *                           real pin (gitleaks.mjs scannerBinProblem; L1123 m5).
  *   afterStage()            tests only: runs right after the private copy is taken, so a test can
  *                           swap the outbox bundle at the earliest moment (review R-0b-47 MAT-4).
  *   uids.worker             the Mac user a worker's bundle must be owned by (`orchestrate`, L65)
@@ -312,9 +317,10 @@ async function messages(mirror, shas, names, about) {
  *                           look owned by another user (tests can't chown).
  */
 export function createPushScript(deps) {
-  const { record, rules, productPlace, outsideWorkflow, privateDir, scanner, getRobotToken, readRun, workflowRule, issues, pullRequests, gateCache = {}, testRemote, afterStage, bundleCap = BUNDLE_CAP, now = () => Date.now(), uids, ownerUid, outboxRoot, testFstat: fstat, testGit } = deps;
+  const { record, rules, productPlace, outsideWorkflow, privateDir, scanner, getRobotToken, readRun, workflowRule, issues, pullRequests, gateCache = {}, testRemote, afterStage, bundleCap = BUNDLE_CAP, now = () => Date.now(), uids, ownerUid, outboxRoot, testFstat: fstat, testGit, testScannerPin } = deps;
   if (fstat !== undefined && !process.env.NODE_TEST_CONTEXT) throw new Error('createPushScript: testFstat is for tests only');
   if (testGit !== undefined && !process.env.NODE_TEST_CONTEXT) throw new Error('createPushScript: testGit is for tests only');
+  if (testScannerPin !== undefined && !process.env.NODE_TEST_CONTEXT) throw new Error('createPushScript: testScannerPin is for tests only');
   // Checked once, here: a push script that can't tell a worker's bundle from Joe's is never made.
   // So is one that doesn't know where a product lives, or which outside check to trust (L568).
   if (typeof productPlace !== 'function') throw new Error('createPushScript: productPlace must be a function');
@@ -500,7 +506,7 @@ export function createPushScript(deps) {
       // 5. The secret scan.
       const shas = commits.map(([s]) => s);
       for (const sha of shas) if (await addedAllowComment(mirror, sha, of)) no(`commit ${sha.slice(0, 12)} adds a "gitleaks:allow" comment`);
-      const scan = await scanSecrets({ setup: scanner, mirror, shas, blobs: [...blobs.values()], messages: await messages(mirror, shas, names, of), privateDir: work, allowedBinaries: allowList(rules.get('product.allowed_binaries', { product })) });
+      const scan = await scanSecrets({ setup: scanner, mirror, shas, blobs: [...blobs.values()], messages: await messages(mirror, shas, names, of), privateDir: work, allowedBinaries: allowList(rules.get('product.allowed_binaries', { product })), testPin: testScannerPin });
       if (!scan.ok) no(scan.reason);
 
       // 6. The rules, then the start gate. M10's push_branch reads the card as { id, kind, rows, doc: { lane, files } } and each

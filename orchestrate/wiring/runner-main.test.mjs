@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { writeSnapshot } from '../modules/M4-workshop/hooks/snapshot.mjs';
 import { makeLock } from '../modules/M9-record/lock.mjs';
 import { loginJobPlist } from '../modules/M11-dispatcher/login-job.mjs';
-import { aclWriteEntries, carriedOverProblem, checkRunnerConfig, DENY_KEYS, hookStoreOf, keepSnapshots, listenStop, main, personUserProblem, readRootFile, realRunnerPorts, snapshotFolderProblem, startDeps, testProductHeld, testProductProblem } from './runner-main.mjs';
+import { DENY_KEYS, personUserProblem, aclWriteEntries, carriedOverProblem, checkRunnerConfig, hookStoreOf, keepSnapshots, launchInputs, readRunnerConfig, snapshotFolderProblem, startDeps, listenStop, main, readRootFile, realRunnerPorts, testProductHeld, testProductProblem } from './runner-main.mjs';
 import { RUNNER_JOB_LOG, RUNNER_JOB_UMASK, RUNNER_JOB_USER, fullPath, workerRunnerPlist } from './runner-job.mjs';
 import { BUILDER } from '../setup/layout.mjs';
 // The tests run as a person's user; main's own check of that is tested apart (L1079).
@@ -652,6 +652,8 @@ test('L1001: main stops when the budget or Bob file list is not root\'s alone in
     // One that can't be loaded, or answers nothing, is logged and leaves its check without a port; the runner still runs.
     for (const [o, said] of [[{ loadBudget: async () => { throw new Error('no snapshot'); } }, /the budget module could not be loaded \(no snapshot\); no session starts/],
       [{ loadBudget: async () => ({ rules: {} }) }, /the budget module gave no rules, rec, bandsNow and runningNow; no session starts/],
+      // Each of the four is needed (BUDGET_PORTS, L1121 c2): one missing alone is refused.
+      ...['rules', 'rec', 'bandsNow', 'runningNow'].map((k) => [{ loadBudget: async () => ({ ...budget, [k]: undefined }) }, /the budget module gave no rules, rec, bandsNow and runningNow; no session starts/]),
       [{ readManifest: () => '{not json' }, /the Bob file list could not be read/]]) {
       logs = []; got.length = 0;
       assert.equal(await main(['/cfg.json'], opts(o)), 0, logs.join('\n'));
@@ -713,6 +715,54 @@ test('L1079: a worker signs in with the owner\'s account choice, read from root\
   assert.match(workerAccount(c, { readCopy: read({ ok: true, account: 'b' }), setUp: () => false }).reason, /account b \(the owner's choice\) is not set up in \/B\/home\/builder/);
   // No accountCopy: the builder home's own file, as before.
   assert.deepEqual(workerAccount({ home: '/h' }, { inUse: ({ home }) => ({ account: 'a', home }) }), { account: 'a', home: '/h' });
+});
+
+test('L1092: launchInputs, the one loader of checks 12 and 13 (the runner\'s and the runLocked proof\'s): root\'s alone first, each loaded once with the caller\'s user', async () => {
+  const c = { installRoot: '/i', budget: '/i/b.mjs', bobManifest: '/i/m.json', statusFile: '/s.json', dispatcherRules: '/r' };
+  const budget = { rules: {}, rec: {}, bandsNow: () => ({}), runningNow: () => [] };
+  const loads = []; const logs = [];
+  const r = await launchInputs(c, { pinnedProblem: () => null, uid: 777, log: (s) => logs.push(s),
+    loadBudget: async (f, x) => { loads.push([f, x.workerUid, x.workerStatusFile]); return budget; }, readManifest: () => '{"a.md":"x"}' });
+  assert.deepEqual(r, { budget, bobManifest: { 'a.md': 'x' } });
+  assert.deepEqual(loads, [['/i/b.mjs', 777, '/s.json']]);
+  assert.deepEqual(logs, []);
+  // Not root's alone, or a check that throws: a problem, and nothing is loaded.
+  for (const pinnedProblem of [() => 'b.mjs is 501\'s', () => { throw new Error('b.mjs is 501\'s'); }]) {
+    loads.length = 0;
+    const p = await launchInputs(c, { pinnedProblem, loadBudget: async () => { loads.push(1); return budget; }, readManifest: () => '{}' });
+    assert.equal(p.problem, 'its budget or Bob file list is not root\'s alone in the installed copy: b.mjs is 501\'s');
+    assert.equal(loads.length, 0);
+  }
+  // Neither in the config: no pinned check, both null.
+  let asked = false;
+  assert.deepEqual(await launchInputs({ installRoot: '/i' }, { pinnedProblem: () => { asked = true; return 'x'; } }), { budget: null, bobManifest: null });
+  assert.equal(asked, false);
+});
+
+test('L1121 m1: readRunnerConfig is the runner\'s one config reading: budget is checked as a code file when named; no own path, no read', () => {
+  const copy = tempDir('orch-rrc-');
+  const file = join(copy, 'runner.json');
+  writeFileSync(file, JSON.stringify({ installRoot: copy, budget: 'budget.mjs' }));
+  // budget named as code (optionalCode): a relative path is refused before anything else is read. Planted: dropped or mistyped.
+  assert.throws(() => readRunnerConfig(file, join(copy, 'wiring', 'runner-main.mjs')), /budget must be a full path/);
+  assert.throws(() => readRunnerConfig(file, undefined), /its own script's path can't be read/);
+});
+
+test('L1121 m2: launchInputs\' own defaults are the real ones: a budget or Bob file list that is not root\'s stops the start, and nothing is loaded', async () => {
+  if (process.getuid() === 0) return;
+  const copy = tempDir('orch-li-');
+  for (const k of ['budget', 'bobManifest']) {
+    const f = join(copy, k === 'budget' ? 'b.mjs' : 'm.json');
+    writeFileSync(f, k === 'budget' ? 'export const budget = () => { throw new Error("loaded"); };\n' : '{}');
+    const r = await launchInputs({ installRoot: copy, [k]: f });
+    assert.match(r.problem ?? '', /^its budget or Bob file list is not root's alone in the installed copy: /, k);
+  }
+  // The manifest's own reader is a second guard: with the first check let through, a file that is not root's still reads as no list.
+  const m = join(copy, 'm.json');
+  const said = [];
+  const r2 = await launchInputs({ installRoot: copy, bobManifest: m }, { pinnedProblem: () => null, log: (t) => said.push(t) });
+  assert.equal(r2.bobManifest, null, 'planted: the manifest read without the root-only check');
+  assert.match(said.join('\n'), /the Bob file list could not be read \(.*is not root's own plain file\)/);
 });
 
 test('R-0b-175a: hookStateDir is optional, a folder apart from the Dispatcher\'s, the requests and every place a worker writes; start_timeout_s per interactive role', () => {

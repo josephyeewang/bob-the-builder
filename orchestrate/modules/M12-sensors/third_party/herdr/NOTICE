@@ -1,4 +1,4 @@
-Parts of orchestrate/modules/M12-sensors/screen/ are a port of herdr (https://github.com/herdrdev/herdr),
+Parts of orchestrate/modules/M12-sensors/screen/, and orchestrate/modules/M4-workshop/send-safe/changes.mjs, are a port of herdr (https://github.com/herdrdev/herdr),
 commit ee5bfb5041bb3e4a49d591c72308aae3c81ecdde, licensed under the Apache License, Version 2.0 (see LICENSE in this
 folder, copied from that commit). herdr ships no NOTICE file at this commit.
 
@@ -10,6 +10,7 @@ Files modified: ported from Rust and TOML to JavaScript, with changes.
   screen/match.test.mjs     partly from src/detect/manifest/tests.rs
   screen/waiting.mjs        from src/pane/agent_detection.rs (the pending-idle confirmation)
   screen/tools/capture.mjs  from scripts/capture_agent_screen.py (the tmux capture loop)
+  M4-workshop/send-safe/changes.mjs  from src/api/wait.rs:364-514 (event sequence numbers and the identity check of a wait)
 
 Main changes from the original:
   - a screen no rule matches reads "unknown" (hold); herdr falls back to idle for a known agent;
@@ -23,4 +24,6 @@ Main changes from the original:
     before matching; rule ids must be unique;
   - the rules load only from the installed file: no remote download, no hot reload, no override folder;
   - the idle confirmation keeps no history between sends, never lets idle through on a time cap, counts only the
-    text-region prompt rule, and also needs the hook tracker to say the session isn't waiting.
+    text-region prompt rule, and also needs the hook tracker to say the session isn't waiting;
+  - changes.mjs numbers each session's own changes and saves the number, so it never goes backwards across a restart;
+    a wait ends aborted on a new launch id or a session end, and waits for the typed prompt's hash, never its text.

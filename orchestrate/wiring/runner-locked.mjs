@@ -8,8 +8,9 @@
 //              with the save's arguments; it writes its answer as JSON into the result file. It runs in the copy's .git
 //              under the session's save-phase settings (L991 M1, runner-ports.mjs saveWorkPort: the session's walls,
 //              the network off, the start's file by its hash), so it writes in .git and the outbox only.
-//              CAPABILITY NOTE, read in claude 2.1.322's bundled sandbox code; not yet checked on the pin (2.1.316, M10
-//              TOOLS_CHECKED): the Mini proof below checks it there. RECHECK ON EVERY UPGRADE of the pin.
+//              CAPABILITY NOTE, read in claude 2.1.322's bundled sandbox code and again in the pin's, 2.1.316, on
+//              13 Nov 2026 (checked: claude-code 2.1.316); the Mini proof below runs it there. RECHECK ON EVERY UPGRADE
+//              of the pin.
 //              That claude's sandbox always denies writes to <cwd>/.git/config and <cwd>/.git/hooks (and **/.git/...).
 //              With the copy as cwd, the job's reset of .git/config and .git/hooks (resetCloneGit) would be refused;
 //              with <copy>/.git as cwd those paths are .git/.git/... and do not apply. M4 README item 9, step 9 proves it.
@@ -26,8 +27,8 @@
 // ended by a signal, a result file left from before that can't be removed, the time limit (the whole process group is
 // killed: LOCKED_SAVE_MS for save-work, under the Dispatcher's SAVE_DEADLINE_MS so one ask can be answered; LOCKED_MS
 // for the install), and no result, one over RESULT_MAX_BYTES, or one that is not the job's form ("not written").
-// The job's own process group (#463 r2 M1): claude's Bash tool (read in 2.1.317 and 2.1.322; the pin, 2.1.316, is a Mini
-// proof) runs each command detached, in a group of its
+// The job's own process group (#463 r2 M1): claude's Bash tool (read in 2.1.317, 2.1.322 and the pin, 2.1.316; the Mini
+// proof runs it) runs each command detached, in a group of its
 // own, so claude's group alone does not hold the job. The job's shell first records its pid (groupRecordCommand) and
 // waits; the runner reads its group and leader start time outside the sandbox, keeps them (onGroup is told claude's
 // group, then the same record with `job`), and only then lets the job run. Both groups are killed at the time limit, on
@@ -42,11 +43,11 @@
 //
 // Proven on the Mini only (a capability claim tied to the pinned claude version, void on a pin move; the Mini checklist,
 // modules/M4-workshop/README.md "Live proofs still to run", item 9, run on the pin, 2.1.316): that claude's Bash tool runs
-// the job in a group of its own that the record names, and honours the BASH_*_TIMEOUT_MS wait (both read in claude 2.1.317
-// and 2.1.322's code, not yet checked on 2.1.316); that claude runs the job's command under dontAsk with the worker hooks;
+// the job in a group of its own that the record names, and honours the BASH_*_TIMEOUT_MS wait (both read in claude 2.1.317,
+// 2.1.322 and 2.1.316's code); that claude runs the job's command under dontAsk with the worker hooks;
 // that node can read orchestrate's code from inside the sandbox; that safe-git's temporary folder is writable there.
 // The 10 minutes of LOCKED_MS (and check 11's BASELINE_MS, guardedRun, #463 r2 M3) is our own cap, a choice, not a tool
-// limit (#463 r3 m2): the Bash tool's longest wait is BASH_MAX_TIMEOUT_MS when it is set (2.1.317, 2.1.322), and the runner
+// limit (#463 r3 m2): the Bash tool's longest wait is BASH_MAX_TIMEOUT_MS when it is set (2.1.317, 2.1.322, 2.1.316), and the runner
 // sets it to the job's limit. A product whose tests need longer splits its test command, or the cap is raised here.
 import { closeSync, constants, fstatSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
@@ -70,8 +71,8 @@ export const LOCKED_JOBS = Object.freeze(['save-work', 'install']);
 /**
  * The install's limit, and the cap on every guardedRun (check 11's baseline too, #463 r2 M3): 10 minutes, our own choice
  * (#463 r3 m2), not a tool limit. Each run's limit is given to the command's claude as both the Bash tool's default and its
- * longest wait (BASH_DEFAULT_TIMEOUT_MS, BASH_MAX_TIMEOUT_MS, #463 r2 m1; read in claude 2.1.317 and 2.1.322, not yet
- * checked on the pin, 2.1.316), so the tool never moves the command to the background and ends its turn while it runs.
+ * longest wait (BASH_DEFAULT_TIMEOUT_MS, BASH_MAX_TIMEOUT_MS, #463 r2 m1; read in claude 2.1.317, 2.1.322 and the pin,
+ * 2.1.316: checked: claude-code 2.1.316), so the tool never moves the command to the background and ends its turn while it runs.
  */
 export const LOCKED_MS = 10 * 60_000;
 /** How often the job's process-group record is looked for while claude runs (#463 r2 M1). */
@@ -125,8 +126,8 @@ export function exitCodeCommand(command, file, what = 'command') {
 // tell; runner-loop.mjs processGroupPorts' groupGone, the leader's start time checked), found(g) (told the job's group,
 // when it is not claude's), ack() (the go-ahead the job's shell waits for: given only after found, and never on a stop
 // or a close, so a job whose group is not kept never runs), everyMs }. Claude's Bash tool
-// runs each command detached, in a process group of its own (read in claude 2.1.317 and 2.1.322; not yet checked on the
-// pin, 2.1.316: Mini proof 9), so killing claude's group
+// runs each command detached, in a process group of its own (read in claude 2.1.317, 2.1.322 and the
+// pin, 2.1.316: checked: claude-code 2.1.316; Mini proof 9 runs it), so killing claude's group
 // leaves the job running. The record is read every everyMs while claude runs, and once more at every end; the job's
 // group is then killed with claude's on the time limit and on every stop, and at claude's close: one still there then is
 // killed and said (`job.left` 'killed'; 'unknown' when it can't be told), so runLocked refuses it (#463 r2 m6).
@@ -380,7 +381,8 @@ export function lockedRunner({ claudeBin, envOf, spawn = childSpawn, node = proc
       }
       // Claude's own end (#463 r1 c3): one ended by a signal is refused, whatever result it left. A non-zero exit with
       // the job's result written is not: with --max-turns 1, claude may end in error after its one command has run (a
-      // capability claim on the pinned claude, proven on the Mini, README item 9); it is said in every refusal below.
+      // capability claim on the pinned claude, proven on the Mini, README item 9; checked: claude-code 2.1.316, open until
+      // 2027-01-20 (R-0b-176)); it is said in every refusal below.
       if (r?.exitCode === null) throw new Error(`the ${job} job did not finish inside the lock-down (${claudeEnd(r)})`);
       // The job's own group (#463 r2 M1, m6): a record that can't be trusted, none at all, or a group still there once
       // claude closed (killed now, or not told) is a refusal of its own, whatever result it left.
