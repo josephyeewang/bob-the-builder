@@ -12,7 +12,7 @@ import { productionFiles, scanI3, scanI4, scanI7, textsIn, compare, keyI, keyI7,
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 // The BASELINE entries each check may still have: the sites found on the day the checks started (L1078). Lower a cap
 // when a baseline site is fixed; never raise one. A new site is listed with its own reason instead.
-const BASELINE_CAP = Object.freeze({ I3: 9, I4: 149, I7: 100 });
+const BASELINE_CAP = Object.freeze({ I3: 0, I4: 149, I7: 100 });
 const KEYS = { I3: keyI, I4: keyI, I7: keyI7 };
 const SCANS = { I3: scanI3, I4: scanI4, I7: scanI7 };
 const WHAT = {
