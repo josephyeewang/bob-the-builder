@@ -1363,15 +1363,6 @@
   },
   {
    "kind": "text",
-   "copy": ", run install), which carries ",
-   "files": [
-    "setup/dispatcher-setup.mjs",
-    "setup/sensors-setup.mjs"
-   ],
-   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
-  },
-  {
-   "kind": "text",
    "copy": ", when set, must be a whole number of minutes, at least 1",
    "files": [
     "modules/M6-merge-gate/required-keys.mjs",
