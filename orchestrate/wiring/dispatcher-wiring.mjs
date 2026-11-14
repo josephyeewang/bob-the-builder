@@ -1,5 +1,6 @@
 // dispatcher-wiring.mjs — the wiring module the Dispatcher's config names (R-0b-162, LEAD-CALLS L229): the one place
-// the tick's ports are joined to the real things. main.mjs imports it and calls `wire(config, { limitedSync })`.
+// the tick's ports are joined to the real things. main.mjs imports it and calls `wire(config, { limitedSync })`
+// with limitedSync's maker; wire() makes the runner once, with node's spawnSync (L1180).
 //
 // WHY. main.mjs and tick.mjs take every outside effect as a port (M11 README, "The tick's ports"), so the pass can be
 // tested without a Mac. Until this file, nothing built those ports: main.mjs named a wiring module that did not exist,
@@ -73,6 +74,7 @@
 
 import { privateFolder } from './private-folder.mjs';
 import { isAbsolute, join } from 'node:path';
+import { spawnSync as nodeSpawnSync } from 'node:child_process';
 import { openRecord } from '../modules/M9-record/writer.mjs';
 import { makeReader, readProducts } from '../modules/M10-rules/reader.mjs';
 import { PRODUCT } from '../shared/product-paths.mjs';
@@ -224,9 +226,10 @@ export async function recordAndRules(c, { who, log, fetchFn, now }) {
  * the same rules (cleanupProblem). So no port can look wired while it isn't, and none can be replaced or lost in silence.
  * A port file gets `ctx`: { config, rec, rules, gh, entry, stateDir, log, limitedSync, fetchFn, now, selfUid }; `gh` is the
  * read-only GitHub client the rules reader uses (L615). `selfUid` is this process's user; main.mjs passes none, and a test
- * stands in for it (L674).
+ * stands in for it (L674). `limitedSync` is given as the maker (sync-limit.mjs) and ctx holds the runner it makes with
+ * `spawnSync` (node's; a test stands in for it): main.mjs can't import child_process (L1180).
  */
-export async function wire(config, { limitedSync, log = (s) => process.stderr.write(`${s}\n`), fetchFn = globalThis.fetch, now = () => Date.now(), groups = PORT_GROUPS, selfUid = process.getuid() } = {}) {
+export async function wire(config, { limitedSync, spawnSync = nodeSpawnSync, log = (s) => process.stderr.write(`${s}\n`), fetchFn = globalThis.fetch, now = () => Date.now(), groups = PORT_GROUPS, selfUid = process.getuid() } = {}) {
   const c = checkConfig(config);
   // Before the Record opens: a state folder M2 can't use stops the start, so no product is turned on untold (L295 MAT-1).
   const stateDir = approvalsDir(c);
@@ -247,7 +250,7 @@ export async function wire(config, { limitedSync, log = (s) => process.stderr.wr
   const ports = { alert: logOnlyAlert(log) };
   for (const { notWired } of groups) for (const k of notWired) ports[k] = refusing(k);
   ports.approvals = () => [approvalsFor(c, entry, stateDir)];
-  const ctx = Object.freeze({ config: c, rec, rules, gh, entry, stateDir, log, limitedSync, fetchFn, now, selfUid });
+  const ctx = Object.freeze({ config: c, rec, rules, gh, entry, stateDir, log, limitedSync: limitedSync === undefined ? undefined : limitedSync(spawnSync), fetchFn, now, selfUid });
   const stopOn = (why, names) => { if (names.length) throw new Error(`${why}: ${names.join(', ')}`); };
   const lists = groups.flatMap((g) => g.notWired);
   const listed = new Set(lists);
