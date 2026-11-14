@@ -851,13 +851,15 @@ test('L1125 gate REAL rules: M10\'s own parser and engine (as M11 budget() build
   const fixture = readFileSync(new URL('../modules/M10-rules/fixtures/policy.yaml', import.meta.url), 'utf8');
   assert.match(fixture, /^product:\n  cutover_stage: first\n/m, 'the fixture\'s product block, which the plants add to');
   const gate = (text) => {
-    const p = parsePolicy(text); assert.equal(p.ok, true, p.reason);
+    const p = parsePolicy(text); if (!p.ok) return `refused when read: ${p.reason}`;
     const engine = makeEngine({ products: ['p1'], rulesState: () => ({ status: 'ok', policy: p.policy, commit: 'a'.repeat(40), blob: 'b'.repeat(40) }), productState: () => null, running: () => 0, rolesDir: new URL('../roles', import.meta.url).pathname, clock: Date.now });
     return testProductProblem({ rules: makeRules(engine) }, 'p1');
   };
   const withFlag = (v) => fixture.replace(/^product:\n/m, `product:\n  test_product: ${v}\n`);
   assert.equal(gate(withFlag("'true'")), null, 'the orchestrate-test rules\' own spelling');
   assert.equal(gate(withFlag('true')), null);
-  for (const v of ["'false'", "'yes'", "'True'", '1']) assert.match(gate(withFlag(v)), /do not say product\.test_product: true/, v);
+  for (const v of ["'false'", 'false']) assert.match(gate(withFlag(v)), /do not say product\.test_product: true/, v);
+  // Anything but true or false: M10 refuses the rules when it reads them (L1100, #550), so they never load and nothing runs.
+  for (const v of ["'yes'", "'True'", '1']) assert.match(gate(withFlag(v)), /refused when read: .*product\.test_product must be true or false/, v);
   assert.match(gate(fixture), /do not say product\.test_product: true/, 'left out: held');
 });

@@ -21,8 +21,8 @@ import { fullPath, workerRunnerPlist } from '../wiring/runner-job.mjs';
 import { BUILDER, WORKER_RUNNER_CONFIG, WORKER_STATUS_FILE, homeOf, keysPath, mirrorPath, outboxRootPath, privatePath, proposalsParentOf, storePath, workerCopiesPath, workerRunnerPaths } from './layout.mjs';
 import { installPaths, keepsNotWarning } from './install.mjs';
 import { readUser } from './users-folders.mjs';
-import { rulesProblems } from './review-config.mjs';
-import { keysDiffer, writeAside } from './dispatcher-setup.mjs';
+import { BUILDER_ROLE, rulesProblems } from './review-config.mjs';
+import { NO_INSTALL, keysDiffer, notRootsAlone, writeAside } from './dispatcher-setup.mjs';
 
 export const WORKER_RUNNER_JOB = 'worker-runner';
 export { WORKER_RUNNER_CONFIG }; // one definition: layout.mjs
@@ -101,7 +101,7 @@ export function workerRunnerConfigFor(io, cfg, { userOf = (n) => readUser(io, n)
   const problems = [];
   const user = (n, what) => { const u = userOf(n); if (!u?.exists || !Number.isInteger(u.uid) || u.uid <= 0) { problems.push(`the Mac user ${n} (${what}) does not exist (run users-folders first)`); return null; } return u; };
   const orch = user('orchestrate', 'the Record\'s owner'); const rev = user('review', 'the review runner\'s user'); const owner = user(cfg.owner, 'the owner');
-  user(BUILDER, 'the worker runner\'s user, L1079');
+  user(BUILDER, BUILDER_ROLE);
   if (owner && !fullPath(owner.home)) problems.push(`the owner's Mac user ${cfg.owner} has no plain home folder (${String(owner.home).slice(0, 80)})`);
   // The review runner's installed config: the rules and the copy's own places, from the one file that names them.
   const rcFile = join(root, RUNNER_CONFIG); let rc = null;
@@ -172,10 +172,10 @@ export function planWorkerRunnerConfig(io, cfg) {
   if (problems.length) return { ops: [], problems };
   const P = installPaths(cfg); const f = join(P.installRoot, WORKER_RUNNER_CONFIG); const text = workerRunnerConfigText(config);
   const keeps = copyKeepsWorker(io, cfg);
-  if (keeps === null) return { ops: [], problems: ['the install is not there yet (run the install first)'] };
+  if (keeps === null) return { ops: [], problems: [NO_INSTALL] };
   if (keeps === false) return { ops: [], problems: [keepsNotWarning(cfg, [WORKER_RUNNER_CONFIG])] };
   const bad = installProblem(io.at(P.installRoot), [], { owner: io.rootUid, top: io.prefix || '/' });
-  if (bad) return { ops: [], problems: [`the installed copy is not root's alone (${bad}), so root won't write in it; install the copy again`] };
+  if (bad) return { ops: [], problems: [notRootsAlone(bad)] };
   let same = false; try { same = io.readText(f) === text; } catch { /* not there: written below */ }
   const restart = `the runner reads it once, at start: a loaded job takes it after daemons unload --only ${WORKER_RUNNER_JOB}, then daemons load --only ${WORKER_RUNNER_JOB}`;
   return { ops: same ? [] : [{ text: `write ${f}   (root:wheel 0644; ${restart})`, run: () => writeAside(io, f, text) }], problems: [], warnings: [] };
