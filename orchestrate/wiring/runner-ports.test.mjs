@@ -11,7 +11,8 @@ import { tempDir } from '../shared/test-tmp.mjs';
 import { SETTINGS as S } from '../modules/M4-workshop/launcher/settings-names.mjs';
 import { gitOk, initMirror } from '../modules/M4-workshop/git/safe-git.mjs';
 import { launch } from '../modules/M4-workshop/launcher/launch.mjs';
-import { INTAKE_DONE, chmodTree, removeAll, cardStartCommit, undoCommitProblem, drainedPort, groupThere, pauseLeadPort, liveWallProblem, productWallGap, projectFolderName, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath, workerPromptText } from './runner-ports.mjs';
+import { INTAKE_DONE, chmodTree, removeAll, cardStartCommit, undoCommitProblem, drainedPort, groupThere, pauseLeadPort, liveWallProblem, productWallGap, projectFolderName, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath, workerPromptText, TRANSCRIPT_PLACE_CHECKED_AGAINST } from './runner-ports.mjs';
+import { roleEnv } from '../modules/M4-workshop/launcher/env-check.mjs';
 import { walledLaunchSettings } from './runner-launch.mjs';
 import { leaderStart } from './runner-loop.mjs';
 import { FLAGS, namesIn } from '../modules/M4-workshop/launcher/settings-names.mjs';
@@ -43,6 +44,31 @@ test('step 5: size reads the session\'s conversation file and its last write; a 
     assert.throws(() => size(s), /not a plain file/);
     assert.throws(() => sizePort({ read: () => null })({ ...s, id: SID }), /not a plain file|can't be read/);
   } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test('L1134: the conversation folder name is cut as 2.1.316 cuts it: 200 characters, then "-" and the path\'s hash', () => {
+  // Expected names worked out apart from this code (a Python copy of the rule read in 2.1.316's bundle), not by it.
+  const exact = `/copies/${'a'.repeat(192)}`;
+  assert.equal(projectFolderName(exact), `-copies-${'a'.repeat(192)}`, 'exactly 200: kept whole, no hash');
+  assert.equal(projectFolderName(exact).length, 200);
+  const over = `/copies/${'a'.repeat(193)}`;
+  assert.equal(projectFolderName(over), `-copies-${'a'.repeat(192)}-sne018`, '201: the first 200, "-", the hash');
+  const long = `/Users/builder/orchestrate/copies/${'C-1234-'.repeat(40)}`;
+  const n = projectFolderName(long);
+  assert.equal(n.length, 207); assert.ok(n.endsWith('-C-1234-C-123-d21u1r'), n);
+  assert.equal(n.slice(0, 200), long.replace(/[^A-Za-z0-9]/g, '-').slice(0, 200));
+  // The hash is of the path, so two paths alike for 200 characters get two folders.
+  const [a, b] = [`/copies/${'q'.repeat(200)}one`, `/copies/${'q'.repeat(200)}two`];
+  assert.ok(projectFolderName(a).endsWith('-g01wx3')); assert.ok(projectFolderName(b).endsWith('-g01szl'));
+  // Not ASCII: each UTF-16 code unit is one character, as in claude (é one "-", an emoji two).
+  assert.equal(projectFolderName('/copies/café/\u{1F600}'), '-copies-caf----');
+  const wide = `/copies/café-\u{1F600}-${'b'.repeat(200)}`;
+  assert.equal(projectFolderName(wide), `${'-copies-caf-----'}${'b'.repeat(184)}-b6b4tn`);
+  assert.equal(transcriptPath({ configDir: '/cfg', copy: over, sessionId: SID }), join('/cfg', 'projects', `-copies-${'a'.repeat(192)}-sne018`, `${SID}.jsonl`));
+  // Not proved on a live session yet (L1134): it stays null until a real run finds its transcript at this path.
+  assert.equal(TRANSCRIPT_PLACE_CHECKED_AGAINST, null);
+  // CLAUDE_CODE_PROJECT_DIR_NAME would replace the name (with a config folder set, as the runner's is): never passed on.
+  assert.equal('CLAUDE_CODE_PROJECT_DIR_NAME' in roleEnv({ CLAUDE_CODE_PROJECT_DIR_NAME: 'x', HOME: '/h' }), false);
 });
 
 test('L835: an outbox is drained once every file in it has the Record\'s done intake fact with its sha256, or it is empty or gone', () => {

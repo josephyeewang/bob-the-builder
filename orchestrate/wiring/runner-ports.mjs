@@ -59,7 +59,8 @@
 // each character but a letter or digit made "-">/<session id>.jsonl) is CHECKED AGAINST NOTHING YET, as transcript.mjs's
 // line shapes are; void at the next pin. TRANSCRIPT_PLACE_CHECKED_AGAINST names the version once the live proof runs.
 // Read in 2.1.316's own code, 13 Nov 2026: that is its rule, and a folder name over 200 characters is cut and given a
-// hash suffix, which this does not do (checked: claude-code 2.1.316; the constant is code, its owner's to set).
+// hash suffix, which projectFolderName now does as read there (L1134; checked: claude-code 2.1.316). Not yet proved
+// on a live session: the constant stays null until a real run in a long-named folder finds its transcript there.
 
 import { fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeSync, closeSync, constants } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -93,8 +94,20 @@ const refuse = (reason) => ({ ok: false, reason });
 const notWired = (what) => refuse(`not wired: ${what}`);
 const SHA = /^[0-9a-f]{40}$/;
 
+// The cut, as 2.1.316's code has it (EL with lke=200 and Zhe, read in its bundle; checked: claude-code 2.1.316): a name
+// over 200 characters keeps its first 200 and gets "-" and the base-36 of the absolute 32-bit string hash
+// (h = h*31 + code unit) of the folder path itself, not of the name. Characters are UTF-16 code units, as there: an
+// é is one "-", an emoji two. CLAUDE_CODE_PROJECT_DIR_NAME can replace the whole name when the config folder is set,
+// as the runner's is; roleEnv passes only its own list, so a session never carries it (runner-ports.test.mjs).
+const PROJECT_NAME_MAX = 200;
+const stringHash = (s) => { let h = 0; for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0; return h; };
+
 /** Claude Code's folder for a working folder's conversations (see the capability note above; checked: claude-code 2.1.316). */
-export const projectFolderName = (cwd) => String(cwd).replace(/[^A-Za-z0-9]/g, '-');
+export const projectFolderName = (cwd) => {
+  const path = String(cwd);
+  const name = path.replace(/[^A-Za-z0-9]/g, '-');
+  return name.length <= PROJECT_NAME_MAX ? name : `${name.slice(0, PROJECT_NAME_MAX)}-${Math.abs(stringHash(path)).toString(36)}`;
+};
 export const transcriptPath = ({ configDir, copy, sessionId }) => join(configDir, 'projects', projectFolderName(copy), `${sessionId}.jsonl`);
 
 /** size(session) → { size, lastWriteAt }, or a throw (the pass then lists no size). */
