@@ -34,6 +34,12 @@ export const NO_SHELL = '/usr/bin/false';
 export const BUILDER_SHELL = '/bin/zsh';
 /** The shell each of USERS must have: the builder's zsh, every other robot user none. */
 export const shellOf = (name) => (name === BUILDER ? BUILDER_SHELL : NO_SHELL);
+// The PATH every background job of this setup runs with (the Dispatcher's, the robot's and the Sensors' plists), and the
+// one launchctl the setup calls: one home each (I7).
+export const JOB_PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
+export const LAUNCHCTL = '/bin/launchctl';
+/** The owner's terminal: an answer is read from it, never from standard input (go-card, approve-rules): one home (I7). */
+export const TTY_PATH = '/dev/tty';
 // Root takes its orders from ONE file at a fixed place, root's own (NEW-1, L100): never from a home folder, where the
 // person's own user could change it between a read-back and the run. The person edits a copy in their home, then a
 // single `sudo install -o root -g wheel -m 0644 /dev/stdin <here> < <copy>` puts it here (README; `install` follows links,
@@ -231,6 +237,8 @@ export const workerRunnerPath = (cfg) => join(cfg.base, 'worker-runner');
 export const WORKER_RUNNER_FOLDERS = Object.freeze({ requests: 'requests', state: 'runner', snapshots: 'snapshots' });
 /** The worker runner's status file, in its own folder (wiring/runner-main.mjs statusFile; the Dispatcher's workerStatusFile). */
 export const WORKER_STATUS_FILE = 'status.json';
+/** The worker runner's config in the installed copy, as its job names it: the products it runs, each with its rules (proofs.mjs reads their lists). */
+export const WORKER_RUNNER_CONFIG = 'worker-runner.json';
 export const workerRunnerPaths = (cfg) => Object.freeze(Object.fromEntries(Object.entries(WORKER_RUNNER_FOLDERS).map(([k, n]) => [k, join(workerRunnerPath(cfg), n)])));
 
 /**

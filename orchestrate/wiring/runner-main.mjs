@@ -47,11 +47,12 @@ import { foldKey } from '../shared/plan-fingerprint.mjs';
 import { loadMemory, processGroupPorts, runRunner } from './runner-loop.mjs';
 import { drainedPort, liveWallProblem, pauseLeadPort, productWallGap, saveSettingsName, saveWorkPort, sessionEnv, sessionSettingsOf, sizePort, startPort, workerAccount } from './runner-ports.mjs';
 import { workerChecks } from './runner-checks.mjs';
-import { holdersOf, readFactFile, readSessionFile } from '../modules/M4-workshop/launcher/review-runner-main.mjs';
+import { NO_BUDGET_PORTS, budgetShapeOk, holdersOf, readFactFile, readSessionFile } from '../modules/M4-workshop/launcher/review-runner-main.mjs';
 import { keepSnapshotFresh, writeSnapshot } from '../modules/M4-workshop/hooks/snapshot.mjs';
 import { spawn as childSpawn, spawnSync } from 'node:child_process';
-import { fullPath } from './runner-job.mjs';
-import { productRoleClash } from './owner-status.mjs';
+import { RUNNER_JOB_USER as BUILDER, fullPath } from './runner-job.mjs';
+import { userInfo } from 'node:os';
+import { live as isLiveSession, productRoleClash } from './owner-status.mjs';
 import { CLAUDE_FILE, MANAGED_SOURCES_CHECKED_ON } from '../modules/M4-workshop/launcher/env-check.mjs';
 import { LOCKED_MS, lockedRunner } from './runner-locked.mjs';
 import { apart } from '../modules/M4-workshop/launcher/render-settings.mjs';
@@ -75,15 +76,19 @@ export const RENDER_PATHS = Object.freeze(['node', 'hooksDir', 'notes', 'bobFold
 // The Mac's own groups a person's user is in: staff (every person's account, which a home folder opens to) and admin.
 // The builder is in neither (setup users-folders, L1079), so a runner in either is running as a person, never the builder.
 export const PERSON_GROUPS = Object.freeze({ staff: 20, admin: 80 });
-/** Null, or why the runner must not run as this user (L1079, I1: nothing falls back to the owner's user): root, or a user
- *  in staff or admin. `groups` is process.getgroups(); a list that can't be read is refused, never read as empty. */
-export function personUserProblem(uid, groups) {
+/** Null, or why the runner must not run as this user (L1079, I1: nothing falls back to the owner's user). An allowed list
+ *  (#528 r1 m1, I6): only the user named builder, and even it not while in staff or admin. `name` is the user's name
+ *  (os.userInfo), `groups` process.getgroups(); either one that can't be read is refused, never read as allowed. */
+export function personUserProblem(uid, groups, name) {
   if (uid === 0) return 'it runs as root; its job file must name the builder user (UserName)';
+  if (typeof name !== 'string' || !name) return 'its user\'s name can\'t be read, so it is not known to be the builder user';
+  if (name !== BUILDER) return `it runs as ${JSON.stringify(name.slice(0, 40))}; only the ${BUILDER} user may run it (L1079)`;
   if (!Array.isArray(groups) || !groups.length || !groups.every(Number.isInteger)) return 'its user\'s groups can\'t be read, so it is not known that it is not a person\'s user';
   const hit = Object.entries(PERSON_GROUPS).filter(([, g]) => groups.includes(g)).map(([n]) => n);
   return hit.length ? `it runs as a user in ${hit.join(' and ')} (a person's user); it must run as the builder user (L1079)` : null;
 }
 const readGroups = () => { try { return process.getgroups(); } catch { return null; } };
+const readName = () => { try { return userInfo().username; } catch { return null; } };
 
 /** The config's fields, checked after the reader has checked the file. → the config with the runner's own paths added, or a throw. */
 export function checkRunnerConfig(c) {
@@ -105,6 +110,9 @@ export function checkRunnerConfig(c) {
     // an empty snapshot.
     const prod = p.rules?.production;
     if (p.rules !== undefined && !(prod && ['env_files', 'programs', 'hosts'].every((k) => Array.isArray(prod[k]) && prod[k].every((v) => typeof v === 'string')))) fail(`product ${name}: rules.production must list env_files, programs and hosts`);
+    // secrets.paths, when there, is a list of text as review-runner-main.mjs readConfig wants it (#528 r4 c2): setup's
+    // proofs read it, and a value that is not a list would be proven as nothing at all.
+    if (p.rules?.secrets !== undefined && !(Array.isArray(p.rules.secrets?.paths) && p.rules.secrets.paths.every((v) => typeof v === 'string'))) fail(`product ${name}: rules.secrets.paths must list the secrets' full paths`);
     // Every deny entry a worker session must have (#364 r1 M2, as review-runner-main.mjs refuses an empty deny list):
     // render-settings leaves a missing one out without a word, so here a missing one stops the runner instead.
     const d = p.render.paths.deny;
@@ -235,7 +243,10 @@ export function carriedOverProblem(c, memory, { groupGone, readSettings = sessio
   }
   const live = [];
   for (const s of Array.isArray(memory?.sessions) ? memory.sessions : []) {
-    if (!(s?.alive === true || (s?.alive !== false && s?.ended !== true))) continue;
+    // An entry that is not an object (null, "abc", 42) refuses the start (#528 r2 m3, I1): skipped, a damaged memory
+    // would read as "none live".
+    if (!s || typeof s !== 'object' || Array.isArray(s)) return `its memory lists a session that is not what the runner writes (${String(JSON.stringify(s)).slice(0, 40)}), so it is not known that none is live`;
+    if (!isLiveSession(s)) continue;   // the one live-session rule (owner-status.mjs, #528 r1 m4)
     let gone = false; try { gone = groupGone(s) === true; } catch { gone = false; }
     if (!gone) live.push({ id: s.id, product: s.product });
   }
@@ -447,10 +458,10 @@ export function keepSnapshots(c, { fresh = keepSnapshotFresh, log = () => {}, re
  * memory (the memory reader), folderProblem (snapshotFolderProblem).
  * → the exit code.
  */
-export async function main(argv, { readConfig = (f) => { const self = selfPath(); if (!self) throw new Error('its own script\'s path can\'t be read, so it can\'t be checked'); return readJobConfig(f, { code: [], optionalCode: ['budget'], self }); }, lock = (dir) => makeLock({ dir, timeoutMs: 2_000 }),
+export async function main(argv, { readConfig = (f) => readRunnerConfig(f, selfPath()), lock = (dir) => makeLock({ dir, timeoutMs: 2_000 }),
   ports = {}, run = runRunner, log = (s) => process.stderr.write(`${new Date().toISOString()} ${s}\n`), onStop = listenStop, fresh = keepSnapshotFresh,
-  realpath = (p) => realpathSync.native(p), memory = loadMemory, asUser = () => personUserProblem(process.getuid(), readGroups()), folderProblem = (dir) => snapshotFolderProblem(dir),
-  pinnedProblem = (root, files) => installProblem(root, files, { owner: 0 }), loadBudget = importBudget, readManifest = readRootFile, portsOf = realRunnerPorts, hooksOf = hookStoreOf } = {}) {
+  realpath = (p) => realpathSync.native(p), memory = loadMemory, asUser = () => personUserProblem(process.getuid(), readGroups(), readName()), folderProblem = (dir) => snapshotFolderProblem(dir),
+  pinnedProblem, loadBudget, readManifest, portsOf = realRunnerPorts, hooksOf = hookStoreOf } = {}) {
   // Who it runs as comes first, before the config is read (L1079): never root, never a person's user.
   { let who; try { who = asUser(); } catch (e) { who = `its user can't be checked (${e?.message ?? e})`; } if (who) { log(`the worker runner did not start: ${who}`); return 1; } }
   let c;
@@ -461,22 +472,11 @@ export async function main(argv, { readConfig = (f) => { const self = selfPath()
     let real; try { real = realpath(c[k]); } catch (e) { log(`the worker runner did not start: ${k} can't be read (${e?.code ?? e?.message})`); return 1; }
     if (real !== c[k]) { log(`the worker runner did not start: ${k} is reached through a link (it is ${real})`); return 1; }
   }
-  // Launch checks 12 and 13's files are root's alone in the copy (L1001), as the review runner's are: the budget module
-  // runs inside the runner, and the Bob file list decides check 13. One that isn't stops the runner here.
-  const pinned = PINNED.map((k) => c[k]).filter((p) => p !== undefined);
-  if (pinned.length) {
-    let bad; try { bad = pinnedProblem(c.installRoot, pinned); } catch (e) { bad = e?.message ?? String(e); }
-    if (bad) { log(`the worker runner did not start: its budget or Bob file list is not root's alone in the installed copy: ${bad}`); return 1; }
-  }
-  // Each is loaded once (L1001). One that can't be is logged; its check then has no port, so no session starts.
-  let budget = null; let bobManifest = null;
-  if (c.budget !== undefined) {
-    try { budget = await loadBudget(c.budget, { ...c, workerStatusFile: c.statusFile, workerUid: process.getuid() }); } catch (e) { log(`worker runner: the budget module could not be loaded (${e?.message ?? e}); no session starts`); }
-    if (budget && !['rules', 'rec', 'bandsNow', 'runningNow'].every((k) => budget[k])) { log('worker runner: the budget module gave no rules, rec, bandsNow and runningNow; no session starts'); budget = null; }
-  }
-  if (c.bobManifest !== undefined) {
-    try { bobManifest = JSON.parse(readManifest(c.bobManifest)); } catch (e) { log(`worker runner: the Bob file list could not be read (${e?.message ?? e}); no session starts`); }
-  }
+  // Launch checks 12 and 13's inputs (L1001): one loader, shared with the runLocked proof (L1092). Its own defaults are
+  // the real ones; main passes a loader only when a test sets one (undefined takes launchInputs' default).
+  const inputs = await launchInputs(c, { pinnedProblem, loadBudget, readManifest, log });
+  if (inputs.problem) { log(`the worker runner did not start: ${inputs.problem}`); return 1; }
+  const { budget, bobManifest } = inputs;
   // Each product's rules snapshot's folder, only the runner's to write (L926, #419 r3 M1): one anyone else could write
   // stops the runner here, before its lock; a missing one holds that product instead (keepSnapshots, below).
   for (const [name, p] of Object.entries(c.products)) {
@@ -517,6 +517,36 @@ export async function main(argv, { readConfig = (f) => { const self = selfPath()
     snaps.stop();
     try { l.release(held.nonce); } catch { /* gone */ }
   }
+}
+
+/** The worker runner's config at `file`, read as its job reads it (shared/job-config.mjs): no code key, `budget` an
+ * optional one. `self` is the reading script's own real path. The one reading, used by main and the runLocked proof (L1121 m1). */
+export function readRunnerConfig(file, self) {
+  if (!self) throw new Error('its own script\'s path can\'t be read, so it can\'t be checked');
+  return readJobConfig(file, { code: [], optionalCode: ['budget'], self });
+}
+
+/** Launch checks 12 and 13's inputs, as the worker runner loads them at start (L1001), and as the runLocked proof loads
+ * them (L1092), so the two can't drift. Their files are root's alone in the copy, as the review runner's are: the budget
+ * module runs inside the runner, and the Bob file list decides check 13. One that isn't → { problem } (the caller stops).
+ * Each is loaded once. One that can't be is logged and comes back null: its check then has no port, so no session starts.
+ * → { budget, bobManifest } or { problem }. */
+export async function launchInputs(c, { pinnedProblem = (root, files) => installProblem(root, files, { owner: 0 }), loadBudget = importBudget,
+  readManifest = readRootFile, log = () => {}, uid = process.getuid() } = {}) {
+  const pinned = PINNED.map((k) => c[k]).filter((p) => p !== undefined);
+  if (pinned.length) {
+    let bad; try { bad = pinnedProblem(c.installRoot, pinned); } catch (e) { bad = e?.message ?? String(e); }
+    if (bad) return { problem: `its budget or Bob file list is not root's alone in the installed copy: ${bad}` };
+  }
+  let budget = null; let bobManifest = null;
+  if (c.budget !== undefined) {
+    try { budget = await loadBudget(c.budget, { ...c, workerStatusFile: c.statusFile, workerUid: uid }); } catch (e) { log(`worker runner: the budget module could not be loaded (${e?.message ?? e}); no session starts`); }
+    if (budget && !budgetShapeOk(budget)) { log(`worker runner: ${NO_BUDGET_PORTS}; no session starts`); budget = null; }
+  }
+  if (c.bobManifest !== undefined) {
+    try { bobManifest = JSON.parse(readManifest(c.bobManifest)); } catch (e) { log(`worker runner: the Bob file list could not be read (${e?.message ?? e}); no session starts`); }
+  }
+  return { budget, bobManifest };
 }
 
 /** M11's budget module at `file`, called with the runner's config (budget.mjs `budget`). */

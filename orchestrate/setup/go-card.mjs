@@ -51,7 +51,8 @@ import { askStore } from '../modules/M2-approvals/ask-store.mjs';
 import { doneBar, raiseGo, recordGo } from '../modules/M2-approvals/go.mjs';
 import { answerByOwnerCommand, OWNER_COMMAND } from '../modules/M2-approvals/owner-command.mjs';
 import { TEST_PRODUCT_KEY, WRITERS } from '../modules/M9-record/permissions.mjs';
-import { canonicalJson, planFingerprint } from '../shared/plan-fingerprint.mjs';
+import { canonicalJson, planFingerprint, unfingerprinted } from '../shared/plan-fingerprint.mjs';
+import { TTY_PATH } from './layout.mjs';
 
 // The Dispatcher's user. Written here, as dispatcher-check.mjs does, not imported from dispatcher-setup.mjs: that module
 // builds job files, and a module that loads one must be a listed job builder (M4 review-install-closure.test, L136 m1).
@@ -61,7 +62,7 @@ export const RUN_AS = 'orchestrate';
 export const USAGE = 'sudo -k -u orchestrate node …/setup/go-card.mjs <the Dispatcher\'s config> <card.json>';
 // The terminal the retype is read from (L1096 Q11). openTty is ttyConfirm's real port: it throws when this process has
 // no terminal (go-card.test.mjs checks both).
-export const TTY_PATH = '/dev/tty';
+export { TTY_PATH };
 export const openTty = () => openSync(TTY_PATH, 'r+');
 const CARD_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const MAX_LINE = 256;
@@ -170,7 +171,7 @@ export async function goCard({ ctx, cardText, sudoUid, readRows, view, mainSha, 
     if (canonicalJson(stored) !== canonicalJson(doc)) return fail(`card ${cardId} is already in the Record with another plan; pick another id`);
   }
   const fp = planFingerprint({ product, card_id: cardId, tier: doc.tier, files: doc.files, done_when: doc.done_when, plan_sha256: doc.plan_sha256, main_commit: doc.main_commit });
-  if (!fp.ok) return fail(`the plan can't be fingerprinted: ${fp.reason}`);
+  if (!fp.ok) return fail(unfingerprinted(fp.reason));
   const said = confirm({ cardId, text: goText({ product, cardId, card: doc, fingerprint: fp.sha256 }) });
   if (!said?.ok) return fail(said?.reason ?? 'the go was not confirmed');
   if (!had) {

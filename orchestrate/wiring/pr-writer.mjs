@@ -24,13 +24,14 @@
 
 import { makeMasker } from '../modules/M12-sensors/mask.mjs';
 import { pastTime } from '../shared/still-waiting.mjs';
+// The most characters put in a GitHub body (an alert's issue, a pull request's): one home, the alert channel's (I7).
+import { BODY_MAX } from '../modules/M13-ledger/alert-channel.mjs';
 
 export const PR_FACT_PREFIX = 'push.pr-open.';
 export const PR_FACT = (branch) => `${PR_FACT_PREFIX}${String(branch).replace(/[^a-z0-9-]/g, '-')}.pending`;
 const REPO = /^([A-Za-z0-9-]{1,39})\/[A-Za-z0-9._-]{1,100}$/;
 const BRANCH = /^[a-z0-9][a-z0-9/_-]{0,120}$/;
 const TITLE_MAX = 256;
-const BODY_MAX = 60_000;
 const short = (s) => String(s ?? '').slice(0, 300);
 
 export function prWriter({ record, fetchFn = globalThis.fetch, now = () => Date.now(), mask, timeoutMs = 15_000 }) {

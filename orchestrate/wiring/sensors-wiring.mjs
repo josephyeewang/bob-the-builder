@@ -25,7 +25,7 @@
 
 import { isAbsolute } from 'node:path';
 import { PRODUCT } from '../shared/product-paths.mjs';
-import { recordAndRules } from './dispatcher-wiring.mjs';
+import { PRODUCT_NAME_PROBLEM, recordAndRules } from './dispatcher-wiring.mjs';
 import { sensorsPorts, storedUsage } from './sensors-ports.mjs';
 import { networkProbe } from '../modules/M12-sensors/probes/network.mjs';
 
@@ -39,7 +39,7 @@ export function checkConfig(c, { selfUid = process.getuid() } = {}) {
   if (!c || typeof c !== 'object' || Array.isArray(c)) throw new Error('config: must be an object');
   const extra = Object.keys(c).filter((k) => !CONFIG_KEYS.includes(k));
   if (extra.length) throw new Error(`config: unknown key ${extra.join(', ')}`);
-  if (typeof c.product !== 'string' || !PRODUCT.test(c.product)) throw new Error('config: product must be a product name (lower case letters, digits and -, a letter or digit first)');
+  if (typeof c.product !== 'string' || !PRODUCT.test(c.product)) throw new Error(PRODUCT_NAME_PROBLEM);
   for (const k of PATHS) if (typeof c[k] !== 'string' || !isAbsolute(c[k])) throw new Error(`config: ${k} must be an absolute path`);
   for (const k of ['ownerUid', 'answerUid']) if (!Number.isSafeInteger(c[k]) || c[k] < 0) throw new Error(`config: ${k} must be a Mac user id`);
   // The answer is a claim the owner's user makes (sensors-ports.mjs, L614). From this job's own user it would be the job

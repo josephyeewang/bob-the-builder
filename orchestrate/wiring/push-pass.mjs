@@ -45,7 +45,7 @@
 
 import { lstatSync } from 'node:fs';
 import { join } from 'node:path';
-import { bundleName, PUSH_FACT, SETTLE_MS } from '../modules/M4-workshop/git/push.mjs';
+import { PUSH_RETRY_MS as RETRY_MS, bundleName, PUSH_FACT, SETTLE_MS } from '../modules/M4-workshop/git/push.mjs';
 import { WORKER_OUTBOX_ROLES, outboxProblemFor } from '../modules/M4-workshop/git/session-outbox.mjs';
 import { PRODUCT_OUTBOX_ROLES } from '../shared/product-paths.mjs';
 import { pastTime } from '../shared/still-waiting.mjs';
@@ -54,8 +54,9 @@ import { dropCause } from '../modules/M11-dispatcher/alerts.mjs';
 import { bundleHeld, fileSha256 } from './runner-ports.mjs';
 
 // A refusal that may pass by itself (GitHub, the mirror, the start gate) is tried again this long after it, not every
-// minute: each try fetches from GitHub. The research copy's own retry (M11 research-intake.mjs) is the same 15 minutes.
-export const RETRY_MS = 15 * 60_000;
+// minute: each try fetches from GitHub. The research copy's own retry (M11 research-intake.mjs) is the same one,
+// push.mjs's PUSH_RETRY_MS (I7: one home).
+export { RETRY_MS };
 export const MAX_PUSHES = 1;
 // One cause per session attempt and kind, so a new attempt or new bytes are told afresh and each wait is its own.
 // Card and attempt are joined by a dot, which neither can hold (push.mjs CARD, ATTEMPT), so no two pairs share a cause

@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { writeSnapshot } from '../modules/M4-workshop/hooks/snapshot.mjs';
 import { makeLock } from '../modules/M9-record/lock.mjs';
 import { loginJobPlist } from '../modules/M11-dispatcher/login-job.mjs';
-import { DENY_KEYS, personUserProblem, aclWriteEntries, carriedOverProblem, checkRunnerConfig, hookStoreOf, keepSnapshots, snapshotFolderProblem, startDeps, listenStop, main, readRootFile, realRunnerPorts } from './runner-main.mjs';
+import { DENY_KEYS, personUserProblem, aclWriteEntries, carriedOverProblem, checkRunnerConfig, hookStoreOf, keepSnapshots, launchInputs, readRunnerConfig, snapshotFolderProblem, startDeps, listenStop, main, readRootFile, realRunnerPorts } from './runner-main.mjs';
 import { RUNNER_JOB_LOG, RUNNER_JOB_UMASK, RUNNER_JOB_USER, fullPath, workerRunnerPlist } from './runner-job.mjs';
 import { BUILDER } from '../setup/layout.mjs';
 // The tests run as a person's user; main's own check of that is tested apart (L1079).
@@ -342,6 +342,8 @@ test('#378 r1 M1: a runner restart carrying over a product A session whose setti
     assert.match(carriedOverProblem(c, {}, { groupGone: () => false, listSettings: () => { throw Object.assign(new Error('x'), { code: 'EACCES' }); } }), /settings folder can't be listed \(EACCES\)/);
     // n3 (A11): a carried-over session that names no product can't be told about: the runner does not start.
     assert.match(carriedOverProblem(c, { sessions: [{ ...A, product: undefined }], requests: {} }, { groupGone: () => false }), /names no product/);
+    // #528 r2 m3: an entry that is not a session refuses the start, never skipped as "not live" (I1).
+    for (const x of [null, 'abc', 42, []]) assert.match(carriedOverProblem(c, { sessions: [x, { ...A, alive: false, ended: true }], requests: {} }, { groupGone: () => false }) ?? '', /lists a session that is not what the runner writes/, JSON.stringify(x));
     // A first run (no memory, no settings files) starts.
     rmSync(join(c.settingsDir, `${SA}.json`));
     assert.equal(carriedOverProblem(c, {}, { groupGone: () => false }), null);
@@ -643,6 +645,8 @@ test('L1001: main stops when the budget or Bob file list is not root\'s alone in
     // One that can't be loaded, or answers nothing, is logged and leaves its check without a port; the runner still runs.
     for (const [o, said] of [[{ loadBudget: async () => { throw new Error('no snapshot'); } }, /the budget module could not be loaded \(no snapshot\); no session starts/],
       [{ loadBudget: async () => ({ rules: {} }) }, /the budget module gave no rules, rec, bandsNow and runningNow; no session starts/],
+      // Each of the four is needed (BUDGET_PORTS, L1121 c2): one missing alone is refused.
+      ...['rules', 'rec', 'bandsNow', 'runningNow'].map((k) => [{ loadBudget: async () => ({ ...budget, [k]: undefined }) }, /the budget module gave no rules, rec, bandsNow and runningNow; no session starts/]),
       [{ readManifest: () => '{not json' }, /the Bob file list could not be read/]]) {
       logs = []; got.length = 0;
       assert.equal(await main(['/cfg.json'], opts(o)), 0, logs.join('\n'));
@@ -667,22 +671,26 @@ test('L1001: the Bob file list is read only as root\'s own plain file, never thr
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
-test('L1079 (I1): the runner refuses to run as root or as a person\'s user (staff or admin), first, before its config is read', async () => {
-  assert.equal(personUserProblem(601, [601, 12, 61, 100, 701]), null, 'the builder: its own group and the Mac\'s all-users groups');
-  assert.match(personUserProblem(0, [0]), /runs as root/);
-  assert.match(personUserProblem(501, [20, 12, 80]), /in staff and admin \(a person's user\)/);
-  assert.match(personUserProblem(601, [601, 20]), /in staff/, 'the builder added to staff is a person\'s user to it');
-  assert.match(personUserProblem(601, [601, 80]), /in admin/);
-  for (const g of [null, undefined, [], ['20'], [601, NaN]]) assert.match(personUserProblem(601, g), /groups can't be read/, String(g));
+test('L1079 (I1): the runner runs as the builder user only (an allowed list, #528 r1 m1), never root or a person\'s user, checked first, before its config is read', async () => {
+  const B = 'builder';
+  assert.equal(personUserProblem(601, [601, 12, 61, 100, 701], B), null, 'the builder: its own group and the Mac\'s all-users groups');
+  assert.match(personUserProblem(0, [0], 'root'), /runs as root/);
+  // An allowed list (#528 r1 m1): any other user is refused, a setup user with none of a person's groups too.
+  for (const n of ['orchestrate', 'review', 'pages', 'sam', 'Builder', 'builder ']) assert.match(personUserProblem(602, [602, 12], n), /only the builder user may run it/, n);
+  for (const n of [null, undefined, '']) assert.match(personUserProblem(601, [601], n), /name can't be read/, String(n));
+  assert.match(personUserProblem(501, [20, 12, 80], B), /in staff and admin \(a person's user\)/);
+  assert.match(personUserProblem(601, [601, 20], B), /in staff/, 'the builder added to staff is a person\'s user to it');
+  assert.match(personUserProblem(601, [601, 80], B), /in admin/);
+  for (const g of [null, undefined, [], ['20'], [601, NaN]]) assert.match(personUserProblem(601, g, B), /groups can't be read/, String(g));
   const logs = []; let read = false;
-  const code = await main(['/cfg.json'], { asUser: () => personUserProblem(501, [20, 80]), readConfig: () => { read = true; return {}; }, log: (s) => logs.push(s) });
+  const code = await main(['/cfg.json'], { asUser: () => personUserProblem(501, [20, 80], 'builder'), readConfig: () => { read = true; return {}; }, log: (s) => logs.push(s) });
   assert.equal(code, 1);
   assert.equal(read, false, 'refused before the config is read');
   assert.match(logs.join('\n'), /did not start: it runs as a user in staff and admin/);
   assert.equal(await main(['/cfg.json'], { asUser: () => { throw new Error('no'); }, readConfig: () => { read = true; return {}; }, log: (s) => logs.push(s) }), 1);
   assert.equal(read, false);
   // The real default checks this process: a test run as a person's user is refused.
-  const me = personUserProblem(process.getuid(), process.getgroups());
+  const me = personUserProblem(process.getuid(), process.getgroups(), (await import('node:os')).userInfo().username);
   if (me) assert.equal(await main(['/cfg.json'], { readConfig: () => { read = true; return {}; }, log: () => {} }), 1);
 });
 
@@ -700,6 +708,54 @@ test('L1079: a worker signs in with the owner\'s account choice, read from root\
   assert.match(workerAccount(c, { readCopy: read({ ok: true, account: 'b' }), setUp: () => false }).reason, /account b \(the owner's choice\) is not set up in \/B\/home\/builder/);
   // No accountCopy: the builder home's own file, as before.
   assert.deepEqual(workerAccount({ home: '/h' }, { inUse: ({ home }) => ({ account: 'a', home }) }), { account: 'a', home: '/h' });
+});
+
+test('L1092: launchInputs, the one loader of checks 12 and 13 (the runner\'s and the runLocked proof\'s): root\'s alone first, each loaded once with the caller\'s user', async () => {
+  const c = { installRoot: '/i', budget: '/i/b.mjs', bobManifest: '/i/m.json', statusFile: '/s.json', dispatcherRules: '/r' };
+  const budget = { rules: {}, rec: {}, bandsNow: () => ({}), runningNow: () => [] };
+  const loads = []; const logs = [];
+  const r = await launchInputs(c, { pinnedProblem: () => null, uid: 777, log: (s) => logs.push(s),
+    loadBudget: async (f, x) => { loads.push([f, x.workerUid, x.workerStatusFile]); return budget; }, readManifest: () => '{"a.md":"x"}' });
+  assert.deepEqual(r, { budget, bobManifest: { 'a.md': 'x' } });
+  assert.deepEqual(loads, [['/i/b.mjs', 777, '/s.json']]);
+  assert.deepEqual(logs, []);
+  // Not root's alone, or a check that throws: a problem, and nothing is loaded.
+  for (const pinnedProblem of [() => 'b.mjs is 501\'s', () => { throw new Error('b.mjs is 501\'s'); }]) {
+    loads.length = 0;
+    const p = await launchInputs(c, { pinnedProblem, loadBudget: async () => { loads.push(1); return budget; }, readManifest: () => '{}' });
+    assert.equal(p.problem, 'its budget or Bob file list is not root\'s alone in the installed copy: b.mjs is 501\'s');
+    assert.equal(loads.length, 0);
+  }
+  // Neither in the config: no pinned check, both null.
+  let asked = false;
+  assert.deepEqual(await launchInputs({ installRoot: '/i' }, { pinnedProblem: () => { asked = true; return 'x'; } }), { budget: null, bobManifest: null });
+  assert.equal(asked, false);
+});
+
+test('L1121 m1: readRunnerConfig is the runner\'s one config reading: budget is checked as a code file when named; no own path, no read', () => {
+  const copy = tempDir('orch-rrc-');
+  const file = join(copy, 'runner.json');
+  writeFileSync(file, JSON.stringify({ installRoot: copy, budget: 'budget.mjs' }));
+  // budget named as code (optionalCode): a relative path is refused before anything else is read. Planted: dropped or mistyped.
+  assert.throws(() => readRunnerConfig(file, join(copy, 'wiring', 'runner-main.mjs')), /budget must be a full path/);
+  assert.throws(() => readRunnerConfig(file, undefined), /its own script's path can't be read/);
+});
+
+test('L1121 m2: launchInputs\' own defaults are the real ones: a budget or Bob file list that is not root\'s stops the start, and nothing is loaded', async () => {
+  if (process.getuid() === 0) return;
+  const copy = tempDir('orch-li-');
+  for (const k of ['budget', 'bobManifest']) {
+    const f = join(copy, k === 'budget' ? 'b.mjs' : 'm.json');
+    writeFileSync(f, k === 'budget' ? 'export const budget = () => { throw new Error("loaded"); };\n' : '{}');
+    const r = await launchInputs({ installRoot: copy, [k]: f });
+    assert.match(r.problem ?? '', /^its budget or Bob file list is not root's alone in the installed copy: /, k);
+  }
+  // The manifest's own reader is a second guard: with the first check let through, a file that is not root's still reads as no list.
+  const m = join(copy, 'm.json');
+  const said = [];
+  const r2 = await launchInputs({ installRoot: copy, bobManifest: m }, { pinnedProblem: () => null, log: (t) => said.push(t) });
+  assert.equal(r2.bobManifest, null, 'planted: the manifest read without the root-only check');
+  assert.match(said.join('\n'), /the Bob file list could not be read \(.*is not root's own plain file\)/);
 });
 
 test('R-0b-175a: hookStateDir is optional, a folder apart from the Dispatcher\'s, the requests and every place a worker writes; start_timeout_s per interactive role', () => {

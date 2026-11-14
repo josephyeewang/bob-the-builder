@@ -15,9 +15,9 @@
 // `view` is M10's git view (git-view.mjs makeGitView). Any error → no (fail closed).
 
 import { createHash } from 'node:crypto';
+import { SHA256 } from '../../shared/plan-fingerprint.mjs';
 
 const BLOB = /^[0-9a-f]{40}$/;
-const SHA256 = /^[0-9a-f]{64}$/;
 const MODES = new Set(['100644', '100755', '120000']);   // a file, a runnable file, a link; never a submodule
 const MAX_BODY = 60000;                                    // GitHub's pull request body limit is 65,536 characters
 const goodPath = (p) => typeof p === 'string' && p.length > 0 && p.length <= 512 && !p.startsWith('/') && !p.split('/').some((s) => s === '' || s === '.' || s === '..');

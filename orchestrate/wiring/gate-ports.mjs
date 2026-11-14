@@ -28,12 +28,13 @@
 
 import { posix } from 'node:path';
 import { checkWorkflow } from '../modules/M6-merge-gate/workflow-rule.mjs';
-import { OWNER_FILE } from '../modules/M12-sensors/outside-watch.mjs';
+import { GUARD_STEP, OWNER_FILE } from '../modules/M12-sensors/outside-watch.mjs';
 import { OUTSIDE_EVENTS } from '../modules/M4-workshop/git/start-gate.mjs';
+import { pastTime } from '../shared/still-waiting.mjs';
 
 const REPO = /^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/;
 const SLOT = /^product [1-9]$/;
-export const GUARD_STEP = 'product 1 / repo-guard';
+export { GUARD_STEP };
 export const PERMISSIONS_STEP = (slot) => `${slot} / permissions`;
 const WORKFLOW_PATH = /^\.github\/workflows\/[A-Za-z0-9._-]+\.ya?ml$/;
 
@@ -66,7 +67,8 @@ export function outsideRun({ getJson, repo, workflowPath, slot, tag, product }) 
     const list = await getJson(`/repos/${repo}/actions/workflows/${file}/runs?branch=main&status=completed&per_page=20`);
     const runs = Array.isArray(list?.workflow_runs) ? list.workflow_runs.filter((r) => r && typeof r === 'object') : null;
     if (!runs || runs.length === 0) return null;
-    const byNew = [...runs].sort((a, b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0));
+    const at = (r) => pastTime(r.created_at, Infinity) || 0; // I4: any readable time (a sort, not a wait); unreadable sorts last
+    const byNew = [...runs].sort((a, b) => at(b) - at(a));
     const run = byNew.find((r) => OUTSIDE_EVENTS.includes(r.event)) ?? byNew[0];
     if (!Number.isSafeInteger(run.id)) return null;
     const jobs = await getJson(`/repos/${repo}/actions/runs/${run.id}/jobs?per_page=10`);

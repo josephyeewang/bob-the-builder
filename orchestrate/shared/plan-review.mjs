@@ -15,7 +15,8 @@
 // PASS means 0 Material: the reviewer's wording allows PASS only with nothing Material left, so `material` is 0 exactly
 // when the reviewer passed. One review covers one card's plan; a plan with several cards gets one review per card.
 
-const SHA256 = /^[0-9a-f]{64}$/;
+import { SHA256 } from './plan-fingerprint.mjs';
+
 const text = (v) => typeof v === 'string' && v.length > 0;
 
 export function planCheckProblem(check, { fingerprint, card, planSha256 } = {}) {

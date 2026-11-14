@@ -25,6 +25,7 @@ import { loginJobPlist } from '../modules/M11-dispatcher/login-job.mjs';
 import { NODE, aclProblem, currentCopy } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { ANSWER_STALE_MS, answerFileProblem, answerFolderProblem, answerProblem } from '../wiring/sensors-ports.mjs';
 import { installPaths } from './install.mjs';
+import { LAUNCHCTL } from './layout.mjs';
 import { readUser } from './users-folders.mjs';
 import { DISPATCHER_OFF } from './dispatcher-setup.mjs';
 import { answerFileOf } from './sensors-setup.mjs';
@@ -34,7 +35,6 @@ export const OWNER_SCRIPT = 'wiring/owner-answer.mjs';
 export const OWNER_EVERY_S = 300;
 export const OWNER_JOB_SUBS = Object.freeze(['place', 'load', 'unload', 'check']);
 const LOG_NAME = 'orchestrate-owner-answer';
-const LAUNCHCTL = '/bin/launchctl';
 const op = (text, run) => ({ text, run });
 const failText = (r) => (r.stderr.trim() || r.stdout.trim()).slice(0, 200);
 // Two of the owner's rounds must fit inside the time the Sensors still believe an answer (else every other read is stale).
