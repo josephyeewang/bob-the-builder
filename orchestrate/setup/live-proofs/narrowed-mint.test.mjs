@@ -3,9 +3,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { generateKeyPairSync } from 'node:crypto';
-import { mkdtempSync, readFileSync, statSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { tempDir } from '../../shared/test-tmp.mjs';
 import { main, parseArgs, proof, expectedPermissions, STEPS } from './narrowed-mint.mjs';
 import { ROBOT_KEY_FILE } from '../../modules/M6-merge-gate/token.mjs';
 
@@ -15,7 +15,7 @@ const PUSH_TOKEN = `ghs_${'A'.repeat(36)}`;
 const OTHER_TOKEN = `ghs_${'B'.repeat(36)}`;
 
 function keyDir() {
-  const root = mkdtempSync(join(tmpdir(), 'narrowed-mint-'));
+  const root = tempDir('orch-narrowed-mint-');
   const dir = join(root, 'keys');
   mkdirSync(dir, { mode: 0o700 });
   const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
@@ -23,7 +23,6 @@ function keyDir() {
   return { root, dir };
 }
 const KEYS = keyDir();
-process.on('exit', () => rmSync(KEYS.root, { recursive: true, force: true }));
 
 const config = (over = {}) => ({ product: 'orchestrate-test', productsFile: '/x/products.json', keyDir: KEYS.dir, ownerUid: ME,
   appId: 5635682, appInstallation: 179098583, alertRepo: `${OWNER}/orchestrate-test`, alertOwner: OWNER, ...over });
@@ -293,7 +292,7 @@ test('main: prints the lines, writes the result file only with --result (new, 06
   const out = [];
   assert.equal(await main(['/x/robot.json', '--other-repo', 'other-private'], { out: (s) => out.push(s), err: () => {}, ...ports(fakeGitHub()) }), 0);
   assert.equal(out.at(-1), 'RESULT: PASS (6/6 steps PASS)');
-  const dir = mkdtempSync(join(tmpdir(), 'narrowed-mint-result-'));
+  const dir = tempDir('orch-narrowed-mint-result-');
   const file = join(dir, 'mint.txt');
   assert.equal(await main(['/x/robot.json', '--other-repo', 'other-private', '--result', file], { out: () => {}, err: () => {}, ...ports(fakeGitHub()) }), 0);
   const text = readFileSync(file, 'utf8');
@@ -303,7 +302,6 @@ test('main: prints the lines, writes the result file only with --result (new, 06
   const errs = [];
   assert.equal(await main(['/x/robot.json', '--other-repo', 'other-private', '--result', file], { out: () => {}, err: (s) => errs.push(s), ...ports(fakeGitHub()) }), 2);
   assert.match(errs.join('\n'), /^ran, no result file: .*can't be made new/);
-  rmSync(dir, { recursive: true, force: true });
   assert.equal(await main(['/x/robot.json'], { out: () => {}, err: () => {}, ...ports(fakeGitHub()) }), 1);
 });
 
