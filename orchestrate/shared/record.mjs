@@ -46,8 +46,10 @@ import { claimCheck, fixPlanCheck, guardWrite, keptSince, same } from '../module
 
 // Plain-script actors write under their own name; AI roles only through applyOutbox, as `<role>:<sessionId>`.
 // `joe` writes nothing in 0b (the owner acts through `approvals`); it stays a name so old diary lines still parse.
+// `owner_command` is the owner's own command on the Mac (setup/go-card.mjs, L1100): it creates one Tier-2 ordinary card
+// on the test product and nothing else (M9 permissions CARD_CREATORS and writer checkNewCard hold it to that).
 export const SCRIPT_ACTORS = Object.freeze(['dispatcher', 'workshop', 'merge_gate', 'approvals', 'sensors', 'ledger',
-  'live_check', 'joe']);
+  'live_check', 'joe', 'owner_command']);
 export const AI_ROLES = Object.freeze(['lead', 'worker', 'reviewer', 'auditor', 'incident', 'scout', 'writer',
   'front_door', 'thinking', 'learning', 'script', 'plan_reviewer']);
 

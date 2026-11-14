@@ -11,13 +11,14 @@
 // own cards skip the owner's go) or value is refused. GO_FREE, GO_FREE_KEY, goFreeOn and heartbeatLimit are #79's, in
 // ready.mjs and writer.mjs; this file imports them and holds no copy (L123).
 //
-//   REQUIRED_KEYS, OPTIONAL_KEYS, policyProblems(rules, product) → [] | every reason
+//   REQUIRED_KEYS, OPTIONAL_KEYS, FLAG_KEYS, policyProblems(rules, product) → [] | every reason
 
 import { GO_FREE, GO_FREE_KEY, goFreeKinds, readyCheck } from './ready.mjs';
 import { heartbeatLimit } from './writer.mjs';
 import { CARD_CREATORS } from './permissions.mjs';
 import { PRODUCT_STATES } from '../M10-rules/policy.mjs';
 import { compile } from '../M10-rules/paths.mjs';
+import { exactFlag } from '../../shared/rules.mjs';
 
 export const REQUIRED_KEYS = Object.freeze([
   GO_FREE_KEY,
@@ -29,7 +30,11 @@ export const REQUIRED_KEYS = Object.freeze([
 export const OPTIONAL_KEYS = Object.freeze([
   'claims.stuck_min',   // writer.mjs: missing breaks no dead session's claim (it fails slow: the running limit ends it)
   'claims.unlaunched_min',   // writer.mjs: missing uses UNLAUNCHED_MIN_DEFAULT; set but not a positive whole number refuses
+  'product.test_product',    // writer.mjs: missing means not the test product, so an owner command may make no card there (L1100)
 ]);
+// The optional keys that are true-or-false switches, not minutes: read by writer.mjs as rules.flag reads them
+// (shared/rules.mjs exactFlag), so checked that way below (L1122 m4).
+export const FLAG_KEYS = Object.freeze(['product.test_product']);
 
 // A pattern as the reason prints it: text in quotes; anything else (a map, a list, null) is named, never converted, since
 // yaml-lite's maps have no prototype and can't be turned into text (L125 m-1).
@@ -84,9 +89,14 @@ export function policyProblems(rules, product) {
   // fine (each says what happens above); set to 0 or to text, the Record would refuse every break, or every lapse pass
   // would fail (L164 m1).
   for (const key of OPTIONAL_KEYS) {
-    if (absent(key)) continue;
+    if (absent(key) || FLAG_KEYS.includes(key)) continue;
     let n; try { n = rules.num(key, { product }); } catch { n = undefined; }
     if (!Number.isInteger(n) || n < 1) out.push(`M9: ${key}, when set, must be a whole number of minutes, at least 1`);
+  }
+  // The switches, when set, exactly true or false (L1122 m4): what M10's policy check says of the same key.
+  for (const key of FLAG_KEYS) {
+    if (absent(key)) continue;
+    if (exactFlag(get(key)) === undefined) out.push(`M9: ${key}, when set, must be true or false`);
   }
   return [...new Set(out)];
 }
