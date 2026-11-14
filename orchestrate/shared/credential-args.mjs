@@ -735,9 +735,11 @@ export function credentialArgFindings(text) {
   const patterns = destructuresIn(code, src);
   const assigns = (n) => {
     if (!assignCache.has(n)) {
-      // A default inside a pattern (`const { env = {} } = X`) is not a value given to the name here (#556 r7 M1).
+      // A default inside a pattern (`const { env = {} } = X`) is not a value given to the name here (#556 r7 M1), but an
+      // assignment inside a default's parentheses (`{ a = (t = X) }`) is (#556 r9 m2).
+      const inParens = (from, to) => { let d = 0; for (const ch of code.slice(from, to)) d += ch === '(' ? 1 : ch === ')' ? -1 : 0; return d > 0; };
       assignCache.set(n, [...code.matchAll(new RegExp(`(?<![\\w$.])${escape(n)}\\s*=(?![=>])\\s*`, 'g'))]
-        .filter((m) => !patterns.some((p) => p.start <= m.index && m.index < p.end))
+        .filter((m) => !patterns.some((p) => p.start <= m.index && m.index < p.end && !inParens(p.start, m.index)))
         .map((m) => { const s = m.index + m[0].length; return { at: m.index, expr: src.slice(s, exprEnd(src, s)).trim() }; }).filter((x) => x.expr));
       // `const { a, b: n = d } = X` gives n X.b; `const [n] = X` and `for (const n of X)` give n what X holds (read as X).
       for (const p of patterns) {
@@ -777,6 +779,21 @@ export function credentialArgFindings(text) {
     if (src[d.start] !== '{') return [{ at: d.start, expr: src.slice(d.start, d.end).trim() }];
     return [...src.slice(d.start, d.end).matchAll(/(?<![\w$.])return\b[ \t]*/g)]
       .map((m) => { const s = d.start + m.index + m[0].length; return { at: s, expr: src.slice(s, exprEnd(src, s)).trim() }; }).filter((x) => x.expr);
+  };
+  /**
+   * A helper's parameters bound to one call's arguments. A parameter the call leaves out, or gives `undefined`, takes
+   * its default, read where the helper is written (#556 r9 M).
+   */
+  const bindParams = (d, given, at, env) => {
+    const bind = new Map();
+    d.params.forEach((q, j) => {
+      if (!q.name) return;
+      if (q.rest) return void bind.set(q.name, { expr: `[${given.slice(j).join(', ')}]`, at, env });
+      const g = given[j]?.trim();
+      if ((g === undefined || g === 'undefined' || g === 'void 0') && q.dflt) return void bind.set(q.name, { expr: q.dflt, at: d.at, env: null, dflt: true });
+      bind.set(q.name, { expr: g ?? 'undefined', at, env });
+    });
+    return bind;
   };
   /** The names a local helper is also called by: `const go = helper`. */
   const aliasesOf = (n) => [...src.matchAll(new RegExp(`(?:const|let|var)\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*${escape(n)}\\s*(?=[;\\n])`, 'g'))].map((m) => m[1]);
@@ -961,9 +978,7 @@ export function credentialArgFindings(text) {
       const f = p.root.name;
       if (local.has(f) && !aliasNames.has(f) && !isNew) {
         if (level >= HELPER_DEPTH) return unreadLeaf(at, label, `passed on through more than ${HELPER_DEPTH} helpers`, callText);
-        const d = local.get(f); const given = args;
-        const bind = new Map();
-        d.params.forEach((q, j) => { if (q.name) bind.set(q.name, { expr: q.rest ? `[${given.slice(j).join(', ')}]` : (given[j] ?? 'undefined'), at, env }); });
+        const d = local.get(f); const bind = bindParams(d, args, at, env);
         const rets = returnsOf(d);
         if (!rets.length) return undefined;   // it returns nothing: undefined
         return rets.forEach((r) => word(r.expr, r.at, level + 1, label, bind, new Set()));
@@ -1020,6 +1035,13 @@ export function credentialArgFindings(text) {
     }
     // An indexed chain's credential name is not in the list's text as one chain (`tokens[0].value`), so it is a finding here (r6 5).
     if (credName(c) && indexed) return push(at, 'value', c.join('.'), c.join('.'));
+    // A property of `this` is set in some other method, which is not followed: a credential's name is a finding, a
+    // plain name passes as any name does, and the rest is listed (#556 r9 m1). `this` stays quiet for the name scan.
+    if (n === 'this') {
+      if (credName(c)) return push(at, 'value', c.join('.'), c.join('.'));
+      if (c.length > 1 && !/(?:env|vars?)$/i.test(c.at(-1)) && (SAFE_END.test(c.at(-1)) || SAFE_START.test(c.at(-1)))) return undefined;
+      return unreadLeaf(at, label, `${c.join('.')} is set where it is not read`, c.join('.'));
+    }
     if (QUIET.test(n) || credName(c) || local.has(n)) return undefined;
     if (imported(n) && !loadedNames.has(n)) return values || indexed ? unreadLeaf(at, label, `${n}'s values become words, and ${n} comes from another module`, n) : undefined;
     // A plain name that says what it is passes; `env.X` or `cfg.value` is read by its last part, not its first (r5 M3).
@@ -1033,7 +1055,8 @@ export function credentialArgFindings(text) {
     // A value is read with the chain's tail (`p.env.X` with p given process is process.env.X, #556 r8): never the name alone.
     // The value is also read as it was, for what it lists, so a value met at several properties is listed once.
     const tailed = (x, xat, xenv) => { if (c.length < 2) return; quiet++; try { leaf(`(${x})${c.slice(1).map((k) => `.${k}`).join('')}`, xat, level, label, xenv, new Set(seen)); } finally { quiet--; } };
-    if (env?.has(n)) { const b = env.get(n); tailed(b.expr, b.at, b.env); return leaf(b.expr, b.at, level, label, b.env, seen); }
+    // A default's text is in no caller's call, so it is judged here, as a word's is (#556 r9 M).
+    if (env?.has(n)) { const b = env.get(n); if (b.dflt) add(b.at, `[${b.expr}]`); tailed(b.expr, b.at, b.env); return leaf(b.expr, b.at, level, label, b.env, seen); }
     const d = declaring(at, n); const k = d ? d.params.findIndex((p) => p.name === n) : -1;
     if (k >= 0) return forward(d, k, 'word', at, label, level, n, c.slice(1).map((x) => `.${x}`).join(''));
     const as = assigns(n).filter((a) => !isFunction(a.expr));
@@ -1111,9 +1134,7 @@ export function credentialArgFindings(text) {
     if (fc && local.has(fc[1]) && balanced(e, fc[0].length - 1)?.length === e.length - fc[0].length + 1) {
       // A list a helper of this module returns: each return read, its parameters bound to this call's arguments.
       if (level >= HELPER_DEPTH) return push(at, 'unread', `${label}: passed on through more than ${HELPER_DEPTH} helpers`, e);
-      const d = local.get(fc[1]); const given = callArgs(e.slice(fc[0].length - 1));
-      const bind = new Map();
-      d.params.forEach((p, k) => { if (p.name) bind.set(p.name, { expr: p.rest ? `[${given.slice(k).join(', ')}]` : (given[k] ?? 'undefined'), at, env }); });
+      const d = local.get(fc[1]); const bind = bindParams(d, callArgs(e.slice(fc[0].length - 1)), at, env);
       const rets = returnsOf(d);
       if (!rets.length) return push(at, 'unread', `${label}: ${fc[1]} returns nothing that is read`, e);
       for (const r of rets) resolve(r.expr, r.at, label, level + 1, bind);

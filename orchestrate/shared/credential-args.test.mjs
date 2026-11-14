@@ -210,7 +210,7 @@ const REVIEWED = {
   "setup/users-folders.mjs unread plan's io reaches planFolders(…, io), and plan is called from other modules @9377316d": SETUP_IO,
   "setup/users-folders.mjs unread planFolders(…, folderTable(cfg)): folderTable(cfg) is a call whose answer is not read @b608e97c": "rows are folderTable(cfg): paths, owners and modes",
   // r8: planFolders' rows default is read as one more value rows may take.
-  "setup/users-folders.mjs unread aclOp(…, row): folderTable(cfg) is a call whose answer is not read @e8c01960": "rows are folderTable(cfg): paths, owners and modes",
+  "setup/users-folders.mjs unread aclOp(…, row): folderTable(cfg) is a call whose answer is not read @e8c01960": "rows are folderTable(cfg): paths, owners and modes, and access lists of Mac user names and permission words (chmod +a)",
   "setup/users-folders.mjs unread check's io reaches folderChecks(…, io), and check is called from other modules @9b76c848": SETUP_IO,
   "setup/users-folders.mjs unread folderChecks's io reaches aclEntries(…, io), and folderChecks is called from other modules @1e11095f": SETUP_IO,
   "setup/watch-setup.mjs unread watchPlist's cfg reaches arr(…, [join(P.installRoot, NODE), join(P.installRoot, WATCH_RUN), ), and watchPlist is called from other modules @57f96ecb": SETUP_CFG,
@@ -630,7 +630,7 @@ test('R-0b-179 (b, #556 r4): a word passes only when each part of it is read: ca
  * (flag, value or text), a reader site, or a listing (unread). No plant may be said more weakly than its entry: a
  * finding that becomes a listing is a regression, even though the listing still fails closed. One said more strongly
  * fails too, so the entry is moved up when a fix lands. A plant left silent is a stated limit, named in LIMITS with its
- * ruling. When made (#556 r8) no plant was weaker than on the r7 scan, and 60 were stronger.
+ * ruling. When made (#556 r8) no plant was weaker than on the r7 scan, and 60 were stronger. r9 added twelve plants.
  */
 const LIMITS = {
   // L1186 m4: a read verb is told from the rest of a name by case or _ (readTokenPath, READ_TOKEN_PATH, read_token).
@@ -640,7 +640,10 @@ const LIMITS = {
 };
 test('R-0b-179 (b, #556 r8): every plant from every audit round is a finding, listed, or a reader site, as strongly as recorded, but the stated limits', () => {
   const corpus = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'credential-args.plants.json'), 'utf8'));
-  assert.ok(Object.keys(corpus).length >= 315, 'the corpus lost plants');
+  assert.ok(Object.keys(corpus).length >= 327, 'the corpus lost plants');
+  // Each entry is exactly [strength, source] (#556 r9 cosmetic): a third element would be quietly dropped.
+  const bad = Object.entries(corpus).filter(([, e]) => !Array.isArray(e) || e.length !== 2 || !['finding', 'reader', 'listed', 'silent'].includes(e[0]) || typeof e[1] !== 'string').map(([k]) => k);
+  assert.deepEqual(bad, [], 'a corpus entry is not [strength, source]');
   const strength = (src) => {
     const kinds = credentialArgFindings(src).map((x) => x.kind);
     return kinds.some((x) => /^(?:flag|value|text)$/.test(x)) ? 'finding' : kinds.includes('reader') ? 'reader' : kinds.length ? 'listed' : 'silent';
