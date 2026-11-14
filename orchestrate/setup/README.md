@@ -246,6 +246,7 @@ Each `PLANT` test breaks one clause and names the check that catches it. `dispat
 | `sudo /usr/local/bin/node setup.mjs daemons reload-account` | refuses (no steps, exit 1) unless the install check passes, as `daemons load` does. Already loaded from the file as built: nothing to do, and its closing check still runs. Otherwise, if the `review-account` job is loaded: rewrite its file (carries `--install <copy>`), unload, load, record, and read back that it is loaded. Not loaded (never loaded, or an earlier reload stopped after the unload): it says plainly that the account job is not loaded and to run `daemons load`, exit 1, never "done". A failed load during the reload stops with that one instruction | yes |
 | `sudo /usr/local/bin/node setup.mjs prove-token` | proves the token **cannot write pull requests** against the repository the config names (`"watch": { "repo": "owner/name" }`; never typed on the command line). The token file is looked at first without following links (orchestrate's own plain 0600 file), then read **as orchestrate** (`sudo -H -u orchestrate cat`). Then: the repository is private and not archived; listing open pull requests works; a no-op change to an open one is refused with GitHub's "this token may not" answer (a rate limit or any other 403 is not proof); and it makes one real read of each kind the watch job makes (`WATCH_READS` in `modules/M6-merge-gate/watch-only.mjs`), on main's latest commit with a pull request, so it stops if the key lacks one, or if no such commit is found among main's latest 50. A read GitHub refused with a 403 (not a rate limit) or a 404 says to give the key that permission; a 429, a rate-limit 403, a 5xx, no answer or an empty answer says GitHub didn't answer properly and to run it again; each is a FAIL. The check runs, which the job reads with the watcher App's token (L624), are proven with that token: as `orchestrate`, the installed copy's `watch-run.mjs checks` mints it through `token.mjs` from the config's `watch.app` (the job's own arguments) and reads the check runs on the same pull request's head; no App in the config, no key file, a failed mint or a failed read is a FAIL that says which, and with no commit to try it on it is NOT TRIED (not a pass). The App's token stays inside that process. Output has only fixed sentences and numbers, never a token. **It does not prove the token cannot change code or that it reaches one repository**: after a PASS it prints what to check by eye on GitHub's token page (one repository; Contents, Pull requests and Commit statuses all read-only; nothing else; not Checks, which the watcher App holds) | yes (reads the file as orchestrate) |
 | `sudo -k -u orchestrate /usr/local/bin/node setup.mjs approve-rules <product> [--dry-run]` | the owner approves the rules version now on the product's GitHub `main`, for the Dispatcher's rules reader (M10's approval list, `approved-rules.json` in the Dispatcher's `rulesStateDir`; L1127). Run from the owner's own login, in the Terminal app: it refuses unless it runs as `orchestrate` through sudo by the owner of root's setup config. The guard is sudo asking the owner's password (`-k` makes it ask every time): only `orchestrate` can write the list. SUDO_UID and the retyped name are second checks against a mistaken run, not guards: a script can set one and answer the other through a pseudo-terminal (L1132 m1). It reads `main`'s commit and its `orchestrate/policy.yaml` itself (read only, the Dispatcher's token), checks the file as the reader does, and shows the product, the repository, the commit, the blob, whether it parses and M10's module checks, what the list holds, and the file's first 25 lines. Then the product's name must be typed again at the terminal (standard input not a terminal, no terminal, or anything else, is a no). `main` is read again (moved: refused) and the list again (changed: refused); the blob is added at the end of the product's list in a new private file renamed over the old, and the reader's own check must then approve it. Already last on the list: nothing to do. A version the reader holds that the list doesn't name is refused (the reader could never move forward from it), and so is a last good copy that can't be read. `--dry-run` stops before the question. Never as root, never `--config` | no (sudo -k -u orchestrate) |
+| `sudo /usr/local/bin/node setup.mjs products-entry <product> [--dry-run]` | root adds the test product's line to the Dispatcher's `products.json` (its `dispatcher` entry's `productsFile`; L1199, L1200), built from root's setup config only, never typed by hand: `product` one of `products`, `owner`/`repo` from `github.repos.<product>` (`"owner/name"`), `joe_github_id` from `github.ownerId` (the owner's GitHub id, a number; never read from the product's repository, whose rules it is the trust root for). Before writing, it reads `main`'s commit and its `orchestrate/policy.yaml` (read only, approve-rules' own read, through the token file the `dispatcher` entry names) and prints both, so the owner can match them to what `approve-rules` shows next. It refuses unless those rules parse and say `product.test_product: true` (the test product only, as the worker runner's gate) and their `accounts.joe.github_id` is `github.ownerId`; any read or parse that fails refuses, with no fallback. That read is a filter, not an approval: nothing goes into the rules state, and the worker runner still checks the approved rules at every start. The list's folder must be root's or orchestrate's, written by no one else, with no access list, and every folder above it root's alone. The list as it is must be a plain file of root's or orchestrate's that no one else can write and that the reader takes; another product's line is kept as written (with any fields of its own), a different line for this product is refused (it only adds). The new list is a root:wheel 0644 file renamed over the old one (orchestrate reads it and can't edit it in place; it owns the folder, `<base>/private`, so it could replace the file: the same trust as before, L1212), after the list is read again unchanged, and read back through the reader. Already there: nothing to do. `--dry-run` stops before writing. Never `--config` | yes |
 | `sudo /usr/local/bin/node setup.mjs token` / `check-token` | types the watch-only token hidden into `<base>/keys/watch-only-token` (orchestrate's, 0600; written at a side name and renamed over the old one, so a failed write keeps the token that works); the check reads owner, mode and size only. A leftover side name is removed as a name only; the new file is made there exclusively, never through a link, and its owner and mode are set on the same open handle before the token is written; a write that fails removes the side file, and only the rename touches the token's own name | yes |
 
 Why the proposals parent is 0711 root's and the folders use an access list, not a group: the owner's own group (`staff`) holds
@@ -317,7 +318,7 @@ for the passes it runs to be wired.
 
 `dispatcher-setup.mjs`. Off unless the setup config has a `dispatcher` entry, which names what setup can't know itself and
 nothing else: `{ "product": "<one of products>" }`, and, only to choose other places than setup's, `productsFile` (M10's
-products.json; default `<base>/private/products.json`, which root puts there), `rulesStateDir` (M10's state folder; default
+products.json; default `<base>/private/products.json`, which root puts there with `products-entry`), `rulesStateDir` (M10's state folder; default
 `<base>/private/rules-state`), `tokenFile` (orchestrate's read-only GitHub token file; default `<base>/keys/watch-only-token`,
 where `token` puts it) and `approvalsStateDir` (M2's state folder; default `<base>/private/approvals`). `dispatcher-config`
 prints the four paths it uses and which are setup's defaults, so the robot's `robot.json` can name the same ones. Plus an
@@ -430,3 +431,92 @@ too, so it is a code change, never a config edit.
 |---|---|---|
 | `sudo /usr/local/bin/node setup.mjs scanner --from <full path> [--dry-run]` | reads the named program once, refuses it unless its bytes hash to the pin (`ba52fb1bfabbcde42f032afad3d6e0b19dff8ed105229a16e7caa338bbc0e84f`, the program inside the checked tarball), and writes those same bytes as `<base>/scanner/gitleaks` (root:wheel 0755). Beside it, the push step's own rules (`DO_PLANE_TOML`, copied from the code, never retyped) as `gitleaks.toml` and an empty `gitleaksignore`, both root:wheel 0644. A file already exactly right is left; one that drifted (bytes, mode, owner, a second name, an access list) is written again. A scanner folder that is not root's 0755, or has an access list, is refused, never taken over; an empty one of root's (a run cut off before it was secured) is secured again. Then the file rows of `check-scanner` | yes |
 | `node setup.mjs check-scanner` | read only, **without sudo** (it runs the downloaded program, which never runs as root; with sudo it refuses). The folder root:wheel 0755; each file root:wheel, its mode, one name, its hash; no access list on any. Only when all of that passes, the push step's own check (`checkScanner`, which the push runs before every scan): the program's hash, owner, mode and one name (a link is not followed), the rules byte for byte, the ignore file empty, and the program run once with `version`, which must say 8.30.1. Anything else FAILs (exit 1) | no |
+
+## Part 8 — the builder wall (R-0b-179; L1149, L1150, L1193, L1215)
+
+**What it changes.** As root, it turns on the Mac's packet filter (pf) with three rules of its own. Then the `builder`
+user, which runs the worker runner and every worker session, can reach only its **own** listeners on this Mac. It can't
+reach the owner's dev servers, databases or Claude ports, or root's local services, on 127.0.0.1, ::1 or the Mac's own
+address. Everyone else's traffic is untouched, except that other users can't reach a listener of `builder`'s either,
+which is intended (L1154). macOS's own `/etc/pf.conf` is never edited: the rules go into an anchor under the
+`com.apple/*` one it already has. What it places, all root's:
+- the rules file `/private/etc/pf.anchors/orchestrate.builder` (0644);
+- `<base>/builder-wall/` (0700), which keeps the pf on-switch's reference number (`pf-token`);
+- the job `/Library/LaunchDaemons/<label>.builder-wall.plist` (0644). At load, at boot and every 5 minutes, it loads the
+  rules and keeps pf on.
+
+The code, with its known limits, is `builder-wall.mjs` (its header).
+
+**Why it matters for the worker runner.** Before every session start, the worker runner reads the wall's status file
+`<base>/builder-wall-status/status.json` (`wiring/wall-gate.mjs`). It holds every start unless that file says ok, for
+`builder`'s uid and for this copy's rules, and is at most 10 minutes old (two of the check job's 5-minute beats).
+`place` writes that file first. After that, setup's `builder-wall-check` job (`daemons.mjs`, on exactly when the
+config's `workerRunner` entry is) rewrites it at load and every 5 minutes. **Until `place` has run, the status never
+says ok, and the worker runner starts nothing.**
+
+**When.** Run it after the install and `add-to-install` (Part 2), with the `builder` user made (Part 1, L1079), and
+before `daemons load` loads the worker runner. Always run the **installed copy's** script, as below: the status names
+the rules of the script that wrote it, and the worker runner compares them with the copy's.
+
+1. **The dry run, without sudo.** `/usr/local/bin/node <base>/install/orchestrate/setup/builder-wall.mjs place --dry-run`
+   prints a `would:` line for each step, changing nothing: the folder check, the rules file (for `builder`'s uid), the
+   token folder, the job file, and the job's load. A `refused:` line says why it won't run; with one, nothing would change.
+2. **The real run.** `sudo /usr/local/bin/node <base>/install/orchestrate/setup/builder-wall.mjs place`. It prints a
+   `doing:` line per step, then waits up to 15 seconds for the job's first run. Then it reads the wall back, one line per
+   row, and writes the status. **Check:** the exit is 0, and the last row line is `all 46 PASS` (`all 39 PASS` on a Mac
+   with no address but loopback; one row then says only 127.0.0.1 and ::1 were probed). The rows, in order, `<uid>`
+   being `builder`'s:
+   - `PASS  the job <label>.builder-wall ran once and finished well (within 15 seconds of loading)`
+   - `PASS  /private/etc/pf.anchors/orchestrate.builder is the wall's rules for uid <uid>, root's 0644`
+   - `PASS  pf is on (iii)`
+   - `PASS  the pf token in <base>/builder-wall/pf-token is held (iii): pf stays on while the job holds it`
+   - `PASS  the main ruleset reaches com.apple/* (iv)`
+   - `PASS  com.apple/100.orchestrate.builder holds exactly the wall's rules (iv)`
+   - then, for TCP and for UDP, and for each of `IPv4 (127.0.0.1)`, `IPv6 (::1)`, `IPv4 (127.0.0.1, listening on 0.0.0.0)`,
+     `IPv6 (::1, listening on ::)` and `this Mac's own address (<address>)`, four rows (`<where>` is e.g. `TCP IPv4 (127.0.0.1)`):
+     `PASS  builder reaches its own listener on <where> (v; the proxy path)`,
+     `PASS  the owner reaches its own listener on <where> (ii)`,
+     `PASS  the owner still reaches its own listener on <where> after (i) (ii)` and
+     `PASS  builder can NOT reach the owner's listener on <where> (i)`.
+
+   Any `FAIL` row means the wall did not hold, or blocked the owner or `builder`'s own proxy. `place` then takes the wall
+   out again by itself and says what it undid. Its `done:` lines list each step, and a `NOT done:` line names a step to do
+   by hand (the way out, below). It writes the status as not ok and exits 1. Nothing stays half on.
+3. **The check afterwards.** Once `daemons load` has loaded the `builder-wall-check` job with the worker runner:
+   `sudo /usr/local/bin/node setup.mjs daemons check --only builder-wall-check` must print every line PASS. Then, as the owner, without sudo,
+   read the status file with the worker runner's own judgment (the same function its gate runs, from the copy, with
+   `<base>` filled in twice):
+   ```
+   C=<base>/install/orchestrate S=<base>/builder-wall-status/status.json U="$(id -u builder)" /usr/local/bin/node --input-type=module -e '
+   const { C, S, U } = process.env;
+   const { readFileSync } = await import("node:fs");
+   const g = await import(C + "/wiring/wall-gate.mjs");
+   const w = await import(C + "/setup/builder-wall.mjs");
+   const k = await import(C + "/modules/M4-workshop/launcher/install-check.mjs");
+   const why = g.wallProblem({ file: S, wall: g.wallFrom(w), uid: Number(U), chain: (p) => k.chainProblem(p, { owner: 0 }), readRoot: (p) => readFileSync(p, "utf8"), now: Date.now });
+   console.log(why ? "FAIL  " + why : "PASS  the builder wall status is ok, for builder (uid " + U + ") and the rules of this copy, at most 10 minutes old"); process.exit(why ? 1 : 0);'
+   ```
+   **Check:** one `PASS` line, exit 0: the file is root's all the way up, ok, for `builder`'s uid, for this copy's rules,
+   and at most 10 minutes old. A `FAIL` line gives the reason the worker runner would hold a start. The status `place`
+   wrote passes for 10 minutes on its own, so run this after `daemons load` to see the check job's own status. To recheck
+   the wall at any time, run `sudo /usr/local/bin/node <base>/install/orchestrate/setup/builder-wall.mjs check`. It runs
+   the same read-back (`all 45 PASS`, or `all 38 PASS` with no address but loopback), changes no rule, and writes the status.
+4. **The way out** (also printed after every run). With `<label>` and `<base>` from the setup config:
+   ```
+   sudo launchctl bootout system/<label>.builder-wall
+   sudo rm /Library/LaunchDaemons/<label>.builder-wall.plist
+   sudo /sbin/pfctl -a com.apple/100.orchestrate.builder -F rules
+   sudo /sbin/pfctl -X "$(sudo cat <base>/builder-wall/pf-token)"
+   ```
+   These unload the job (so it doesn't come back at boot), empty the wall's rules, and release the wall's hold on pf
+   (pf stays on only if something else holds it). If `<base>/builder-wall/pf-enable-unread` is there, the job once got no
+   readable token from `pfctl -E`. Find that hold with `sudo pfctl -s References` and release it with `sudo pfctl -X <number>`.
+   **The worker runner then holds every start** (the check job keeps writing ok false), until the wall is placed again
+   or both jobs are unloaded: `sudo /usr/local/bin/node setup.mjs daemons unload --only worker-runner`, then
+   `sudo /usr/local/bin/node setup.mjs daemons unload --only builder-wall-check`.
+
+| Command | What it does | Root? |
+|---|---|---|
+| `/usr/local/bin/node <base>/install/orchestrate/setup/builder-wall.mjs place --dry-run` | prints each step `place` would take; changes nothing | no |
+| `sudo /usr/local/bin/node <base>/install/orchestrate/setup/builder-wall.mjs place` | puts the rules, the token folder and the job in place, loads the job (which turns pf on and holds it), waits for its first run, reads the wall back and writes the status. Any FAIL takes the wall out again. Safe to run again: what is already right is left, and the job is reloaded | yes |
+| `sudo /usr/local/bin/node <base>/install/orchestrate/setup/builder-wall.mjs check` | the read-back alone, and the status. The `builder-wall-check` job runs this every 5 minutes | yes |

@@ -18,6 +18,8 @@ import { spawn } from 'node:child_process';
 import { mkdtempSync, readFileSync, existsSync, readdirSync, lstatSync, statSync, realpathSync, rmSync, rmdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, isAbsolute } from 'node:path';
+// Loaded for what it does on load: every program start in this process refuses a registered secret on its command line.
+import '../../../shared/secret-guard.mjs';
 
 export const MIN_GIT = [2, 42];
 

@@ -39,9 +39,10 @@ import { pinProblem } from './review-config.mjs';   // a cycle (review-config re
 const HERE = dirname(fileURLToPath(import.meta.url));
 const KNOWN_ROLES = Object.freeze([...new Set([...Object.keys(DESIGN_PROFILES), ...RUNNER_ROLES])]);
 export const ORCH_ROOT = join(HERE, '..');   // this repository's orchestrate/ folder
-// The updater's module set, relative to orchestrate/ (review-updater.mjs imports the other two by these relative paths).
+// The updater's module set, relative to orchestrate/ (review-updater.mjs imports install-check and safe-git by these
+// relative paths; safe-git loads shared/secret-guard.mjs, R-0b-179's runtime guard, which imports only node's own modules).
 const UPDATER_DIR = posix.dirname(SCRIPTS.updater);
-export const BOOTSTRAP_FILES = Object.freeze([SCRIPTS.updater, posix.join(UPDATER_DIR, 'install-check.mjs'), posix.join(UPDATER_DIR, '../git/safe-git.mjs')].map((p) => posix.normalize(p)));
+export const BOOTSTRAP_FILES = Object.freeze([SCRIPTS.updater, posix.join(UPDATER_DIR, 'install-check.mjs'), posix.join(UPDATER_DIR, '../git/safe-git.mjs'), 'shared/secret-guard.mjs'].map((p) => posix.normalize(p)));
 // The jobs' label rule is review-daemons.mjs's own (it exports it), so there is one.
 export const LABEL_RE = LABEL;
 const HTTPS = /^https:\/\/[A-Za-z0-9.-]+(:\d+)?\/[^\s]+$/;
