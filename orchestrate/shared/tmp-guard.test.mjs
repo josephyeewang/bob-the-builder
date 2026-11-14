@@ -35,6 +35,44 @@ const isTestCode = (f) => {
   return /from\s+['"]node:test['"]/.test(readFileSync(f, 'utf8'));
 };
 
+// L170 item 4: say which inner tests failed (each "not ok" line that is not a todo, with its error), not the run's last
+// 2000 characters, which are mostly the summary. A long error shows its first 3 and last 3 lines: an assertion whose
+// message is a long log puts the log first and the line that says what went wrong last.
+const EDGE = 3;
+function failedTests(stdout, stderr) {
+  const lines = stdout.split('\n');
+  const out = [];
+  lines.forEach((l, i) => {
+    if (!/^\s*not ok \d+/.test(l) || /# TODO\b/.test(l)) return;
+    const end = lines.findIndex((x, k) => k > i && /^\s*\.\.\.\s*$/.test(x));
+    const block = lines.slice(i + 1, end < 0 ? i + 30 : end);
+    const loc = block.find((x) => /^\s*location:/.test(x));
+    const e = block.findIndex((x) => /^\s*error:/.test(x));
+    const pad = e < 0 ? 0 : block[e].search(/\S/);
+    const body = e < 0 ? [] : block.slice(e + 1).filter((x, k, a) => x.trim() && a.slice(0, k + 1).every((y) => !y.trim() || y.search(/\S/) > pad));
+    const shown = body.length <= 2 * EDGE ? body : [...body.slice(0, EDGE), `… ${body.length - 2 * EDGE} line(s) left out …`, ...body.slice(-EDGE)];
+    const err = e < 0 ? [] : [block[e], ...shown];
+    out.push([l.trim(), ...[loc, ...err].filter(Boolean).map((x) => `    ${x.trim()}`)].join('\n'));
+  });
+  return `${out.length} inner test(s) failed:\n${out.join('\n') || '(no "not ok" line; stderr follows)'}\n${stderr.slice(-800)}`;
+}
+
+test('failedTests shows a long error\'s first and last lines, a short error whole, and skips todos and passes', () => {
+  const tap = (name, errLines) => [`not ok 1 - ${name}`, '  ---', "  location: '/x.test.mjs:9:1'", '  error: |-',
+    ...errLines.map((x) => `    ${x}`), "  code: 'ERR_ASSERTION'", '  ...'];
+  const long = Array.from({ length: 10 }, (_, k) => `log line ${k + 1}`);
+  const stdout = [...tap('long one', long), ...tap('short one', ['only line']), 'not ok 3 - a todo # TODO later', 'ok 4 - fine'].join('\n');
+  const text = failedTests(stdout, 'stderr tail');
+  assert.match(text, /^2 inner test\(s\) failed:/);
+  const shown = text.split('\n').map((x) => x.trim()).filter((x) => x.startsWith('log line '));
+  assert.deepEqual(shown, [1, 2, 3, 8, 9, 10].map((k) => `log line ${k}`));
+  assert.match(text, /… 4 line\(s\) left out …/);
+  assert.match(text, /not ok 1 - short one\n {4}location: '\/x\.test\.mjs:9:1'\n {4}error: \|-\n {4}only line/);
+  assert.ok(!text.includes('ERR_ASSERTION'), 'the error stops at the next key');
+  assert.ok(!text.includes('a todo') && !text.includes('fine'));
+  assert.ok(text.endsWith('stderr tail'));
+});
+
 test('isTestCode: tests, helpers and fixtures are test code; production scripts are not', () => {
   const fake = (r) => join(ROOT, r);
   for (const r of ['modules/M1-front-door/round4.test.mjs', 'shared/test-tmp.mjs', 'modules/M1-front-door/fixtures.mjs',
@@ -80,24 +118,7 @@ test('a whole run of every orchestrate suite leaves no lane\'s temp folder behin
   const files = ALL.filter((f) => f.endsWith('.test.mjs') && f !== SELF);
   assert.ok(files.length >= 10, 'found the test files');
   const run = spawnSync(process.execPath, ['--test', '--test-reporter=tap', ...files], { encoding: 'utf8', env: cleanEnv({ TMPDIR: tmp, TMP: tmp, TEMP: tmp }), maxBuffer: 64 * 1024 * 1024 });
-  // L170 item 4: say which inner tests failed (each "not ok" line that is not a todo, with its error's first lines),
-  // not the run's last 2000 characters, which are mostly the summary.
-  const failed = () => {
-    const lines = run.stdout.split('\n');
-    const out = [];
-    lines.forEach((l, i) => {
-      if (!/^\s*not ok \d+/.test(l) || /# TODO\b/.test(l)) return;
-      const end = lines.findIndex((x, k) => k > i && /^\s*\.\.\.\s*$/.test(x));
-      const block = lines.slice(i + 1, end < 0 ? i + 30 : end);
-      const loc = block.find((x) => /^\s*location:/.test(x));
-      const e = block.findIndex((x) => /^\s*error:/.test(x));
-      const pad = e < 0 ? 0 : block[e].search(/\S/);
-      const err = e < 0 ? [] : [block[e], ...block.slice(e + 1).filter((x, k, a) => x.trim() && a.slice(0, k + 1).every((y) => !y.trim() || y.search(/\S/) > pad)).slice(0, 3)];
-      out.push([l.trim(), ...[loc, ...err].filter(Boolean).map((x) => `    ${x.trim()}`)].join('\n'));
-    });
-    return `${out.length} inner test(s) failed:\n${out.join('\n') || '(no "not ok" line; stderr follows)'}\n${run.stderr.slice(-800)}`;
-  };
-  assert.equal(run.status, 0, run.status === 0 ? '' : failed());
+  assert.equal(run.status, 0, run.status === 0 ? '' : failedTests(run.stdout, run.stderr));
   const tolerated = Object.values(NOT_SWITCHED_YET);
   const left = readdirSync(tmp).filter((n) => OURS.test(n) && !tolerated.some((p) => n.startsWith(p)));
   assert.deepEqual(left, []);
