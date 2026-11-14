@@ -18,6 +18,7 @@
 import { closeSync, constants, fstatSync, openSync, readFileSync, readSync, unlinkSync } from 'node:fs';
 import { ActivityTracker, State } from './activity.mjs';
 import { signalFromHook } from './claude-signals.mjs';
+import { LAUNCH_EVENT, withChange } from './changes.mjs';
 
 export const HOOK_LINE_FIELDS = Object.freeze(['launchId', 'event', 'at', 'toolName', 'toolUseId', 'notificationType', 'reason', 'source', 'watchdog', 'promptHash']);
 export const HOOK_EVENTS = Object.freeze(['session-start', 'user-prompt-submit', 'pre-tool-use', 'post-tool-use', 'post-tool-use-failure',
@@ -176,8 +177,11 @@ export function hookStore({ dir, fs, saveFile, now = () => Date.now(), startTime
     if (store.broken) return false;
     if (!HOOK_SESSION_ID.test(id ?? '') || !INTERACTIVE_ROLES.includes(role) || !strOrNull(product)) return false;
     const t = now();
-    store.set(id, { id, role, product, activity: { state: State.ACTIVE, at: t }, firstSignalAt: null, hook_offset: 0, launched_at: t,
-      ...(typeof launchId === 'string' && launchId ? { launchId } : {}) });
+    // R-0b-155b: a session added again keeps its change number, and the re-add is numbered as a launch.
+    const old = store.get(id);
+    const fresh = { id, role, product, activity: { state: State.ACTIVE, at: t }, firstSignalAt: null, hook_offset: 0, launched_at: t,
+      ...(typeof launchId === 'string' && launchId ? { launchId } : {}) };
+    store.set(id, old ? withChange({ ...fresh, seq: old.seq, changes: old.changes }, { event: LAUNCH_EVENT, launchId: fresh.launchId, at: t }) : fresh);
     save();
     return true;
   }

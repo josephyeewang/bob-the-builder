@@ -25,6 +25,8 @@ export const REPO = 'owner/test-repo';
 // is another id; the proposal tests swap the two (R-0b-127).
 const ME = process.getuid();
 const here = dirname(fileURLToPath(import.meta.url));
+/** A test's stand-in gitleaks as the push's pin takes it: its hash and its owner (the test's own uid; root's in use). */
+export const scannerPinOf = (bin) => ({ sha: createHash('sha256').update(readFileSync(bin)).digest('hex'), uid: process.getuid() });
 
 let engine;
 /** M10's real engine on its sample policy (L81 sweep). */
@@ -157,6 +159,8 @@ export async function pushWorld({ root, record = memoryRecord(), seed = true, ca
     outsideWorkflow: WF,
     privateDir,
     scanner: scannerOverride ?? fake.setup,
+    // The stand-in's own pin (or the real gitleaks' a test passes): the push checks the program's hash and owner (L1123 m5).
+    testScannerPin: scannerPinOf((scannerOverride ?? fake.setup).bin),
     getRobotToken: async () => 'robot-key-for-test',
     readRun: async () => (gate.readRun ? gate.readRun() : run),
     workflowRule: gate.workflowRule ?? (async () => ({ ok: true })),

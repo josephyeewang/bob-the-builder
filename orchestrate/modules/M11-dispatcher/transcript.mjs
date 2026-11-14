@@ -4,7 +4,9 @@
 // Capability note (Principle 9): the line shapes below (type, isSidechain, message.usage,
 // stop_reason, tool_use / tool_result, system compact_boundary, isCompactSummary, the synthetic
 // model name) are CHECKED AGAINST NOTHING YET. They are the shapes the review names, to be proven
-// on the pinned Claude Code (live proof: 5 sessions within 2% of /context). Void at the next pin.
+// on the pinned Claude Code (live proof: 5 sessions within 2% of /context). Void at the next pin. Every name above is in
+// 2.1.316's own code (read 13 Nov 2026); the shapes and the 2% are still for the live proof (checked: claude-code
+// 2.1.316, open until 2027-01-20 (R-0b-62)).
 // The folder these files live in is config, never a fixed machine path.
 
 import { readFileSync } from 'node:fs';

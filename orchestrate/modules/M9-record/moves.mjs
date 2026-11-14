@@ -90,7 +90,7 @@ export const INTERNAL_MOVES = Object.freeze({ card: Object.freeze({ claimed: Obj
 // The state each entity is created in, and by whom (R2-M5). A fix card over the round cap is created in `waiting`
 // by the writer itself, whatever state the Dispatcher asked for (M-8).
 export const CREATE_STATES = Object.freeze({
-  card: Object.freeze({ draft: Object.freeze(['lead', 'dispatcher']) }),
+  card: Object.freeze({ draft: Object.freeze(['lead', 'dispatcher', 'owner_command']) }),
   ask: Object.freeze({ open: A }),
   session: Object.freeze({ preparing: D }),
   merge: Object.freeze({ requested: G }),

@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { chmodSync, fstatSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { join } from 'node:path';
-import { pushWorld, PRODUCT } from '../modules/M4-workshop/git/push-world.test-helper.mjs';
+import { pushWorld, PRODUCT, scannerPinOf } from '../modules/M4-workshop/git/push-world.test-helper.mjs';
 import { createPushScript } from '../modules/M4-workshop/git/push.mjs';
 import { gitOk, initMirror, GIT_TIMEOUT_MS } from '../modules/M4-workshop/git/safe-git.mjs';
 import { SCAN_BUDGET_MS, SCAN_TIMEOUT_MS } from '../modules/M4-workshop/git/gitleaks.mjs';
@@ -174,7 +174,7 @@ async function wiredWorld({ hangPr = null } = {}) {
   const pass = ({ later = 0 } = {}) => pushWiring({ product: PRODUCT, keyDir: keysPath({ base: root }), ownerUid: ME + 1, hostLockUid: OWNER_UID, ...OUTSIDE }, {
     rec: w.record, rules: w.ports.rules, entry: ENTRY, tokenFor: okTokenFor(), fetchFn, now: () => Date.now() + 10_000 + later, uid: ME,
     scannerAt: () => w.fake.setup, userOf: builder, testRemote: () => w.gh,
-    makePush: (deps) => createPushScript({ ...deps, testFstat: asBuilder }),
+    makePush: (deps) => createPushScript({ ...deps, testFstat: asBuilder, testScannerPin: scannerPinOf(w.fake.setup.bin) }),
   });
   return { ...w, root, calls, pass, posts: () => calls.filter((x) => x.method === 'POST') };
 }
@@ -269,7 +269,7 @@ test('L1115: a hold the queue refused fails the pass, so robot-main\'s own tell 
     const p = pushWiring({ product: PRODUCT, keyDir: keysPath({ base: w.root }), ownerUid: ME + 1, hostLockUid: OWNER_UID, ...OUTSIDE }, {
       rec: w.record, rules: w.ports.rules, entry: ENTRY, tokenFor: okTokenFor(), now: () => Date.now() + 10_000, uid: ME, fetchFn: async () => ({ status: 500, json: async () => ({}) }),
       scannerAt: () => w.fake.setup, userOf: builder, testRemote: () => w.gh, hold: () => false,
-      makePush: (deps) => createPushScript({ ...deps, testFstat: (fd) => Object.assign(Object.create(Object.getPrototypeOf(fstatSync(fd))), fstatSync(fd), { uid: BUILDER_UID }) }),
+      makePush: (deps) => createPushScript({ ...deps, testFstat: (fd) => Object.assign(Object.create(Object.getPrototypeOf(fstatSync(fd))), fstatSync(fd), { uid: BUILDER_UID }), testScannerPin: scannerPinOf(w.fake.setup.bin) }),
     });
     await assert.rejects(p(), (e) => /the push pass's alerts could not be queued: push-wait-C-1\.a1/.test(e.message) && /untold/.test(e.tell));
   } finally { rmSync(w.root, { recursive: true, force: true }); }

@@ -93,6 +93,14 @@ test('the cutover stage is first or second, and a missing one reads as first', (
   assert.equal(parsePolicy(fixture.replace('product:\n  cutover_stage: first\n', '')).policy.product.cutover_stage, 'first');
 });
 
+test('product.test_product is true or false, and a missing one marks no test product (L1100)', () => {
+  const withIt = (v) => fixture.replace('cutover_stage: first', `cutover_stage: first\n  test_product: ${v}`);
+  assert.equal(parsePolicy(withIt('true')).policy.product.test_product, 'true');
+  assert.equal(parsePolicy(withIt('false')).policy.product.test_product, 'false');
+  for (const v of ['yes', 'True', '1', '"maybe"']) refused(withIt(v), `test_product ${v}`);
+  assert.equal(parsePolicy(fixture).policy.product.test_product, undefined);
+});
+
 test('docs_paths defaults to docs/** and can only narrow inside docs/ (R3-m5)', () => {
   assert.deepEqual([...parsePolicy(fixture).policy.docs_paths], ['docs/**']);
   assert.ok(parsePolicy(`${fixture}\ndocs_paths: [docs/notes/**]\n`).ok);
