@@ -1,0 +1,45 @@
+ ▐▛███▛█   Claude Code v2.1.322
+▝▜██████▀  Sonnet 5.5 · Claude Ultra
+ ▝▝   ▝▝   <repo>
+
+
+❯ First create three tasks with your task tool: alpha, beta, gamma. Then use the AskUserQuestion tool to ask "Which first?" with the
+  options Alpha and Beta. Do nothing else.
+
+⏺ I don't have a task-creation tool in this session. The search turned up only TaskStop and the cron tools, so I couldn't create alpha, beta
+  and gamma. I'm asking the question anyway.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Which first?
+
+Which first?
+
+❯ 1. Alpha
+     Start with alpha
+  2. Beta
+     Start with beta
+  3. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
