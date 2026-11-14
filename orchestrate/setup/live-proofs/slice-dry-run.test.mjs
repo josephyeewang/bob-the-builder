@@ -6,9 +6,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { FIRST, swap } from '../../modules/M10-rules/first-cutover.test-helper.mjs';
 import { blobSha, RULES_PATH } from '../../modules/M10-rules/reader.mjs';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { tempDir } from '../../shared/test-tmp.mjs';
 import { rulesRows, mergeRow, dryRun, parseArgs, main, writeNew, NOT_WIRED } from './slice-dry-run.mjs';
 
 const P = 'sample-app';
@@ -284,20 +284,18 @@ test('b16: a merge gate that throws is a FAIL, never read as refusal 9', () => {
 
 // L1132 m3: the result file is made new, never one already there and never through a link.
 test('m3: writeNew makes a new 0600 file, and refuses a file already there or a link (dangling or not), writing nothing through it', () => {
-  const d = mkdtempSync(join(tmpdir(), 'slice-dry-run-'));
-  try {
-    const f = join(d, 'r.txt');
-    writeNew(f, 'one\n');
-    assert.equal(readFileSync(f, 'utf8'), 'one\n');
-    assert.equal(statSync(f).mode & 0o777, 0o600);
-    assert.throws(() => writeNew(f, 'two\n'), { code: 'EEXIST' });
-    assert.equal(readFileSync(f, 'utf8'), 'one\n');
-    const target = join(d, 'target'); const link = join(d, 'link');
-    symlinkSync(target, link);
-    assert.throws(() => writeNew(link, 'x'), { code: 'EEXIST' });
-    assert.equal(existsSync(target), false);
-    writeFileSync(target, 'kept\n');
-    assert.throws(() => writeNew(link, 'x'));
-    assert.equal(readFileSync(target, 'utf8'), 'kept\n');
-  } finally { rmSync(d, { recursive: true, force: true }); }
+  const d = tempDir('orch-slice-');
+  const f = join(d, 'r.txt');
+  writeNew(f, 'one\n');
+  assert.equal(readFileSync(f, 'utf8'), 'one\n');
+  assert.equal(statSync(f).mode & 0o777, 0o600);
+  assert.throws(() => writeNew(f, 'two\n'), { code: 'EEXIST' });
+  assert.equal(readFileSync(f, 'utf8'), 'one\n');
+  const target = join(d, 'target'); const link = join(d, 'link');
+  symlinkSync(target, link);
+  assert.throws(() => writeNew(link, 'x'), { code: 'EEXIST' });
+  assert.equal(existsSync(target), false);
+  writeFileSync(target, 'kept\n');
+  assert.throws(() => writeNew(link, 'x'));
+  assert.equal(readFileSync(target, 'utf8'), 'kept\n');
 });
