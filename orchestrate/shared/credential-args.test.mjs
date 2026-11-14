@@ -19,162 +19,236 @@ function sources(dir, out = []) {
 const said = (src) => credentialArgFindings(src).map((x) => `${x.kind}:${x.what}`);
 
 /**
- * What the scan lists rather than reads to its end (#556 r1-r3), each looked at by hand. Since r3 the scan fails closed:
- * a list, a word or a command string it can not follow to literals, names that say what they are, or a value this
- * module gives is listed here, never passed. A new one fails the test below until it is looked at and added with the true
- * reason it is safe; one no longer met fails it too. Three reasons cover many entries, each checked once:
+ * Every finding the scan makes in the tree, looked at by hand, keyed by site (#556 r4 M-C): the file, the kind, what the
+ * scan says, and @ a hash of the call's normalised text (with #2, #3 for the same text met again in one file). Since r3
+ * the scan fails closed: a word it can not follow to literals, names that say what they are, or a value this module gives
+ * is listed (kind unread), never passed. A new site fails the test below until it is looked at and added with the true
+ * reason it is safe; one no longer met fails it too. A site inside a function that reads a credential (readSecret, a cat
+ * or read of a token or key path) is kind reader, not unread, and is held to the same table.
+ *
+ * Reasons that cover many sites are named, each checked once, and each one's count is pinned in SHARED below, so a new
+ * site under a shared reason changes the test.
  */
-// setup/layout.mjs parseConfig rebuilds the setup config from base, owner, products, proposalsParent, the host.lock paths
-// and watch (repo, rulesSha256, app: id, installation and keyFile, a bare file name): no field can hold a credential.
-const SETUP_CFG = 'the setup config: paths, user and product names, labels; parseConfig keeps no field that could hold a credential';
-// setup's io: run, lstat, uid, readConfig, readSource. No setup step reads a key: the keys folder is only made and
-// checked (lstat), and the watcher App's token is minted by its own job from the key file, whose path is all setup passes.
-const SETUP_IO = "setup's ports: what they return is a uid, a path, a job file's text or a command's answer; setup reads no key";
+// setup/layout.mjs parseConfig and setup/install.mjs parseInstallConfig rebuild the setup config field by field.
+const SETUP_CFG = "the setup config as parseConfig and parseInstallConfig rebuild it: paths, user and product names, labels, an https address; neither keeps a field that could hold a credential";
+// The io port setup steps pass on to reach io.at(path), io.run and io.lstat. Setup does read one credential: the watch
+// token (setup/extras.mjs, io.readSecret when it is pasted, and a cat as orchestrate when it is checked). Neither function
+// has a site here; one that did would be kind reader.
+const SETUP_IO = "setup's io port, passed on: here it answers with paths (io.at), uids, lstat results and commands' own answers; the one credential setup reads, the watch token, is read in extras.mjs functions that have no site here";
 // A parameter written as { a, b }: the scan does not follow a property of a caller's object (a known limit).
 const DESTRUCTURED = "a destructured parameter: a path, a 40-hex commit id or a ref name its callers pass, checked where it is used";
-const REVIEWED_UNREAD = {
-  "modules/M11-dispatcher/cleanup.mjs mirrorTree's sha reaches a program's words, and mirrorTree is called from other modules": "mirrorTree(git, mirror, sha): git ls-tree on a commit id; its callers pass a card's recorded commit",
-  "modules/M11-dispatcher/cleanup.mjs stage's card reaches a program's words, and stage is called from other modules": "stage(rec, card) reads the record to name a stage ('keep', 'check', …); its words are a card id and the record's own commit ids",
-  "modules/M11-dispatcher/cleanup.mjs stage's rec reaches a program's words, and stage is called from other modules": "stage(rec, card) reads the record to name a stage ('keep', 'check', …); its words are a card id and the record's own commit ids",
-  "modules/M11-dispatcher/cleanup.mjs stage(…, rec): rec is given no value here that is read": DESTRUCTURED,
-  "modules/M11-dispatcher/sync-limit.mjs run passes its list on, and is not called here (it may be handed on as a value)": "limitedSync returns run as a port: the wiring that holds it passes fixed git, launchctl and gh words (the gh token goes by environment, never a word)",
-  "modules/M11-dispatcher/sync-limit.mjs run passes its words on, and is not called here (it may be handed on as a value)": "limitedSync returns run as a port: the wiring that holds it passes fixed git, launchctl and gh words (the gh token goes by environment, never a word)",
-  "modules/M12-sensors/history.mjs runner(…, ['--literal-pathspecs', ...args]): a parameter of an unnamed function": "makeGit's git takes an argument list from the history reader: git log words, commit ids and paths",
-  "modules/M12-sensors/probes/launchd.mjs runLaunchctl's args reaches a program's words, and runLaunchctl is called from other modules": "exported, but its only use is launchdProbe's default runner, which passes ['print', <domain>/<label>], both checked against fixed patterns",
-  "modules/M12-sensors/screen/tools/capture.mjs keys's k reaches a program's words, and keys is called from other modules": "the screen-capture test tool: tmux words, the test server's name, and the keys and text a fixture scenario types into a test session; no credential exists in it",
-  "modules/M12-sensors/screen/tools/capture.mjs makeTmux's server reaches a program's words, and makeTmux is called from other modules": "the screen-capture test tool: tmux words, the test server's name, and the keys and text a fixture scenario types into a test session; no credential exists in it",
-  "modules/M12-sensors/screen/tools/capture.mjs run(…, ...args)": "the screen-capture test tool: tmux words, the test server's name, and the keys and text a fixture scenario types into a test session; no credential exists in it",
-  "modules/M12-sensors/screen/tools/capture.mjs runScenario's s reaches a program's words, and runScenario is called from other modules": "the screen-capture test tool: tmux words, the test server's name, and the keys and text a fixture scenario types into a test session; no credential exists in it",
-  "modules/M12-sensors/screen/tools/capture.mjs screen's colour reaches a program's words, and screen is called from other modules": "the screen-capture test tool: tmux words, the test server's name, and the keys and text a fixture scenario types into a test session; no credential exists in it",
-  "modules/M12-sensors/screen/tools/capture.mjs text's t reaches a program's words, and text is called from other modules": "the screen-capture test tool: tmux words, the test server's name, and the keys and text a fixture scenario types into a test session; no credential exists in it",
-  "modules/M12-sensors/shell-guard/runner.mjs askHook's hookCommand reaches a program's words, and askHook is called from other modules": "the hook command from the role's settings file (a path and its fixed words); the command under test goes on stdin",
-  "modules/M12-sensors/shell-guard/selfcheck.mjs runShell's args reaches a program's words, and runShell is called from other modules": "runShell's one caller passes a shell from the fixed list and -c with a case's command from the guard's own case table",
-  "modules/M12-sensors/shell-guard/selfcheck.mjs runShell's sh reaches a program's words, and runShell is called from other modules": "runShell's one caller passes a shell from the fixed list and -c with a case's command from the guard's own case table",
-  "modules/M12-sensors/shell-guard/selfcheck.mjs runShell(…, sh): sh is given no value here that is read": "sh is each of touchCheck's shells: /bin/bash unless its caller names others (shell paths)",
-  "modules/M12-sensors/shell-guard/selfcheck.mjs spawnSync(…, argv[1])": "runShell builds argv as [perl, ['-e', GROUP, sh, ...args]] or [sh, args]; its one caller passes -c and a case's command from the guard's own case table",
-  "modules/M4-workshop/git/gitleaks.mjs run(…, ['git', mirror, '--log-opts', logOpts, ...common(setup, repo): mirror is given no value here that is read": DESTRUCTURED,
-  "modules/M4-workshop/git/gitleaks.mjs run(…, bin): bin is given no value here that is read": DESTRUCTURED,
-  "modules/M4-workshop/git/push.mjs newCommits(…, ['refs/heads/main', ...(remoteTip && remoteTip !== tip && !r): passed on through more than 4 helpers": "commit ids and ref names (refs/heads/main, the card branch), read from git itself, through more helpers than the scan follows",
-  "modules/M4-workshop/git/push.mjs newCommits(…, tip): passed on through more than 4 helpers": "commit ids and ref names (refs/heads/main, the card branch), read from git itself, through more helpers than the scan follows",
-  "modules/M4-workshop/git/push.mjs pushResearch passes its words on, and is not called here (it may be handed on as a value)": "pushResearch's words are the research ask's card, attempt and report path, checked against the id patterns; it is handed to the script as a value",
-  "modules/M4-workshop/git/push.mjs run(…, ['check-ref-format', '--branch', branch]): a parameter of an unnamed function": "a branch name, checked by git check-ref-format itself",
-  "modules/M4-workshop/git/safe-git.mjs withNoPrograms's args reaches a program's words, and withNoPrograms is called from other modules": "withNoPrograms adds only the fixed NO_PROGRAMS flags to the list it is given; its callers' lists are read where they call it",
-  "modules/M4-workshop/launcher/accounts.mjs claudeAuthStatus's claudeBin reaches a program's words, and claudeAuthStatus is called from other modules": "claudeBin is the pinned Claude Code program's path; the account goes by environment (CLAUDE_CONFIG_DIR), not a word",
-  "modules/M4-workshop/launcher/env-check.mjs readPlist's p reaches a program's words, and readPlist is called from other modules": "p is a job file's path (plutil -convert json -- <path>)",
-  "modules/M4-workshop/launcher/hooks-check.mjs run(…, [script, ...argv])": "argv is the hook command's own words from the role settings file, and the script is checked to be the hooks folder's",
-  "modules/M4-workshop/launcher/hooks-check.mjs run(…, claudeBin): claudeBin is given no value here that is read": "claudeBin is the pinned Claude Code program's path; the account goes by environment (CLAUDE_CONFIG_DIR), not a word",
-  "modules/M4-workshop/launcher/install-check.mjs aclProblem's paths reaches a program's words, and aclProblem is called from other modules": "paths are install paths whose access lists are read (ls -led -- <paths>)",
-  "modules/M4-workshop/launcher/install-check.mjs currentCopy's installRoot reaches a program's words, and currentCopy is called from other modules": "installRoot and p are install paths (the copy's link and the folders under it)",
-  "modules/M4-workshop/launcher/install-check.mjs currentCopy(…, installRoot): passed on through more than 4 helpers": "installRoot and p are install paths (the copy's link and the folders under it)",
-  "modules/M4-workshop/launcher/install-check.mjs oldInstall's installRoot reaches a program's words, and oldInstall is called from other modules": "installRoot and p are install paths (the copy's link and the folders under it)",
-  "modules/M4-workshop/launcher/install-check.mjs shellQuote's p reaches a program's words, and shellQuote is called from other modules": "installRoot and p are install paths (the copy's link and the folders under it)",
-  "modules/M4-workshop/launcher/review-launch.mjs launchReview's x reaches a program's words, and launchReview is called from other modules": "Claude Code's path, its fixed flags, a settings file's path and the session prompt (the card's brief); the account and any key go by environment",
-  "modules/M4-workshop/launcher/review-launch.mjs reviewChecks's x reaches a program's words, and reviewChecks is called from other modules": "Claude Code's path, its fixed flags, a settings file's path and the session prompt (the card's brief); the account and any key go by environment",
-  "modules/M4-workshop/launcher/review-launch.mjs runProbe(…, lr.args)": "Claude Code's path, its fixed flags, a settings file's path and the session prompt (the card's brief); the account and any key go by environment",
-  "modules/M4-workshop/launcher/review-launch.mjs spawnClaude's args reaches a program's words, and spawnClaude is called from other modules": "Claude Code's path, its fixed flags, a settings file's path and the session prompt (the card's brief); the account and any key go by environment",
-  "modules/M4-workshop/launcher/review-launch.mjs spawnClaude's bin reaches a program's words, and spawnClaude is called from other modules": "Claude Code's path, its fixed flags, a settings file's path and the session prompt (the card's brief); the account and any key go by environment",
-  "modules/M4-workshop/launcher/review-runner-main.mjs currentHead's card reaches a program's words, and currentHead is called from other modules": "a card id (checked against its pattern) and a 40-hex commit id, in git rev-parse words",
-  "modules/M4-workshop/launcher/review-runner-main.mjs gitOk(…, ['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-): mirror is given no value here that is read": DESTRUCTURED,
-  "modules/M4-workshop/launcher/review-runner-main.mjs gitOk(…, ['init', '-q', '--initial-branch=review-copy-unborn', dest]): dest is given no value here that is read": DESTRUCTURED,
-  "modules/M4-workshop/launcher/review-runner-main.mjs main's argv reaches a program's words, and main is called from other modules": "the review runner's config: paths, uids, names and the rules' file paths (it has no credential field); argv[0] is that config's path",
-  "modules/M4-workshop/launcher/review-runner-main.mjs realPorts's c reaches a program's words, and realPorts is called from other modules": "the review runner's config: paths, uids, names and the rules' file paths (it has no credential field); argv[0] is that config's path",
-  "modules/M4-workshop/launcher/review-runner-main.mjs start's x reaches a program's words, and start is called from other modules": "the review runner's config: paths, uids, names and the rules' file paths (it has no credential field); argv[0] is that config's path",
-  "modules/M4-workshop/launcher/review-runner-main.mjs treeOf's head reaches a program's words, and treeOf is called from other modules": "a card id (checked against its pattern) and a 40-hex commit id, in git rev-parse words",
-  "modules/M4-workshop/launcher/review-updater.mjs git(…, ['ls-tree', '-r', '-z', '--full-tree', commit, '--', ...OUTS)": "OUTSIDE_FILES is an imported constant of file paths",
-  "modules/M4-workshop/launcher/review-updater.mjs updateOnce's c reaches a program's words, and updateOnce is called from other modules": "the updater's config: paths and an https address whose host part holds no user or password (HTTPS pattern)",
-  "modules/M4-workshop/launcher/worker-copy.mjs gitOk(…, ['init', '-q', dest]): dest is given no value here that is read": DESTRUCTURED,
-  "modules/M4-workshop/send-safe/guard.mjs send's text reaches a program's words, and send is called from other modules": "text is a message typed into a session (tmux send-keys -l): the Dispatcher's own words to a session, which reads them anyway; never a credential",
-  "modules/M5-review-audit/findings.mjs at(…, head): head is given no value here that is read": DESTRUCTURED,
-  "modules/M5-review-audit/findings.mjs gitOk(…, ['merge-base', 'refs/heads/main', head]): head is given no value here that is read": DESTRUCTURED,
-  "modules/M5-review-audit/review-package.mjs git(…, ['merge-base', '--is-ancestor', since, head]): head is given no value here that is read": DESTRUCTURED,
-  "modules/M5-review-audit/review-package.mjs git(…, ['merge-base', '--is-ancestor', since, head]): since is given no value here that is read": DESTRUCTURED,
-  "modules/M5-review-audit/review-package.mjs gitOk(…, ['diff', ...DIFF_FLAGS, base, head]): head is given no value here that is read": DESTRUCTURED,
-  "modules/M5-review-audit/review-package.mjs gitOk(…, ['diff', '--name-status', '-z', '--no-renames', '--ignore-su): head is given no value here that is read": DESTRUCTURED,
-  "modules/M5-review-audit/review-package.mjs gitOk(…, ['merge-base', 'refs/heads/main', head]): head is given no value here that is read": DESTRUCTURED,
-  "modules/M5-review-audit/review-package.mjs gitOk(…, ['merge-base', 'refs/heads/main', since]): since is given no value here that is read": DESTRUCTURED,
-  "setup/bob-manifest.mjs bobGit's cfg reaches a program's words, and bobGit is called from other modules": SETUP_CFG,
-  "setup/bob-manifest.mjs bobGit's from reaches a program's words, and bobGit is called from other modules": "argv is sudo's flags, ENV, GIT_ENV (PATH, LC_ALL, GIT_TERMINAL_PROMPT, GIT_CONFIG_NOSYSTEM; no token), git -C <Bob's folder> and the command; input is object ids on stdin",
-  "setup/bob-manifest.mjs run(…, argv): a parameter of an unnamed function": "argv is sudo's flags, ENV, GIT_ENV (PATH, LC_ALL, GIT_TERMINAL_PROMPT, GIT_CONFIG_NOSYSTEM; no token), git -C <Bob's folder> and the command; input is object ids on stdin",
-  "setup/builder-wall.mjs otherAddresses's ifaces reaches a program's words, and otherAddresses is called from other modules": "this Mac's own non-loopback address, an IP address, for the listener and client probes",
-  "setup/builder-wall.mjs planWall's cfg reaches a program's words, and planWall is called from other modules": SETUP_CFG,
-  "setup/builder-wall.mjs planWall's io reaches a program's words, and planWall is called from other modules": SETUP_IO,
-  "setup/builder-wall.mjs trafficChecks's net reaches a program's words, and trafficChecks is called from other modules": "this Mac's own non-loopback address, an IP address, for the listener and client probes",
-  "setup/builder-wall.mjs wayOut's cfg reaches a program's words, and wayOut is called from other modules": SETUP_CFG,
-  "setup/builder-wall.mjs wayOut's io reaches a program's words, and wayOut is called from other modules": SETUP_IO,
-  "setup/builder-wall.mjs words's p reaches a program's words, and words is called from other modules": "a pf rule's words: the builder user's name or uid and a protocol (tcp, udp)",
-  "setup/builder-wall.mjs words's u reaches a program's words, and words is called from other modules": "a pf rule's words: the builder user's name or uid and a protocol (tcp, udp)",
-  "setup/daemons.mjs placeSteps's jobs reaches a program's words, and placeSteps is called from other modules": "jobs are job names from jobsFor (fixed labels)",
-  "setup/daemons.mjs planLoad's cfg reaches a program's words, and planLoad is called from other modules": SETUP_CFG,
-  "setup/daemons.mjs planLoad's io reaches a program's words, and planLoad is called from other modules": SETUP_IO,
-  "setup/daemons.mjs planReloadAccount's cfg reaches a program's words, and planReloadAccount is called from other modules": SETUP_CFG,
-  "setup/daemons.mjs planReloadAccount's io reaches a program's words, and planReloadAccount is called from other modules": SETUP_IO,
-  "setup/daemons.mjs planUnload's cfg reaches a program's words, and planUnload is called from other modules": SETUP_CFG,
-  "setup/extras.mjs planProposals's cfg reaches a program's words, and planProposals is called from other modules": SETUP_CFG,
-  "setup/extras.mjs planProposals's io reaches a program's words, and planProposals is called from other modules": SETUP_IO,
-  "setup/extras.mjs planSafeDirectory's cfg reaches a program's words, and planSafeDirectory is called from other modules": SETUP_CFG,
-  "setup/install.mjs spawnSync(…, c.args)": "updaterCommand writes the list out: the script, the config, --first and the seed, all paths",
-  "setup/install.mjs spawnUpdater's io reaches a program's words, and spawnUpdater is called from other modules": SETUP_IO,
-  "setup/install.mjs spawnUpdater's spec reaches a program's words, and spawnUpdater is called from other modules": "updaterCommand writes the list out: the script, the config, --first and the seed, all paths",
-  "setup/managed-settings.mjs planManagedSettings's cfg reaches a program's words, and planManagedSettings is called from other modules": SETUP_CFG,
-  "setup/owner-answer-setup.mjs checkOwnerJob's cfg reaches a program's words, and checkOwnerJob is called from other modules": SETUP_CFG,
-  "setup/owner-answer-setup.mjs ownerJobState's cfg reaches a program's words, and ownerJobState is called from other modules": SETUP_CFG,
-  "setup/owner-answer-setup.mjs planOwnerLoad's cfg reaches a program's words, and planOwnerLoad is called from other modules": SETUP_CFG,
-  "setup/owner-answer-setup.mjs planOwnerLoad's io reaches a program's words, and planOwnerLoad is called from other modules": SETUP_IO,
-  "setup/owner-answer-setup.mjs planOwnerPlace's cfg reaches a program's words, and planOwnerPlace is called from other modules": SETUP_CFG,
-  "setup/owner-answer-setup.mjs planOwnerUnload's cfg reaches a program's words, and planOwnerUnload is called from other modules": SETUP_CFG,
-  "setup/proofs.mjs proveList's list reaches a program's words, and proveList is called from other modules": "pr comes from proofList, whose args: [...] lists (ls, test -w/-x, head -c 1, true, on paths) the scan reads as lists",
-  "setup/proofs.mjs run(…, ['-n', '-H', '-u', BUILDER, ...pr.args])": "pr comes from proofList, whose args: [...] lists (ls, test -w/-x, head -c 1, true, on paths) the scan reads as lists",
-  "setup/proofs.mjs runProofs's cfg reaches a program's words, and runProofs is called from other modules": SETUP_CFG,
-  "setup/proofs.mjs runProofs's io reaches a program's words, and runProofs is called from other modules": SETUP_IO,
-  "setup/users-folders.mjs aclEntries's io reaches a program's words, and aclEntries is called from other modules": SETUP_IO,
-  "setup/users-folders.mjs check's io reaches a program's words, and check is called from other modules": SETUP_IO,
-  "setup/users-folders.mjs folderChecks's io reaches a program's words, and folderChecks is called from other modules": SETUP_IO,
-  "setup/users-folders.mjs plan's cfg reaches a program's words, and plan is called from other modules": SETUP_CFG,
-  "setup/users-folders.mjs plan's io reaches a program's words, and plan is called from other modules": SETUP_IO,
-  "setup/users-folders.mjs planFolders's io reaches a program's words, and planFolders is called from other modules": SETUP_IO,
-  "setup/users-folders.mjs planFolders's rows reaches a program's words, and planFolders is called from other modules": "rows are folderTable(cfg): paths, owners and modes",
-  "setup/users-folders.mjs planUsers's cfg reaches a program's words, and planUsers is called from other modules": SETUP_CFG,
-  "setup/users-folders.mjs planUsers's io reaches a program's words, and planUsers is called from other modules": SETUP_IO,
-  "setup/users-folders.mjs planUsers(…, cfg): passed on through more than 4 helpers": SETUP_CFG,
-  "setup/users-folders.mjs planUsers(…, io): passed on through more than 4 helpers": SETUP_IO,
-  "setup/users-folders.mjs readUser's io reaches a program's words, and readUser is called from other modules": SETUP_IO,
-  "setup/watch-setup.mjs proveWatchAppChecks's cfg reaches a program's words, and proveWatchAppChecks is called from other modules": SETUP_CFG,
-  "setup/watch-setup.mjs proveWatchAppChecks's on reaches a program's words, and proveWatchAppChecks is called from other modules": "on is a pull request's number and 40-hex head; the job mints the App's token itself from the key file, whose path is the only key word passed",
-  "setup/watch-setup.mjs watchPlist's cfg reaches a program's words, and watchPlist is called from other modules": SETUP_CFG,
-  "wiring/owner-answer.mjs claudeUsage's claudeBin reaches a program's words, and claudeUsage is called from other modules": "claudeBin is the Claude Code program's path; the account goes by environment, not a word",
-  "wiring/review-ports.mjs git(…, withNoPrograms(['diff-tree', '-r', '-z', '--name-only', '--n)": "the list is written out inside withNoPrograms, which only adds the fixed NO_PROGRAMS flags; sha is checked to be a commit id",
-  "wiring/review-ports.mjs git(…, withNoPrograms(['diff-tree', '-r', '-z', '--name-only', '--n): a parameter of an unnamed function": "the list is written out inside withNoPrograms, which only adds the fixed NO_PROGRAMS flags; sha is checked to be a commit id",
-  "wiring/review-ports.mjs run(…, ['-i', ...Object.entries(env).map(([k, v]) => `${k}=${v}`), )": "env -i K=V: both callers pass safeGitEnv() with no extraConfig, so only fixed PATH, HOME, LANG and the fixed safe settings; a token could come only through extraConfig, and none is passed (#556 r2 m6)",
-  "wiring/runner-locked.mjs runToEnd's args reaches a program's words, and runToEnd is called from other modules": "Claude Code's path and its fixed flags, a settings file's path and the session prompt (the card's brief, last); the account and any key go by environment",
-  "wiring/runner-locked.mjs runToEnd's bin reaches a program's words, and runToEnd is called from other modules": "Claude Code's path and its fixed flags, a settings file's path and the session prompt (the card's brief, last); the account and any key go by environment",
-  "wiring/runner-locked.mjs runToEnd(…, args)": "Claude Code's path and its fixed flags, a settings file's path and the session prompt (the card's brief, last); the account and any key go by environment",
-  "wiring/runner-ports.mjs chmodTree's d reaches a program's words, and chmodTree is called from other modules": "d is a folder being removed (chmod -R -P u+rwx <folder>)",
-  "wiring/runner-ports.mjs run(…, ['cat-file', '-t', commit]): a parameter of an unnamed function": "a commit id from the session record, checked against its pattern",
-  "wiring/runner-ports.mjs run(…, ['merge-base', '--is-ancestor', commit, head]): head is given no value here that is read": DESTRUCTURED,
-  "wiring/runner-ports.mjs startPort's c reaches a program's words, and startPort is called from other modules": "the worker's start: the runner's config (paths, uids, names) and the session prompt, the card's brief; the account goes by environment",
-  "wiring/runner-ports.mjs workerPromptText's x reaches a program's words, and workerPromptText is called from other modules": "the worker's start: the runner's config (paths, uids, names) and the session prompt, the card's brief; the account goes by environment",
+// push.mjs's run wraps git; gitDo and gitText hand back git's own output.
+const GIT_ANSWER = "git's own answer in the product mirror (push.mjs's run, gitDo and gitText): commit, tree and ref ids and lists of them; the push token goes by GIT_CONFIG_* environment through extraConfig, never a word";
+const RECORD_DOC = "the Record's session and card documents (record.read): product name, card id, branch, outbox path, attempt and the report's sha256, each checked against its pattern before git sees it; neither document has a credential field";
+const CLAUDE_START = "Claude Code's path, its fixed flags, a settings file's path and the session prompt (the card's brief, last); the account and any key go by environment";
+const INSTALL_PATHS = "installRoot, p and rel are install paths (the copy's link, the folders under it, a file inside it); ls -led reads only their access lists";
+const PROOF_ROWS = "proofList builds each proof's args from fixed words (ls, test -w/-x, head -c 1, true) and paths: the setup config's folders, homes, proposal rows and the installed rules' env_files and secrets.paths (paths whose reading is proven refused; their contents are never read)";
+const CAPTURE_TOOL = "the screen-capture test tool: tmux words, the test server's name, and the keys and text a fixture scenario types into a test session; no credential exists in it";
+const REVIEW_CONFIG = "the review runner's config (readConfig, through openJobJson): paths, uids, names and the rules' file paths, with no credential field; argv[0] is that config's path and ownerTaps a folder path";
+const GITLEAKS_SETUP = "the push script's scanner setup { bin, version, config, ignoreFile }: the pinned gitleaks path (checkScanner checks it is absolute) and file paths";
+const SHARED = { SETUP_CFG, SETUP_IO, DESTRUCTURED, GIT_ANSWER, RECORD_DOC, CLAUDE_START, INSTALL_PATHS, PROOF_ROWS, CAPTURE_TOOL, REVIEW_CONFIG, GITLEAKS_SETUP };
+const SHARED_COUNT = { SETUP_CFG: 4, SETUP_IO: 13, DESTRUCTURED: 9, GIT_ANSWER: 13, RECORD_DOC: 7, CLAUDE_START: 6, INSTALL_PATHS: 13, PROOF_ROWS: 16, CAPTURE_TOOL: 6, REVIEW_CONFIG: 4, GITLEAKS_SETUP: 4 };
+const REVIEWED = {
+  "modules/M11-dispatcher/cleanup.mjs unread git(…, ['merge-base', '--is-ancestor', a.merge_commit, 'refs/heads/): rec.list('merge') is a call whose answer is not read @d02e91a1": "rec is the Record store: rec.list('merge') gives merge records, whose merge_commit is a 40-hex commit id (checked before git sees it), and rec.list('product') gives product ids",
+  "modules/M11-dispatcher/cleanup.mjs unread mirrorTree's sha reaches git(…, ['ls-tree', '-r', '-z', '--full-tree', sha]), and mirrorTree is called from other modules @879170a7": "mirrorTree(git, mirror, sha): git ls-tree on a commit id; its callers pass a card's recorded commit",
+  "modules/M11-dispatcher/cleanup.mjs unread git(…, ['merge-base', '--is-ancestor', a.merge_commit, 'refs/heads/): rec.list('product') is a call whose answer is not read @616aedfb": "rec is the Record store: rec.list('merge') gives merge records, whose merge_commit is a 40-hex commit id (checked before git sees it), and rec.list('product') gives product ids",
+  "modules/M11-dispatcher/sync-limit.mjs unread run passes its words on, and is not called here (it may be handed on as a value) @9f2d946c": "limitedSync returns run as a port: the wiring that holds it passes fixed git, launchctl and gh words (the gh token goes by environment, never a word)",
+  "modules/M11-dispatcher/sync-limit.mjs unread run passes its list on, and is not called here (it may be handed on as a value) @eb3a0a5d": "limitedSync returns run as a port: the wiring that holds it passes fixed git, launchctl and gh words (the gh token goes by environment, never a word)",
+  "modules/M12-sensors/history.mjs unread runner(…, ['--literal-pathspecs', ...args]): a parameter of an unnamed function @916a74f4": "makeGit's git takes an argument list from the history reader: git log words, commit ids and paths",
+  "modules/M12-sensors/probes/launchd.mjs unread runLaunchctl's args reaches spawn(…, args), and runLaunchctl is called from other modules @3380bcc1": "exported, but its only use is launchdProbe's default runner, which passes ['print', <domain>/<label>], both checked against fixed patterns",
+  "modules/M12-sensors/probes/launchd.mjs unread run(…, ['print', `${domain}/${label}`]): domain is given no value here that is read @f136c3b6": "domain is checked against DOMAIN (system, gui/<uid> or user/<uid>) and label against LABEL just above",
+  "modules/M12-sensors/screen/tools/capture.mjs unread makeTmux's server reaches execFileSync(…, ['-L', server, '-f', '/dev/null', ...args]), and makeTmux is called from other modules @4c816efc": CAPTURE_TOOL,
+  "modules/M12-sensors/screen/tools/capture.mjs unread keys's k reaches run(…, ...k), and keys is called from other modules @5b981112": CAPTURE_TOOL,
+  "modules/M12-sensors/screen/tools/capture.mjs unread text's t reaches run(…, t), and text is called from other modules @db71962f": CAPTURE_TOOL,
+  "modules/M12-sensors/screen/tools/capture.mjs unread runScenario's s reaches run(…, ...args), and runScenario is called from other modules @08f33e9d": CAPTURE_TOOL,
+  "modules/M12-sensors/screen/tools/capture.mjs unread main's argv reaches run(…, claude), and main is called from other modules @22d1286f": CAPTURE_TOOL,
+  "modules/M12-sensors/screen/tools/capture.mjs unread main's argv reaches version(…, bin), and main is called from other modules @4cf5f9a5": CAPTURE_TOOL,
+  "modules/M12-sensors/shell-guard/runner.mjs unread askHook's hookCommand reaches spawnSync(…, ['-c', hookCommand]), and askHook is called from other modules @354f4d32": "the hook command from the role's settings file (a path and its fixed words); the command under test goes on stdin",
+  "modules/M12-sensors/shell-guard/selfcheck.mjs unread runShell(…, [...(sh.endsWith('zsh') ? ['-f'] : []), '-c', cmd]): cases(mode === 'relative' ? name : `${root}/proj/${name}`, m is a call whose answer is not read @56bd2879": "cmd is a case from cases(), the guard's own case table, built on a new temp folder's real path (newFolder)",
+  "modules/M12-sensors/shell-guard/selfcheck.mjs unread runShell's sh reaches spawnSync(…, argv[0]), and runShell is called from other modules @4653bd61": "runShell's one caller passes a shell from the fixed list and -c with a case's command from the guard's own case table",
+  "modules/M12-sensors/shell-guard/selfcheck.mjs unread runShell's args reaches spawnSync(…, argv[0]), and runShell is called from other modules @0689a76d": "runShell's one caller passes a shell from the fixed list and -c with a case's command from the guard's own case table",
+  "modules/M12-sensors/shell-guard/selfcheck.mjs unread runShell(…, [...(sh.endsWith('zsh') ? ['-f'] : []), '-c', cmd]): newFolder() is a call whose answer is not read @1a1a9702": "cmd is a case from cases(), the guard's own case table, built on a new temp folder's real path (newFolder)",
+  "modules/M12-sensors/shell-guard/selfcheck.mjs unread runOne(…, sh): a parameter of an unnamed function @8a1e903d": "sh is each of touchCheck's shells: /bin/bash unless its caller names others (shell paths)",
+  "modules/M4-workshop/git/gitleaks.mjs unread run(…, bin): bin is given no value here that is read @2b887073": GITLEAKS_SETUP,
+  "modules/M4-workshop/git/gitleaks.mjs unread run(…, ['git', mirror, '--log-opts', logOpts, ...common(setup, repo): shas is given no value here that is read @a29af271": "shas are 40-hex commit ids and mirror the product mirror's path, from the push script; messages' texts go on stdin (input), and only each sha reaches a word, in the report's file name",
+  "modules/M4-workshop/git/gitleaks.mjs unread run(…, setup.bin): setup is given no value here that is read @5c8bbc30": GITLEAKS_SETUP,
+  "modules/M4-workshop/git/gitleaks.mjs unread run(…, ['git', mirror, '--log-opts', logOpts, ...common(setup, repo): mirror is given no value here that is read @a5f71025": "shas are 40-hex commit ids and mirror the product mirror's path, from the push script; messages' texts go on stdin (input), and only each sha reaches a word, in the report's file name",
+  "modules/M4-workshop/git/gitleaks.mjs unread run(…, setup.bin): setup is given no value here that is read @5c8bbc30 #2": GITLEAKS_SETUP,
+  "modules/M4-workshop/git/gitleaks.mjs unread run(…, ['stdin', ...common(setup, rep)]): messages is given no value here that is read @b635587e": "shas are 40-hex commit ids and mirror the product mirror's path, from the push script; messages' texts go on stdin (input), and only each sha reaches a word, in the report's file name",
+  "modules/M4-workshop/git/gitleaks.mjs unread run(…, setup.bin): setup is given no value here that is read @5c8bbc30 #3": GITLEAKS_SETUP,
+  "modules/M4-workshop/git/push.mjs unread run(…, ['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-): git(args, opts) is a call whose answer is not read @1f203dec": GIT_ANSWER,
+  "modules/M4-workshop/git/push.mjs unread run(…, ['merge-base', '--is-ancestor', remoteTip, tip]): git(args, opts) is a call whose answer is not read @3a07f800": GIT_ANSWER,
+  "modules/M4-workshop/git/push.mjs unread gitDo(…, ['cat-file', 'commit', sha]): git(args, opts) is a call whose answer is not read @b11bc3f2": GIT_ANSWER,
+  "modules/M4-workshop/git/push.mjs unread changes(…, [mb, tip]): git(args, opts) is a call whose answer is not read @eaf76ea4": GIT_ANSWER,
+  "modules/M4-workshop/git/push.mjs unread run(…, ['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-): git(args, { ...opts, ...(t.bin ? { gitBin: t.bin } : {}), .. is a call whose answer is not read @78f54efd": GIT_ANSWER,
+  "modules/M4-workshop/git/push.mjs unread run(…, ['merge-base', '--is-ancestor', remoteTip, tip]): git(args, { ...opts, ...(t.bin ? { gitBin: t.bin } : {}), .. is a call whose answer is not read @98be60a9": GIT_ANSWER,
+  "modules/M4-workshop/git/push.mjs unread gitDo(…, ['cat-file', 'commit', sha]): git(args, { ...opts, ...(t.bin ? { gitBin: t.bin } : {}), .. is a call whose answer is not read @536d23c7": GIT_ANSWER,
+  "modules/M4-workshop/git/push.mjs unread changes(…, [mb, tip]): git(args, { ...opts, ...(t.bin ? { gitBin: t.bin } : {}), .. is a call whose answer is not read @317af315": GIT_ANSWER,
+  "modules/M4-workshop/git/push.mjs unread run(…, ['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-): passed on through more than 6 helpers @4913271b": GIT_ANSWER,
+  "modules/M4-workshop/git/push.mjs unread run(…, ['check-ref-format', '--branch', branch]): a parameter of an unnamed function @e31eb719": "a branch name, checked by git check-ref-format itself",
+  "modules/M4-workshop/git/push.mjs unread run(…, ['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-): out.trim().split('\\n').filter(Boolean).map((l) => { const [s is given a function whose answer is not read @e8d3423b": GIT_ANSWER,
+  "modules/M4-workshop/git/push.mjs unread gitDo(…, ['cat-file', 'commit', sha]): out.trim().split('\\n').filter(Boolean).map((l) => { const [s is given a function whose answer is not read @f77c5611": GIT_ANSWER,
+  "modules/M4-workshop/git/push.mjs unread run(…, ['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-): passed on through more than 6 helpers @f4dec46d": GIT_ANSWER,
+  "modules/M4-workshop/git/push.mjs unread run(…, ['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-): passed on through more than 6 helpers @c5e8a196": GIT_ANSWER,
+  "modules/M4-workshop/git/push.mjs unread run(…, ['check-ref-format', '--branch', branch]): record.read('session', sessionId) is a call whose answer is not read @df8a7b00": RECORD_DOC,
+  "modules/M4-workshop/git/push.mjs unread run(…, ['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-): proposalFolder(rules, product) is a call whose answer is not read @ce668588": "proposalFolder(rules, product) is the product's proposals folder path from the rules",
+  "modules/M4-workshop/git/push.mjs unread run(…, ['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-): cardBranch(card) is a call whose answer is not read @2cb445b8": "cardBranch(card) is card/<card id>, the id checked against CARD",
+  "modules/M4-workshop/git/push.mjs unread run(…, ['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-): record.read('card', card) is a call whose answer is not read @5b8b42d8": RECORD_DOC,
+  "modules/M4-workshop/git/push.mjs unread gitDo(…, ['cat-file', 'commit', sha]): record.read('card', card) is a call whose answer is not read @3c962526": RECORD_DOC,
+  "modules/M4-workshop/git/push.mjs unread gitText(…, ['commit-tree', tree, '-p', main, '-m', `Copy research ask $): record.read('card', card) is a call whose answer is not read @bb92e06a": RECORD_DOC,
+  "modules/M4-workshop/git/push.mjs unread run(…, ['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-): proposalFolder(rules, product) is a call whose answer is not read @ce668588 #2": "proposalFolder(rules, product) is the product's proposals folder path from the rules",
+  "modules/M4-workshop/git/push.mjs unread run(…, ['push', '--porcelain', '--atomic', '--no-verify', url, `${t): testRemote(repo) is a call whose answer is not read @5415f594": "url is githubUrl(repo), checked to start https://github.com/ with no user part, or in tests testRemote's local folder, checked to be a full path",
+  "modules/M4-workshop/git/push.mjs unread gitText(…, ['commit-tree', tree, '-p', main, '-m', `Copy research ask $): checkMirror(mirror) is a call whose answer is not read @c3fd0570": "checkMirror answers { ok, reason } about the mirror folder; only the mirror's path reaches a word",
+  "modules/M4-workshop/git/push.mjs value auth @68a4b3f4": "remoteTip is a commit id parsed from git ls-remote's answer; auth is that call's options (the token goes by GIT_CONFIG_* environment through extraConfig), not a word",
+  "modules/M4-workshop/git/push.mjs unread gitText(…, ['commit-tree', tree, '-p', main, '-m', `Copy research ask $): rules.may('push_branch', subject) is a call whose answer is not read @ee2d0656": "rules.may answers { decision, reason }; only the decision is read, and no part of it reaches a word",
+  "modules/M4-workshop/git/push.mjs value auth @d775228e": "remoteTip is a commit id parsed from git ls-remote's answer; auth is that call's options (the token goes by GIT_CONFIG_* environment through extraConfig), not a word",
+  "modules/M4-workshop/git/push.mjs unread gitText(…, ['commit-tree', tree, '-p', main, '-m', `Copy research ask $): record.read('card', card) is a call whose answer is not read @bb92e06a #2": RECORD_DOC,
+  "modules/M4-workshop/git/push.mjs unread run(…, ['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-): factParts() is a call whose answer is not read @4c46e0c2": RECORD_DOC,
+  "modules/M4-workshop/git/push.mjs unread run(…, ['check-ref-format', '--branch', branch]): record.read('session', sessionId) is a call whose answer is not read @df8a7b00 #2": RECORD_DOC,
+  "modules/M4-workshop/git/save-work.mjs unread gitOk(…, ['bundle', 'create', '-q', tmp, `refs/heads/${branch}`]): branch is given no value here that is read @91790e7f": "branch is checked just above to be cardBranch(card) and to match BRANCH",
+  "modules/M4-workshop/launcher/accounts.mjs unread claudeAuthStatus's claudeBin reaches spawnSync(…, claudeBin), and claudeAuthStatus is called from other modules @9c6a0212": "claudeBin is Claude Code's program path ('claude', or --claude <path> for a test's fake); the account goes by environment (CLAUDE_CONFIG_DIR), not a word",
+  "modules/M4-workshop/launcher/accounts.mjs unread claudeAuthStatus(…, claudeBin): args.splice(k, 2) is a call whose answer is not read @aec334e2": "claudeBin is Claude Code's program path ('claude', or --claude <path> for a test's fake); the account goes by environment (CLAUDE_CONFIG_DIR), not a word",
+  "modules/M4-workshop/launcher/env-check.mjs unread readPlist's p reaches execFileSync(…, ['-convert', 'json', '-o', '-', '--', p]), and readPlist is called from other modules @77e9e38c": "p is a job file's path (plutil -convert json -- <path>)",
+  "modules/M4-workshop/launcher/hooks-check.mjs unread run(…, node): execFileSync(bin, a, { encoding: 'utf8', timeout: 10000, env is a call whose answer is not read @1d0055da": "the hook command's own words from the role settings file, node's and Claude Code's pinned paths (claudeBin is checked to be pinnedBinary(root, pin)) and --version",
+  "modules/M4-workshop/launcher/hooks-check.mjs unread run(…, claudeBin): claudeBin is given no value here that is read @c3a59cdd": "the hook command's own words from the role settings file, node's and Claude Code's pinned paths (claudeBin is checked to be pinnedBinary(root, pin)) and --version",
+  "modules/M4-workshop/launcher/hooks-check.mjs unread run(…, node): settings is given no value here that is read @3942f546": "the hook command's own words from the role settings file, node's and Claude Code's pinned paths (claudeBin is checked to be pinnedBinary(root, pin)) and --version",
+  "modules/M4-workshop/launcher/install-check.mjs unread copyModuleProblem's rel reaches lsShowsAcl(…, [p]), and copyModuleProblem is called from other modules @dd78c160": INSTALL_PATHS,
+  "modules/M4-workshop/launcher/install-check.mjs unread lsShowsAcl(…, [p]): readlink(installRoot) is a call whose answer is not read @f7b5749a": INSTALL_PATHS,
+  "modules/M4-workshop/launcher/install-check.mjs unread lsShowsAcl(…, [p]): e is given no value here that is read @aacd693e": INSTALL_PATHS,
+  "modules/M4-workshop/launcher/install-check.mjs unread currentCopy's installRoot reaches lsShowsAcl(…, [p]), and currentCopy is called from other modules @cae28d14": INSTALL_PATHS,
+  "modules/M4-workshop/launcher/install-check.mjs unread copyReady's installRoot reaches currentCopy(…, installRoot), and copyReady is called from other modules @309b9574": INSTALL_PATHS,
+  "modules/M4-workshop/launcher/install-check.mjs unread copyReady's installRoot reaches readInstallStamp(…, installRoot), and copyReady is called from other modules @db382688": INSTALL_PATHS,
+  "modules/M4-workshop/launcher/install-check.mjs unread copyPath's installRoot reaches lsShowsAcl(…, [p]), and copyPath is called from other modules @99795a92": INSTALL_PATHS,
+  "modules/M4-workshop/launcher/install-check.mjs unread copyPath's p reaches lsShowsAcl(…, [p]), and copyPath is called from other modules @5d588a78": INSTALL_PATHS,
+  "modules/M4-workshop/launcher/install-check.mjs unread aclProblem's paths reaches lsShowsAcl(…, batch), and aclProblem is called from other modules @53943225": INSTALL_PATHS,
+  "modules/M4-workshop/launcher/install-check.mjs unread installProblem's installRoot reaches currentCopy(…, installRoot), and installProblem is called from other modules @f9e5b0ae": INSTALL_PATHS,
+  "modules/M4-workshop/launcher/install-check.mjs unread installProblem's installRoot reaches inside(…, installRoot), and installProblem is called from other modules @27a3db36": INSTALL_PATHS,
+  "modules/M4-workshop/launcher/install-check.mjs unread installProblem's installRoot reaches lsShowsAcl(…, [p]), and installProblem is called from other modules @a07535ae": INSTALL_PATHS,
+  "modules/M4-workshop/launcher/install-check.mjs unread readInstallStamp's installRoot reaches currentCopy(…, installRoot), and readInstallStamp is called from other modules @1682e7f2": INSTALL_PATHS,
+  "modules/M4-workshop/launcher/review-launch.mjs unread spawnClaude's bin reaches spawn(…, bin), and spawnClaude is called from other modules @1ecafca3": CLAUDE_START,
+  "modules/M4-workshop/launcher/review-launch.mjs unread spawnClaude's args reaches spawn(…, args), and spawnClaude is called from other modules @5b418b89": CLAUDE_START,
+  "modules/M4-workshop/launcher/review-launch.mjs unread runProbe(…, lr.bin): lockedRunCommand({ claudeBin: x.claudeBin, settingsFile: x.s is a call whose answer is not read @2510d8ef": CLAUDE_START,
+  "modules/M4-workshop/launcher/review-runner-main.mjs unread realPath(…, c.root): openJobJson(file, (why) => { throw new Error(`config: ${file is a call whose answer is not read @5cf2e1ea": REVIEW_CONFIG,
+  "modules/M4-workshop/launcher/review-runner-main.mjs unread realPath(…, c.root): read(runnerConfig) is a call whose answer is not read @d0846155": REVIEW_CONFIG,
+  "modules/M4-workshop/launcher/review-runner-main.mjs unread realPath(…, given): ownerTaps is given no value here that is read @832a7751": REVIEW_CONFIG,
+  "modules/M4-workshop/launcher/review-runner-main.mjs unread gitOk(…, ['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-): cardBranch(card) is a call whose answer is not read @f2fdf991": "prepareReviewCopy({ mirror, card, head, dest }): card is checked against CARD_ID and head to be 40 hex just above; mirror and dest are the runner's folder paths",
+  "modules/M4-workshop/launcher/review-runner-main.mjs unread gitOk(…, ['init', '-q', '--initial-branch=review-copy-unborn', dest]): dest is given no value here that is read @87cc44c4": "prepareReviewCopy({ mirror, card, head, dest }): card is checked against CARD_ID and head to be 40 hex just above; mirror and dest are the runner's folder paths",
+  "modules/M4-workshop/launcher/review-runner-main.mjs unread gitOk(…, ['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-): mirror is given no value here that is read @ef1fe249": "prepareReviewCopy({ mirror, card, head, dest }): card is checked against CARD_ID and head to be 40 hex just above; mirror and dest are the runner's folder paths",
+  "modules/M4-workshop/launcher/review-runner-main.mjs unread currentHead's card reaches git(…, ['rev-parse', '--verify', '-q', `refs/heads/card/${card.toLo), and currentHead is called from other modules @7dd0f63b": "a card id (checked against its pattern) and a 40-hex commit id, in git rev-parse words",
+  "modules/M4-workshop/launcher/review-runner-main.mjs unread treeOf's head reaches git(…, ['rev-parse', '--verify', '-q', `${head}^{tree}`]), and treeOf is called from other modules @66f09cf3": "a card id (checked against its pattern) and a 40-hex commit id, in git rev-parse words",
+  "modules/M4-workshop/launcher/review-runner-main.mjs unread realPath(…, c.root): readConfigFn(argv[0]) is a call whose answer is not read @3af1e357": REVIEW_CONFIG,
+  "modules/M4-workshop/launcher/review-updater.mjs unread updateOnce(…, c): readFileSync(file, 'utf8') is a call whose answer is not read @ad246420": "the updater's config (readUpdaterConfig): paths and an https address whose host part holds no user or password (HTTPS pattern)",
+  "modules/M4-workshop/launcher/review-updater.mjs unread updateOnce's c reaches makeClone(…, c.clone), and updateOnce is called from other modules @2a783828": "the updater's config (readUpdaterConfig): paths and an https address whose host part holds no user or password (HTTPS pattern)",
+  "modules/M4-workshop/launcher/review-updater.mjs unread updateOnce's c reaches git(…, ['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-), and updateOnce is called from other modules @09b7ab5a": "the updater's config (readUpdaterConfig): paths and an https address whose host part holds no user or password (HTTPS pattern)",
+  "modules/M4-workshop/launcher/review-updater.mjs unread git(…, ['ls-tree', '-r', '-z', '--full-tree', `${commit}:${SOURCE}`): git(['rev-parse', '--verify', '-q', `${MAIN}^{commit}`], { . is a call whose answer is not read @831ad7ee": "commit is git's own answer to rev-parse main^{commit}, a commit id; OUTSIDE_FILES is an imported constant of file paths",
+  "modules/M4-workshop/launcher/review-updater.mjs unread git(…, ['ls-tree', '-r', '-z', '--full-tree', commit, '--', ...OUTS) @1c07e12f": "commit is git's own answer to rev-parse main^{commit}, a commit id; OUTSIDE_FILES is an imported constant of file paths",
+  "modules/M4-workshop/launcher/worker-copy.mjs unread gitOk(…, ['fetch', '-q', '--no-tags', '--no-write-fetch-head', lastBu): cardBranch(card.id) is a call whose answer is not read @9823116b": "prepareWorkerCopy({ product, card, dest }): card.id is checked against CARD and card.commit to be a full commit id, product.mirror is the rules' mirror path, dest the copy's folder; remoteRef's commit is git's own answer",
+  "modules/M4-workshop/launcher/worker-copy.mjs unread gitOk(…, ['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-): product is given no value here that is read @40a6835b": "prepareWorkerCopy({ product, card, dest }): card.id is checked against CARD and card.commit to be a full commit id, product.mirror is the rules' mirror path, dest the copy's folder; remoteRef's commit is git's own answer",
+  "modules/M4-workshop/launcher/worker-copy.mjs unread git(…, ['cat-file', '-t', card.commit]): card is given no value here that is read @8558f5d8": "prepareWorkerCopy({ product, card, dest }): card.id is checked against CARD and card.commit to be a full commit id, product.mirror is the rules' mirror path, dest the copy's folder; remoteRef's commit is git's own answer",
+  "modules/M4-workshop/launcher/worker-copy.mjs unread git(…, ['merge-base', '--is-ancestor', card.commit, 'refs/heads/mai): card is given no value here that is read @1e3b5f00": "prepareWorkerCopy({ product, card, dest }): card.id is checked against CARD and card.commit to be a full commit id, product.mirror is the rules' mirror path, dest the copy's folder; remoteRef's commit is git's own answer",
+  "modules/M4-workshop/launcher/worker-copy.mjs unread gitOk(…, ['init', '-q', dest]): dest is given no value here that is read @efc23733": "prepareWorkerCopy({ product, card, dest }): card.id is checked against CARD and card.commit to be a full commit id, product.mirror is the rules' mirror path, dest the copy's folder; remoteRef's commit is git's own answer",
+  "modules/M4-workshop/launcher/worker-copy.mjs unread gitOk(…, ['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-): card is given no value here that is read @53fd9dbf": "prepareWorkerCopy({ product, card, dest }): card.id is checked against CARD and card.commit to be a full commit id, product.mirror is the rules' mirror path, dest the copy's folder; remoteRef's commit is git's own answer",
+  "modules/M4-workshop/launcher/worker-copy.mjs unread git(…, ['merge-base', '--is-ancestor', card.commit, head]): card is given no value here that is read @16c9a11c": "prepareWorkerCopy({ product, card, dest }): card.id is checked against CARD and card.commit to be a full commit id, product.mirror is the rules' mirror path, dest the copy's folder; remoteRef's commit is git's own answer",
+  "modules/M4-workshop/launcher/worker-copy.mjs unread git(…, ['merge-base', '--is-ancestor', card.commit, head]): card is given no value here that is read @16c9a11c #2": "prepareWorkerCopy({ product, card, dest }): card.id is checked against CARD and card.commit to be a full commit id, product.mirror is the rules' mirror path, dest the copy's folder; remoteRef's commit is git's own answer",
+  "modules/M4-workshop/launcher/worker-copy.mjs unread gitOk(…, ['branch', branch, card.commit]): card is given no value here that is read @0c9b3814": "prepareWorkerCopy({ product, card, dest }): card.id is checked against CARD and card.commit to be a full commit id, product.mirror is the rules' mirror path, dest the copy's folder; remoteRef's commit is git's own answer",
+  "modules/M4-workshop/launcher/worker-copy.mjs unread git(…, ['merge-base', '--is-ancestor', card.commit, head]): git(['rev-parse', '--verify', '-q', `${remoteRef}^{commit}`] is a call whose answer is not read @8eda35c2": "prepareWorkerCopy({ product, card, dest }): card.id is checked against CARD and card.commit to be a full commit id, product.mirror is the rules' mirror path, dest the copy's folder; remoteRef's commit is git's own answer",
+  "modules/M4-workshop/send-safe/guard.mjs unread run(…, ['send-keys', '-t', target, '-l', '--', text, ';', 'send-key): targetFor(id) is a call whose answer is not read @cae7e18e": "a message typed into a session (tmux send-keys -l) and targetFor(id)'s tmux target: the Dispatcher's own words to a session, which reads them anyway; never a credential",
+  "modules/M4-workshop/send-safe/guard.mjs unread send's text reaches run(…, ['send-keys', '-t', target, '-l', '--', text, ';', 'send-key), and send is called from other modules @03a34ff8": "a message typed into a session (tmux send-keys -l) and targetFor(id)'s tmux target: the Dispatcher's own words to a session, which reads them anyway; never a credential",
+  "modules/M5-review-audit/findings.mjs unread gitOk(…, ['merge-base', 'refs/heads/main', head]): head is given no value here that is read @95ce5375": DESTRUCTURED,
+  "modules/M5-review-audit/findings.mjs unread at(…, head): head is given no value here that is read @6f62011a": DESTRUCTURED,
+  "modules/M5-review-audit/review-package.mjs unread gitOk(…, ['merge-base', 'refs/heads/main', head]): head is given no value here that is read @95ce5375": DESTRUCTURED,
+  "modules/M5-review-audit/review-package.mjs unread gitOk(…, ['diff', '--name-status', '-z', '--no-renames', '--ignore-su): head is given no value here that is read @9eb865eb": DESTRUCTURED,
+  "modules/M5-review-audit/review-package.mjs unread gitOk(…, ['diff', ...DIFF_FLAGS, base, head]): head is given no value here that is read @64ff2e2c": DESTRUCTURED,
+  "modules/M5-review-audit/review-package.mjs unread git(…, ['merge-base', '--is-ancestor', since, head]): since is given no value here that is read @7ce55da9": DESTRUCTURED,
+  "modules/M5-review-audit/review-package.mjs unread git(…, ['merge-base', '--is-ancestor', since, head]): head is given no value here that is read @d6d37aa1": DESTRUCTURED,
+  "modules/M5-review-audit/review-package.mjs unread gitOk(…, ['merge-base', 'refs/heads/main', since]): since is given no value here that is read @3a710277": DESTRUCTURED,
+  "setup/bob-manifest.mjs unread bobGit's cfg reaches run(…, argv), and bobGit is called from other modules @90a87067": SETUP_CFG,
+  "setup/bob-manifest.mjs unread bobGit's from reaches run(…, argv), and bobGit is called from other modules @34d91233": "argv is sudo's flags, ENV, GIT_ENV (PATH, LC_ALL, GIT_TERMINAL_PROMPT, GIT_CONFIG_NOSYSTEM; no token), git -C <Bob's folder> and the command; input is object ids on stdin",
+  "setup/bob-manifest.mjs unread run(…, argv): a parameter of an unnamed function @1a7d192b": "argv is sudo's flags, ENV, GIT_ENV (PATH, LC_ALL, GIT_TERMINAL_PROMPT, GIT_CONFIG_NOSYSTEM; no token), git -C <Bob's folder> and the command; input is object ids on stdin",
+  "setup/builder-wall.mjs unread planWall's io reaches run(…, ['bootstrap', 'system', io.at(wallPlistPath(cfg))]), and planWall is called from other modules @e64a91b9": SETUP_IO,
+  "setup/builder-wall.mjs reader step(…, ['-X', ref]): io.readText(tokenPath(cfg)) is a call whose answer is not read (in wayOut, which reads a credential) @e28f722b": "ref is pf's enable reference, the number pfctl -E printed and wallDir's pf-token file keeps (root's 0700 folder); it is checked to be digits before pfctl -X takes it. pf calls it a token; it is a count, not a credential",
+  "setup/builder-wall.mjs unread spawn(…, [...as(user), '-e', LISTENER, proto, host]): net.addresses() is a call whose answer is not read @b0bde14e": "net.addresses() is this Mac's own non-loopback IP address, for the listener and client probes",
+  "setup/builder-wall.mjs unread planWall(…, io): realIo() is a call whose answer is not read @58a4416a": SETUP_IO,
+  "setup/daemons.mjs unread planLoad's io reaches launchctl(…, ['bootstrap', 'system', io.at(plistPath(cfg, job))]), and planLoad is called from other modules @e2d8b091": SETUP_IO,
+  "setup/daemons.mjs unread planReloadAccount's io reaches launchctl(…, ['bootstrap', 'system', io.at(plistPath(cfg, job))]), and planReloadAccount is called from other modules @cc90dfc9": SETUP_IO,
+  "setup/dispatcher-check.mjs unread unreadableWhy's real reaches asDispatcher(…, ['/bin/test', '-r', real]), and unreadableWhy is called from other modules @ebde55eb": "real is a guarded file's real path (realpathSync.native of a config path, with the disk's own case); test -r reads nothing",
+  "setup/dispatcher-check.mjs unread checkDispatcherKeys's io reaches unreadableWhy(…, real), and checkDispatcherKeys is called from other modules @df930cf9": SETUP_IO,
+  "setup/extras.mjs unread asUser(…, [TEST, '-w', f]): planFolders(io, cfg, { owner: { uid: owner.uid, gid: owner.g is a call whose answer is not read @d344687c": "proposalsParentOf(cfg) and planFolders' rows are paths built from the setup config's base and product names",
+  "setup/extras.mjs unread checkProposals's cfg reaches asUser(…, [TEST, '-w', f]), and checkProposals is called from other modules @a320d649": SETUP_CFG,
+  "setup/extras.mjs unread asUser(…, [TEST, '-w', f]): proposalsParentOf(cfg) is a call whose answer is not read @f94d0a66": "proposalsParentOf(cfg) and planFolders' rows are paths built from the setup config's base and product names",
+  "setup/install.mjs unread spawnSync(…, c.args): node is given no value here that is read @bf16ec3d": "updaterCommand writes the list out: the script, the config, --first and the seed, all install paths (io.at)",
+  "setup/install.mjs unread spawnSync(…, c.args): script is given no value here that is read @fcda2aff": "updaterCommand writes the list out: the script, the config, --first and the seed, all install paths (io.at)",
+  "setup/install.mjs unread spawnSync(…, c.args): config is given no value here that is read @0b0113c1": "updaterCommand writes the list out: the script, the config, --first and the seed, all install paths (io.at)",
+  "setup/install.mjs unread spawnSync(…, c.args): seed is given no value here that is read @0e9aebb3": "updaterCommand writes the list out: the script, the config, --first and the seed, all install paths (io.at)",
+  "setup/managed-settings.mjs unread spawnSync(…, node): node is given no value here that is read @10d09a6d": "runGuard({ node, hook, copy }): node's path, the hook's path and the snapshot copy's path; the command under test goes on stdin",
+  "setup/owner-answer-setup.mjs unread planOwnerLoad's io reaches bootstrap(…, io), and planOwnerLoad is called from other modules @7248fb30": SETUP_IO,
+  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf })): io.readText(file) is a call whose answer is not read @c52122b6": PROOF_ROWS,
+  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf })): cfg.products.map((prod) => [prod, runnerPlaces({ copiesRoot: is given a function whose answer is not read @edfd73da": PROOF_ROWS,
+  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf })): make(q, l.kind) is a call whose answer is not read @0f853076": PROOF_ROWS,
+  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf })): make(q, l.kind).map((pr) => ({ ...pr, what: via ? `${pr.what is given a function whose answer is not read @0235fa35": PROOF_ROWS,
+  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf })): homeOf(cfg, B) is a call whose answer is not read @ab9b14b2": PROOF_ROWS,
+  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf })): places.flatMap(([prod, at]) => [at.copies, ...PRODUCT_OUTBOX is given a function whose answer is not read @04d86977": PROOF_ROWS,
+  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf })): cfg.products.flatMap((prod) => noWrite((d) => `${B} cannot w is given a function whose answer is not read @6cca2b28": PROOF_ROWS,
+  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf })): NO_WRITE.flatMap((d) => noWrite((q) => `${B} cannot write ${ is given a function whose answer is not read @b0b9719c": PROOF_ROWS,
+  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf })): places.flatMap(([prod, at]) => noWrite((d) => `${B} cannot w is given a function whose answer is not read @c03e5425": PROOF_ROWS,
+  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf })): USERS.filter((u) => u !== B).flatMap((u) => noList((d) => `$ is given a function whose answer is not read @3dfe8e70": PROOF_ROWS,
+  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf })): FLAT_OUTBOX_ROLES.map((r) => join(outboxRootPath(cfg), r)) is given a function whose answer is not read @b889b135": PROOF_ROWS,
+  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf })): FLAT_OUTBOX_ROLES.map((r) => join(outboxRootPath(cfg), r)).f is given a function whose answer is not read @da5ccd43": PROOF_ROWS,
+  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf })): proposalRows(cfg) is a call whose answer is not read @a0ea6fda": PROOF_ROWS,
+  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf })): proposalRows(cfg).flatMap((row) => reach(`${B} cannot write  is given a function whose answer is not read @6da1c6a9": PROOF_ROWS,
+  "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf })): (rules.odd ?? []).map((x) => notTried(`${B} cannot read the  is given a function whose answer is not read @55a17493": PROOF_ROWS,
+  "setup/proofs.mjs unread proveList's list reaches run(…, ['-n', '-H', '-u', BUILDER, ...pr.args]), and proveList is called from other modules @680eaaba": PROOF_ROWS,
+  "setup/users-folders.mjs value key @f14f1e8a": "census's read(path, key): key is a dscl attribute name, 'UniqueID' or 'PrimaryGroupID' at its one caller",
+  "setup/users-folders.mjs unread want(…, [['UserShell', shellOf(name)], ['IsHidden', '1'], ['Password): homeOf(cfg, name) is a call whose answer is not read @2df588fe": "homeOf(cfg, name) is a home folder's path under the setup base and shellOf(name) a shell's path (/usr/bin/false or /bin/zsh); dscl attribute values",
+  "setup/users-folders.mjs unread want(…, [['UserShell', shellOf(name)], ['IsHidden', '1'], ['Password): shellOf(name) is a call whose answer is not read @8f7af688": "homeOf(cfg, name) is a home folder's path under the setup base and shellOf(name) a shell's path (/usr/bin/false or /bin/zsh); dscl attribute values",
+  "setup/users-folders.mjs unread aclEntries's io reaches run(…, ['-led', io.at(path)]), and aclEntries is called from other modules @f142b286": SETUP_IO,
+  "setup/users-folders.mjs unread planFolders's rows reaches aclOp(…, row), and planFolders is called from other modules @b54f037a": "rows are folderTable(cfg): paths, owners and modes",
+  "setup/users-folders.mjs unread planFolders's io reaches aclOp(…, io), and planFolders is called from other modules @1120115e": SETUP_IO,
+  "setup/users-folders.mjs unread planFolders's io reaches aclEntries(…, io), and planFolders is called from other modules @8fe81b16": SETUP_IO,
+  "setup/users-folders.mjs unread planFolders's io reaches aclOp(…, io), and planFolders is called from other modules @1120115e #2": SETUP_IO,
+  "setup/users-folders.mjs unread plan's io reaches planFolders(…, io), and plan is called from other modules @9377316d": SETUP_IO,
+  "setup/users-folders.mjs unread planFolders(…, folderTable(cfg)): folderTable(cfg) is a call whose answer is not read @b608e97c": "rows are folderTable(cfg): paths, owners and modes",
+  "setup/users-folders.mjs unread check's io reaches folderChecks(…, io), and check is called from other modules @9b76c848": SETUP_IO,
+  "setup/users-folders.mjs unread folderChecks's io reaches aclEntries(…, io), and folderChecks is called from other modules @1e11095f": SETUP_IO,
+  "setup/watch-setup.mjs unread watchPlist's cfg reaches arr(…, [join(P.installRoot, NODE), join(P.installRoot, WATCH_RUN), ), and watchPlist is called from other modules @57f96ecb": SETUP_CFG,
+  "setup/watch-setup.mjs unread proveWatchAppChecks's cfg reaches run(…, ['-n', '-H', '-u', 'orchestrate', join(P.installRoot, NODE),), and proveWatchAppChecks is called from other modules @2f4d98ef": SETUP_CFG,
+  "setup/watch-setup.mjs unread proveWatchAppChecks's on reaches run(…, ['-n', '-H', '-u', 'orchestrate', join(P.installRoot, NODE),), and proveWatchAppChecks is called from other modules @47feee6d": "on is a pull request's number and 40-hex head; the job mints the App's token itself from the key file, whose path is the only key word passed",
+  "wiring/owner-answer.mjs unread claudeUsage's claudeBin reaches spawnSync(…, claudeBin), and claudeUsage is called from other modules @4b221127": "claudeBin is the Claude Code program's path; the account goes by environment, not a word",
+  "wiring/review-ports.mjs unread git(…, safeGitEnv()): safeGitEnv() is a call whose answer is not read @39950bb4": "env -i K=V: both callers pass safeGitEnv() with no extraConfig, so only fixed PATH, HOME, LANG, GIT_DIR paths and the fixed safe settings; a token could come only through extraConfig, and none is passed (#556 r2 m6)",
+  "wiring/review-ports.mjs unread git(…, safeGitEnv({ gitDir: found.dir, commonDir: found.common })): safeGitEnv({ gitDir: found.dir, commonDir: found.common }) is a call whose answer is not read @c394ebf7": "env -i K=V: both callers pass safeGitEnv() with no extraConfig, so only fixed PATH, HOME, LANG, GIT_DIR paths and the fixed safe settings; a token could come only through extraConfig, and none is passed (#556 r2 m6)",
+  "wiring/review-ports.mjs unread git(…, withNoPrograms(['diff-tree', '-r', '-z', '--name-only', '--n): withNoPrograms(['diff-tree', '-r', '-z', '--name-only', '--n is a call whose answer is not read @a288668a": "the list is written out inside withNoPrograms, which only adds the fixed NO_PROGRAMS flags; sha is checked to be a commit id",
+  "wiring/runner-checks.mjs unread run(…, ['ls-tree', '-r', '-z', '--full-tree', main]): mainAt is given no value here that is read @0056e2c5": "mainAt is used only when SHA says it is a 40-hex commit id, else 'refs/heads/main'",
+  "wiring/runner-locked.mjs unread runToEnd's bin reaches spawn(…, bin), and runToEnd is called from other modules @5330f049": CLAUDE_START,
+  "wiring/runner-locked.mjs unread runToEnd's args reaches spawn(…, args), and runToEnd is called from other modules @d1bbaf97": CLAUDE_START,
+  "wiring/runner-locked.mjs unread runToEnd(…, lr.bin): lockedRunCommand({ claudeBin, settingsFile, command, roleArg is a call whose answer is not read @da073895": CLAUDE_START,
+  "wiring/runner-ports.mjs unread run(…, ['merge-base', '--is-ancestor', commit, head]): head is given no value here that is read @9fc2f629": DESTRUCTURED,
+  "wiring/runner-ports.mjs unread chmodTree's d reaches execFileSync(…, ['-R', '-P', 'u+rwx', d]), and chmodTree is called from other modules @1f95cc77": "d is a folder being removed (chmod -R -P u+rwx <folder>)",
+  "wiring/runner-ports.mjs unread run(…, ['cat-file', '-t', commit]): startCommit({ mirror: p.mirror, card, cardDoc: cd.doc }) is a call whose answer is not read @81fc7491": "startCommit answers with the card's start commit id, from the card record or git; git cat-file -t only names its type",
 };
-/** Findings looked at and not a credential: what the scan took for one, and why it is not. */
-const REVIEWED_FOUND = {
-  'setup/users-folders.mjs value key': "census's read(path, key): key is a dscl attribute name, 'UniqueID' or 'PrimaryGroupID' at its one caller",
-  'modules/M4-workshop/git/push.mjs value auth': "remoteTip is a commit id parsed from git ls-remote's answer; auth is that call's options (the token goes by GIT_CONFIG_* environment through extraConfig), not a word",
-};
+/** A finding's key in REVIEWED: file, kind, what, @site, and #n for the nth time that text is met in the file. */
+function keysOf(rel, src) {
+  const seen = new Map();
+  return credentialArgFindings(src).map((x) => {
+    const k = `${rel} ${x.kind} ${x.what} @${x.site}`;
+    seen.set(k, (seen.get(k) ?? 0) + 1);
+    return { x, key: seen.get(k) > 1 ? `${k} #${seen.get(k)}` : k };
+  });
+}
 
-test('R-0b-179 (b): no module outside the tests puts a credential on a command line, and every list the scan can not read has been looked at', () => {
+test('R-0b-179 (b): no module outside the tests puts a credential on a command line, and every site the scan can not read has been looked at', () => {
   const files = sources(ROOT);
   assert.ok(files.length > 100, `only ${files.length} modules were found to read`);
-  const found = []; const unread = []; const seenFound = [];
+  const fresh = []; const met = new Set();
   for (const f of files) {
-    for (const x of credentialArgFindings(readFileSync(f, 'utf8'))) {
-      if (x.kind === 'unread') unread.push(`${relative(ROOT, f)} ${x.what}`);
-      else if (!REVIEWED_FOUND[`${relative(ROOT, f)} ${x.kind} ${x.what}`]) found.push(`${relative(ROOT, f)}:${x.line} ${x.kind} ${x.what}: ${x.list}`);
-      else seenFound.push(`${relative(ROOT, f)} ${x.kind} ${x.what}`);
+    for (const { x, key } of keysOf(relative(ROOT, f), readFileSync(f, 'utf8'))) {
+      if (REVIEWED[key]) met.add(key);
+      else fresh.push(`${relative(ROOT, f)}:${x.line} ${key}\n    ${x.list}`);
     }
   }
-  assert.deepEqual(found, [], `pass a credential in the child's environment, a file it reads, or its stdin, never its arguments:\n${found.join('\n')}`);
-  assert.deepEqual(unread.filter((u) => !REVIEWED_UNREAD[u]), [], 'a spawn call whose list the scan can not read: look at what reaches it, then add it to REVIEWED_UNREAD with why it is safe');
-  assert.deepEqual(Object.keys(REVIEWED_UNREAD).filter((u) => !unread.includes(u)), [], 'a reviewed entry no longer met: take it out');
-  assert.deepEqual(Object.keys(REVIEWED_FOUND).filter((u) => !seenFound.includes(u)), [], 'a reviewed finding no longer met: take it out');
+  assert.deepEqual(fresh, [], 'pass a credential in the child\'s environment, a file it reads, or its stdin, never its arguments. A site the scan can not read: look at what reaches it, then add it to REVIEWED with why it is safe');
+  assert.deepEqual(Object.keys(REVIEWED).filter((k) => !met.has(k)), [], 'a reviewed site no longer met: take it out');
+  const counts = Object.fromEntries(Object.entries(SHARED).map(([n, why]) => [n, Object.values(REVIEWED).filter((r) => r === why).length]));
+  assert.deepEqual(counts, SHARED_COUNT, 'a shared reason now covers more or fewer sites: check the new ones against it, then move the count');
 });
 
 test('R-0b-179 (b): a planted credential flag, value, header or URL is caught, however the argument list is written', () => {
@@ -216,11 +290,11 @@ test('R-0b-179 (b, #556 r2 A, B): the auditor\'s plants: lists passed through he
   };
   for (const [what, src] of Object.entries(caught)) assert.ok(said(src).some((x) => /^(flag|value|text):/.test(x)), `${what}: ${JSON.stringify(said(src))}`);
   // A list passed in that the scan can not follow is listed, never passed: a helper called only from other modules.
-  assert.deepEqual(said('export function f(io, list) { return io.run(BIN, list); }'), ["unread:f's list reaches a program's words, and f is called from other modules"]);
+  assert.deepEqual(said('export function f(io, list) { return io.run(BIN, list); }'), ["unread:f's list reaches run(…, list), and f is called from other modules"]);
   assert.ok(said("function wrap(a) { return a.map(String); }\nspawn(b, wrap(x));").some((x) => x.startsWith('unread:')));
   // Safe shapes stay quiet: a token in the child's environment, literal lists through a helper. (A Bearer string in env
   // was quiet here until r3 m2 made `Bearer ${` a finding in any string but an HTTP header's whole value.)
-  for (const src of ["spawn(bin, ['push'], { env: { GH_TOKEN: token } });", "function asUser(io, user, args) { return io.run('/usr/bin/sudo', ['-n', '-u', user, ...args]); }\nasUser(io, 'o', ['/bin/ls', dir]);"]) assert.deepEqual(said(src), [], src);
+  for (const src of ["spawn('/usr/bin/gh', ['push'], { env: { GH_TOKEN: token } });", "function asUser(io, user, args) { return io.run('/usr/bin/sudo', ['-n', '-u', user, ...args]); }\nasUser(io, 'o', ['/bin/ls', dir]);"]) assert.deepEqual(said(src), [], src);
 });
 
 test('R-0b-179 (b, #556 r1 M3, M4, m10/11): the auditor\'s plants: lists built by push or under any name, scripts in strings, more names and flags', () => {
@@ -268,8 +342,8 @@ test('R-0b-179 (b, #556 r1 M3, M4, m10/11): the auditor\'s plants: lists built b
   };
   for (const [name, [src, want]] of Object.entries(only)) assert.ok(said(src).includes(want), `${name}: ${JSON.stringify(said(src))}`);
   // A list the scan can not read is listed, never passed in silence.
-  assert.deepEqual(said('spawn(bin, makeList(cfg));'), ['unread:spawn(…, makeList(cfg))']);
-  assert.deepEqual(said("const args = ['a'];\nspawn(bin, args);"), []);
+  assert.deepEqual(said('spawn(bin, makeList(cfg));'), ['unread:spawn(…, bin): bin is given no value here that is read', 'unread:spawn(…, makeList(cfg)): makeList(cfg) is a call whose answer is not read']);
+  assert.deepEqual(said("const args = ['a'];\nspawn('/bin/x', args);"), []);
 });
 
 test('R-0b-179 (b, #556 r3): the scan fails closed: command strings, parameters, returned lists, URLs and aliases are read to their end, or listed', () => {
@@ -303,14 +377,14 @@ test('R-0b-179 (b, #556 r3): the scan fails closed: command strings, parameters,
   // Each way of reading, pinned: with it taken out the plant above it would pass (checked by mutation, #556 r3).
   // What can not be read to its end is listed, never passed.
   const listed = {
-    'a command string from a call': ['execSync(makeCommand(cfg));', 'unread:execSync(…, makeCommand(cfg))'],
+    'a command string from a call': ['execSync(makeCommand(cfg));', 'unread:execSync(…, makeCommand(cfg)): makeCommand(cfg) is a call whose answer is not read'],
     'a parameter whose caller gives a name with no value here': ["function push(io, v) { return io.run('/usr/bin/gh', ['--body', v]); }\npush(io, given);", 'unread:push(…, given): given is given no value here that is read'],
     'a helper that is not called here (c1)': ["function f(o) { return spawn('/x', ['a', o.v]); }", 'unread:f passes its words on, and is not called here (it may be handed on as a value)'],
     'a helper that returns nothing read': ["function mk() { build(); }\nspawn('/x', mk());", 'unread:spawn(…, mk()): mk returns nothing that is read'],
     'a destructured parameter': ["function go({ a }) { return spawn('/x', ['x', a]); }\ngo({ a: 'y' });", "unread:spawn(…, ['x', a]): a is given no value here that is read"],
-    'more than four helpers': ["function h1(a){ return spawn('/x', a); }\nfunction h2(a){ return h1(a); }\nfunction h3(a){ return h2(a); }\nfunction h4(a){ return h3(a); }\nfunction h5(a){ return h4(a); }\nh5(['--x', token]);", 'unread:h4(…, a): passed on through more than 4 helpers'],
+    'more than six helpers': ["function h1(a){ return spawn('/x', a); }\nfunction h2(a){ return h1(a); }\nfunction h3(a){ return h2(a); }\nfunction h4(a){ return h3(a); }\nfunction h5(a){ return h4(a); }\nfunction h6(a){ return h5(a); }\nfunction h7(a){ return h6(a); }\nh7(['--x', token]);", 'unread:h6(…, a): passed on through more than 6 helpers'],
     'apply': ["spawn.apply(null, ['/x', ['a']]);", 'unread:spawn.apply(…)'],
-    'an exported helper': ['export function f(io, list) { return io.run(BIN, list); }', "unread:f's list reaches a program's words, and f is called from other modules"],
+    'an exported helper': ['export function f(io, list) { return io.run(BIN, list); }', "unread:f's list reaches run(…, list), and f is called from other modules"],
   };
   for (const [what, [src, want]] of Object.entries(listed)) assert.deepEqual(said(src), [want], what);
   // Safe shapes stay quiet: an HTTP header's whole value (fetch sends it, no command line holds it), the environment,
@@ -360,9 +434,9 @@ test('R-0b-179 (b): the real job builders are read: a token planted in the watch
   const plant = (rel, from, to) => {
     const src = readFileSync(join(ROOT, rel), 'utf8');
     assert.ok(src.includes(from), `${rel} no longer holds ${from}; move this plant to where its arguments are built now`);
-    // Before the plant: only the findings already looked at (REVIEWED_FOUND); after it, what the plant added.
+    // Before the plant: only the findings already looked at (REVIEWED); after it, what the plant added.
+    assert.deepEqual(keysOf(rel, src).map((k) => k.key).filter((k) => !REVIEWED[k]), [], rel);
     const before = said(src).filter((x) => !x.startsWith('unread:'));
-    assert.deepEqual(before.filter((x) => !REVIEWED_FOUND[`${rel} ${x.replace(':', ' ')}`]), [], rel);
     return said(src.replace(from, to)).filter((x) => !x.startsWith('unread:') && !before.includes(x));
   };
   assert.deepEqual(plant('setup/watch-setup.mjs', "'--token-file'", "'--token'"), ['flag:--token']);
@@ -375,4 +449,53 @@ test('R-0b-179 (b): the real job builders are read: a token planted in the watch
   // #556 r1 M4: the wall's own job script is a string.
   assert.deepEqual(plant('setup/builder-wall.mjs', "    'set -u',", "    'set -u',\n    `/usr/bin/curl --token ${cfg.secret} https://x`,"), ['flag:--token']);
   assert.deepEqual(plant('setup/builder-wall.mjs', "    'set -u',", "    'set -u',\n    `GH_TOKEN=${cfg.watchToken} /usr/bin/true`,"), ['text:GH_TOKEN=${…} (a credential set in a command)']);
+});
+
+test('R-0b-179 (b, #556 r4): a word passes only when each part of it is read: calls, awaits, ${…} and + parts, argv0, a reader\'s sites', () => {
+  const H = "import { spawnSync, execSync, spawn } from 'node:child_process';\nimport { readFileSync } from 'node:fs';\n";
+  const E = 'process.' + 'env.';
+  // Each must give a finding of some kind (flag, value, text, unread or reader): none may pass in silence.
+  const plants = {
+    'M-A a program\'s answer as a word': "const r = spawnSync('git', ['config', 'x']);\nspawnSync('git', ['push', r.stdout.trim()]);",
+    'M-A readFileSync as a word': "const p = '/k';\nspawnSync('git', ['x', readFileSync(p, 'utf8')]);",
+    'M-A await vault.get()': "async function f(vault) { const v = await vault.get(); spawnSync('x', ['--', v]); }\nf(globalThis.vault);",
+    'M-A await vault.get() inline': "async function f(vault) { spawnSync('x', ['--', await vault.get()]); }\nf(globalThis.vault);",
+    'M-A JSON.parse(…).value': "const pemPath = '/k';\nspawnSync('x', ['--', JSON.parse(readFileSync(pemPath, 'utf8')).value]);",
+    'M-A a helper fed readFileSync': "function h(w) { spawnSync('x', ['--', w]); }\nconst pemPath = '/k';\nh(readFileSync(pemPath));",
+    'M-B ${v} in execSync': "function f({ v }) { execSync(`gh api ${v}`); }\nf({ v: 1 });",
+    'M-B --body=${v}': "function f({ v }) { spawnSync('gh', [`--body=${v}`]); }\nf({ v: 1 });",
+    "M-B 'Bearer ' + v": "function f({ v }) { spawnSync('curl', ['-H', 'Authorization: Bearer ' + v]); }\nf({ v: 1 });",
+    'M-B a + operand': "function f({ v }) { spawnSync('curl', ['-H', 'X: ' + v]); }\nf({ v: 1 });",
+    'M-B io.run one word at a time': "function f({ v }, io) { io.run('gh', 'api', v); }\nf({ v: 1 }, globalThis.io);",
+    'M-C an exported function reading a key path': "export function planWall(io, cfg) { const keyPath = cfg.keyFile; const k = io.readText(keyPath); return io.run('/sbin/pfctl', ['-a', k]); }",
+    'M-C cfg.watch.value': "export function planWall(io, cfg) { return io.run('/sbin/pfctl', ['-a', cfg.watch.value]); }",
+    'M-C a header from a cat of tokenPath': "const tokenPath = (c) => c.dir + '/t';\nexport function planWall(io, cfg) { const f = tokenPath(cfg); const r = io.run('/usr/bin/sudo', ['-u', 'o', '/bin/cat', f]); const h = String(r.stdout).trim(); return io.run('curl', ['-H', h]); }",
+    'M-C readSecret in a function': "export function setupX(io) { const t = io.readSecret('Paste'); const z = t.trim(); return io.run('x', ['--', z]); }",
+    'm1 argv0': `const t = ${E}GH_TOKEN;\nspawn('/bin/x', ['a'], { argv0: t });`,
+    'm1 argv0 in a named options object': "function f({ v }) { const o = { argv0: v }; spawn('/bin/x', ['a'], o); }\nf({ v: 1 });",
+    "m2 'Bearer ' + t outside a header": `const t = ${E}X;\nconst h = 'Bearer ' + t;`,
+    'm6 Reflect.apply(spawn, …)': "function f(args) { Reflect.apply(spawn, null, ['x', args]); }",
+    'm6 shell: true in a named options object': "function f({ v }) { const o = { shell: true }; spawn(`ls ${v}`, [], o); }\nf({ v: 1 });",
+    'env -i K=V from an imported env maker': "import { mkEnv } from './e.mjs';\nconst git = (env, args) => spawnSync('/usr/bin/env', ['-i', ...Object.entries(env).map(([k, v]) => `${k}=${v}`), 'git', ...args]);\ngit(mkEnv({ extra: 1 }), ['x']);",
+  };
+  for (const [what, src] of Object.entries(plants)) assert.ok(said(H + src).length > 0, `${what} passed in silence`);
+  // M-C: a site inside a function that reads a credential is kind reader, so a reason written for an unread site can't cover it.
+  const reader = (src) => said(H + src).filter((x) => x.startsWith('reader:'));
+  assert.equal(reader(plants['M-C a header from a cat of tokenPath']).length, 1);
+  assert.equal(reader(plants['M-C readSecret in a function']).length, 1);
+  assert.equal(reader(plants['M-C an exported function reading a key path']).length, 1);
+  // Reading a file whose last name part is not a credential's (host.lock's path, held in a config's key names) is not.
+  assert.deepEqual(reader("export function chk(io, cfg) { const k = keysOf(cfg); const r = io.run('/bin/cat', [k.hostLockPath]); return io.run('x', ['--', r.stdout]); }"), []);
+  // Sites are told apart by their call text, not only the function or message.
+  const two = credentialArgFindings(H + "export function f(io, a, b) { io.run('/x', [a]); io.run('/y', [b]); }").filter((x) => x.kind === 'unread');
+  assert.equal(new Set(two.map((x) => x.site)).size, two.length);
+  // m1: argv0 is read like any word; c1: the header names it.
+  assert.ok(said(`const t = ${E}GH_TOKEN;\nspawn('/bin/x', ['a'], { argv0: t });`).includes('value:process.env.GH_TOKEN'));
+  // The safe shapes the leaf rule reads through stay quiet, unread included.
+  const I = "import { join } from 'node:path';\nimport { randomUUID } from 'node:crypto';\n";
+  for (const src of [
+    "spawnSync('/bin/x', [join('/a', 'b'), String(3), `--n=${Math.max(1, 2)}`]);",
+    "const dirs = ['/a', '/b'];\nspawnSync('/bin/ls', dirs.map((d) => `${d}/x`));",
+    "spawnSync('/bin/x', [randomUUID(), new Date().toISOString(), process.pid > 1 ? 'a' : 'b']);",
+  ]) assert.deepEqual(said(H + I + src), [], src);
 });
