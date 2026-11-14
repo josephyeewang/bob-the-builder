@@ -6,6 +6,9 @@
 //
 // (<installRoot> is the installed copy, <base>/install/orchestrate: setup/install.mjs installPaths.)
 //
+// The run reaches the network only through the pairs' asked-for GETs of plain public pages: 2 to api.github.com and 4 to
+// example.com (GETS). The ones a setting must refuse are refused by the sandbox, so fewer reach the hosts.
+//
 // It prints one line per name: PASS, FAIL or NOT TRIED, with how it was proven or why not. A name no test ran is NOT
 // TRIED, never PASS. The receipt, settings-names-proof-<time>.jsonl in the user's home, holds the pin and one line per
 // name; each PASS line carries the `by` a CONFIRMED entry takes. Every run writes one, a refused one too, and prints
@@ -139,21 +142,34 @@ const markerHook = (event, file) => ({ [S.hooks]: { [event]: [{ [H.hooks]: [hook
 const init = (out) => findInit(out);
 // A command that is exactly `cmd` (L1128 c1, L1166): every pair whose evidence comes from a Bash call reads only the
 // exact command it asked for, so a call that holds it and does more (`<cmd> || echo …`, a comment) is not the asked-for
-// call, and that side is NOT TRIED.
-const bashExact = (cmd) => ({ tool: 'Bash', needle: cmd, exact: true });
+// call, and that side is NOT TRIED. By default (L1169) it must also be the side's only tool call (once), and no call may
+// ask to leave the sandbox or carry its own allowed_domains (sandboxed): what the side shows then came from that one
+// call as the settings ran it, not from a retry. A pair opts out only through BASH_OPT_OUT, by its id, with the reason.
+const bashExact = (cmd, opt = {}) => ({ tool: 'Bash', needle: cmd, exact: true, once: true, sandboxed: true, ...opt });
+export const BASH_OPT_OUT = Object.freeze({
+  // Its off side makes two calls, the second the evidence (the marker it writes), so it cannot be the only call.
+  maxTurns: { once: 'its off side makes two Bash calls by design: the second one\'s marker is what --max-turns 1 must stop' },
+});
 const writeUse = (needle) => ({ tool: 'Write', needle });
 // failIfUnavailable: a sandbox path entry 2.1.316 can't resolve (it holds a null byte). With the setting on, the entry
 // stops the sandbox from being built and every command in it is refused; off, it is dropped with a warning.
 export const unbuildable = (dir) => join(dir, 'out', 'bad\u0000path');
-// strictAllowlist: host A in the --settings file, host B only in the project's file (L1152). One GET each.
+// strictAllowlist: host A in the --settings file, host B only in the project's file (L1152). Each side asks for one GET of
+// each host, so 2 of api.github.com and 2 of example.com; allowedDomains asks for one GET of example.com on each side, 2
+// more. In all (GETS): 2 to api.github.com and 4 to example.com, plain public pages, no third host (L1169 M4).
 export const HOST = Object.freeze({ a: 'api.github.com', b: 'example.com' });
 const got = (dir, k) => join(dir, 'work', `got-${k}`);
 const fetchHost = (dir, k) => `curl -sSf -o ${got(dir, k)} https://${HOST[k]}`;
+/** Every GET the run asks claude to make, by host (L1169 M4); the test counts them from the pairs' own prompts. */
+export const GETS = Object.freeze({ 'api.github.com': 2, 'example.com': 4 });
 const fetchBoth = (dir) => `${fetchHost(dir, 'a')} ; ${fetchHost(dir, 'b')}`;
 // What each host's page holds (L1163 MAT-1): a host counts as reached only when its file holds its page, so a file the
 // model made (`touch`, a write) is not a host reached.
 export const PAGE = Object.freeze({ a: '"current_user_url"', b: 'Example Domain' });
-export const fetched = (dir, k) => { try { return readFileSync(got(dir, k), 'utf8').includes(PAGE[k]); } catch { return false; } };
+const holds = (p, text) => { try { return readFileSync(p, 'utf8').includes(text); } catch { return false; } };
+export const fetched = (dir, k) => holds(got(dir, k), PAGE[k]);
+// allowedDomains: one GET of example.com, its page read as strictAllowlist reads it (L1169 M2).
+const fetchOne = (dir) => `curl -sSf -o ${join(dir, 'work', 'got')} https://${HOST.b}`;
 // crossSessionInbound: the message as another session's arrives, in the envelope 2.1.316 reads as one, fed on stdin.
 // Each line carries its own uuid, so claude's echo of it (REPLAY_USER_MESSAGES) is read for that line only. 2.1.316
 // drops a refused peer message before it is queued, so it is never echoed; an accepted one is echoed when its turn runs.
@@ -187,6 +203,9 @@ const toolResults = (out) => events(out).filter((e) => e.type === 'user').flatMa
 export const warningsOf = (r) => [String(r?.err ?? ''), ...events(r?.out).filter((e) => e.type === 'system' && e.subtype !== 'init').map((e) => JSON.stringify(e))].join('\n');
 const usesFor = (out, want) => toolUses(out).filter((u) => (!want.tool || u.name === want.tool) &&
   (want.exact ? String(u.input?.command ?? '').trim() === want.needle : JSON.stringify(u.input ?? {}).includes(want.needle)));
+/** What the asked-for call itself gave back: the text of its tool_result lines, found by its tool_use id (L1169 m2). */
+export const callOutput = (out, want) => { const ids = new Set(usesFor(out, want).map((u) => u.id));
+  return toolResults(out).filter((t) => ids.has(t.tool_use_id)).map((t) => JSON.stringify(t.content ?? '')).join('\n'); };
 /**
  * The refusals a side may be expected to show (L1128 m3), each read only for the asked-for call (its tool_use id):
  * permission, claude's permission check (the call is in the result's permission_denials, or its error result says it
@@ -216,8 +235,9 @@ export function refusalSeen(r, want = {}) {
 /**
  * Why a side's run is void however it ended, or null (L1160 M2). It outranks a breach: what such a run shows is not the
  * setting's. `want.sandboxed`: any tool call asking to leave the sandbox (dangerouslyDisableSandbox set to anything but
- * false), or carrying its own allowed_domains, voids the side; `want.once`: the asked-for call must be the side's only tool call (L1163 MAT-1), so what it
- * shows came from that call and not from a retry, a `touch` or a write.
+ * false), or carrying its own allowed_domains, voids the side. `want.once`: the asked-for call must be the side's only
+ * tool call (L1163 MAT-1), so what it shows came from that call and not from a retry, a `touch` or a write. Both are
+ * bashExact's defaults (L1169).
  */
 export function voidProblem(r, want = {}) {
   const uses = toolUses(r?.out);
@@ -333,13 +353,13 @@ export const TESTS = Object.freeze([
     prompt: `Use the Bash tool to run exactly this shell command, once, and nothing else: cat ${join(dir, 'out', 'secret')}\nThen reply with exactly what it printed, or the word nothing.` }),
     files: (side, dir) => ({ [join(dir, 'out', 'secret')]: `seen-${side}-7c1f\n` }),
     expect: (side, dir) => ({ ...bashExact(`cat ${join(dir, 'out', 'secret')}`), refused: side === 'on' && 'sandbox' }),
-    see: (side, dir, out) => String(out).includes(`seen-${side}-7c1f`), judge: sameBut({ on: false, off: true }) },
+    see: (side, dir, out) => callOutput(out, bashExact(`cat ${join(dir, 'out', 'secret')}`)).includes(`seen-${side}-7c1f`), judge: sameBut({ on: false, off: true }) },
   { id: 'allowedDomains', title: 'an allowed host is reached from inside the sandbox, and only then', kind: 'break-it', names: [S.network, S.allowedDomains],
-    run: (side, dir) => ({ settings: { [S.permissions]: { [S.allow]: [`Bash(curl -sS -o ${join(dir, 'work', 'got')} https://example.com)`] },
-      [S.sandbox]: { [S.sandboxEnabled]: true, [S.allowUnsandboxedCommands]: false, [S.network]: { [S.allowedDomains]: side === 'on' ? ['example.com'] : [] } } },
-    prompt: bashOnce(`curl -sS -o ${join(dir, 'work', 'got')} https://example.com`) }),
-    expect: (side, dir) => ({ ...bashExact(`curl -sS -o ${join(dir, 'work', 'got')} https://example.com`), refused: side === 'off' && 'network' }),
-    see: (side, dir) => there(join(dir, 'work', 'got')), judge: sameBut({ on: true, off: false }) },
+    run: (side, dir) => ({ settings: { [S.permissions]: { [S.allow]: [`Bash(${fetchOne(dir)})`] },
+      [S.sandbox]: { [S.sandboxEnabled]: true, [S.allowUnsandboxedCommands]: false, [S.network]: { [S.allowedDomains]: side === 'on' ? [HOST.b] : [] } } },
+    prompt: bashOnce(fetchOne(dir)) }),
+    expect: (side, dir) => ({ ...bashExact(fetchOne(dir)), refused: side === 'off' && 'network' }),
+    see: (side, dir) => holds(join(dir, 'work', 'got'), PAGE.b), judge: sameBut({ on: true, off: false }) },
   { id: 'excludedCommands', title: 'an excluded command runs outside the sandbox (the launcher refuses the setting; proven for its name)', kind: 'break-it', names: [S.excludedCommands],
     run: (side, dir) => ({ settings: { [S.permissions]: { [S.allow]: ALLOW_TOUCH(join(dir, 'out', 'mark')) },
       [S.sandbox]: { [S.sandboxEnabled]: true, ...(side === 'on' ? { [S.excludedCommands]: ['touch'] } : {}) } }, prompt: bashOnce(`touch ${join(dir, 'out', 'mark')}`) }),
@@ -376,7 +396,7 @@ export const TESTS = Object.freeze([
     run: (side, dir) => ({ settings: { [S.permissions]: { [S.allow]: ['Bash(env)'] }, ...(side === 'on' ? { [S.env]: { ORCH_PROOF_VAR: 'on-5a1', [ENV.autoCompactWindow]: '190001', [ENV.disableUpdates]: '1' } } : {}) },
       prompt: 'Use the Bash tool to run exactly this shell command, once, and nothing else: env\nThen reply with each line it printed that begins with ORCH_PROOF_VAR=, CLAUDE_CODE_AUTO_COMPACT_WINDOW= or DISABLE_UPDATES=, exactly, or the word none.' }),
     expect: () => bashExact('env'),
-    see: (side, dir, out) => ['ORCH_PROOF_VAR=on-5a1', `${ENV.autoCompactWindow}=190001`, `${ENV.disableUpdates}=1`].map((x) => (String(out).includes(x) ? 1 : 0)).join(''),
+    see: (side, dir, out) => ['ORCH_PROOF_VAR=on-5a1', `${ENV.autoCompactWindow}=190001`, `${ENV.disableUpdates}=1`].map((x) => (callOutput(out, bashExact('env')).includes(x) ? 1 : 0)).join(''),
     judge: sameBut({ on: '111', off: '000' }) },
   // the rest of the settings
   { id: 'disableSkillShellExecution', title: 'a skill\'s inline shell does not run when it is off', kind: 'break-it', names: [S.disableSkillShellExecution],
@@ -464,7 +484,7 @@ export const TESTS = Object.freeze([
     // A host counts only from the side's one tool call, exactly the asked-for command, inside the sandbox (L1160 M2, L1163
     // MAT-1, L1166): a second call of any kind, a call asking to leave the sandbox or carrying its own allowed_domains
     // voids the side, a command that differs is NOT TRIED, and a host's file must hold its page (PAGE).
-    expect: (side, dir) => ({ ...bashExact(fetchBoth(dir)), refused: side === 'on' && 'network', sandboxed: true, once: true }),
+    expect: (side, dir) => ({ ...bashExact(fetchBoth(dir)), refused: side === 'on' && 'network' }),
     see: (side, dir) => `${fetched(dir, 'a') ? 'A' : '-'}|${fetched(dir, 'b') ? 'B' : '-'}`,
     // The project's host reached with the setting on is the setting failing, however the run ended.
     breach: { on: (v) => typeof v === 'string' && v.endsWith('|B') },
@@ -498,7 +518,7 @@ export const TESTS = Object.freeze([
   { id: 'maxTurns', title: '--max-turns 1 stops before a second command; 4 lets it run', kind: 'break-it', names: [F.maxTurns],
     run: (side, dir) => ({ maxTurns: side === 'on' ? 1 : 4, settings: { [S.permissions]: { [S.allow]: [...ALLOW_TOUCH(mark(dir, 'a')), ...ALLOW_TOUCH(mark(dir, 'b'))] } },
       prompt: `Use the Bash tool to run ${touchIn(dir, 'a')}. After it has finished, use the Bash tool again, in a separate call, to run ${touchIn(dir, 'b')}. Then reply with the word done.` }),
-    expect: (side, dir) => ({ ...bashExact(touchIn(dir, 'a')), turnsEnd: side === 'on' }),
+    expect: (side, dir) => ({ ...bashExact(touchIn(dir, 'a'), { once: false }), turnsEnd: side === 'on' }),
     see: (side, dir) => there(mark(dir, 'b')), judge: sameBut({ on: false, off: true }) },
 ]);
 
@@ -811,7 +831,7 @@ export function finish({ res, pin, base, home, at, print }) {
   print(r.text);
   if (base) print(`The runs' folders are kept in ${base}.\n`);
   let receipt;
-  try { receipt = writeReceipt({ home, at, header: { pin, runs: base ?? null, ok: r.ok }, lines, outcomes: res.outcomes, readback: res.readback }); print(`Written to ${receipt}\n`); } catch (e) {
+  try { receipt = writeReceipt({ home, at, header: { pin, runs: base ?? null, ok: r.ok, gets: GETS }, lines, outcomes: res.outcomes, readback: res.readback }); print(`Written to ${receipt}\n`); } catch (e) {
     print(`The record of this run could not be written (${e?.code ?? e?.message}), so the run can't be used.\n`);
     print(`NOT DONE on Claude Code ${pin}: the receipt could not be written${r.ok ? '' : `; ${r.verdict.replace(/^NOT DONE on Claude Code \S+: /, '')}`}\n`);
     return 1;

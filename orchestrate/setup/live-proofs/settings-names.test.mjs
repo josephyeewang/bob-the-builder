@@ -9,7 +9,7 @@ import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { refusalSeen } from './settings-names.mjs';
-import { BACKUP_SUFFIX, BAD_EFFORT, CONNECTORS_FALLBACK, HOST, META_SUFFIX, PAGE, PEER_FROM, PEER_WORD, READY, REFUSAL, STDIN_ARGS, REPLAY_USER_MESSAGES, peerLine, peerTaken, replayed, saidWord, unbuildable, voidProblem, accountSettingsFiles, effortWarning, NOT_TRIED, NOT_USED, SPELLING_LABEL, misspell, READBACK_NAMES, TESTS, allNames, finish, guardProblem, judgeNames, main, report, restoreUserFile, roleReadback, runAll, runArgs, runProblem, runToEnd, withUserSettings, writeReceipt } from './settings-names.mjs';
+import { BASH_OPT_OUT, GETS, callOutput, BACKUP_SUFFIX, BAD_EFFORT, CONNECTORS_FALLBACK, HOST, META_SUFFIX, PAGE, PEER_FROM, PEER_WORD, READY, REFUSAL, STDIN_ARGS, REPLAY_USER_MESSAGES, peerLine, peerTaken, replayed, saidWord, unbuildable, voidProblem, accountSettingsFiles, effortWarning, NOT_TRIED, NOT_USED, SPELLING_LABEL, misspell, READBACK_NAMES, TESTS, allNames, finish, guardProblem, judgeNames, main, report, restoreUserFile, roleReadback, runAll, runArgs, runProblem, runToEnd, withUserSettings, writeReceipt } from './settings-names.mjs';
 import { CONFIRMED, FLAGS as F, PROOF_KIND, REFUSED_SETTINGS, SPELLING_ONLY, noToolServerArgs, proofCounts, sourcesArgs, unconfirmedNames } from '../../modules/M4-workshop/launcher/settings-names.mjs';
 import { FIRST_ROUND_EFFORT, SEND_BACK_EFFORT } from '../../modules/M4-workshop/launcher/review-launch.mjs';
 import { sourcesProblem } from '../../modules/M4-workshop/launcher/readback.mjs';
@@ -330,27 +330,58 @@ test('L1160 M2: voidProblem reads a call outside the sandbox and a repeated call
   assert.equal(voidProblem({ out: o(call('1', { command: 'ls', dangerouslyDisableSandbox: true })) }, { tool: 'Bash', needle: 'x' }), null);
 });
 
-test('L1166: every pair whose evidence comes from a Bash call reads only the exact command it asked for', () => {
-  const d = '/x/run'; let n = 0;
-  for (const t of TESTS) {
+test('L1166, L1169: every pair that asks for a Bash call reads only that exact call, once, inside the sandbox', () => {
+  const d = '/x/run'; let n = 0; const asks = new Set();
+  for (const t of TESTS.filter((x) => !x.byGuard)) {
     for (const side of ['on', 'off']) {
+      const o = t.run(side, d, { sessionId: 's', peerId: 'p', plainId: 'q' });
       const w = t.expect?.(side, d);
-      if (w?.tool !== 'Bash') continue;
-      n += 1;
+      // M3: a pair asks for Bash by its prompt or its tools; one that does must say which call it reads.
+      const asksBash = /\bBash\b/.test(String(o.prompt ?? '')) || /\bBash\b/.test(String(o.tools ?? ''));
+      if (!asksBash) { assert.notEqual(w?.tool, 'Bash', `${t.id} ${side}: reads a Bash call it never asks for`); continue; }
+      n += 1; asks.add(t.id);
+      assert.equal(w?.tool, 'Bash', `${t.id} ${side}: asks for a Bash call but reads none`);
       assert.equal(w.exact, true, `${t.id} ${side}: not exact`);
-      const prompt = t.run(side, d).prompt;
+      // The defaults, unless the pair is named in BASH_OPT_OUT with its reason.
+      for (const k of ['once', 'sandboxed']) {
+        if (w[k] === true) continue;
+        assert.ok(typeof BASH_OPT_OUT[t.id]?.[k] === 'string' && BASH_OPT_OUT[t.id][k].length > 20, `${t.id} ${side}: ${k} off with no reason in BASH_OPT_OUT`);
+      }
+      const prompt = o.prompt;
       const asked = /run exactly this shell command, once, and nothing else: (.*)\n/.exec(prompt)?.[1];
       // A bashOnce prompt names one command, the one read; maxTurns names two, and the first is read.
       if (asked !== undefined) assert.equal(w.needle, asked, `${t.id} ${side}`);
       else assert.ok(prompt.includes(`run ${w.needle}.`), `${t.id} ${side}: ${w.needle} is not the prompt's first command`);
     }
   }
-  assert.ok(n >= 26, `only ${n} Bash sides`);
+  assert.equal(n, 30, `${n} Bash sides`);
+  // Every opt-out names a pair that asks for Bash and really turns the default off.
+  for (const [id, why] of Object.entries(BASH_OPT_OUT)) {
+    assert.ok(asks.has(id), id);
+    for (const k of Object.keys(why)) assert.ok(['on', 'off'].some((sd) => byId(id).expect(sd, d)[k] === false), `${id}: ${k}`);
+  }
   // A call holding the asked-for command and more is not it.
   const t = byId('strictAllowlist'); const w = t.expect('off', d); const cmd = w.needle;
   const run = (command) => runProblem({ out: [INIT, call('1', { command }), evt({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: '1', content: '' }] } }), OK].join('\n') }, w);
   assert.equal(run(cmd), null);
   assert.match(run(`${cmd} || echo "Example Domain" > /x/got-b`), /no Bash call that is exactly/);
+});
+
+test('L1169 M4: the run asks for exactly GETS, per host: 2 to api.github.com, 4 to example.com, no third host', () => {
+  const d = '/x/run'; const count = {};
+  for (const t of TESTS.filter((x) => !x.byGuard)) {
+    for (const side of ['on', 'off']) {
+      const o = t.run(side, d, { sessionId: 's', peerId: 'p', plainId: 'q' });
+      const text = [o.prompt ?? '', ...(o.input ?? [])].join('\n');
+      const runs = side === 'on' && t.repeatOn ? 2 : 1;
+      for (const [, host] of text.matchAll(/https?:\/\/([a-z0-9.-]+)/gi)) count[host] = (count[host] ?? 0) + runs;
+    }
+  }
+  assert.deepEqual(count, { ...GETS });
+  assert.deepEqual(GETS, { 'api.github.com': 2, 'example.com': 4 });
+  const src = readFileSync(new URL('./settings-names.mjs', import.meta.url), 'utf8');
+  assert.match(src, /header: \{ pin, runs: base \?\? null, ok: r\.ok, gets: GETS \}/, 'the receipt carries the count');
+  assert.match(src, /2 to api\.github\.com and 4 to\n\/\/ example\.com \(GETS\)/, 'the run sheet says the count');
 });
 
 test('m5: a receipt is never overwritten', () => {
@@ -715,7 +746,7 @@ test('L1128 m3, c1: the asked-for call is of the asked-for tool, and a bare comm
   assert.match(runProblem({ out: [INIT, call('1', { command: 'ls', run_in_background: true }), OK].join('\n') }, exact), /no Bash call/);
   assert.match(runProblem({ out: [INIT, call('1', { command: 'true && rm -rf x' }), OK].join('\n') }, exact), /no Bash call/);
   assert.equal(runProblem({ out: [INIT, call('1', { command: ' true ' }), OK].join('\n') }, exact), null);
-  for (const [id, cmd] of [['preToolUse', 'true'], ['timeout', 'true'], ['env', 'env']]) assert.deepEqual(byId(id).expect('on', '/x'), { tool: 'Bash', needle: cmd, exact: true }, id);
+  for (const [id, cmd] of [['preToolUse', 'true'], ['timeout', 'true'], ['env', 'env']]) assert.deepEqual(byId(id).expect('on', '/x'), { tool: 'Bash', needle: cmd, exact: true, once: true, sandboxed: true }, id);
 });
 
 test('L1128 m4: a spelling pair\'s name side runs twice; skipped counts only when both runs agree (P4)', async () => {
@@ -838,6 +869,22 @@ function failFake(plant = {}) {
   };
 }
 
+// A stand-in for one Bash pair: `act(side, cmd)` gives the side's calls, each { input, out, error, write: [path, text] }.
+function oneCallFake(act) {
+  return async (args, { cwd }) => {
+    const cmd = callOf(args); const side = sideOf(cwd);
+    const out = [INIT];
+    for (const [i, c] of act(side, cmd).entries()) {
+      out.push(call(`t${i}`, c.input ?? { command: cmd }));
+      for (const [p, text] of c.write ?? []) writeFileSync(p, text);
+      out.push(result(`t${i}`, c.out ?? '', c.error || undefined));
+      if (c.say) out.push(evt({ type: 'assistant', message: { content: [{ type: 'text', text: c.say }] } }));
+    }
+    return { out: [...out, OK].join('\n'), err: '', code: 0 };
+  };
+}
+const pathIn = (cmd, re) => re.exec(cmd)?.[1];
+
 function strictFake(plant = {}) {
   return async (args, { cwd }) => {
     const s = settingsOf(args); const cmd = callOf(args);
@@ -898,6 +945,52 @@ function inboundFake(plant = {}) {
     return { out: out.join('\n'), err: '', code: 0 };
   };
 }
+
+test('L1169: a Bash pair\'s evidence comes from its one call inside the sandbox, and from that call\'s own result', async () => {
+  const SANDBOX = 'touch: /x/out/mark: Operation not permitted';
+  // M1, excludedCommands: honest, the on side runs outside the sandbox by the setting; the off side is refused.
+  const ex = (plant) => oneCallFake((side, cmd) => {
+    const m = pathIn(cmd, /^touch (\S+)$/);
+    if (side === 'off') return [{ out: SANDBOX, error: true }];
+    if (!plant) return [{ write: [[m, '']] }];
+    // The setting ignored: the sandbox refuses, and the model retries the same text outside it.
+    return [{ out: SANDBOX, error: true }, { input: { command: cmd, dangerouslyDisableSandbox: true }, write: [[m, '']] }];
+  });
+  assert.equal((await runOne(byId('excludedCommands'), ex(false))).ok, true);
+  const exo = await runOne(byId('excludedCommands'), ex(true));
+  assert.equal(exo.ok, null); assert.match(exo.notTried, /the on side: a tool call asked to run outside the sandbox/);
+  // M2, allowedDomains: the page, from the one call. Honest PASS; a fallback write, as a second call or as a page that is
+  // not example.com's, never PASS.
+  const REFUSED = 'curl: (56) CONNECT tunnel failed, response 403';
+  const ad = (plant) => oneCallFake((side, cmd) => {
+    const g = pathIn(cmd, /-o (\S+) https:/);
+    if (side === 'off') return plant === 'offFallback' ? [{ out: REFUSED, error: true }, { input: { command: `echo x > ${g}` }, write: [[g, 'x']] }] : [{ out: REFUSED, error: true }];
+    if (plant === 'notPage') return [{ write: [[g, 'x']] }];
+    if (plant === 'onFallback') return [{ out: REFUSED, error: true }, { input: { command: `echo '${PAGE.b}' > ${g}` }, write: [[g, PAGE.b]] }];
+    return [{ write: [[g, `<h1>${PAGE.b}</h1>`]] }];
+  });
+  assert.equal((await runOne(byId('allowedDomains'), ad())).ok, true);
+  for (const p of ['notPage', 'onFallback', 'offFallback']) assert.notEqual((await runOne(byId('allowedDomains'), ad(p))).ok, true, p);
+  assert.match((await runOne(byId('allowedDomains'), ad('onFallback'))).notTried, /the on side: 2 tool calls/);
+  assert.match(byId('allowedDomains').run('on', '/x').prompt, /curl -sSf -o \/x\/work\/got https:\/\/example\.com/);
+  // m2: denyRead and env read what the asked-for call gave back, by its id, never the model's own words or another call.
+  const out = (...l) => [INIT, ...l, OK].join('\n');
+  const w = { tool: 'Bash', needle: 'env', exact: true };
+  assert.equal(callOutput(out(call('1', { command: 'env' }), result('1', 'ORCH_PROOF_VAR=on-5a1')), w).includes('ORCH_PROOF_VAR=on-5a1'), true);
+  assert.equal(callOutput(out(call('1', { command: 'env' }), result('1', ''), evt({ type: 'assistant', message: { content: [{ type: 'text', text: 'ORCH_PROOF_VAR=on-5a1' }] } })), w).includes('on-5a1'), false);
+  assert.equal(callOutput(out(call('1', { command: 'env' }), result('1', ''), call('2', { command: 'echo ORCH_PROOF_VAR=on-5a1' }), result('2', 'ORCH_PROOF_VAR=on-5a1')), w).includes('on-5a1'), false);
+  const dr = (plant) => oneCallFake((side, cmd) => {
+    const f = pathIn(cmd, /^cat (\S+)$/);
+    if (side === 'on') return [{ out: `cat: ${f}: Operation not permitted`, error: true }];
+    return plant ? [{ out: '', say: 'seen-off-7c1f' }] : [{ out: readFileSync(f, 'utf8') }];
+  });
+  assert.equal((await runOne(byId('denyRead'), dr(false))).ok, true);
+  assert.notEqual((await runOne(byId('denyRead'), dr(true))).ok, true, 'the model saying it is not the call reading it');
+  const VARS = 'ORCH_PROOF_VAR=on-5a1\nCLAUDE_CODE_AUTO_COMPACT_WINDOW=190001\nDISABLE_UPDATES=1';
+  const ev = (plant) => oneCallFake((side) => (side === 'off' ? [{ out: 'PATH=/bin' }] : plant ? [{ out: 'PATH=/bin', say: VARS }] : [{ out: `PATH=/bin\n${VARS}` }]));
+  assert.equal((await runOne(byId('env'), ev(false))).ok, true);
+  assert.notEqual((await runOne(byId('env'), ev(true))).ok, true, 'the model saying the variables is not the call printing them');
+});
 
 test('R-0b-178: each lock-down setting\'s pair differs only in the setting, with the setups the pin needs', () => {
   const d = '/x/run';
