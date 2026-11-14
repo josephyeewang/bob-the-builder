@@ -15,7 +15,8 @@
 //     "pin": "<claude version>"?, "machineWide": "/Library/Application Support/ClaudeCode/managed-settings.json"? (that file only, L913),
 //     "budget": "/abs.mjs"?, "bobManifest": "/abs"?,        inside installRoot and root's alone, each loaded once at start (L1001)
 //     "dispatcherRules": "/abs"?, "reviewStatusFile": "/abs"?, "reviewUid": <uid>?  required with budget,
-//     "accountCopy": "/abs"? root's copy of the owner's account choice (L1079: the runner runs as the builder; runner-ports.mjs workerAccount) }
+//     "accountCopy": "/abs"? root's copy of the owner's account choice (L1079: the runner runs as the builder; runner-ports.mjs workerAccount),
+//     "wallStatus": "/abs"? root's builder wall status (wall-gate.mjs, L1193): left out, every start is held }
 // The launch checks (runner-checks.mjs, step 6) read pin, machineWide and each product's rules; one that is left out
 // leaves its check without a port, so launch() refuses there and no session starts. `budget` names M11's budget module
 // (launch check 12: the rules the Dispatcher's snapshot at dispatcherRules holds, the Record, and the running count from
@@ -56,7 +57,8 @@ import { live as isLiveSession, productRoleClash } from './owner-status.mjs';
 import { CLAUDE_FILE, MANAGED_SOURCES_CHECKED_ON } from '../modules/M4-workshop/launcher/env-check.mjs';
 import { LOCKED_MS, lockedRunner } from './runner-locked.mjs';
 import { apart } from '../modules/M4-workshop/launcher/render-settings.mjs';
-import { installProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
+import { chainProblem, installProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
+import { wallFrom, wallHeld, wallProblem } from './wall-gate.mjs';
 import { INTERACTIVE_ROLES, hookStore, nodeHookFs } from '../modules/M4-workshop/send-safe/hook-store.mjs';
 import { writeStatus } from './runner-files.mjs';
 
@@ -123,7 +125,7 @@ export function checkRunnerConfig(c) {
     for (const k of RENDER_PATHS) if (p.render.paths[k] !== undefined && !fullPath(p.render.paths[k])) fail(`product ${name}: render.paths.${k} must be a full path in its simplest form, not / itself`);
   }
   if (c.pin !== undefined && (typeof c.pin !== 'string' || !/^\d+\.\d+\.\d+$/.test(c.pin))) fail('pin must be a Claude Code version');
-  for (const k of [...PINNED, 'dispatcherRules', 'reviewStatusFile', 'accountCopy']) if (c[k] !== undefined && !fullPath(c[k])) fail(`${k} must be a full path in its simplest form, not / itself`);
+  for (const k of [...PINNED, 'dispatcherRules', 'reviewStatusFile', 'accountCopy', 'wallStatus']) if (c[k] !== undefined && !fullPath(c[k])) fail(`${k} must be a full path in its simplest form, not / itself`);
   if (c.reviewUid !== undefined && (!Number.isInteger(c.reviewUid) || c.reviewUid < 0)) fail('reviewUid must be a uid');
   if (c.budget !== undefined) for (const k of BUDGET_NEEDS) if (c[k] === undefined) fail(`${k} must be set with budget (launch check 12 reads it)`);
   for (const k of PINNED) if (c[k] !== undefined && !insideCopy(c.installRoot, c[k])) fail(`${k} must be inside installRoot (${c.installRoot})`);
@@ -470,13 +472,15 @@ export function keepSnapshots(c, { fresh = keepSnapshotFresh, log = () => {}, re
 
 /**
  * argv: [config]. opts (tests only): asUser (personUserProblem), readConfig, lock, ports, run, log, onStop (how a SIGTERM is listened for), realpath,
- * memory (the memory reader), folderProblem (snapshotFolderProblem).
+ * memory (the memory reader), folderProblem (snapshotFolderProblem), loadWall (lane A's builder-wall module), wallPorts
+ * ({ chain, readRoot, now, uid } for wall-gate.mjs wallProblem).
  * → the exit code.
  */
 export async function main(argv, { readConfig = (f) => readRunnerConfig(f, selfPath()), lock = (dir) => makeLock({ dir, timeoutMs: 2_000 }),
   ports = {}, run = runRunner, log = (s) => process.stderr.write(`${new Date().toISOString()} ${s}\n`), onStop = listenStop, fresh = keepSnapshotFresh,
   realpath = (p) => realpathSync.native(p), memory = loadMemory, asUser = () => personUserProblem(process.getuid(), readGroups(), readName()), folderProblem = (dir) => snapshotFolderProblem(dir),
-  pinnedProblem, loadBudget, readManifest, portsOf = realRunnerPorts, hooksOf = hookStoreOf, testProduct = testProductProblem } = {}) {
+  pinnedProblem, loadBudget, readManifest, portsOf = realRunnerPorts, hooksOf = hookStoreOf, testProduct = testProductProblem,
+  loadWall = () => import('../setup/builder-wall.mjs'), wallPorts = {} } = {}) {
   // Who it runs as comes first, before the config is read (L1079): never root, never a person's user.
   { let who; try { who = asUser(); } catch (e) { who = `its user can't be checked (${e?.message ?? e})`; } if (who) { log(`the worker runner did not start: ${who}`); return 1; } }
   let c;
@@ -492,6 +496,11 @@ export async function main(argv, { readConfig = (f) => readRunnerConfig(f, selfP
   const inputs = await launchInputs(c, { pinnedProblem, loadBudget, readManifest, log });
   if (inputs.problem) { log(`the worker runner did not start: ${inputs.problem}`); return 1; }
   const { budget, bobManifest } = inputs;
+  // The builder wall's gate (L1170 m5, L1193): its code is loaded once here; one that can't be loaded holds every start
+  // (wallProblem says why at each), never lets one through. Asked before every start, and again just before claude starts.
+  let wall = null; let wallWhy;
+  try { wall = wallFrom(await loadWall()); } catch (e) { wallWhy = e?.message ?? String(e); log(`worker runner: the builder wall's code can't be loaded (${wallWhy}); every start is held until it can`); }
+  const wallGate = () => wallProblem({ file: c.wallStatus, wall, wallWhy, uid: process.getuid(), chain: (p) => chainProblem(p, { owner: 0 }), readRoot: (p) => readRootFile(p), now: Date.now, ...wallPorts });
   // Each product's rules snapshot's folder, only the runner's to write (L926, #419 r3 M1): one anyone else could write
   // stops the runner here, before its lock; a missing one holds that product instead (keepSnapshots, below).
   for (const [name, p] of Object.entries(c.products)) {
@@ -515,7 +524,7 @@ export async function main(argv, { readConfig = (f) => readRunnerConfig(f, selfP
   const snaps = keepSnapshots(c, { fresh: guarded, log, recheck: (path) => folderProblem(dirname(path))?.reason ?? null });
   let P;
   try {
-    P = portsOf(c, ports, { stopped: () => stopping, log, productHeld: testProductHeld(budget, snaps.held, testProduct), budget, bobManifest });
+    P = portsOf(c, ports, { stopped: () => stopping, log, productHeld: wallHeld(wallGate, testProductHeld(budget, snaps.held, testProduct)), budget, bobManifest });
     // A memory that can't be read is the loop's to refuse; one read is checked for carried-over sessions first.
     let m = null; try { m = memory(c.memoryFile, { uid: process.getuid() }); } catch { m = null; }
     const why = m ? carriedOverProblem(c, m, { groupGone: P.groupGone }) : null;
@@ -568,12 +577,14 @@ export async function launchInputs(c, { pinnedProblem = (root, files) => install
 export async function importBudget(file, config) { return (await import(pathToFileURL(file).href)).budget(config); }
 
 const MAX_MANIFEST_BYTES = 4 * 1024 * 1024;
-/** A plain file of root's that no one else writes, read whole without following a link. → its text, or throws. */
+/** A plain file of root's that no one else writes, with one name (L1207: as the wall job writes it), read whole without
+ * following a link. → its text, or throws. */
 export function readRootFile(p, { uid = 0 } = {}) {
   const fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const st = fstatSync(fd);
     if (!st.isFile() || st.uid !== uid || st.mode & 0o022 || st.size > MAX_MANIFEST_BYTES) throw new Error(`${p} is not root's own plain file`);
+    if (st.nlink !== 1) throw new Error(`${p} has ${st.nlink} names, not one`);
     return readFileSync(fd, 'utf8');
   } finally { closeSync(fd); }
 }
