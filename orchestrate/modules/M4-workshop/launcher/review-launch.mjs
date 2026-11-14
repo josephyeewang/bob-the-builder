@@ -42,7 +42,7 @@ import { checkSettings } from './render-settings.mjs';
 import { templateText } from './review-settings.mjs';
 import { check12 } from '../../M11-dispatcher/gate.mjs';
 import { gitOk } from '../git/safe-git.mjs';
-import { FLAGS as F } from './settings-names.mjs';
+import { FLAGS as F, sourcesArgs, noToolServerArgs } from './settings-names.mjs';
 
 const refuse = (reason) => ({ ok: false, reason });
 export const PROBE_MS = 120_000;
@@ -85,8 +85,9 @@ function runProbe(spawn, bin, args, opts, timeoutMs) {
 
 /** The session's own start: `--settings` the runner's file and no other source, the runner's session id, the role. */
 export function sessionArgs({ profile, settingsFile, sessionId, prompt, earlier }) {
-  const args = [F.print, F.outputFormat, F.streamJson, F.verbose, F.settings, settingsFile, F.sessionId, sessionId,
-    F.strictMcpConfig, F.mcpConfig, '{"mcpServers":{}}', F.tools, profile.tools.join(','), F.permissionMode, profile.mode];
+  // No settings file but managed and --settings (L1093, L1109): the same limit the read-back checks, so it proves this start.
+  const args = [F.print, F.outputFormat, F.streamJson, F.verbose, F.settings, settingsFile, ...sourcesArgs(), F.sessionId, sessionId,
+    ...noToolServerArgs(), F.tools, profile.tools.join(','), F.permissionMode, profile.mode];
   if (profile.restricted) args.push(F.restricted);
   // A send-back (R-0b-145): a round after an earlier failing verdict on this card, by either role.
   args.push(F.effort, typeof earlier === 'string' && earlier.trim() ? SEND_BACK_EFFORT : FIRST_ROUND_EFFORT);

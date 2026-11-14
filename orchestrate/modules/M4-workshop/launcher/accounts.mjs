@@ -1,6 +1,7 @@
 // The account switch (R-1-89): two Claude accounts on one Mac user, each with its own sign-in folder.
 //
-// How Claude Code keeps them apart (checked 31 Oct 2026 against CLI 2.1.316; a capability claim, re-check on an
+// How Claude Code keeps them apart (checked 31 Oct 2026 against CLI 2.1.316, checked: claude-code 2.1.316; a
+// capability claim, re-check on an
 // upgrade): `CLAUDE_CONFIG_DIR` names the folder Claude Code reads. The macOS Keychain sign-in is keyed to that folder,
 // and so are its settings file `.claude.json` and its list of background sessions. Account `a` is the folder Claude
 // Code uses when the variable is not set (`~/.claude`, with `.claude.json` in the home folder), so it runs with the

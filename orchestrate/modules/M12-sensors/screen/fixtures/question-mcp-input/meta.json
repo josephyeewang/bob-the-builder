@@ -1,0 +1,26 @@
+{
+  "scenario": "question-mcp-input",
+  "claude_code_version": "2.1.322",
+  "tool": "screen/tools/capture.mjs",
+  "captured_on": "2026-11-13",
+  "label": "question-mcp-input",
+  "cols": 140,
+  "rows": 45,
+  "samples": [
+    {
+      "file": "01.txt",
+      "title": "✳ Ask_name MCP tool call",
+      "after_ms": 0
+    },
+    {
+      "file": "02.txt",
+      "title": "✳ Ask_name MCP tool call",
+      "after_ms": 1011
+    },
+    {
+      "file": "03.txt",
+      "title": "✳ Ask_name MCP tool call",
+      "after_ms": 2020
+    }
+  ]
+}

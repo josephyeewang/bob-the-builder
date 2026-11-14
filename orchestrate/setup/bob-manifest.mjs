@@ -28,14 +28,13 @@ import { isAbsolute, join, posix, relative } from 'node:path';
 import { UPDATER_CONFIG, currentCopy } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { readUpdaterConfig } from '../modules/M4-workshop/launcher/review-updater.mjs';
 import { foldKey } from '../shared/plan-fingerprint.mjs';
-import { bobPath } from './layout.mjs';
+import { BOB_NEW, BOB_OLD, bobPath } from './layout.mjs';
 import { installPaths } from './install.mjs';
 import { readUser } from './users-folders.mjs';
 
 export const BOB_MANIFEST = 'bob-manifest.json';
 export const BOB_COMMIT = 'bob-commit.txt';
-export const BOB_NEW = '.bob-new';
-export const BOB_OLD = '.bob-old';
+export { BOB_NEW, BOB_OLD };   // defined in layout.mjs, where the setup check names them too (L1035 c4)
 const ADDING = '.adding';
 // The review runner reads the list whole, up to its own cap (review-runner-main.mjs MAX_CARD_BYTES): a longer one it refuses.
 export const MAX_MANIFEST_BYTES = 1024 * 1024;

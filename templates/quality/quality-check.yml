@@ -1,0 +1,74 @@
+# Bob's quality checks (templates/quality/README.md) — copy to .github/workflows/quality-check.yml.
+#
+# On every pull request it builds the product and starts it with the test data in .quality/test-data, inside this
+# GitHub job, then checks that each declared page loads (smoke), looks like its reference image (visual), has no
+# serious accessibility problems (a11y) and loads within its speed budget (speed); then it scans for new dead or
+# duplicated code. Every check step runs even after an earlier one fails, and any failure fails the job.
+#
+# NO SECRETS: nothing here reads a secret, and the job's token can only read the repository. The product runs on the
+# job's own machine against test data, never against production. Your hosting (for example Vercel) keeps deploying
+# only from main; this check adds nothing to it.
+#
+# New reference images: run this workflow by hand (Actions → Quality checks → Run workflow) with
+# "update_references" ticked, download the "screenshots" artifact, and commit the images into .quality/reference/
+# as part of the change that alters the look. Screenshots taken on your own computer won't match: fonts differ.
+name: Quality checks
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      update_references:
+        description: "Write new reference images from this run (download them from the screenshots artifact)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install the product's dependencies
+        run: npm ci
+      - name: Install the checking tools (pinned versions; not added to package.json)
+        run: |
+          npm install --no-save --no-audit --no-fund playwright@1.64.1 axe-core@4.14.0 knip@6.42.1 jscpd@5.4.1
+          node node_modules/playwright/cli.js install --with-deps chromium
+      - name: Build with the test data
+        run: node scripts/quality/run.mjs build
+      - name: Check each page loads, looks right, is accessible and is fast enough
+        if: ${{ !inputs.update_references }}
+        run: node scripts/quality/run.mjs smoke visual a11y speed
+      - name: Write new reference images
+        if: ${{ inputs.update_references }}
+        run: node scripts/quality/run.mjs visual --update-references
+      - name: Keep the screenshots for a person to look at
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: |
+            .quality/out/
+            .quality/reference/
+          if-no-files-found: ignore
+      - name: No new dead or duplicated code
+        if: ${{ !cancelled() && !inputs.update_references }}
+        run: node scripts/quality/code-scan.mjs
+      - name: The live-figure list is filled in (when the product keeps one)
+        if: ${{ !cancelled() && !inputs.update_references }}
+        run: |
+          if [ -f .quality/live-figures.json ]; then node scripts/quality/live-figures-check.mjs .quality/live-figures.json
+          else echo "no .quality/live-figures.json: this product declares no live figures"; fi

@@ -38,6 +38,10 @@ export function deriveActivityState(event, payload = {}) {
         default:
           return null;
       }
+    case 'session-start':
+      // R-0b-175a (d)(2): a fresh start or a resume reaches its prompt idle. The tracker applies it only to a record still
+      // startup pending; `clear` and `compact` (an auto-compact fires one mid-turn) are never a first signal.
+      return payload?.source === 'startup' || payload?.source === 'resume' ? State.IDLE : null;
     case 'session-end':
       // clear and resume keep the session going in the same copy.
       return payload?.reason === 'clear' || payload?.reason === 'resume' ? null : State.EXITED;

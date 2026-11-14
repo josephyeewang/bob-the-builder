@@ -14,7 +14,8 @@
 // attachment: {type: 'queued_command', prompt, timestamp?, origin: {kind: 'human'|'task-notification'|'peer'…}}}
 // (0b-8 audit round 2 M-1). Principle 9: a format note; re-check on a CLI upgrade, the tests' fixtures follow it.
 // Not re-checked on 2.1.316, the pin since 5 Nov 2026 (L599): this Mac holds no 2.1.316 log with an answer or a queued
-// message. Safety roadmap row, owner lane 1, trigger: the first real role start on 2.1.316.
+// message. Safety roadmap row, owner lane 1, trigger: the first real role start on 2.1.316 (checked: claude-code 2.1.309,
+// open until 2027-01-20 (R-0b-84)).
 
 export const QUESTION_TOOL = 'AskUserQuestion';
 export const AUTOMATED_PREFIXES = Object.freeze(['[watchdog]', '[relay]', '[dispatcher]']);

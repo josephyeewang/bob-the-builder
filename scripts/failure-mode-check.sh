@@ -54,7 +54,7 @@ done
 for f in "$FIXTURE_DIR"/[0-9][0-9][0-9]-*.md; do
   [ -e "$f" ] || continue
   base="fixtures/detection/$(basename "$f")"
-  echo "$REFERENCED" | grep -qF "$base" || fail "fixture exists but no index row cites it: $base"
+  grep -qF "$base" <<<"$REFERENCED" || fail "fixture exists but no index row cites it: $base"
 done
 
 # --- 3. the scoreboard must match a fresh count ------------------------------------------

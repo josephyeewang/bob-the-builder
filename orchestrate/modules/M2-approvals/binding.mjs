@@ -21,7 +21,8 @@
 // a typed "Other" with the same words are stored identically (toolUseResult.answers holds only the text). So an exact,
 // case-sensitive match to a choice counts as the tap; anything else releases the box. This is a claim about the tool
 // and expires: R-0b-84's real phone capture re-checks it. Not re-checked on 2.1.316, the pin since 5 Nov 2026 (L599); safety
-// roadmap row, owner lane 1, trigger: the first real role start on 2.1.316, with R-0b-84's capture run on that pin.
+// roadmap row, owner lane 1, trigger: the first real role start on 2.1.316, with R-0b-84's capture run on that pin
+// (checked: claude-code 2.1.312, open until 2027-01-20 (R-0b-84)).
 //
 //   createAsk(ctx, { id, kind, card, title, choices?, recommended?, tier?, risky?, fingerprint?, files?, origin_session? })
 //   const r = processSession(ctx, { sessionId, sourcePath })  → { ok, events: [{ type, ask, card, … }] }

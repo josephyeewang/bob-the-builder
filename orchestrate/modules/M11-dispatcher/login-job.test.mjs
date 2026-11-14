@@ -66,3 +66,18 @@ test('L734 answer 1 (audit #292 m1): home and umask are written only when passed
   if (r.error) return t.skip('plutil is not on this machine');
   assert.equal(r.status, 0, r.stdout + r.stderr);
 });
+
+test('L1051: every and configFlag are written only when passed (the owner\'s answer job); left out, the text is unchanged; bad values are refused', (t) => {
+  const plain = loginJobPlist(OK);
+  assert.equal(loginJobPlist({ ...OK, every: 60 }), plain, 'every: 60 is the default text');
+  const owner = loginJobPlist({ ...OK, every: 300, configFlag: '--to' });
+  assert.match(owner, /<key>StartInterval<\/key><integer>300<\/integer>/);
+  assert.match(owner, /<array><string>\/opt\/node\/bin\/node<\/string><string>\/srv\/orch\/dispatcher\.mjs<\/string><string>--to<\/string><string>\/srv\/orch\/config\.json<\/string><\/array>/);
+  assert.equal(owner.replace('<integer>300<', '<integer>60<').replace('<string>--to</string>', ''), plain, 'nothing else changes');
+  for (const every of [59, 3601, 300.5, '300', 0, null]) assert.throws(() => loginJobPlist({ ...OK, every }), /every must be a whole number of seconds from 60 to 3600/, String(every));
+  for (const configFlag of ['to', '-t', '--To', '--to x', '--', '', `--${'a'.repeat(32)}`]) assert.throws(() => loginJobPlist({ ...OK, configFlag }), /configFlag must be one "--word"/, configFlag);
+  const p = join(tempDir('m11-plist-'), 'owner.plist');
+  writeFileSync(p, owner);
+  const r = spawnSync('plutil', ['-lint', p], { encoding: 'utf8' });
+  if (r.error) t.skip('plutil is not on this machine'); else assert.equal(r.status, 0, r.stdout + r.stderr);
+});

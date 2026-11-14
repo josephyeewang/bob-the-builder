@@ -23,7 +23,7 @@ function world() {
   w.gone = new Set();
   w.ports = {
     start: async (x) => { w.n += 1; const role = x.kind === 'script' ? 'script' : 'worker';
-      return { ok: true, pid: 7000 + w.n, pidStart: S0, pgid: 7000 + w.n, head: 'a'.repeat(40), outbox: join(w.outboxRoot, x.product, role, x.sessionId), signin: 's', configDir: '/cfg', copy: `/copies/${x.product}/${x.card}` }; },
+      return { ok: true, saveSettingsSha: 'a'.repeat(64), pid: 7000 + w.n, pidStart: S0, pgid: 7000 + w.n, head: 'a'.repeat(40), outbox: join(w.outboxRoot, x.product, role, x.sessionId), signin: 's', configDir: '/cfg', copy: `/copies/${x.product}/${x.card}` }; },
     groupGone: async (s) => w.gone.has(s.pgid), stopGroup: async (s) => { w.gone.add(s.pgid); return { ok: true, how: 'SIGTERM' }; },
     saveWork: async () => ({ ok: true }), pauseLead: async () => ({ ok: true }), outboxDrained: async () => true,
   };
@@ -198,7 +198,7 @@ test('step-4 review m3, m4: a memory that is a link, has two names or the wrong 
   assert.throws(() => loadMemory(w.memoryFile, { uid: UID }), /more than one name/);
   rmSync(w.memoryFile);
   assert.throws(() => loadMemory('memory.json', { uid: UID }), /not a full path/, '#362 r1 c3');
-  for (const bad of ['{"sessions":{}}', '{"requests":[]}', '{"answers":null}', '{"seen":[1]}', '[]', '{"sessions":[null]}', '{"requests":{"S-1":null}}']) {
+  for (const bad of ['{"sessions":{}}', '{"requests":[]}', '{"answers":null}', '{"seen":[1]}', '[]', '{"sessions":[null]}', '{"requests":{"S-1":null}}', '{"saves":[]}', '{"saves":{"S-1":7}}', '{"saves":{"S-1":{"pgid":1,"pid":1,"pid_start":"x","at":1}}}', '{"saves":{"S-1":{"pgid":70,"pid":71,"pid_start":"x","at":1}}}', '{"saves":{"S-1":{"pgid":70,"pid":70,"at":1}}}', '{"saves":{"S-1":{"pgid":70,"pid":70,"pid_start":"x","at":1,"job":{"pgid":71,"pid":72,"pid_start":"y"}}}}', '{"saves":{"S-1":{"pgid":70,"pid":70,"pid_start":"x","at":1,"job":7}}}']) {
     writeFileSync(w.memoryFile, bad); chmodSync(w.memoryFile, 0o600);
     assert.throws(() => loadMemory(w.memoryFile, { uid: UID }), /not what the runner writes/, bad);
     rmSync(w.memoryFile);
@@ -321,7 +321,7 @@ test('#358 r1 M1 through the loop: each write carries the clock at that write', 
 
 test('#364 self-review M1: a start still on when the stop comes is waited for and settled by a last tick that reads no request', async () => {
   const w = world(); let n = 0; let release;
-  w.ports.start = (x) => new Promise((r) => { release = () => r({ ok: true, pid: 7001, pidStart: S0, pgid: 7001, head: 'a'.repeat(40), outbox: join(w.outboxRoot, x.product, 'worker', x.sessionId), signin: 's', configDir: '/cfg', copy: `/copies/${x.product}/${x.card}` }); });
+  w.ports.start = (x) => new Promise((r) => { release = () => r({ ok: true, saveSettingsSha: 'a'.repeat(64), pid: 7001, pidStart: S0, pgid: 7001, head: 'a'.repeat(40), outbox: join(w.outboxRoot, x.product, 'worker', x.sessionId), signin: 's', configDir: '/cfg', copy: `/copies/${x.product}/${x.card}` }); });
   w.ask(...launch('S-1'));
   const state = await runRunner({ ...w.ctx({ portMs: 30 }), stopWhen: () => n >= 1, sleep: async () => { w.ask(...launch('S-2')); setTimeout(() => release(), 50); n += 1; } });
   assert.deepEqual(state.sessions.map((s) => s.id), ['S-1']);
@@ -334,4 +334,38 @@ test('#364 self-review M1: a start still on when the stop comes is waited for an
   const st = await runRunner({ ...v.ctx({ portMs: 30 }), drainMs: 30, stopWhen: () => m >= 1, sleep: async () => { m += 1; } });
   assert.equal(st.requests['S-1'].state, 'waiting');
   assert.ok(v.notes.some((t) => /still on when the worker runner stopped/.test(t)), v.notes.join('\n'));
+});
+
+test('#463 r1 m2: a save still on when the runner stops has its kept process group stopped, and is told truly (not answered, told as not saved)', async () => {
+  const w = world(); let n = 0;
+  w.ask(...launch('S-1'));
+  // The first tick starts S-1; the save is asked during the sleep and never ends.
+  // #463 r2 M1: claude's group and the job's own, both stopped.
+  // Self-review m3: the job's group is told only while claude's is being stopped: it is read again and stopped too.
+  let late;
+  w.ports.saveWork = (s, { onGroup }) => { onGroup({ pgid: 7101, pid: 7101, pid_start: S0 }); late = () => onGroup({ pgid: 7101, pid: 7101, pid_start: S0, job: { pgid: 7102, pid: 7102, pid_start: S0 } }); return new Promise(() => {}); };
+  const stopped = [];
+  w.ports.stopGroup = async (s) => { stopped.push(s); if (s.pgid === 7101) late(); return { ok: true, how: 'SIGTERM' }; };
+  const state = await runRunner({ ...w.ctx({ portMs: 30 }), drainMs: 30, stopWhen: () => n >= 2,
+    sleep: async () => { if (n === 0) w.ask('saveWork-S-1-0123456789abcdef.json', { saveWork: { id: 'S-1' } }); n += 1; } });
+  assert.deepEqual(stopped.map((s) => [s.id, s.pgid, s.pid, s.pid_start]), [['S-1', 7101, 7101, S0], ['S-1', 7102, 7102, S0]]);
+  const told = w.notes.find((t) => /the save of S-1 was still on when the worker runner stopped/.test(t));
+  assert.match(told, /its process groups are stopped\. It is not answered, so the Dispatcher's wait for it runs out and the work is told as not saved/);
+  assert.equal(/asks again/.test(w.notes.join('\n')), false, 'never the old claim');
+  assert.ok(state.saves['S-1'], 'kept until the next runner sees it gone');
+});
+
+// #463 r2 plant 'SR M-2 loop gives no keeper': the loop hands every tick the one saveHolder, so a save's job group told
+// after its pass returned (between ticks) is in the memory file at once, before its go-ahead, not only at the last tick.
+test('#463 r2 self-review M-2: the loop\'s ticks keep a job group told between ticks in the memory at once', async () => {
+  const w = world(); let n = 0; let late; let kept = null;
+  w.ask(...launch('S-1'));
+  w.ports.saveWork = (s, { onGroup }) => { onGroup({ pgid: 7101, pid: 7101, pid_start: S0 }); late = () => onGroup({ pgid: 7101, pid: 7101, pid_start: S0, job: { pgid: 7102, pid: 7102, pid_start: S0 } }); return new Promise(() => {}); };
+  await runRunner({ ...w.ctx({ portMs: 30 }), drainMs: 30, stopWhen: () => n >= 3, sleep: async () => {
+    if (n === 0) w.ask('saveWork-S-1-0123456789abcdef.json', { saveWork: { id: 'S-1' } });
+    if (n === 1) { late(); kept = loadMemory(w.memoryFile, { uid: UID }); }   // the save's pass has returned; no tick runs now
+    n += 1;
+  } });
+  assert.ok(late, 'the save was asked and started');
+  assert.deepEqual(kept?.saves?.['S-1']?.job, { pgid: 7102, pid: 7102, pid_start: S0 }, JSON.stringify(kept?.saves ?? null));
 });

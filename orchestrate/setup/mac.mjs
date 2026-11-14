@@ -6,7 +6,7 @@
 //   io.readConfig(path, {strict})   the config text; strict = root's own file at the fixed place (see readConfigFile)
 //   io.write/secureFile/list   make a new file (never overwrites), set a file's owner and mode, list a folder
 //   io.run(cmd, args)       → { status, stdout, stderr }; a fixed PATH, no shell, a time limit
-//   io.lstat/mkdir          on the logical path
+//   io.lstat/mkdir          on the logical path; io.realpath its real place (every link followed), logical again
 //   io.secure(path, want)   set a folder's owner and mode WITHOUT following a link (L90 M4): see secureFolder
 //   io.secureFile(path, want)   the same for a file: see secureFile
 //   io.readText/write/copyFile/copyTree/rm/list/readlink   on the logical path (write and copyFile make a NEW file and
@@ -25,10 +25,17 @@
 // swap a child for a link between the plan and the change. Every change opens the folder itself (O_NOFOLLOW, folder
 // only), checks it is the very folder the plan saw, and changes it through that handle.
 
-import { renameSync, unlinkSync, closeSync, constants, cpSync, fchmodSync, fchownSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, realpathSync, rmSync, writeSync } from 'node:fs';
+import { renameSync, unlinkSync, closeSync, constants, cpSync, fchmodSync, fchownSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, writeSync } from 'node:fs';
+import { constants as osConstants } from 'node:os';
+import { openRead } from '../wiring/owner-status.mjs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { chainProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
+
+/** The refusal when a file setup would change is not a plain file (here and managed-settings.mjs): one home (I7). */
+/** The refusal when a file to read is a link: a link is never followed (mac, approve-rules): one text (I7). */
+export const linkNotFollowed = (what) => `${what} is a link, and a link is not followed`;
+export const notPlainFile = (path) => `${path} is not a plain file; nothing was changed`;
 
 /**
  * Set the owner and mode of the folder at `real` through an open handle. Refuses a link, anything that is not a folder, and
@@ -59,7 +66,7 @@ export function secureFile(real, want, { chown = fchownSync, chmod = fchmodSync 
   }
   try {
     const st = fstatSync(fd);
-    if (!st.isFile()) throw new Error(`${real} is not a plain file; nothing was changed`);
+    if (!st.isFile()) throw new Error(notPlainFile(real));
     if (want.ino !== undefined && (st.ino !== want.ino || st.dev !== want.dev)) throw new Error(`${real} is not the file the plan saw (it was replaced); nothing was changed`);
     chown(fd, want.uid, want.gid ?? st.gid);
     chmod(fd, want.mode);
@@ -97,7 +104,7 @@ export function unlinkName(real) { unlinkSync(real); }
 export function readConfigFile(real, { strict = false, rootUid = 0, top = '/', ownerOf = (st) => st.uid, chain = chainProblem, what = 'the config', fstat = fstatSync } = {}) {
   let fd;
   try { fd = openSync(real, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) {   // O_NONBLOCK: a named pipe must not hold the open forever (R6 m-1)
-    throw new Error(e?.code === 'ELOOP' ? `${what} is a link, and a link is not followed` : e?.code === 'ENOENT' ? (/ file$/.test(what) ? `${what} was not found` : `${what} file was not found`) : `${what} could not be opened (${e?.code ?? 'error'})`);
+    throw new Error(e?.code === 'ELOOP' ? linkNotFollowed(what) : e?.code === 'ENOENT' ? (/ file$/.test(what) ? `${what} was not found` : `${what} file was not found`) : `${what} could not be opened (${e?.code ?? 'error'})`);
   }
   try {
     const st = fstat(fd);
@@ -163,9 +170,15 @@ export function realIo({ prefix = '' } = {}) {
     euid: () => (typeof process.geteuid === 'function' ? process.geteuid() : -1),
     run: (cmd, args) => {
       const r = spawnSync(cmd, args, { encoding: 'utf8', env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LC_ALL: 'C' }, timeout: 30_000, maxBuffer: 16 * 1024 * 1024 });
-      return { status: r.status ?? (r.error ? 127 : 1), stdout: String(r.stdout ?? ''), stderr: String(r.stderr ?? r.error?.message ?? '') };
+      // A death by signal is 128 + its number, as a shell says it (#528 r2 m5): never 1, which a `test` proof reads as "no".
+      const status = r.status ?? (r.error ? 127 : r.signal ? 128 + (osConstants.signals[r.signal] ?? 0) : 1);
+      return { status, stdout: String(r.stdout ?? ''), stderr: String(r.stderr ?? r.error?.message ?? '') };
     },
     lstat: (p) => lstatSync(at(p)),
+    stat: (p) => statSync(at(p)),   // follows a link (the proofs judge a link by what it leads to, #528 r2 M1)
+    // Its real place, every link along the way followed (#528 r3 M1), as a logical path again (the prefix taken off).
+    realpath: (p) => { const r = realpathSync(at(p)); return prefix && r.startsWith(`${prefix}/`) ? r.slice(prefix.length) : r; },
+    openRead: (p) => openRead(at(p)),   // one handle, never a link (owner-status.mjs; #528 r2 m4)
     mkdir: (p, mode) => mkdirSync(at(p), { mode }),
     secure: (p, want) => secureFolder(at(p), want),
     secureFile: (p, want) => secureFile(at(p), want),

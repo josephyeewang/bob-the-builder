@@ -1,0 +1,29 @@
+Parts of orchestrate/modules/M12-sensors/screen/, and orchestrate/modules/M4-workshop/send-safe/changes.mjs, are a port of herdr (https://github.com/herdrdev/herdr),
+commit ee5bfb5041bb3e4a49d591c72308aae3c81ecdde, licensed under the Apache License, Version 2.0 (see LICENSE in this
+folder, copied from that commit). herdr ships no NOTICE file at this commit.
+
+Every file below was made only from the pinned copy of that commit, never from a fresh download.
+
+Files modified: ported from Rust and TOML to JavaScript, with changes.
+  screen/claude-rules.mjs   from src/detect/manifests/claude.toml (rule set 2026.10.11.1)
+  screen/match.mjs          from src/detect/manifest.rs (validator limits, the rule loop, gates and regions)
+  screen/match.test.mjs     partly from src/detect/manifest/tests.rs
+  screen/waiting.mjs        from src/pane/agent_detection.rs (the pending-idle confirmation)
+  screen/tools/capture.mjs  from scripts/capture_agent_screen.py (the tmux capture loop)
+  M4-workshop/send-safe/changes.mjs  from src/api/wait.rs:364-514 (event sequence numbers and the identity check of a wait)
+
+Main changes from the original:
+  - a screen no rule matches reads "unknown" (hold); herdr falls back to idle for a known agent;
+  - two rules are left out: osc_progress_idle (tmux can't see the progress sequence, so the osc_progress region is
+    not ported and a rule naming it is refused) and osc_title_idle (a title alone must never clear a session to idle;
+    a title rule may only say working);
+  - only the regions the Claude rules use are ported; the Codex prompt-marker regions and top_non_empty_lines are refused;
+  - each Rust pattern is translated to an exact JavaScript equivalent (Unicode \d, \s, \w and \b, \x{...}, \z, leading
+    (?i) and (?m)) or refused, never approximated;
+  - a reading that is too large, or whose matching runs past a time limit, reads unknown; escape sequences are stripped
+    before matching; rule ids must be unique;
+  - the rules load only from the installed file: no remote download, no hot reload, no override folder;
+  - the idle confirmation keeps no history between sends, never lets idle through on a time cap, counts only the
+    text-region prompt rule, and also needs the hook tracker to say the session isn't waiting;
+  - changes.mjs numbers each session's own changes and saves the number, so it never goes backwards across a restart;
+    a wait ends aborted on a new launch id or a session end, and waits for the typed prompt's hash, never its text.

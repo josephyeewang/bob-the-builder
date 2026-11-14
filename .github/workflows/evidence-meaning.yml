@@ -1,0 +1,17 @@
+name: evidence-meaning
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  evidence-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Missing specification and source inputs cannot pass
+        run: python3 -m unittest discover -s scripts -p 'test_*_audit.py' -v
+      - name: Coverage consumes the actual task verdict
+        run: python3 -m unittest discover -s scripts -p 'test_coverage_check.py' -v

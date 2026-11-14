@@ -70,9 +70,12 @@ else
     HI=$(printf '%s\n' "${IDS[@]}" | sed 's/D-//' | sort -n | tail -1)
     HIGHEST_ID="D-$HI"
     MISSING=""
+    # A here-string, not "printf | grep -q": under pipefail, grep -q stopping at the first
+    # match broke printf's pipe (SIGPIPE) and an ID that exists was reported MISSING at random.
+    ID_LIST="$(printf '%s\n' "${IDS[@]}")"
     for ((n=10#$LO; n<=10#$HI; n++)); do
       pad=$(printf 'D-%03d' "$n")
-      printf '%s\n' "${IDS[@]}" | grep -qx "$pad" || MISSING+=" $pad"
+      grep -qx "$pad" <<<"$ID_LIST" || MISSING+=" $pad"
     done
     echo "  range: D-$LO … D-$HI   (${#IDS[@]} unique entries)"
     if [ -n "$MISSING" ]; then echo "  ✗ MISSING:$MISSING"; FAIL=1; FAIL_WHY="$FAIL_WHY [1] ID gap"; else echo "  ✓ contiguous, no gaps"; fi

@@ -22,7 +22,8 @@ tiers:
       tier: 1
 
 # Added to M10's own floor (paths.mjs PROTECTED_FLOOR), which this file cannot shrink.
-# Claude Code's protected paths: re-checked 5 Nov 2026 against the list inside Claude Code 2.1.316 (L572).
+# Claude Code's protected paths: re-checked 5 Nov 2026 against the list inside Claude Code 2.1.316 (L572;
+# checked: claude-code 2.1.316).
 # Sample only: a real product re-checks this list against its own claude_code.pin (2.1.316 below) when it
 # sets the pin, and again on every pin change.
 protected_files:

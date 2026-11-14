@@ -8,8 +8,9 @@
 //   - config.worktree, hooks, info/attributes, info/grafts and commondir are removed;
 //   - objects/info/alternates must be absent or name exactly the mirror's objects folder.
 // Then the only git call is `bundle create` of the card branch, through safe-git, with
-// core.symlinks=false. It runs only through `runLocked`, the launcher's lock-down runner (same
-// network-off sandbox and read-deny as the worker), even when started on its own.
+// core.symlinks=false. It runs only through `runLocked`, the lock-down runner (wiring/runner-locked.mjs: the job
+// script jobs/save-work.mjs, run by claude under the session's own settings, so the same network-off sandbox and
+// read-deny as the worker), even when started on its own.
 
 import { lstatSync, writeFileSync, rmSync, readFileSync, renameSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -46,29 +47,61 @@ export function resetCloneGit({ clone, mirror }) {
   return gitDir;
 }
 
+/** The bundle's name while it is written (L991 M1): in the copy's `.git`, never in the outbox, whose dot-names the
+ * save's settings deny and whose every other name intake may read. */
+export const partialName = (card) => `orch-save-${card}.bundle.partial`;
+
 /**
- * `runLocked(fn)` runs `fn` inside the worker's lock-down and returns its result. Required:
- * without it save-work refuses. Returns { ok: true, bundle } or { ok: false, reason }.
+ * The save itself, run inside the lock-down by the save-work job (jobs/save-work.mjs, L969), never in the runner's own
+ * process: the copy's `.git` reset, then one `bundle create` of the card branch, written in the copy's `.git` (git's
+ * lock file beside it) and then moved into the outbox under its final name in one rename (L991 M1), so intake never
+ * sees half a bundle and the save writes only in `.git` and the outbox. A copy and an outbox on different disks can't
+ * be renamed across: refused plainly (setup puts them on one). → { ok: true, bundle }, or a throw.
+ */
+export async function saveWorkJob({ clone, mirror, card, branch, outbox }) {
+  if (!CARD.test(String(card))) throw new Error('bad card id');
+  if (branch !== cardBranch(card) || !BRANCH.test(branch)) throw new Error('bad card branch');
+  const gitDir = resetCloneGit({ clone, mirror });
+  const o = st(outbox);
+  if (!o || o.isSymbolicLink() || !o.isDirectory()) throw new Error('the outbox is not a real folder');
+  const tmp = join(gitDir, partialName(card));
+  rmSync(tmp, { force: true });
+  try {
+    await gitOk(['bundle', 'create', '-q', tmp, `refs/heads/${branch}`], { gitDir, purpose: 'save-work', extraConfig: [['core.symlinks', 'false']], allowObjects: [resolve(mirror, 'objects')] });
+    const out = join(outbox, bundleName(card));
+    if (st(out)?.isSymbolicLink()) rmSync(out);
+    try { renameSync(tmp, out); } catch (e) {
+      if (e?.code === 'EXDEV') throw new Error('the copy and the outbox are on different disks, so the bundle can\'t be moved into the outbox in one step; setup must put both on one disk');
+      throw e;
+    }
+    return { ok: true, bundle: out };
+  } finally { try { rmSync(tmp, { force: true }); } catch { /* left in the copy's .git; removed before the next save */ } }
+}
+
+/**
+ * `runLocked(job)` runs the save-work job inside the worker's lock-down (wiring/runner-locked.mjs): it gets
+ * { job: 'save-work', args, run }, where `run` is the in-process body for a stand-in (a test) only; the real runner runs
+ * the job script in its own process and never calls it. Required: without it save-work refuses. The card's bundle is
+ * removed first, so one left from before never passes as this save's; the answer is then checked again on the disk (the
+ * bundle a plain, non-empty file in the outbox, by the card's name), since it comes back through a file. That is a
+ * sanity check, not a wall: the worker can write both the outbox and the result file, so a forged "ok" with a bundle of
+ * its own is possible, and push.mjs's bundle verify and its fetch of the card branch only are what bound it.
+ * Returns { ok: true, bundle } or { ok: false, reason }.
  */
 export function createSaveWork({ runLocked }) {
   return async function saveWork({ clone, mirror, card, branch, outbox }) {
     if (typeof runLocked !== 'function') return refuse('save-work runs only inside the worker\'s lock-down');
     if (!CARD.test(String(card))) return refuse('bad card id');
     if (branch !== cardBranch(card) || !BRANCH.test(branch)) return refuse('bad card branch');
+    const args = { clone, mirror, card, branch, outbox };
+    const out = join(outbox, bundleName(card));
     try {
-      return await runLocked(async () => {
-        const gitDir = resetCloneGit({ clone, mirror });
-        const o = st(outbox);
-        if (!o || o.isSymbolicLink() || !o.isDirectory()) throw new Error('the outbox is not a real folder');
-        // Written under a temporary name, then moved, so a half-written bundle is never read.
-        const tmp = join(outbox, `.${bundleName(card)}.partial`);
-        rmSync(tmp, { force: true });
-        await gitOk(['bundle', 'create', '-q', tmp, `refs/heads/${branch}`], { gitDir, purpose: 'save-work', extraConfig: [['core.symlinks', 'false']], allowObjects: [resolve(mirror, 'objects')] });
-        const out = join(outbox, bundleName(card));
-        if (st(out)?.isSymbolicLink()) rmSync(out);
-        renameSync(tmp, out);
-        return { ok: true, bundle: out };
-      });
+      try { rmSync(out, { force: true }); } catch (e) { return refuse(`the card's old bundle can't be removed (${e?.code ?? e?.message})`); }
+      const r = await runLocked({ job: 'save-work', args, run: () => saveWorkJob(args) });
+      if (!r?.ok) return refuse(String(r?.reason ?? 'the save-work job gave no answer'));
+      const b = st(out);
+      if (r.bundle !== out || !b?.isFile() || b.isSymbolicLink() || b.size === 0) return refuse('the save-work job answered, but no bundle of the card is in the outbox');
+      return { ok: true, bundle: out };
     } catch (e) { return refuse(e.message); }
   };
 }

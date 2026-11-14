@@ -1,0 +1,45 @@
+ ▐▛███▛█   Claude Code v2.1.322
+▝▜██████▀  Sonnet 5.5 · Claude Ultra
+ ▝▝   ▝▝   <repo>
+
+
+❯ Call the ask_name tool from the fixture MCP server now. Do nothing else.
+
+  Calling fixture… (ctrl+o to expand)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  MCP server “fixture” requests your input
+
+  Fixture asks: what name should it use?
+
+  ❯ * Name: Type something…
+
+    Accept    Decline
+
+  Esc to cancel · ↑/↓ to navigate · Backspace to unset
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

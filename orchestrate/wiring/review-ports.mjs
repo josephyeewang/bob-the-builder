@@ -183,8 +183,8 @@ export function mainSeen({ installRoot, now, owner = 0, top = '/' }) {
  * The review runner's ports, from the config's review keys (dispatcher-wiring.mjs). `selfUid` is the Dispatcher's own
  * user; a test stands in for it, since a test can't make files another user owns. The review user must be neither the
  * Dispatcher's nor the Record owner's (ownerUid, orchestrate's uid): either could then write the status that says a
- * reviewer runs (L668, L674). Nor may it be Joe's (the workers' user, L238): that uid is the config's hostLockUid and
- * workerUid, and worker-ports.mjs refuses a hostLockUid equal to reviewUid, and a workerUid that is not hostLockUid.
+ * reviewer runs (L668, L674). Nor may it be Joe's (the config's hostLockUid) or the builder's (workerUid, the workers'
+ * user since L1079): worker-ports.mjs refuses a hostLockUid equal to reviewUid, and a workerUid equal to either.
  */
 export function reviewRunner({ config: c, now, owner = 0, top = '/', selfUid = process.getuid() }) {
   if (!Number.isSafeInteger(c.reviewUid) || c.reviewUid < 0) throw new Error('config: reviewUid must be a Mac user id');

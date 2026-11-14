@@ -82,6 +82,8 @@ This is taint tracking applied to product correctness rather than security: foll
 
 4. **Execute the flow, don't just read it.** Submit a real input through the running app. Then query the DB / inspect each consumer to confirm the field actually arrived and is the right value — not just that a write *appears* to exist in source. (Source can lie: the field is in the payload, the insert omits it.)
 
+**Meaning-preserving round trip:** compare a synthetic source through parse → store → reload → export, including magnitude, sign, units, precision, current/prior identity and original/amended values. Reordering object keys should not change meaning; reordering a meaningful sequence may. Check the real rendered/exported artifact as well as its container. When a conversion cannot preserve meaning or appearance, retain a faithful representation with a visible limitation or refuse the conversion; never substitute a plausible default silently.
+
 4b. **Census the field AT REST — the non-null RATE, not just "it can be written."** For each meaningful field, query `count(field IS NOT NULL) / count(*)` across the real table. A field at **~0% populated is a DEAD column** — silently dropped in practice even when a write path exists in source, so any downstream logic keyed on it is scoring a phantom. (Field-hardened on a production data product: two key columns were 100%/near-100% NULL or stuck on a single value across hundreds of thousands of rows — the analysis "ran" and silently produced nothing on those axes. "It can be populated" ≠ "it is.")
 
 5. **Check the lifecycle / terminal states per flow.** Every flow has end-states that must each be handled:

@@ -54,6 +54,27 @@ const TEST_FAULTS = Object.freeze(['append_fails', 'cutback_fails', 'short_write
 const SAFE_ID = /^[A-Za-z0-9._-]+$/;
 // The one test for a name that becomes part of a path: no slash, not all dots, short enough to be a file name (rounds 5 m-2, 6).
 const safeName = (s) => typeof s === 'string' && s.length <= 200 && SAFE_ID.test(s) && !/^\.+$/.test(s);
+/** Where a document's file is: `<root>/docs/<entity>/<id>.json`, the one statement of that layout (read-view.mjs reads by it). Throws on a name that is not safe. */
+export const docPathOf = (root, entity, id) => { if (!safeName(entity) || !safeName(id)) throw new Error(`bad entity or id: ${String(id).slice(0, 80)}`); return join(root, 'docs', entity, `${id}.json`); };
+/**
+ * One diary line, replayed into `index` (Map keyOf → entry): the one parser of the diary, for the Store Writer and for
+ * read-view.mjs's read-only meta (L999). Throws on a line that doesn't follow the one before it. → the line's seq.
+ */
+export function absorbDiaryLine(index, lastSeq, line) {
+  if (!line || !Number.isInteger(line.seq) || !Array.isArray(line.writes) || !line.writes.length) throw new Error('diary line has no seq or writes');
+  if (line.seq !== lastSeq + 1) throw new Error(`diary seq ${line.seq} after ${lastSeq} (a gap)`);
+  for (const w of line.writes) {
+    const k = `${w.entity}/${w.id}`;
+    const cur = index.get(k);
+    if ((cur?.hash ?? null) !== (w.prev_hash ?? null)) throw new Error(`diary line ${line.seq}: ${k} prev_hash doesn't match the version before it`);
+    if (w.rev !== (cur?.rev ?? 0) + 1) throw new Error(`diary line ${line.seq}: ${k} rev ${w.rev} after ${cur?.rev ?? 0}`);
+    if (sha256(docBytes(w.entity, w.id, w.rev, w.doc)) !== w.doc_hash) throw new Error(`diary line ${line.seq}: ${k} doc_hash doesn't match its doc`);
+    const stateChanged = (cur?.doc?.state ?? null) !== (w.doc?.state ?? null);
+    index.set(k, { entity: w.entity, id: w.id, rev: w.rev, doc: w.doc, hash: w.doc_hash, prevHash: cur?.hash ?? null, seq: line.seq,
+      ts: line.ts, createdBy: cur?.createdBy ?? line.actor, createdKind: cur?.createdKind ?? line.kind, stateSince: !cur || stateChanged ? line.ts : cur.stateSince });
+  }
+  return line.seq;
+}
 
 export const sha256 = (s) => createHash('sha256').update(s).digest('hex');
 export const docBytes = (entity, id, rev, doc) => `${JSON.stringify({ entity, id, rev, doc })}\n`;
@@ -278,10 +299,7 @@ export function openStore({ root, ownerUid, alert = () => false, now = () => Dat
     }
   }
   // Every path from an id goes through here, so an id like ../../x can never name a file outside the store (round 5 m-2).
-  const docPath = (entity, id) => {
-    if (!safeName(entity) || !safeName(id)) throw new Error(`bad entity or id: ${String(id).slice(0, 80)}`);
-    return join(P.docs, entity, `${id}.json`);
-  };
+  const docPath = (entity, id) => docPathOf(root, entity, id);
   // A failure of the store itself, not of what was asked of it: the outbox tries such a file again (round 5 m-1).
   const storeFail = (msg) => Object.assign(new Error(msg), { store: true });
   const keyOf = (entity, id) => `${entity}/${id}`;
@@ -303,19 +321,7 @@ export function openStore({ root, ownerUid, alert = () => false, now = () => Dat
   function reset() { index = new Map(); lines = []; offset = 0; lastSeq = 0; damaged = null; }
 
   function absorb(line) {
-    if (!line || !Number.isInteger(line.seq) || !Array.isArray(line.writes) || !line.writes.length) throw new Error('diary line has no seq or writes');
-    if (line.seq !== lastSeq + 1) throw new Error(`diary seq ${line.seq} after ${lastSeq} (a gap)`);
-    for (const w of line.writes) {
-      const k = keyOf(w.entity, w.id);
-      const cur = index.get(k);
-      if ((cur?.hash ?? null) !== (w.prev_hash ?? null)) throw new Error(`diary line ${line.seq}: ${k} prev_hash doesn't match the version before it`);
-      if (w.rev !== (cur?.rev ?? 0) + 1) throw new Error(`diary line ${line.seq}: ${k} rev ${w.rev} after ${cur?.rev ?? 0}`);
-      if (sha256(docBytes(w.entity, w.id, w.rev, w.doc)) !== w.doc_hash) throw new Error(`diary line ${line.seq}: ${k} doc_hash doesn't match its doc`);
-      const stateChanged = (cur?.doc?.state ?? null) !== (w.doc?.state ?? null);
-      index.set(k, { entity: w.entity, id: w.id, rev: w.rev, doc: w.doc, hash: w.doc_hash, prevHash: cur?.hash ?? null, seq: line.seq,
-        ts: line.ts, createdBy: cur?.createdBy ?? line.actor, createdKind: cur?.createdKind ?? line.kind, stateSince: !cur || stateChanged ? line.ts : cur.stateSince });
-    }
-    lastSeq = line.seq;
+    lastSeq = absorbDiaryLine(index, lastSeq, line);
     lines.push(line);
   }
 

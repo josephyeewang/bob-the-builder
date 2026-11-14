@@ -105,7 +105,7 @@ echo "S1 the happy path, from outside the copy"
 next; outer "$T"
 [ "$(rc "$T")" = 0 ] && has "$T" "^ALL DONE" && ok "exit 0 and ALL DONE" || bad "rc $(rc "$T"): $(tail -3 "$T/out")"
 seq=$(grep '^NODE' "$T/ctl/calls" | sed -E 's#^NODE [^ ]*/(review-updater\.mjs|setup\.mjs) ?##' | sed -E 's#rules-source [^ ]*/rules\.yaml#rules-source TMP#' | tr '\n' '|')
-want="$T/L/install/orchestrate/updater.json|$WA $H --dry-run|$WA $H|watch-rules --rules-source TMP --dry-run|watch-rules --rules-source TMP|check-watch-rules|daemons place --only watch-only --dry-run|daemons place --only watch-only|daemons load --only watch-only --dry-run|daemons load --only watch-only|check-watch-rules|check-install|daemons check --only watch-only|"
+want="$T/L/install/orchestrate/updater.json|$WA $H --dry-run|$WA $H|watch-rules --rules-source TMP --dry-run|watch-rules --rules-source TMP|check-watch-rules|daemons place --only watch-only --dry-run|daemons place --only watch-only|daemons load --only watch-only --dry-run|daemons load --only watch-only|check-watch-rules|check-install --watch-only|daemons check --only watch-only|"
 [ "$seq" = "$want" ] && ok "the updater, then every setup call in order, each step's dry run before it" || bad "order: $seq"
 [ "$(grep -c '^NODE .*orchestrate\.v-new/orchestrate/setup/setup\.mjs' "$T/ctl/calls")" = 12 ] && ok "every setup call runs from the new copy, by its real folder" || bad "setup calls: $(grep '^NODE' "$T/ctl/calls" | cut -c1-120)"
 [ "$(grep -c '^LC kickstart' "$T/ctl/calls")" = 1 ] && ok "one pass started" || bad "kickstarts: $(grep -c '^LC kickstart' "$T/ctl/calls")"
@@ -135,7 +135,7 @@ stops "$T" b "main's copy of this script is not the file you ran" && ok "stops a
 
 for f in "$WA HASH --dry-run:a" "$WA HASH:a" "watch-rules --rules-source *--dry-run:a2" "watch-rules --rules-source *rules.yaml:a2" \
          "check-watch-rules:a2-check" "daemons place --only watch-only --dry-run:c-place" "daemons place --only watch-only:c-place" \
-         "daemons load --only watch-only --dry-run:c-load" "daemons load --only watch-only:c-load" "check-install:d-install" "daemons check --only watch-only:d-job"; do
+         "daemons load --only watch-only --dry-run:c-load" "daemons load --only watch-only:c-load" "check-install --watch-only:d-install" "daemons check --only watch-only:d-job"; do
   cmd="${f%:*}"; st="${f##*:}"
   next; cmd="${cmd//HASH/$H}"; printf '%s' "$cmd" > "$T/ctl/fail"; outer "$T"
   echo "S6 a planted failure at $st ($cmd)"

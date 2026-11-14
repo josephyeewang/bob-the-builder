@@ -1,6 +1,6 @@
 // The production-write guard (design v4 §14.1.5, launch check 10, R-0b-36). Registered on every
-// tool in every role file and in the machine-wide file as a fallback. It reads ONLY the rules
-// snapshot, never GitHub or the network.
+// tool in every role file and in the machine-wide file as a fallback (there as `--machine-wide --snapshot <root's copy>`,
+// L1031). It reads ONLY the rules snapshot, never GitHub or the network.
 //
 // Snapshot shape M4 reads (lane 1 publishes it; assumed until the shared reader lands):
 //   rules.production = { env_files: [absolute paths], programs: [hosting / database program names],
@@ -8,9 +8,9 @@
 // A missing or stale snapshot, or one without that block, blocks every call (fail closed).
 
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
-import { readdirSync } from 'node:fs';
+import { readdirSync, statSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
-import { isMain, runHook, block, pass, toolPaths, shellCommands, bothWords, programOf, landingPath, realFolder, inside, joinLines, unreadable, heredocs, expandBraces, fold, globRe } from './lib.mjs';
+import { isMain, runHook, MACHINE_WIDE_WAY_OUT, MANAGED_FILE, block, pass, toolPaths, shellCommands, shellWords, bothWords, programOf, landingPath, realFolder, inside, joinLines, unreadable, heredocs, expandBraces, fold, globRe } from './lib.mjs';
 import { readSnapshot } from './snapshot.mjs';
 
 // ---- whole-folder writes (LEAD-CALLS L41 G2: deny by default) ----
@@ -332,12 +332,222 @@ function judge(t, abs, deletes, protectedFiles, shielded, how = 'written') {
   return null;
 }
 
+/**
+ * Each command in `raw`, and each command in a string a shell is handed to run (`bash -c "<s>"`, `sh -lc '<s>'`, `eval <s>`),
+ * read the same way, a few levels deep. The role form refuses those shapes outright (`unreadable`); the machine-wide form
+ * lets them run (L1044 M1), so it reads inside them for a production program (#487 r2).
+ */
+export function* commandsWithin(raw, depth = 0) {
+  for (const c of shellCommands(raw)) {
+    yield c;
+    if (depth >= 4) continue;
+    const word = programOf(c) ?? '';
+    const prog = basename(word);
+    const rest = c.slice(c.indexOf(word) + 1);
+    if (prog === 'eval') { yield* commandsWithin(rest.join(' '), depth + 1); continue; }
+    if (!['sh', 'bash', 'zsh', 'dash', 'ksh'].includes(prog)) continue;
+    const flag = rest.findIndex((w) => /^-[a-z]*c[a-z]*$/i.test(w));
+    if (flag >= 0 && typeof rest[flag + 1] === 'string') yield* commandsWithin(rest[flag + 1], depth + 1);
+  }
+}
+
+// Folder changers and programs that match patterns in folders of their own: a wildcard is judged by its folder only
+// when none runs in the line (#487 r2 m1).
+const FOLDER_CHANGERS = ['cd', 'pushd', 'popd', 'chdir', 'z', 'zi'];
+const PATTERN_TAKERS = ['find', 'fd', 'locate', 'mdfind', 'rsync', 'tar', 'bsdtar', 'zip', 'unzip', 'ditto', 'git', 'rg', 'ag', 'du', 'pax', 'cpio'];
+
+// Every word-like run of `raw`'s text (letters, digits and `._+@/-`), as written and with quotes and backslashes taken out.
+// No wildcard characters: in code (`a[0]`, `x*y`) they are not file patterns.
+export function wordsIn(raw) {
+  const s = String(raw);
+  return [s, s.replace(/['"\\]/g, '')].flatMap((text) => text.split(/[^A-Za-z0-9._+@/-]+/)).filter(Boolean);
+}
+
+// ---- the machine-wide form: refuse by default (#487 r5, LEAD-CALLS L1075) ----
+//
+// Four rounds of runner lists and text exceptions each left a gap (a runner the list lacked, a call hidden inside an
+// exception), so the machine-wide form no longer reads what a line runs. Any word of the raw line, here-document bodies
+// and `$( )` included, that names a production program refuses it, unless the whole line is one of three closed shapes
+// (allowedShape) or the word is a path that can't be that program (notAProgram).
+
+// The words of one line of literal text: plain letters, quoted strings with no `$` or backtick, nothing the shell would
+// run or expand into a command. With `globs`, wildcards and braces are letters too; with `pipes`, a single `|` splits the
+// line into commands. → the commands, each a word list, or null when anything else is on the line.
+function literalLine(s, { globs = false, pipes = false } = {}) {
+  const plain = globs ? /[A-Za-z0-9._+@/:,=%^*?[\]{}-]/ : /[A-Za-z0-9._+@/:,=%^-]/;
+  const cmds = [[]];
+  let cur = null;
+  const end = () => { if (cur !== null) cmds.at(-1).push(cur); cur = null; };
+  for (let i = 0; i < s.length; i += 1) {
+    const ch = s[i];
+    if (ch === ' ' || ch === '\t') { end(); continue; }
+    if (ch === "'") {
+      const close = s.indexOf("'", i + 1);
+      if (close < 0 || s.slice(i + 1, close).includes('\n')) return null;
+      cur = (cur ?? '') + s.slice(i + 1, close);
+      i = close;
+      continue;
+    }
+    if (ch === '"') {
+      let k = i + 1;
+      let body = '';
+      for (; k < s.length && s[k] !== '"'; k += 1) {
+        if ('$`\n'.includes(s[k])) return null;
+        if (s[k] === '\\') { if (k + 1 >= s.length || '$`\n'.includes(s[k + 1])) return null; k += 1; }
+        body += s[k];
+      }
+      if (k >= s.length) return null;
+      cur = (cur ?? '') + body;
+      i = k;
+      continue;
+    }
+    if (pipes && ch === '|' && s[i + 1] !== '|' && s[i - 1] !== '|') { end(); cmds.push([]); continue; }
+    if (!plain.test(ch)) return null;
+    cur = (cur ?? '') + ch;
+  }
+  end();
+  return cmds.every((c) => c.length) ? cmds : null;
+}
+
+const NAME = /^[A-Za-z0-9._+@-]+$/;
+// What a search's output may be piped into, and the options those take (sort's --compress-program runs a program).
+const PIPE_TAILS = ['head', 'tail', 'wc', 'sort', 'uniq'];
+const TAIL_WORD = /^(-[A-Za-z0-9.,:]*|\+?[0-9][0-9A-Za-z.,]*|--(lines|bytes|count|unique|reverse|numeric-sort|human-numeric-sort|ignore-case|repeated|words|chars)(=[0-9]+)?)$/;
+// Search options that start a program of their own: rg --pre and --hostname-bin, ag --pager.
+const SEARCH_RUNS = /^--(pre|hostname-bin|pager)/;
+
+/**
+ * The allowed shape `raw` is, or null (L1075). Only these may name a production program in the machine-wide form:
+ *  1. one `git commit` / `git tag` / `gh pr|issue create|comment|edit` whose words are literal text, with its message from a
+ *     quoted here-document: fed to it (`-F - <<'EOF'`), or Claude's `-m "$(cat <<'EOF'` … `EOF` `)"` with nothing else
+ *     inside the `$( )` and nothing after `<<'EOF'` on its line;
+ *  2. one grep / rg / ag with literal words, piped into head, tail, wc, sort or uniq at most;
+ *  3. one `command -v` / `which` / `type` with plain names.
+ * Nothing else may be on the line: no `;`, `&&`, `||`, other pipe, redirection, or second `$( )` or backtick.
+ */
+export function allowedShape(raw) {
+  const s = String(raw).replace(/[ \t\n]+$/, '').replace(/^[ \t\n]+/, '');
+  if (!s.includes('\n')) {
+    const one = literalLine(s);
+    if (one?.length === 1) {
+      const [w] = one;
+      if (w[0] === 'command' && /^-[pvV]*[vV][pvV]*$/.test(w[1] ?? '') && w.length > 2 && w.slice(2).every((x) => NAME.test(x) && !x.startsWith('-'))) return 'lookup';
+      if (['which', 'type'].includes(w[0])) {
+        const names = w.slice(1).filter((x) => !/^-[a-zA-Z]+$/.test(x));
+        if (names.length && names.every((x) => NAME.test(x) && !x.startsWith('-'))) return 'lookup';
+      }
+    }
+    const piped = literalLine(s, { globs: true, pipes: true });
+    if (piped && ['grep', 'egrep', 'fgrep', 'rg', 'ag'].includes(piped[0][0]) && !piped[0].some((x) => SEARCH_RUNS.test(x))
+      && piped.slice(1).every((c) => PIPE_TAILS.includes(c[0]) && c.slice(1).every((x) => TAIL_WORD.test(x)))) return 'search';
+  }
+  return messageShape(s) ? 'message' : null;
+}
+
+// A git commit / tag or gh pr|issue create|comment|edit, as literal words (shape 1's command).
+function messageCommand(words) {
+  if (words[0] === 'git') {
+    let k = 1;
+    while (k < words.length) { if (words[k] === '-C' && k + 1 < words.length) k += 2; else if (['--no-pager', '-P'].includes(words[k])) k += 1; else break; }
+    return ['commit', 'tag'].includes(words[k]);
+  }
+  return words[0] === 'gh' && ['pr', 'issue'].includes(words[1]) && ['create', 'comment', 'edit'].includes(words[2]);
+}
+// A here-document's body lines up to its end line: → the lines after the end line, or null when no line ends it.
+function afterBody(lines, delim, dash) {
+  const at = lines.findIndex((l) => (dash ? l.replace(/^\t+/, '') : l) === delim);
+  return at < 0 ? null : lines.slice(at + 1);
+}
+function messageShape(s) {
+  const lines = s.split('\n');
+  const first = lines[0];
+  // `git commit -F - <<'EOF'` with the body on the lines below and nothing after its end line.
+  const fed = /^(.*?)<<(-?)[ \t]*(['"])([A-Za-z_][A-Za-z0-9_.-]*)\3$/.exec(first);
+  if (fed && lines.length > 1) {
+    const words = literalLine(fed[1]);
+    const rest = afterBody(lines.slice(1), fed[4], fed[2] === '-');
+    if (words?.length === 1 && messageCommand(words[0]) && rest && rest.every((l) => l.trim() === '')) return true;
+  }
+  // The same command on one line with a literal message (`git commit -m 'Fix vercel config'`): nothing in it runs.
+  if (lines.length === 1) { const words = literalLine(first); return Boolean(words?.length === 1 && messageCommand(words[0])); }
+  // `git commit -m "$(cat <<'EOF'` … `EOF` / `)"`, the substitution's end on the line after the end line.
+  const sub = /^(.*?)"\$\([ \t]*cat[ \t]+<<(-?)[ \t]*(['"])([A-Za-z_][A-Za-z0-9_.-]*)\3$/.exec(first);
+  if (!sub || lines.length < 3) return false;
+  const rest = afterBody(lines.slice(1), sub[4], sub[2] === '-');
+  if (!rest || rest.length !== 1) return false;
+  const close = /^[ \t]*\)"(.*)$/.exec(rest[0]);
+  if (!close) return false;
+  const words = literalLine(`${sub[1]}MESSAGE${close[1]}`);
+  return Boolean(words?.length === 1 && messageCommand(words[0]));
+}
+
+// A word that ends in a production program's name but can't start it (L1075): a path, trailing slashes taken off, that is
+// an existing folder or a file no one may run. Read only where the word is the whole of a plain shell word, or the folder
+// part of a wildcard (`src/lib/supabase/*.ts`), not part of `${X}/p` or `~/p`. A relative path is read from the call's
+// folder, but never `./p`, `../p` or `<…>bin/p`, since an earlier `cd` in the line could make it a real program
+// (`cd /opt/homebrew && bin/<p>`), and a missing one counts. A missing absolute path names nothing that can run.
+function notAProgram(t, plainWords, cwd) {
+  if (!plainWords.has(t)) return false;
+  const p = t.replace(/\/+$/, '');
+  if (!p) return false;
+  const abs = isAbsolute(p);
+  if (!abs) {
+    if (!(typeof cwd === 'string' && isAbsolute(cwd)) || /^\.\.?\//.test(p) || p.split('/').includes('..') || /bin$/i.test(basename(dirname(p)))) return false;
+  }
+  let st = null;
+  try { st = statSync(abs ? p : resolve(cwd, p)); } catch { return abs; }
+  return st.isDirectory() || (st.isFile() && (st.mode & 0o111) === 0);
+}
+
+/**
+ * The first production program a word of `raw` names: words split at anything that is not part of a name, read as written
+ * and with quotes and backslashes taken out (`v'e'rcel`, `v\\ercel`), the program part of a path (`./node_modules/.bin/<p>`)
+ * and of a versioned package (`<p>@latest`), folded as every name here is; a path that can't be the program is left out.
+ */
+export function programInLine(raw, programs, cwd) {
+  const s = String(raw);
+  const chunks = s.split(/[ \t\n;&|()<>'"=,:`]+/);
+  const plainWords = new Set([...chunks.filter((w) => /^[A-Za-z0-9._+@/-]+$/.test(w)),
+    ...chunks.map((w) => /^([A-Za-z0-9._+@/-]*\/)[*?[{]/.exec(w)?.[1]).filter(Boolean)]);
+  for (const t of new Set(wordsIn(s))) {
+    const name = fold(basename(t).replace(/^@/, '').split('@')[0]);
+    if (!name || !programs.includes(name)) continue;
+    if (t.includes('/') && notAProgram(t, plainWords, cwd)) continue;
+    return name;
+  }
+  return null;
+}
+
+// The block's way forward: what may name a production program on this Mac.
+const ALLOWED_SHAPES = 'a line naming one runs only as one git commit / git tag / gh pr|issue message from a quoted here-document, '
+  + 'one grep / rg / ag (piped into head, tail, wc, sort or uniq at most), or one command -v / which / type, with nothing else on the line. '
+  + 'Run the production program yourself in a Terminal window, or write inline code to a file and run that; '
+  + `to switch the machine-wide guard off: sudo rm "${MANAGED_FILE}" from the Terminal app`;
+
+// Where the first command of `raw` ends: the first `;`, `&`, `|`, line break, bracket, backtick or `$(` outside quotes.
+export function firstCommandEnd(raw) {
+  const s = String(raw);
+  let q = null;
+  for (let i = 0; i < s.length; i += 1) {
+    const ch = s[i];
+    if (q) { if (ch === q) q = null; else if (ch === '\\' && q === '"') i += 1; else if (q === '"' && (ch === '`' || (ch === '$' && s[i + 1] === '('))) return i; continue; }
+    if (ch === "'" || ch === '"') { q = ch; continue; }
+    if (ch === '\\') { i += 1; continue; }
+    if (';&|\n()`'.includes(ch) || (ch === '$' && s[i + 1] === '(')) return i;
+  }
+  return s.length;
+}
+
 export function decide(input, args) {
-  const snap = readSnapshot(args.snapshot);
-  if (!snap.ok) return block(snap.reason);
+  // The machine-wide form (L1031) reads root's copy, written once by setup.mjs managed-settings and never refreshed: no age
+  // limit, but root's alone. `ownerUid` is a test's stand-in for root; parseArgs never sets it. A copy that can't be used
+  // blocks, saying how to switch the machine-wide guard off (guard b).
+  const snap = args.machineWide ? readSnapshot(args.snapshot, { maxAgeMs: Infinity, ownerUid: args.ownerUid ?? 0 }) : readSnapshot(args.snapshot);
+  const broken = (why) => block(args.machineWide ? `${why}; ${MACHINE_WIDE_WAY_OUT}` : why);
+  if (!snap.ok) return broken(snap.reason);
   const prod = snap.rules.production;
   if (!prod || !Array.isArray(prod.env_files) || !Array.isArray(prod.programs) || !Array.isArray(prod.hosts)) {
-    return block('the rules snapshot has no production block');
+    return broken('the rules snapshot has no production block');
   }
   // A Mac disk does not care about letter case, so names are compared folded (audit R-0b-44 round 2 MAT-2).
   const envFiles = prod.env_files.map((f) => fold(f));
@@ -349,31 +559,71 @@ export function decide(input, args) {
   };
   // A word naming a production settings file by its short name or a wildcard (`p*.x`), which a
   // `cd` beforehand could point at the real file (audit R-0b-44 M-5).
+  // The machine-wide form (#487 r2 m1) judges a wildcard only in the folder it is read in, when that folder is certain:
+  // `wildFolder` is the call's own folder when the command is plainly readable and changes folder nowhere (no cd, pushd,
+  // popd), else null and the wildcard matches by name alone, as in the role form. So `ls -d .*` in a project passes for
+  // every session, and `ls -d .*` in the production file's own folder, or `cat /srv/app/p*` anywhere, is still blocked.
+  let wildFolder = null;
+  // A wildcard the shell itself expands: every place it is written in the command stands alone, unquoted and not after
+  // `=` (`'.p*'`, `.p\*` and `--include=.p*` are patterns a program matches in some other folder).
+  let wildRaw = '';
+  // Only in the first command of the line (#487 r4 m1): a command before a later one may have changed folder in a way the
+  // guard does not know (a function, an alias, a tool of its own).
+  let wildEnd = 0;
+  const expandedHere = (w) => {
+    const at = [...wildRaw.matchAll(new RegExp(w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'))];
+    return at.length > 0 && at.every((m) => m.index + w.length <= wildEnd && /(^|[\s;&|(])$/.test(wildRaw.slice(0, m.index)) && /^($|[\s;&|)])/.test(wildRaw.slice(m.index + w.length)));
+  };
   const namesEnv = (w) => {
     const name = basename(w);
     // A name of stars alone (`dist/*`) names no file in particular (L46; round 3 MAT-14).
     if (!name || /^\*+$/.test(name)) return false;
     let re = null;
     try { re = /[*?[]/.test(name) ? globRe(fold(name), 'i') : null; } catch { return true; }
-    return envFiles.some((f) => (re ? re.test(basename(f)) : basename(f) === fold(name)));
+    if (!re) return envFiles.some((f) => basename(f) === fold(name));
+    const dir = dirname(w);
+    if (wildFolder === null || /[*?[~$]/.test(dir) || !expandedHere(w)) return envFiles.some((f) => re.test(basename(f)));
+    const at = resolve(wildFolder, dir);
+    const here = [at, realFolder(at)].filter(Boolean).map(fold);
+    return envFiles.some((f) => re.test(basename(f)) && [f, landingPath(f)].filter(Boolean).some((x) => here.includes(fold(dirname(x)))));
   };
   for (const p of toolPaths(input)) if (touchesEnv(p)) return block(`"${p}" is a production settings file`);
 
+  // The machine-wide form (L1044 M1) blocks production names only: a production settings file on a tool path or in a
+  // command's words, a production program (also through a package runner) and a host. It never applies the role guard's
+  // shell-shape and whole-folder rules to every session on the Mac (the owner's and the lead's normal work); role sessions
+  // keep them through their own settings. Words are read as written, so a name behind `$VAR` or `$(…)` is not seen: the
+  // ruled trade (L1044), and the role guard is the one that refuses such shapes.
+  const wide = args.machineWide === true;
   if (input.tool_name === 'Bash') {
     // A short name is read from the session's folder; without it the guard can't tell (lane 3, R-0b-70).
-    if (typeof input.cwd !== 'string' || !isAbsolute(input.cwd)) return block('the call gives no working folder, so a short file name can\'t be checked');
+    if (!wide && (typeof input.cwd !== 'string' || !isAbsolute(input.cwd))) return block('the call gives no working folder, so a short file name can\'t be checked');
     // Read raw where a here-document matters: joining lines first could move where its body ends (L46).
     const raw = String(input.tool_input?.command ?? '');
     const cmd = joinLines(raw);
     // Shapes no hook can read are refused as a class (lib.mjs `unreadable`; R-0b-44 round 2 MAT-1, R-0b-70).
     const why = unreadable(raw);
-    if (why) return block(`${why}; write the command out plainly`);
+    if (why && !wide) return block(`${why}; write the command out plainly`);
+    // The machine-wide form refuses by default (#487 r5, L1075): any word of the raw line naming a production program
+    // refuses it, unless the whole line is one of the three allowed shapes or the word is a path that can't be one.
+    if (wide && !allowedShape(raw)) {
+      const named = programInLine(raw, programs, input.cwd);
+      if (named) return block(`"${named}" reaches production: the line names the production program "${named}"; on this Mac ${ALLOWED_SHAPES}`);
+    }
     // Each protected file as listed and where it really is (a folder link, or /tmp on a Mac), folded.
     const listed = [...prod.env_files, ...(Array.isArray(snap.rules.secrets?.paths) ? snap.rules.secrets.paths : [])].filter((f) => typeof f === 'string' && isAbsolute(f));
     const protectedFiles = [...new Set(listed.flatMap((f) => [f, landingPath(f)]).filter(Boolean).map(fold))];
-    const folderWhy = folderWriteWhy(raw, { cwd: input.cwd, protectedFiles, home: process.env.HOME || homedir(), projectDir: process.env.CLAUDE_PROJECT_DIR });
+    // The folder a wildcard is read in is certain (m1 above) only when nothing changes folder, a string handed to a shell
+    // included (its words are read below too).
+    const within = [...commandsWithin(raw)];
+    // Nor when a program that matches patterns in folders of its own runs (`find /srv -name .p*`: bash hands an unmatched
+    // wildcard on as written).
+    if (wide && !why && typeof input.cwd === 'string' && isAbsolute(input.cwd)
+      && !within.some((c) => FOLDER_CHANGERS.includes(fold(programOf(c) ?? '')) || PATTERN_TAKERS.includes(fold(programOf(c) ?? '')))) { wildFolder = input.cwd; wildRaw = raw; wildEnd = firstCommandEnd(raw); }
+    const folderWhy = wide ? null : folderWriteWhy(raw, { cwd: input.cwd, protectedFiles, home: process.env.HOME || homedir(), projectDir: process.env.CLAUDE_PROJECT_DIR });
     if (folderWhy) return block(folderWhy);
-    for (const c of shellCommands(raw)) {
+    // The role form's read of each command (the machine-wide form read every word above).
+    for (const c of wide ? [] : commandsWithin(raw)) {
       const prog = programOf(c);
       if (programs.includes(fold(prog))) return block(`"${prog}" reaches production`);
       // Package runners that would start the program: npx <p>, bunx <p>, pnpm dlx <p>, npm exec <p>.
@@ -381,8 +631,12 @@ export function decide(input, args) {
         if (c.slice(1).some((w) => programs.includes(fold(basename(w.replace(/^--?[a-z-]+=/, '').split('@')[0]))))) return block('a package runner starts a production program');
       }
     }
-    // Each word as the shell would expand its braces, and the value after `=` too (`of=<file>`, `F=<file>`).
-    for (const word of bothWords(cmd)) {
+    // Each word as the shell would expand its braces, and the value after `=` too (`of=<file>`, `F=<file>`). The machine-wide
+    // form reads the words of a string handed to a shell (`bash -c "cd /srv && cat p*"`) too (#487 r3: the role form refuses
+    // those shapes), and in a shape no hook can read (`python3 -c "open('/srv/x')"`) every word-like run of its text.
+    // A substitution inside quotes (`echo "$(cat p*)"`) is read as its own words too (#487 r4).
+    const words = wide ? [...bothWords(cmd), ...within.flat(), ...(why ? [...wordsIn(raw), ...shellWords(raw.replace(/["']/g, ' '))] : [])] : bothWords(cmd);
+    for (const word of words) {
       for (const w of expandBraces(word)) {
         if (prod.hosts.some((h) => fold(w).includes(fold(h)))) return block('the command names a production host');
         const forms = [w, ...(w.includes('=') ? [w.slice(w.indexOf('=') + 1)] : [])];
@@ -395,4 +649,5 @@ export function decide(input, args) {
   return pass();
 }
 
-if (isMain(import.meta.url)) runHook(decide);
+// The one hook with a machine-wide form (L1031): `--machine-wide --snapshot <root's copy>`, from managed-settings.json.
+if (isMain(import.meta.url)) runHook(decide, {}, { machineWide: true });

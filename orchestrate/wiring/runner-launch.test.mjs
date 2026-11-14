@@ -172,3 +172,73 @@ test('#439 r1 c1: the launch hands the render and the check the same lstat and r
     assert.deepEqual(seen, { render: [realpath, lstat], check: [realpath, lstat] });
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
+
+test('#456 runLocked self-review M2: check 4\'s install phase, rendered and checked for real, keeps the runner wall and allows the registry\'s hosts', () => {
+  const { d, runner } = runnerDirs();
+  try {
+    const s = walledLaunchSettings(input('editing', runner));
+    const i = walledLaunchSettings(input('editing', runner, { phase: 'install', registryHosts: ['registry.npmjs.org'] }));
+    assert.equal(i.ok, true, i.reason);
+    assert.ok(i.settings[S.sandbox][S.filesystem][S.denyRead].includes(runner.requestsDir), 'the wall stays on for the install');
+    assert.ok(JSON.stringify(i.settings).includes('registry.npmjs.org'), 'the registry is allowed');
+    assert.equal(JSON.stringify(s.settings).includes('registry.npmjs.org'), false, 'and only for the install');
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+// #463 r1 M1 (L991): the save-work job's settings. The save phase is the session's walls with the network off, and only
+// the outbox as an extra folder (no Bob folder); only a worker has one.
+test('#463 r1 M1: the save phase renders the session\'s walls with no network and only the outbox beside its folder; it is a worker\'s only', () => {
+  const { d, runner } = runnerDirs();
+  try {
+    const r = walledLaunchSettings(input('editing', runner, { phase: 'save', product: { commands: { test: 'npm test' }, hosts: ['x.example'] }, rulesHosts: ['x.example'] }));
+    assert.equal(r.ok, true, r.reason);
+    assert.deepEqual(r.settings[S.sandbox][S.network][S.allowedDomains], [], 'no host, not even the product\'s');
+    assert.deepEqual(r.settings[S.permissions][S.additionalDirectories], [PATHS.outbox]);
+    for (const k of [S.sandboxEnabled, S.failIfUnavailable]) assert.equal(r.settings[S.sandbox][k], true, k);
+    assert.equal(r.settings[S.sandbox][S.allowUnsandboxedCommands], false);
+    assert.ok(r.settings[S.sandbox][S.filesystem][S.denyRead].includes(runner.requestsDir), 'the runner wall stands');
+    assert.match(walledLaunchSettings(input('script', runner, { profile: DESIGN_PROFILES.script, phase: 'save' })).reason, /only a worker has a save step/);
+    assert.match(walledLaunchSettings(input('editing', runner, { phase: 'saved' })).reason, /bad phase/);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+// The probe: Seatbelt (which Claude Code's shell sandbox runs on), given what the rendered save file lets a command write
+// (its folder, the copy's .git, and the outbox; the denyWrite list over them), makes the real bundle and moves it into the
+// outbox, and refuses a write to the copy's files, a dot file in the outbox, or anywhere else.
+test('#463 r1 M1: under macOS\'s sandbox, the rendered save settings let a real bundle be made in .git and moved into the outbox, and nothing else', {
+  skip: process.platform !== 'darwin' || !existsSync('/usr/bin/sandbox-exec') ? 'needs macOS sandbox-exec' : false,
+}, () => {
+  const { d, runner } = runnerDirs();
+  try {
+    const copy = join(d, 'copy'); const outbox = join(d, 'outbox'); mkdirSync(copy); mkdirSync(outbox);
+    const git = (...a) => spawnSync('git', ['-C', copy, '-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false', ...a], { encoding: 'utf8' });
+    assert.equal(git('init', '-q').status, 0); writeFileSync(join(copy, 'a.txt'), 'a\n');
+    assert.equal(git('add', 'a.txt').status, 0); assert.equal(git('commit', '-qm', 'a').status, 0, 'a commit to bundle');
+    const r = walledLaunchSettings(input('editing', runner, { phase: 'save', paths: { ...PATHS, copy, outbox } }));
+    assert.equal(r.ok, true, r.reason);
+    const fsw = r.settings[S.sandbox][S.filesystem];
+    const gitDir = join(copy, '.git');
+    // The writable folders: the job's own (the copy's .git, its cwd) and the extra ones, the outbox only.
+    const writable = [gitDir, ...r.settings[S.permissions][S.additionalDirectories]];
+    assert.deepEqual(writable, [gitDir, outbox]);
+    const rx = (g) => `^${g.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\/\*\*\//g, '/(.*/)?').replace(/\*\*/g, '.*').replace(/\*/g, '[^/]*')}`;
+    const q = (s) => JSON.stringify(s);
+    const deny = fsw[S.denyWrite].map((g) => (/[*]/.test(g) ? `(deny file-write* (regex ${q(rx(g))}))` : `(deny file-write* (subpath ${q(g)}))`)).join('');
+    const profile = `(version 1)(allow default)(deny file-write* (require-not (require-any ${writable.map((p) => `(subpath ${q(p)})`).join(' ')} (subpath "/dev"))))${deny}`;
+    const sb = (cmd, args, cwd = gitDir) => spawnSync('/usr/bin/sandbox-exec', ['-p', profile, cmd, ...args], { encoding: 'utf8', cwd });
+    const partial = join(gitDir, 'orch-save-C-1.bundle.partial'); const bundle = join(outbox, 'bundle-C-1.bundle');
+    const made = sb('/usr/bin/env', ['git', '--git-dir', gitDir, 'bundle', 'create', partial, '--all']);
+    assert.equal(made.status, 0, `the bundle was not made: ${made.stderr}`);
+    const mv = sb('/bin/mv', [partial, bundle]);
+    assert.equal(mv.status, 0, `the bundle was not moved: ${mv.stderr}`);
+    assert.equal(spawnSync('git', ['bundle', 'verify', bundle], { cwd: copy, encoding: 'utf8' }).status, 0, 'a whole bundle');
+    // Outside: the copy's files, a dot file in the outbox, a folder beside them.
+    for (const to of [join(copy, 'a.txt'), join(copy, 'b.txt'), join(outbox, '.partial'), join(d, 'elsewhere.txt')]) {
+      const w = sb('/bin/sh', ['-c', `echo x > ${q(to)}`]);
+      assert.notEqual(w.status, 0, `a write to ${to} was let through`);
+    }
+    assert.equal(readFileSync(join(copy, 'a.txt'), 'utf8'), 'a\n');
+    for (const f of [join(copy, 'b.txt'), join(outbox, '.partial'), join(d, 'elsewhere.txt')]) assert.equal(existsSync(f), false, f);
+    assert.deepEqual(readdirSync(outbox), ['bundle-C-1.bundle']);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
