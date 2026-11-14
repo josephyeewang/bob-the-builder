@@ -51,6 +51,8 @@
 // enabledPlugins is no longer written (L1114) and shows NOT USED, not counted.
 // apiKeyHelper and disableAllHooks (REFUSED_SETTINGS) are not proven: the launcher refuses them in every role file, and
 // the run says so.
+// What claude does that this harness reads (its start message, its warnings, its result line) was read in the pinned
+// version's own code (checked: claude-code 2.1.316).
 
 import { closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync, writeSync, fsyncSync, chmodSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';

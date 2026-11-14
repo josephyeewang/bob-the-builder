@@ -16,7 +16,7 @@ import { REVIEW_ROLES, RUNNER_ROLES } from '../../../shared/review-roles.mjs';
 
 const tmp = () => tempDir('orch-set-');
 
-// Sandbox setting names claude 2.1.316 reads (from its own code, #410 r2 M1) that the renderer never writes: each one is
+// Sandbox setting names claude 2.1.316 reads (from its own code, #410 r2 M1; checked: claude-code 2.1.316) that the renderer never writes: each one is
 // refused in a role file and in the machine-wide file. Recheck on every pinned upgrade.
 const WIDENING_TOP = ['enabledPlatforms', 'allowAppleEvents', 'autoAllowBashIfSandboxed', 'enableWeakerNestedSandbox', 'enableWeakerNetworkIsolation',
   'allowNestedUserNamespaces', 'credentials', 'ripgrep', 'bwrapPath', 'socatPath', 'ignoreViolations', 'somethingNew'];
@@ -524,7 +524,7 @@ test('L881: the shell\'s write wall between sessions: the only added folders are
     // With no added folders at all, too (#410 r1 A11).
     assert.match(drift((c) => { delete c[S.permissions][S.additionalDirectories]; c[S.sandbox][S.filesystem][key] = ['/w/outbox-2']; }).reason ?? '', new RegExp(`holds ${key}`), `${key}, no added folders`);
   }
-  // Any sandbox key the renderer does not write (#410 r1 m3), each name claude 2.1.316 reads (#410 r2 m1).
+  // Any sandbox key the renderer does not write (#410 r1 m3), each name claude 2.1.316 reads (#410 r2 m1; checked: claude-code 2.1.316).
   for (const k of WIDENING_TOP) assert.match(drift((c) => { c[S.sandbox][k] = true; }).reason ?? '', new RegExp(`sandbox holds ${k};`), k);
   for (const k of WIDENING_NETWORK) assert.match(drift((c) => { c[S.sandbox][S.network][k] = ['x']; }).reason ?? '', new RegExp(`network holds ${k};`), `network ${k}`);
   for (const k of WIDENING_FILESYSTEM) assert.match(drift((c) => { c[S.sandbox][S.filesystem][k] = true; }).reason ?? '', new RegExp(`filesystem holds ${k};`), `filesystem ${k}`);
@@ -545,7 +545,7 @@ test('L881: the shell\'s write wall between sessions: the only added folders are
   const noProfile = structuredClone(s); noProfile[S.permissions][S.additionalDirectories].push('/w/outbox-2');
   assert.match(checkSettings(noProfile).reason ?? '', /beyond the session's own outbox/);
   // The machine-wide file (#410 r1 M1, r2 M1, launch check 10): its sandbox block is an allow-list, each key with its
-  // one safe value; every other key claude 2.1.316 reads from it is refused (one case per name, r2 m1).
+  // one safe value; every other key claude 2.1.316 reads from it is refused (one case per name, r2 m1; checked: claude-code 2.1.316).
   const mw = (sb) => checkSettings({ [S.sandbox]: sb }, { machineWide: true });
   assert.equal(mw({ [S.sandboxEnabled]: true, [S.failIfUnavailable]: true, [S.allowUnsandboxedCommands]: false,
     [S.network]: { [S.strictAllowlist]: true, deniedDomains: ['example.com'], allowManagedDomainsOnly: true }, [S.filesystem]: { [S.denyRead]: ['/x'], [S.denyWrite]: ['/y'] } }).ok, true);
