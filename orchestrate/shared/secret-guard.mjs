@@ -93,23 +93,14 @@ function addBytes(bytes) {
 }
 
 /**
- * The text with every %XX (and escape's %uXXXX) decoded, byte by byte: a % that starts no such run stays as it is, so
- * a malformed one never throws; bytes that are not valid UTF-8 read as U+FFFD, as the rest of the text does.
+ * The text with every %XX (and escape's %uXXXX) decoded: a run of %XX is one byte string, read as UTF-8 (bytes that are
+ * not valid UTF-8 read as U+FFFD); a % that starts no such run stays as it is, so a malformed one never throws. One
+ * global replace, so it is linear in the text (L1206 m1: the first form sliced at every character).
  */
+const PERCENT_RUN = /(?:%[0-9a-f]{2})+|%u[0-9a-f]{4}/gi;
 function percentDecoded(s) {
   if (!s.includes('%')) return s;
-  const out = []; let run = [];
-  const flush = () => { if (run.length) { out.push(Buffer.from(run).toString('utf8')); run = []; } };
-  for (let i = 0; i < s.length;) {
-    const two = /^%([0-9a-fA-F]{2})/.exec(s.slice(i, i + 3));
-    if (two) { run.push(parseInt(two[1], 16)); i += 3; continue; }
-    flush();
-    const u = /^%u([0-9a-fA-F]{4})/.exec(s.slice(i, i + 6));
-    if (u) { out.push(String.fromCharCode(parseInt(u[1], 16))); i += 6; continue; }
-    out.push(s[i]); i += 1;
-  }
-  flush();
-  return out.join('');
+  return s.replace(PERCENT_RUN, (m) => (m[1] === 'u' || m[1] === 'U' ? String.fromCharCode(parseInt(m.slice(2), 16)) : Buffer.from(m.replace(/%/g, ''), 'hex').toString('utf8')));
 }
 
 /** True when this one spelling of the text holds a registered value as written or in a listed encoding. */
@@ -139,11 +130,33 @@ export function refuseSecretArgs(what, parts) {
 // The parts of one call's command line: the program, each argument, and what the options put on it (argv0, a shell
 // named by path, fork's execPath and execArgv). Options sit after the arguments, or in their place: a skipped
 // (undefined or null) argument list leaves them at a[2], as in spawn(cmd, undefined, { argv0 }) (L1196 Minor 1).
-function partsOf(name, a) {
+export function partsOf(name, a) {
   const parts = [a[0]];
   let opts;
   if (Array.isArray(a[1])) { parts.push(...a[1]); opts = a[2]; } else if (a[1] === undefined || a[1] === null) opts = a[2]; else opts = a[1];
   return [...parts, ...optionParts(opts)];
+}
+/**
+ * The call's arguments with every command-line part made a string once (L1206 m3): the program, each argument, and the
+ * options' argv0, execPath, a non-boolean shell and execArgv. The check reads these strings and the start is handed
+ * exactly them, so an object whose toString answers differently on a later call can't put something else on the line.
+ * The caller's options object is copied, never changed. A part that is undefined or null is left for Node to judge.
+ */
+const asText = (x) => (x === undefined || x === null || typeof x === 'string' ? x : String(x));
+export function pinned(a) {
+  const b = [...a];
+  if (b.length) b[0] = asText(b[0]);
+  let at;
+  if (Array.isArray(b[1])) { b[1] = b[1].map(asText); at = 2; } else if (b[1] === undefined || b[1] === null) at = 2; else at = 1;
+  const o = b[at];
+  if (o && typeof o === 'object' && !Array.isArray(o)) {
+    const c = { ...o };
+    for (const k of ['argv0', 'execPath']) if (k in c) c[k] = asText(c[k]);
+    if (c.shell !== undefined && typeof c.shell !== 'boolean') c.shell = asText(c.shell);
+    if (Array.isArray(c.execArgv)) c.execArgv = c.execArgv.map(asText);
+    b[at] = c;
+  }
+  return b;
 }
 function optionParts(opts) {
   if (!opts || typeof opts !== 'object') return [];
@@ -164,11 +177,11 @@ function install() {
     if (typeof real !== 'function' || real[WRAPPED]) continue;
     // The label is the start function's name only: the program's own name could be the secret.
     const check = (a) => { if (SECRETS.size) refuseSecretArgs(`a program (${name})`, partsOf(name, a)); };
-    const guarded = function (...a) { check(a); return Reflect.apply(real, this, a); };
+    const guarded = function (...a) { const b = pinned(a); check(b); return Reflect.apply(real, this, b); };
     // exec and execFile carry their own promisified form (util.promisify uses it), which starts the program without
     // going through the function above, so it is wrapped too.
     const custom = real[PROMISIFIED];
-    if (typeof custom === 'function') guarded[PROMISIFIED] = function (...a) { check(a); return Reflect.apply(custom, this, a); };
+    if (typeof custom === 'function') guarded[PROMISIFIED] = function (...a) { const b = pinned(a); check(b); return Reflect.apply(custom, this, b); };
     guarded[WRAPPED] = true;
     cp[name] = guarded;
   }
@@ -177,6 +190,12 @@ function install() {
   const proto = cp.ChildProcess?.prototype; const realSpawn = proto?.spawn;
   if (typeof realSpawn === 'function' && !realSpawn[WRAPPED]) {
     const guarded = function (options) {
+      // The parts are made strings once in the options themselves (Node's own options object, or the caller's when it
+      // calls this directly), since Node reads its stdio and more back from that same object.
+      if (options && typeof options === 'object') {
+        if ('file' in options) options.file = asText(options.file);
+        if (Array.isArray(options.args)) options.args = options.args.map(asText);
+      }
       if (SECRETS.size) refuseSecretArgs('a program (ChildProcess.spawn)', [options?.file, ...(Array.isArray(options?.args) ? options.args : [])]);
       return Reflect.apply(realSpawn, this, [options]);
     };

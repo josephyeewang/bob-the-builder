@@ -7,7 +7,7 @@ import { chmodSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { tempDir } from './test-tmp.mjs';
-import { registerSecret, holdsSecret, refuseSecretArgs, guardInstalled, MIN_SECRET } from './secret-guard.mjs';
+import { registerSecret, holdsSecret, refuseSecretArgs, guardInstalled, MIN_SECRET, partsOf, pinned } from './secret-guard.mjs';
 import { limitedSync } from '../modules/M11-dispatcher/sync-limit.mjs';
 import { safeGitEnv } from '../modules/M4-workshop/git/safe-git.mjs';
 import { tokenConfig } from '../modules/M4-workshop/git/push.mjs';
@@ -264,4 +264,66 @@ test('L1196 Minor 3: base64 wrapped at 64 or 76 columns and hex with spaces betw
   assert.equal(holdsSecret(hex.toUpperCase().match(/../g).join(' ')), true, 'upper hex with spaces');
   assert.equal(holdsSecret(hex.match(/.{1,32}/g).join('\n')), true, 'hex wrapped (xxd -p)');
   assert.equal(holdsSecret(wrap(Buffer.from('nothing secret at all, just text that is long enough').toString('base64'), 64)), false);
+});
+
+// --- L1206 (the #581 r2 audit) ---------------------------------------------------------------------------------------
+
+test('L1206 m1: a big argument with a % in it is checked in linear time', () => {
+  registerSecret(fresh());
+  for (const big of ['%'.repeat(1 << 20), `${'a%2'.repeat(350_000)}`, `${'%41'.repeat(350_000)}`, `${'x'.repeat(1 << 20)}%`]) {
+    const t0 = process.hrtime.bigint();
+    assert.equal(holdsSecret(big), false);
+    const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+    assert.ok(ms < 150, `${big.slice(0, 6)}… took ${ms.toFixed(1)} ms`);
+  }
+});
+
+test('L1206 m2: a query string\'s form, + for each space, is refused', () => {
+  const s = registerSecret('my secret pass phrase 42');
+  assert.equal(holdsSecret('k=my+secret+pass+phrase+42'), true);
+  assert.equal(holdsSecret('k=my+secret%20pass+phrase%2042'), true, 'mixed with %20');
+  assert.throws(() => spawnSync('/bin/echo', ['k=my+secret+pass+phrase+42']), refusedWithout(s));
+});
+
+test('L1206 m3: each part is made a string once; the start gets exactly the string that was checked', () => {
+  const s = registerSecret(fresh());
+  const shifty = () => { let n = 0; return { calls: () => n, toString() { n += 1; return n <= 2 ? 'harmless text' : s; } }; };
+  const evil = shifty();
+  const r = spawnSync('/bin/echo', [evil], { encoding: 'utf8' });
+  assert.equal(r.stdout.trim(), 'harmless text', 'the checked string is the one that ran');
+  assert.equal(evil.calls(), 1, 'read once');
+  const evil2 = shifty();
+  assert.equal(execFileSync('/bin/echo', [evil2], { encoding: 'utf8' }).trim(), 'harmless text');
+  // pinned: strings in, the caller's objects untouched.
+  const opts = { argv0: shifty(), execArgv: [shifty()], shell: '/bin/sh', env: {} };
+  const b = pinned(['/bin/echo', [shifty(), 'b'], opts]);
+  assert.deepEqual(b[1], ['harmless text', 'b']);
+  assert.equal(b[2].argv0, 'harmless text'); assert.deepEqual(b[2].execArgv, ['harmless text']); assert.equal(b[2].shell, '/bin/sh');
+  assert.notEqual(b[2], opts); assert.equal(typeof opts.argv0, 'object', 'the caller\'s options are copied, not changed');
+  assert.deepEqual(pinned(['ls', undefined, { argv0: undefined, shell: true }]), ['ls', undefined, { argv0: undefined, shell: true }]);
+  // ChildProcess.prototype.spawn pins its options in place.
+  const evil3 = shifty(); const o = { file: '/bin/echo', args: ['/bin/echo', evil3], envPairs: [], stdio: 'ignore' };
+  const child = new ChildProcess();
+  child.spawn(o);
+  assert.deepEqual(o.args, ['/bin/echo', 'harmless text']); assert.equal(evil3.calls(), 1);
+  child.kill();
+});
+
+test('L1206: each layer fails on its own: partsOf reads execArgv, execPath, a skipped list\'s options and a shell; trim and the PEM body each register a form only they give', () => {
+  const S = 'x'.repeat(4);   // partsOf is plain text plumbing: no secret needed
+  assert.deepEqual(partsOf('fork', ['m.mjs', [], { execArgv: [`--a=${S}`] }]), ['m.mjs', `--a=${S}`]);
+  assert.deepEqual(partsOf('fork', ['m.mjs', { execPath: `/p/${S}` }]), ['m.mjs', `/p/${S}`]);
+  assert.deepEqual(partsOf('spawn', ['/bin/echo', undefined, { argv0: S }]), ['/bin/echo', S]);
+  assert.deepEqual(partsOf('spawn', ['/bin/echo', null, { argv0: S }]), ['/bin/echo', S]);
+  assert.deepEqual(partsOf('execSync', ['true', { shell: `/sh/${S}` }]), ['true', `/sh/${S}`]);
+  assert.deepEqual(partsOf('execSync', ['true', { shell: true }]), ['true']);
+  // Trim: a value read with its newline; the trimmed text alone is held only because the trimmed form is registered.
+  const v = fresh(); registerSecret(`${v}\n`);
+  assert.equal(holdsSecret(`--t=${v}`), true);
+  // The PEM body's own text forms (its hex) come only from the body's registration; the DER's hex only from the bytes'.
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 1024 });
+  const pem = registerSecret(privateKey.export({ type: 'pkcs1', format: 'pem' }));
+  const body = pem.replace(/-----[^-]+-----/g, '').replace(/\s+/g, '');
+  assert.equal(holdsSecret(Buffer.from(body).toString('hex')), true, 'the body as text, in hex');
+  assert.equal(holdsSecret(Buffer.from(body, 'base64').toString('hex')), true, 'the key bytes, in hex');
 });
