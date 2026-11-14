@@ -5,7 +5,7 @@ import { chmodSync, linkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs
 import { join } from 'node:path';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { writeAnswer, ANSWER_FILE } from './owner-answer.mjs';
-import { readOwnerAnswer, sensorsPorts, storedUsage, ANSWER_STALE_MS } from './sensors-ports.mjs';
+import { readOwnerAnswer, sensorsPorts, storedUsage, ANSWER_AHEAD_MS, ANSWER_STALE_MS } from './sensors-ports.mjs';
 import { sensorsPass } from '../modules/M12-sensors/loop.mjs';
 import { memoryRecord, makeRecord } from '../shared/record.mjs';
 import { writeUsageFact, writeSignedInAccount } from '../modules/M12-sensors/state-facts.mjs';
@@ -88,6 +88,11 @@ test('L614: an old answer and one dated ahead are refused; a small clock drift i
     const [old, why] = await at(ANSWER_STALE_MS + 60_000);
     assert.equal(old, null); assert.match(why, /11 min old \(the owner's job may be failing to write; see its log\)/);
     assert.deepEqual(await at(-60_000), ['a', null], 'one minute of drift');
+    // The answer's own allowance, not pastTime's one minute (I4 fold, L1133): 90 s and exactly ANSWER_AHEAD_MS ahead pass, a ms more does not.
+    assert.equal(ANSWER_AHEAD_MS, 2 * 60_000);
+    assert.deepEqual(await at(-90_000), ['a', null], '90 s of drift');
+    assert.deepEqual(await at(-ANSWER_AHEAD_MS), ['a', null], 'the allowance itself');
+    assert.equal((await at(-ANSWER_AHEAD_MS - 1))[0], null, 'a ms past the allowance');
     const [ahead, why2] = await at(-3 * 60_000);
     assert.equal(ahead, null); assert.match(why2, /future/);
   } finally { w.done(); }

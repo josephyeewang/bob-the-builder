@@ -55,13 +55,17 @@
 //   size(session): the session's conversation file, read by M11 transcript.mjs, and its last write time. The activity
 //     state is left out (the tracker is not fed in the runner), so the Dispatcher's probe reads "can't tell" and the
 //     stop step waits for its late hard stop, never a guess of "safe".
-// Capability note (Principle 9): where Claude Code keeps a conversation is <config dir>/projects/<folder>/<session id>.jsonl,
-// <folder> being the working folder with each character but a letter or digit made "-", cut at 200 characters with "-" and
-// the folder's 32-bit string hash in base 36 added when longer. Read in 2.1.316's code (EL, Zhe, qw, Lm; checked:
-// claude-code 2.1.316), not yet proved live (L1139): TRANSCRIPT_PLACE_CHECKED_AGAINST stays null until Joe's live run
-// (L1134, L1137). 2.1.316 takes the folder from CLAUDE_CODE_PROJECT_DIR_NAME instead when CLAUDE_CONFIG_DIR is set; the
-// environment allow-list (env-check.mjs ROLE_ENV_ALLOWED, R-0b-156) keeps that name out of every session.
-// transcript.mjs's line shapes are a separate note.
+// Capability note (Principle 9): where Claude Code keeps a conversation (<config dir>/projects/<the working folder with
+// each character but a letter or digit made "-">/<session id>.jsonl) is CHECKED AGAINST NOTHING YET, as transcript.mjs's
+// line shapes are; void at the next pin. TRANSCRIPT_PLACE_CHECKED_AGAINST names the version once the live proof runs.
+// Read in 2.1.316's own code, 13 Nov 2026: that is its rule, applied to the working folder's real path put in NFC, and
+// a folder name over 200 characters is cut and given a hash suffix. projectFolderName (claude-folder-name.mjs, which
+// sets the rule out step by step) does the NFC step and the cut as read there; the real-path step it leaves to runner-main.mjs, which refuses to start unless copiesRoot is its own real
+// path (L1134, L1141; checked: claude-code 2.1.316). Not yet proved on a live session: the constant stays null until
+// the live proof (setup/live-proofs/transcript-place.mjs) finds every case's transcript where this code says.
+// 2.1.316 takes the folder from CLAUDE_CODE_PROJECT_DIR_NAME instead when CLAUDE_CONFIG_DIR is set; the environment
+// allow-list (env-check.mjs ROLE_ENV_ALLOWED, R-0b-156) keeps that name out of every session. Read (checked: claude-code 2.1.316), not yet proved live
+// (L1139). transcript.mjs's line shapes are a separate note.
 
 import { fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeSync, closeSync, constants } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -76,6 +80,7 @@ import { SESSION_ID } from '../shared/record.mjs';
 import { CARD_ID } from '../modules/M9-record/outbox.mjs';
 import { leaderStart } from './runner-loop.mjs';
 import { readTranscriptFile } from '../modules/M11-dispatcher/transcript.mjs';
+import { folderNameAsGiven, projectFolderName } from './claude-folder-name.mjs';
 import { launch } from '../modules/M4-workshop/launcher/launch.mjs';
 import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.mjs';
 import { prepareWorkerCopy } from '../modules/M4-workshop/launcher/worker-copy.mjs';
@@ -89,19 +94,14 @@ import { git } from '../modules/M4-workshop/git/safe-git.mjs';
 import { PUSH_FACT, bundleName } from '../modules/M4-workshop/git/push.mjs';
 import { PRODUCT_OUTBOX_ROLES } from '../shared/product-paths.mjs';
 import { workerPrompt } from '../modules/M5-review-audit/worker-prompt.mjs';
+import { SHA256 } from '../shared/plan-fingerprint.mjs';
 
 export const TRANSCRIPT_PLACE_CHECKED_AGAINST = null;   // read, not yet proved live (L1139): read in 2.1.316's code (see the note above); set to the version only after Joe's live run (L1134, L1137)
 const refuse = (reason) => ({ ok: false, reason });
 const notWired = (what) => refuse(`not wired: ${what}`);
 const SHA = /^[0-9a-f]{40}$/;
 
-/** Claude Code's folder for a working folder's conversations (2.1.316's rule: see the capability note above; checked: claude-code 2.1.316). */
-export const PROJECT_FOLDER_MAX = 200;
-const stringHash = (t) => { let h = 0; for (let i = 0; i < t.length; i++) h = ((h << 5) - h + t.charCodeAt(i)) | 0; return h; };
-export const projectFolderName = (cwd) => {
-  const s = String(cwd); const name = s.replace(/[^A-Za-z0-9]/g, '-');
-  return name.length <= PROJECT_FOLDER_MAX ? name : `${name.slice(0, PROJECT_FOLDER_MAX)}-${Math.abs(stringHash(s)).toString(36)}`;
-};
+export { folderNameAsGiven, projectFolderName };
 export const transcriptPath = ({ configDir, copy, sessionId }) => join(configDir, 'projects', projectFolderName(copy), `${sessionId}.jsonl`);
 
 /** size(session) → { size, lastWriteAt }, or a throw (the pass then lists no size). */
@@ -144,7 +144,6 @@ const WAITING_DONE_FOR = new Set(PRODUCT_OUTBOX_ROLES);
 const doneFor = (s, state) => INTAKE_DONE.has(state) && (state !== 'waiting' || WAITING_DONE_FOR.has(s.role));
 const noFactReader = () => ({ ok: false, reason: 'no Record fact reader is wired' });
 const noSessionReader = () => ({ ok: false, reason: 'no Record session reader is wired' });
-const SHA256 = /^[0-9a-f]{64}$/;
 // Not drained, and why (L896): a DRAIN_CAUSES name, so the runner can tell it once it lasts.
 const held = (cause) => {
   if (!DRAIN_CAUSES.includes(cause)) throw new Error(`no drain cause ${cause}`);

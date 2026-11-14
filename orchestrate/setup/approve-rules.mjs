@@ -46,21 +46,22 @@ import { moduleProblems } from '../modules/M10-rules/first-cutover.mjs';
 import { readOnlyClient, tokenFile } from '../modules/M6-merge-gate/watch-only.mjs';
 import { checkConfig } from '../wiring/dispatcher-wiring.mjs';
 import { privateFolder } from '../wiring/private-folder.mjs';
-import { readConfigFile } from './mac.mjs';
+import { linkNotFollowed, readConfigFile } from './mac.mjs';
+import { TTY_PATH } from './layout.mjs';
+import { SHA40 } from '../shared/plan-fingerprint.mjs';
 import { readUser } from './users-folders.mjs';
 import { installPaths } from './install.mjs';
 import { DISPATCHER_CONFIG, DISPATCHER_USER } from './dispatcher-setup.mjs';
 
 export const APPROVED_FILE = 'approved-rules.json';
 export const TOP_LINES = 25;
-const SHA = /^[0-9a-f]{40}$/;
 const MAX_LIST_BYTES = 1 << 20;
 
 /** The list's text → { product: [blob, ...] }, or a throw: an object whose every value is a list of 40-hex blobs. */
 export function parseList(text) {
   let v; try { v = JSON.parse(text); } catch { throw new Error(`${APPROVED_FILE} is not valid JSON`); }
   if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error(`${APPROVED_FILE} is not an object of product lists`);
-  for (const [k, l] of Object.entries(v)) if (!Array.isArray(l) || !l.every((b) => typeof b === 'string' && SHA.test(b))) throw new Error(`${APPROVED_FILE}: ${k} is not a list of blobs`);
+  for (const [k, l] of Object.entries(v)) if (!Array.isArray(l) || !l.every((b) => typeof b === 'string' && SHA40.test(b))) throw new Error(`${APPROVED_FILE}: ${k} is not a list of blobs`);
   return v;
 }
 
@@ -72,7 +73,7 @@ export function readListFile(file, { uid }) {
   let fd;
   try { fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) {
     if (e?.code === 'ENOENT') return { text: null };
-    throw new Error(e?.code === 'ELOOP' ? `${file} is a link, and a link is not followed` : `${file} can't be opened (${e?.code ?? e})`);
+    throw new Error(e?.code === 'ELOOP' ? linkNotFollowed(file) : `${file} can't be opened (${e?.code ?? e})`);
   }
   try {
     const st = fstatSync(fd);
@@ -103,7 +104,7 @@ export function writeListFile(file, text) {
  * is no terminal (a session without one). `isTty` and `ttyPath` are for tests.
  */
 /** The terminal itself, never standard input: the yes must come from the keyboard of the window sudo ran in. */
-export const TTY_PATH = '/dev/tty';
+export { TTY_PATH };
 export function readLineFromTty(prompt, { maxBytes = 200, isTty = () => isatty(0), ttyPath = TTY_PATH } = {}) {
   if (!isTty()) throw new Error('standard input is not a terminal (a pipe or a script?); run this yourself in the Terminal app');
   let fd;
@@ -127,7 +128,7 @@ export async function mainRules(gh, entry) {
   const ref = await gh.get(`${base}/git/ref/heads/${BRANCH}`);
   if (ref.status !== 200) throw new Error(`the ${BRANCH} branch read answered ${ref.status}`);
   const commit = ref.json?.object?.sha;
-  if (!SHA.test(commit ?? '')) throw new Error(`the ${BRANCH} branch read gave no commit`);
+  if (!SHA40.test(commit ?? '')) throw new Error(`the ${BRANCH} branch read gave no commit`);
   const file = await gh.get(`${base}/contents/${RULES_PATH}?ref=${commit}`);
   if (file.status !== 200) throw new Error(`the rules file read answered ${file.status}${file.status === 404 ? ` (no ${RULES_PATH} on ${BRANCH})` : ''}`);
   let got; try { got = rulesFileOf(file.json); } catch (e) { throw new Error(`main's rules file can't be used: ${e.message}`); }

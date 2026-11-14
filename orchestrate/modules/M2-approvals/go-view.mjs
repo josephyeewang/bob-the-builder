@@ -18,7 +18,7 @@
 // the lines in the decision pull request body are escaped (Minor 3: the title is the Lead's text).
 
 import { createHash } from 'node:crypto';
-import { TIER1_BAR, canonicalJson, planFingerprint } from '../../shared/plan-fingerprint.mjs';
+import { TIER1_BAR, canonicalJson, planFingerprint, SHA256 } from '../../shared/plan-fingerprint.mjs';
 import { planCheckProblem } from '../../shared/plan-review.mjs';
 import { LINE_BREAKS } from './payload.mjs';
 
@@ -26,7 +26,6 @@ const fail = (reason) => ({ ok: false, reason });
 // The first line at any break a screen may show (L787), the one class payload.mjs flattens titles at.
 const firstLine = (s) => String(s ?? '').split(LINE_BREAKS).map((l) => l.trim()).find(Boolean)?.slice(0, 160) ?? '';
 const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
-const SHA256 = /^[0-9a-f]{64}$/;
 
 // The fresh plan check a Tier-1 go needs is the one shared rule (shared/plan-review.mjs, L87); raiseGo (go.mjs)
 // applies it before the ask exists, goView again before the owner sees it.

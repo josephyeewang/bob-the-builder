@@ -49,6 +49,7 @@ import { aclProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { ANSWER_VERSION } from './owner-answer.mjs';
 import { USAGE_FACT } from '../modules/M11-dispatcher/usage.mjs';
 import { knownDoc } from '../modules/M12-sensors/facts.mjs';
+import { FUTURE_SKEW_MS, pastTime } from '../shared/still-waiting.mjs';
 
 /**
  * The `stored` reader over a Record: the usage fact it holds for the account, or null when it holds none. A failed read
@@ -120,8 +121,11 @@ export function answerFileProblem(st, ownerUid, file) {
 export function answerProblem(a, nowMs, staleMs = ANSWER_STALE_MS) {
   const bad = shapeProblem(a);
   if (bad) return bad;
-  const age = nowMs - Date.parse(a.observed_at);
-  if (age < -ANSWER_AHEAD_MS) return 'the owner\'s answer is dated in the future';
+  // Read through pastTime (I4), with this answer's own allowance: null is a time more than ANSWER_AHEAD_MS ahead (the shape
+  // check above already refused one that can't be read).
+  const at = pastTime(a.observed_at, nowMs + ANSWER_AHEAD_MS - FUTURE_SKEW_MS);
+  if (at === null) return 'the owner\'s answer is dated in the future';
+  const age = nowMs - at;
   if (age > staleMs) return `the owner's answer is ${Math.round(age / 60_000)} min old (the owner's job may be failing to write; see its log)`;
   return null;
 }
