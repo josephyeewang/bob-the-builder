@@ -30,6 +30,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { installPaths } from './install.mjs';
+import { notPlainFile } from './mac.mjs';
 import { COPY_HOOKS, managedGuardDir, managedRulesPath } from './layout.mjs';
 import { rulesProblems } from './review-config.mjs';
 import { CLAUDE_FILE, checkMachineWide, listDropIns, readPlist } from '../modules/M4-workshop/launcher/env-check.mjs';
@@ -144,7 +145,7 @@ export function planManagedSettings(io, cfg, { readSource = (p) => io.readSource
   // A managed-settings.json already there: replaced only when it is this guard (an earlier run), never anything else.
   let had = null;
   const fileSt = dirSt?.isDirectory() ? lstatOrNull(() => io.lstat(CLAUDE_FILE)) : null;
-  if (fileSt && !fileSt.isFile()) problems.push(`${CLAUDE_FILE} is not a plain file; nothing was changed`);
+  if (fileSt && !fileSt.isFile()) problems.push(notPlainFile(CLAUDE_FILE));
   else if (fileSt) {
     try { had = io.readText(CLAUDE_FILE); } catch (e) { problems.push(`${CLAUDE_FILE} can't be read (${e?.code ?? 'error'})`); }
     let obj = null; try { obj = JSON.parse(had); } catch { /* refused below */ }

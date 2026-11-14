@@ -598,11 +598,6 @@
    "why": "baseline (L1078)"
   },
   {
-   "file": "modules/M4-workshop/send-safe/hook-store.mjs",
-   "line": "&& typeof h.since === 'string' && Number.isFinite(Date.parse(h.since)) && (h.sessionId === null) === (h.role === null);",
-   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
-  },
-  {
    "file": "modules/M6-merge-gate/gate.mjs",
    "line": ".filter((x) => typeof x === 'string' && Number.isFinite(Date.parse(x))).sort()[0] ?? iso();",
    "why": "baseline (L1078)"
@@ -776,11 +771,6 @@
    "file": "wiring/sensors-ports.mjs",
    "line": "if (w.resets_at !== null && Date.parse(w.resets_at) - Date.parse(a.observed_at) > WINDOW_MS[k] + SAME_WINDOW_MS) return `the ${k} reset time is further out than one ${k === 'h5' ? '5-hour' : 'weekly'} window from the reading`;",
    "why": "baseline (L1078)"
-  },
-  {
-   "file": "wiring/sensors-ports.mjs",
-   "line": "const age = nowMs - Date.parse(a.observed_at);",
-   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
   },
   {
    "file": "wiring/sensors-ports.mjs",
@@ -1001,15 +991,6 @@
   },
   {
    "kind": "definition",
-   "copy": "LAUNCHCTL = '/bin/launchctl'",
-   "files": [
-    "setup/daemons.mjs",
-    "setup/owner-answer-setup.mjs"
-   ],
-   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
-  },
-  {
-   "kind": "definition",
    "copy": "LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/",
    "files": [
     "modules/M13-ledger/alert-channel.mjs",
@@ -1074,16 +1055,6 @@
     "modules/M4-workshop/launcher/outbox.mjs"
    ],
    "why": "baseline (L1078)"
-  },
-  {
-   "kind": "definition",
-   "copy": "PATH = '/usr/bin:/bin:/usr/sbin:/sbin'",
-   "files": [
-    "setup/dispatcher-setup.mjs",
-    "setup/robot-setup.mjs",
-    "setup/sensors-setup.mjs"
-   ],
-   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
   },
   {
    "kind": "definition",
@@ -1230,24 +1201,6 @@
   },
   {
    "kind": "text",
-   "copy": " alert could not be queued; it is tried again next pass",
-   "files": [
-    "modules/M11-dispatcher/drain-alerts.mjs",
-    "modules/M11-dispatcher/interactive-holds.mjs"
-   ],
-   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
-  },
-  {
-   "kind": "text",
-   "copy": " and would drop it on the next update: install again (README, part 6)",
-   "files": [
-    "setup/dispatcher-setup.mjs",
-    "setup/sensors-setup.mjs"
-   ],
-   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
-  },
-  {
-   "kind": "text",
    "copy": " are not safe for root to work in (",
    "files": [
     "setup/extras.mjs",
@@ -1285,16 +1238,6 @@
   },
   {
    "kind": "text",
-   "copy": " in the copy is not root's alone: ",
-   "files": [
-    "setup/dispatcher-setup.mjs",
-    "setup/robot-setup.mjs",
-    "setup/sensors-setup.mjs"
-   ],
-   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
-  },
-  {
-   "kind": "text",
    "copy": " is not a plain file with one name",
    "files": [
     "modules/M4-workshop/launcher/accounts.mjs",
@@ -1302,24 +1245,6 @@
     "wiring/sensors-ports.mjs"
    ],
    "why": "baseline (L1078)"
-  },
-  {
-   "kind": "text",
-   "copy": " is not a plain file; nothing was changed",
-   "files": [
-    "setup/mac.mjs",
-    "setup/managed-settings.mjs"
-   ],
-   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
-  },
-  {
-   "kind": "text",
-   "copy": " is not in the copy (run dispatcher-config)",
-   "files": [
-    "setup/dispatcher-setup.mjs",
-    "setup/sensors-setup.mjs"
-   ],
-   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
   },
   {
    "kind": "text",
@@ -1378,24 +1303,6 @@
   },
   {
    "kind": "text",
-   "copy": " is root's 0644 and the config this setup writes",
-   "files": [
-    "setup/dispatcher-setup.mjs",
-    "setup/sensors-setup.mjs"
-   ],
-   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
-  },
-  {
-   "kind": "text",
-   "copy": " is that config, and the copy keeps it",
-   "files": [
-    "setup/dispatcher-setup.mjs",
-    "setup/sensors-setup.mjs"
-   ],
-   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
-  },
-  {
-   "kind": "text",
    "copy": " minutes old; the runner may be stopped",
    "files": [
     "modules/M4-workshop/launcher/review-runner.mjs",
@@ -1433,15 +1340,6 @@
   },
   {
    "kind": "text",
-   "copy": "), so root won't write in it; install the copy again (unload the jobs, remove ",
-   "files": [
-    "setup/dispatcher-setup.mjs",
-    "setup/sensors-setup.mjs"
-   ],
-   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
-  },
-  {
-   "kind": "text",
    "copy": ", above the installed copy, is a link (name the copy by its real path)",
    "files": [
     "modules/M4-workshop/launcher/install-check.mjs",
@@ -1475,15 +1373,6 @@
     "setup/review-config.mjs"
    ],
    "why": "baseline (L1078)"
-  },
-  {
-   "kind": "text",
-   "copy": ", run install), which carries ",
-   "files": [
-    "setup/dispatcher-setup.mjs",
-    "setup/sensors-setup.mjs"
-   ],
-   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
   },
   {
    "kind": "text",
@@ -1576,15 +1465,6 @@
     "modules/M11-dispatcher/gate.mjs"
    ],
    "why": "baseline (L1078)"
-  },
-  {
-   "kind": "text",
-   "copy": "config: product must be a product name (lower case letters, digits and -, a letter or digit first)",
-   "files": [
-    "wiring/dispatcher-wiring.mjs",
-    "wiring/sensors-wiring.mjs"
-   ],
-   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
   },
   {
    "kind": "text",
@@ -1731,24 +1611,6 @@
     "setup/watch-setup.mjs"
    ],
    "why": "baseline (L1078)"
-  },
-  {
-   "kind": "text",
-   "copy": "the install is not there yet (run the install first)",
-   "files": [
-    "setup/dispatcher-setup.mjs",
-    "setup/sensors-setup.mjs"
-   ],
-   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
-  },
-  {
-   "kind": "text",
-   "copy": "the installed copy is not root's alone (",
-   "files": [
-    "setup/dispatcher-setup.mjs",
-    "setup/sensors-setup.mjs"
-   ],
-   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
   },
   {
    "kind": "text",

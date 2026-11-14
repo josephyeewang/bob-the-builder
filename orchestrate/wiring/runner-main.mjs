@@ -46,7 +46,7 @@ import { foldKey } from '../shared/plan-fingerprint.mjs';
 import { loadMemory, processGroupPorts, runRunner } from './runner-loop.mjs';
 import { drainedPort, liveWallProblem, pauseLeadPort, productWallGap, saveSettingsName, saveWorkPort, sessionEnv, sessionSettingsOf, sizePort, startPort } from './runner-ports.mjs';
 import { workerChecks } from './runner-checks.mjs';
-import { holdersOf, readFactFile, readSessionFile } from '../modules/M4-workshop/launcher/review-runner-main.mjs';
+import { NO_BUDGET_PORTS, budgetShapeOk, holdersOf, readFactFile, readSessionFile } from '../modules/M4-workshop/launcher/review-runner-main.mjs';
 import { keepSnapshotFresh, writeSnapshot } from '../modules/M4-workshop/hooks/snapshot.mjs';
 import { spawn as childSpawn, spawnSync } from 'node:child_process';
 import { fullPath } from './runner-job.mjs';
@@ -458,7 +458,7 @@ export async function main(argv, { readConfig = (f) => { const self = selfPath()
   let budget = null; let bobManifest = null;
   if (c.budget !== undefined) {
     try { budget = await loadBudget(c.budget, { ...c, workerStatusFile: c.statusFile, workerUid: process.getuid() }); } catch (e) { log(`worker runner: the budget module could not be loaded (${e?.message ?? e}); no session starts`); }
-    if (budget && !['rules', 'rec', 'bandsNow', 'runningNow'].every((k) => budget[k])) { log('worker runner: the budget module gave no rules, rec, bandsNow and runningNow; no session starts'); budget = null; }
+    if (budget && !budgetShapeOk(budget)) { log(`worker runner: ${NO_BUDGET_PORTS}; no session starts`); budget = null; }
   }
   if (c.bobManifest !== undefined) {
     try { bobManifest = JSON.parse(readManifest(c.bobManifest)); } catch (e) { log(`worker runner: the Bob file list could not be read (${e?.message ?? e}); no session starts`); }

@@ -76,6 +76,8 @@ import { isAbsolute, join } from 'node:path';
 import { openRecord } from '../modules/M9-record/writer.mjs';
 import { makeReader, readProducts } from '../modules/M10-rules/reader.mjs';
 import { PRODUCT } from '../shared/product-paths.mjs';
+// The refusal for a config's product name, shared with the Sensors' wiring (sensors-wiring.mjs): one home (I7).
+export const PRODUCT_NAME_PROBLEM = 'config: product must be a product name (lower case letters, digits and -, a letter or digit first)';
 import { makeEngine } from '../modules/M10-rules/engine.mjs';
 import { ROLES_DIR } from '../modules/M10-rules/roles.mjs';
 import { makeRules } from '../shared/rules.mjs';
@@ -133,7 +135,7 @@ export function checkConfig(c, { keys = CONFIG_KEYS, paths = PATHS, optional = k
   const extra = Object.keys(c).filter((k) => !keys.includes(k) && !optional.includes(k));
   if (extra.length) throw new Error(`config: unknown key ${extra.join(', ')}`);
   // Setup's product rule (shared/product-paths.mjs PRODUCT, #378 r1 m3): the name its folders are made under.
-  if (typeof c.product !== 'string' || !PRODUCT.test(c.product)) throw new Error('config: product must be a product name (lower case letters, digits and -, a letter or digit first)');
+  if (typeof c.product !== 'string' || !PRODUCT.test(c.product)) throw new Error(PRODUCT_NAME_PROBLEM);
   for (const k of paths) if (typeof c[k] !== 'string' || !isAbsolute(c[k])) throw new Error(`config: ${k} must be an absolute path`);
   for (const k of optional) if (k in c && (typeof c[k] !== 'string' || !isAbsolute(c[k]))) throw new Error(`config: ${k} must be an absolute path when given`);
   if (c.hostLockStamp !== undefined && c.hostLockStamp === c.hostLockPath) throw new Error('config: hostLockStamp must be the copier\'s stamp, not host.lock\'s copy itself (hostLockPath)');

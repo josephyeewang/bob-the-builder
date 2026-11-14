@@ -30,6 +30,9 @@ import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { chainProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
 
+/** The refusal when a file setup would change is not a plain file (here and managed-settings.mjs): one home (I7). */
+export const notPlainFile = (path) => `${path} is not a plain file; nothing was changed`;
+
 /**
  * Set the owner and mode of the folder at `real` through an open handle. Refuses a link, anything that is not a folder, and
  * (when `ino` is given) a folder other than the one the plan saw. `want` = { uid, gid?, mode, ino?, dev? }; a missing gid
@@ -59,7 +62,7 @@ export function secureFile(real, want, { chown = fchownSync, chmod = fchmodSync 
   }
   try {
     const st = fstatSync(fd);
-    if (!st.isFile()) throw new Error(`${real} is not a plain file; nothing was changed`);
+    if (!st.isFile()) throw new Error(notPlainFile(real));
     if (want.ino !== undefined && (st.ino !== want.ino || st.dev !== want.dev)) throw new Error(`${real} is not the file the plan saw (it was replaced); nothing was changed`);
     chown(fd, want.uid, want.gid ?? st.gid);
     chmod(fd, want.mode);

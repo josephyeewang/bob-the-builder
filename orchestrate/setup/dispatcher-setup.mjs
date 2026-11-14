@@ -27,11 +27,11 @@ import { RUNNER_LOG } from '../modules/M4-workshop/launcher/review-daemons.mjs';
 import { FOLDERS } from '../modules/M4-workshop/launcher/review-runner.mjs';
 import { CONFIG_KEYS, checkConfig } from '../wiring/dispatcher-wiring.mjs';
 import { tokenPath } from './extras.mjs';
-import { dispatcherRulesPath, homeOf, privatePath } from './layout.mjs';
+import { JOB_PATH as PATH, dispatcherRulesPath, homeOf, privatePath } from './layout.mjs';
 import { installPaths, keepsNotWarning } from './install.mjs';
 import { readUser } from './users-folders.mjs';
 import { checkDispatcherKeys, dispatcherKeysOn } from './dispatcher-check.mjs';
-import { lockFolderProblem } from './robot-setup.mjs';
+import { inCopyNotRootsAlone, lockFolderProblem } from './robot-setup.mjs';
 
 export const DISPATCHER_JOB = 'dispatcher';
 export const DISPATCHER_CONFIG = 'dispatcher.json';
@@ -62,7 +62,6 @@ export const dispatcherDefaults = (cfg) => Object.freeze({
   tokenFile: tokenPath(cfg), approvalsStateDir: join(privatePath(cfg), 'approvals'),
 });
 const PLAIN_PATH = (p) => typeof p === 'string' && p.startsWith('/') && p !== '/' && posix.normalize(p) === p && !p.endsWith('/') && !/[\u0000-\u001f\u007f]/.test(p) && p.length <= 300;
-const PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
 export const DISPATCHER_OFF = 'the config does not turn the Dispatcher job on: add its "dispatcher" entry (README, part 6)';
 
 /**
@@ -152,7 +151,37 @@ export function copyKeeps(io, cfg, name = DISPATCHER_CONFIG) {
   if (cur.missing || cur.problem || !cur.link) return null;
   try { const u = JSON.parse(io.readText(join(P.installRoot, UPDATER_CONFIG))); return Array.isArray(u?.keep) && u.keep.includes(name); } catch { return null; }
 }
-const KEEPS_NOT = `the installed copy was made before the Dispatcher was set up, so its updater does not keep ${DISPATCHER_CONFIG} and would drop it on the next update: install again (README, part 6)`;
+/** Why a copy that does not keep `name` loses it (`who`: "the Dispatcher was", "the Sensors were"): one text for both configs (I7). */
+export const keepsNotText = (who, name) => `the installed copy was made before ${who} set up, so its updater does not keep ${name} and would drop it on the next update: install again (README, part 6)`;
+const KEEPS_NOT = keepsNotText('the Dispatcher was', DISPATCHER_CONFIG);
+/** The stop a config writer gives when the copy is not root's alone: `bad` why, `install` the copy's folder, `src` the base file. */
+export const copyNotRootsStop = (bad, install, src) => `the installed copy is not root's alone (${bad}), so root won't write in it; install the copy again (unload the jobs, remove ${install}, run install), which carries ${src} into it`;
+
+/**
+ * Null, or why the copy's config `name` is not root's alone in the copy and exactly `text`, with the copy keeping it
+ * (`keepsNot`: what to say when it does not). Read only. The Dispatcher's and the Sensors' config checks share it (I7).
+ */
+export function copyConfigProblem(io, cfg, name, text, keepsNot) {
+  const P = installPaths(cfg); const root = io.at(P.installRoot); const file = join(P.installRoot, name);
+  const keeps = copyKeeps(io, cfg, name);
+  if (keeps === null) return 'the install is not there yet (run the install first)';
+  let here = true; try { io.lstatReal(join(root, name)); } catch { here = false; }
+  if (!here) return keeps ? `${file} is not in the copy (run dispatcher-config)` : keepsNot;
+  const bad = installProblem(root, [join(root, name)], { owner: io.rootUid, top: io.prefix || '/' });
+  if (bad) return inCopyNotRootsAlone(name, bad);
+  const why = fileProblem(io, file, text, { inCopy: true });
+  if (why) return why;
+  return keeps ? null : keepsNot;
+}
+
+/** The writer's closing-check rows for a config: the base file `src`, and, once there is a copy, the copy's `name` (`copyProblem`). */
+export function configRows(io, cfg, { src, name, text, copyProblem }) {
+  const a = fileProblem(io, src, text);
+  return [
+    { ok: a === null, what: `${src} is root's 0644 and the config this setup writes`, ...(a ? { why: a } : {}) },
+    ...(copyKeeps(io, cfg, name) === null ? [] : [{ ok: copyProblem === null, what: `the copy's ${name} is that config, and the copy keeps it`, ...(copyProblem ? { why: copyProblem } : {}) }]),
+  ];
+}
 
 /**
  * Null, or why a root file is not exactly `want`: root's 0644, a plain file with one name, this text. `inCopy`: the file is in
@@ -237,7 +266,7 @@ export function planDispatcherConfig(io, cfg, { jobLive } = {}) {
     // The base file is still written, so the install that replaces the copy carries the new text and is not refused for it
     // (L757 r2 m1); then the command stops, naming the way out (README Part 3: a copy that is not root's is installed again).
     if (bad) {
-      const why = `the installed copy is not root's alone (${bad}), so root won't write in it; install the copy again (unload the jobs, remove ${P.install}, run install), which carries ${src} into it`;
+      const why = copyNotRootsStop(bad, P.install, src);
       ops.push({ text: `stop: ${why}`, run: () => { throw new Error(why); } });
       return { ops, problems: [], notes, warnings };
     }
@@ -254,16 +283,8 @@ export function planDispatcherConfig(io, cfg, { jobLive } = {}) {
 export function dispatcherConfigProblem(io, cfg) {
   const { config, problems } = dispatcherConfigFor(io, cfg);
   if (problems.length) return problems.join('; ');
-  const P = installPaths(cfg); const root = io.at(P.installRoot); const file = join(P.installRoot, DISPATCHER_CONFIG);
-  const keeps = copyKeeps(io, cfg);
-  if (keeps === null) return 'the install is not there yet (run the install first)';
-  let here = true; try { io.lstatReal(join(root, DISPATCHER_CONFIG)); } catch { here = false; }
-  if (!here) return keeps ? `${file} is not in the copy (run dispatcher-config)` : KEEPS_NOT;
-  const bad = installProblem(root, [join(root, DISPATCHER_CONFIG)], { owner: io.rootUid, top: io.prefix || '/' });
-  if (bad) return `${DISPATCHER_CONFIG} in the copy is not root's alone: ${bad}`;
-  const why = fileProblem(io, file, dispatcherConfigText(config), { inCopy: true });
+  const why = copyConfigProblem(io, cfg, DISPATCHER_CONFIG, dispatcherConfigText(config), KEEPS_NOT);
   if (why) return why;
-  if (!keeps) return KEEPS_NOT;
   // The Dispatcher's own lock: in orchestrate's home, a folder only it can write, every folder above root's (self-review m4).
   const orch = readUser(io, DISPATCHER_USER);
   const lock = lockFolderProblem(io, config.lockFile, [orch.uid]);
@@ -288,12 +309,7 @@ export function robotMatchProblem(io, cfg, config = dispatcherConfigFor(io, cfg)
 export function checkDispatcherConfig(io, cfg) {
   const { config, problems } = dispatcherConfigFor(io, cfg);
   if (problems.length) return [{ ok: false, what: 'the Dispatcher\'s config can be built from this setup', why: problems.join('; ') }];
-  const src = dispatcherSourcePath(cfg); const a = fileProblem(io, src, dispatcherConfigText(config));
-  const b = dispatcherConfigProblem(io, cfg);
-  return [
-    { ok: a === null, what: `${src} is root's 0644 and the config this setup writes`, ...(a ? { why: a } : {}) },
-    ...(copyKeeps(io, cfg) === null ? [] : [{ ok: b === null, what: `the copy's ${DISPATCHER_CONFIG} is that config, and the copy keeps it`, ...(b ? { why: b } : {}) }]),
-  ];
+  return configRows(io, cfg, { src: dispatcherSourcePath(cfg), name: DISPATCHER_CONFIG, text: dispatcherConfigText(config), copyProblem: dispatcherConfigProblem(io, cfg) });
 }
 
 /** Null, or check-dispatcher's FAILs in one line (NOT TRIED is not a FAIL). Load and place refuse on it, and daemons check FAILs on it (L807 m3).
