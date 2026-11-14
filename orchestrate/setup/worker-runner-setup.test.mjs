@@ -35,7 +35,8 @@ test('worker runner job: off without its entry; on, runner-main.mjs with the cop
   assert.deepEqual(onlyJobs(off, WORKER_RUNNER_JOB, { anyKnown: true }), [WORKER_RUNNER_JOB], 'a job the config has since turned off can still be taken out');
   assert.ok(OPTIONAL_JOBS.includes(WORKER_RUNNER_JOB));
   const cfg = parseInstallConfig({ ...RAW, workerRunner: { product: 'alpha' }, robot: false });
-  assert.deepEqual(jobsFor(cfg), ['review-updater', 'review-account', 'review-runner', WORKER_RUNNER_JOB]);
+  // L1193: the builder wall's check job comes with the runner, just before it (it leaves the status the runner's gate reads).
+  assert.deepEqual(jobsFor(cfg), ['review-updater', 'review-account', 'review-runner', 'builder-wall-check', WORKER_RUNNER_JOB]);
   const t = workerRunnerJobPlist(cfg);
   assert.ok(t.includes('<key>Label</key><string>com.example.orch.worker-runner</string>'), t);
   assert.ok(t.includes(`<key>ProgramArguments</key><array><string>${R}/${NODE}</string><string>${R}/wiring/runner-main.mjs</string><string>${R}/${WORKER_RUNNER_CONFIG}</string></array>`), t);
