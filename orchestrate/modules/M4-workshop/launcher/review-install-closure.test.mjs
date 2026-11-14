@@ -132,14 +132,19 @@ const READS_JOB_FILES = Object.freeze({
 // imports a job-file builder function (only names and paths), and from node:fs only readers.
 const READS_JOB_FILES_PINNED = Object.freeze({
   'setup/live-proofs/guard-proof.mjs': Object.freeze({
-    why: 'the guard proof (L1211) reads each placed job file\'s start command, user and Label to check them; it builds none',
+    why: 'the guard proof (L1211) reads each placed job file\'s start command, user and Label to check them; it places none',
+    // #591 r1 M2: the one builder it may import, and why. It builds the installer's own job file for each job in memory, from
+    // the config and the Mac's users, only to learn which keys and environment names that job may have; the text is read,
+    // never written (the proof writes nothing). realIo is the Mac reader that builder needs.
+    builders: Object.freeze(["import { DAEMON_DIR, plistTexts } from '../daemons.mjs';"]),
     imports: Object.freeze([
       "import { lstatSync, readFileSync, realpathSync } from 'node:fs';",
       "import { join } from 'node:path';",
       "import { spawnSync } from 'node:child_process';",
       "import { randomBytes } from 'node:crypto';",
       "import { fileURLToPath } from 'node:url';",
-      "import { DAEMON_DIR } from '../daemons.mjs';",
+      "import { DAEMON_DIR, plistTexts } from '../daemons.mjs';",
+      "import { realIo } from '../mac.mjs';",
       "import { installPaths, parseInstallConfig } from '../install.mjs';",
       "import { ROOT_CONFIG_PATH } from '../layout.mjs';",
       "import { WATCH_RUN } from '../watch-setup.mjs';",
@@ -148,26 +153,32 @@ const READS_JOB_FILES_PINNED = Object.freeze({
       "import { SENSORS_JOB, SENSORS_MAIN } from '../sensors-setup.mjs';",
       "import { WORKER_RUNNER_JOB, WORKER_RUNNER_MAIN } from '../worker-runner-setup.mjs';",
       "import { SCRIPTS } from '../../modules/M4-workshop/launcher/review-daemons.mjs';",
-      "import { NODE, chainProblem } from '../../modules/M4-workshop/launcher/install-check.mjs';",
+      "import { NODE, chainProblem, currentCopy } from '../../modules/M4-workshop/launcher/install-check.mjs';",
       "import { INSTALL_MARK, REFUSED_CODE } from '../../shared/secret-guard.mjs';",
       // The child's code (a string the proof runs in a child as the job's user; its fs is for the answer line only).
       "import cp from 'node:child_process';",
       "import fs from 'node:fs';",
       "import net from 'node:net';",
+      "import dgram from 'node:dgram';",
+      "import dns from 'node:dns';",
+      "import wt from 'node:worker_threads';",
       "import { syncBuiltinESMExports } from 'node:module';",
       "import { randomBytes } from 'node:crypto';",
       "import { fileURLToPath, pathToFileURL } from 'node:url';",
     ]),
   }),
 });
-/** A pinned reader's problems (L1216): a <key>, a require, import lines other than the pinned ones, or a builder name imported. */
-function pinnedReaderProblems(text, imports) {
+/**
+ * A pinned reader's problems (L1216): a <key>, a require, import lines other than the pinned ones, or a builder name
+ * imported on any line but the exact ones its entry allows, each with its reason (#591 r1).
+ */
+function pinnedReaderProblems(text, imports, builders = []) {
   const out = [];
   if (/<key>/.test(text)) out.push('it holds a <key>, so it could write a start command');
   if (/\brequire\s*\(/.test(text)) out.push('it has a require');
   const lines = text.split('\n').filter((l) => /^\s*import\b/.test(l)).map((l) => l.trim());
   if (JSON.stringify(lines) !== JSON.stringify(imports)) out.push(`its import lines are not the pinned ones: ${JSON.stringify(lines)}`);
-  for (const l of imports) if (/plist/i.test(l)) out.push(`it imports a job-file builder: ${l}`);
+  for (const l of imports) if (/plist/i.test(l) && !builders.includes(l)) out.push(`it imports a job-file builder: ${l}`);
   return out;
 }
 /** The one script of the copy a job file starts: the .mjs file under the copy's link in its start command. */
@@ -620,8 +631,8 @@ test('L136 m1: the programs to start come from every job-file builder of the cop
     assert.ok(!/<key>/.test(text), `${f} writes no start command (it holds a <key>)`);
     assert.ok(!/^\s*import\b|\bimport\s*\(|\brequire\s*\(\s*['"]/m.test(text), `${f} imports nothing, so it writes no job file`);
   }
-  for (const [f, { imports }] of Object.entries(READS_JOB_FILES_PINNED)) {
-    assert.deepEqual(pinnedReaderProblems(readFileSync(join(REPO, SOURCE, f), 'utf8'), imports), [], f);
+  for (const [f, { imports, builders }] of Object.entries(READS_JOB_FILES_PINNED)) {
+    assert.deepEqual(pinnedReaderProblems(readFileSync(join(REPO, SOURCE, f), 'utf8'), imports, builders), [], f);
   }
   // Builders through another builder, found from their real import lines (L734 self-review M1, m1).
   const users = tracked([SOURCE]).filter((f) => f.endsWith('.mjs')).map((f) => f.slice(SOURCE.length + 1))
@@ -762,9 +773,15 @@ test('L106 M-1 (b), (c): the scans find a load the real import cannot see', () =
 });
 
 test('L1216 plant: a pinned job-file reader with one more import, a <key>, a require or a builder import is caught', () => {
-  const [f, { imports }] = Object.entries(READS_JOB_FILES_PINNED)[0];
+  const [f, { imports, builders }] = Object.entries(READS_JOB_FILES_PINNED)[0];
   const text = readFileSync(join(REPO, SOURCE, f), 'utf8');
-  assert.deepEqual(pinnedReaderProblems(text, imports), [], 'the real file is clean');
+  assert.deepEqual(pinnedReaderProblems(text, imports, builders), [], 'the real file is clean');
+  // The allowed builder line is allowed only as written: one more name on it, or the same builder from another line, is caught.
+  for (const b of builders) {
+    const wider = b.replace('plistTexts', 'plistTexts, placeSteps');
+    assert.ok(pinnedReaderProblems(text.replace(b, wider), imports.map((l) => (l === b ? wider : l)), builders).some((x) => x.startsWith('it imports a job-file builder')), 'a wider builder line is caught');
+  }
+  assert.ok(pinnedReaderProblems(text, imports).some((x) => x.startsWith('it imports a job-file builder')), 'with no allowed list, its builder line is caught');
   const first = imports[0];
   const plants = {
     'one more import': text.replace(first, `${first}\nimport { writeFileSync } from 'node:fs';`),
@@ -775,8 +792,8 @@ test('L1216 plant: a pinned job-file reader with one more import, a <key>, a req
   };
   for (const [name, planted] of Object.entries(plants)) {
     assert.notEqual(planted, text, name);
-    assert.ok(pinnedReaderProblems(planted, imports).length > 0, `${name} is caught`);
+    assert.ok(pinnedReaderProblems(planted, imports, builders).length > 0, `${name} is caught`);
   }
   const withBuilder = [...imports, "import { loginJobPlist } from '../../modules/M11-dispatcher/login-job.mjs';"];
-  assert.ok(pinnedReaderProblems(`${text}\n${withBuilder.at(-1)}\n`, withBuilder).some((x) => x.startsWith('it imports a job-file builder')), 'a builder import is caught even when pinned');
+  assert.ok(pinnedReaderProblems(`${text}\n${withBuilder.at(-1)}\n`, withBuilder, builders).some((x) => x.startsWith('it imports a job-file builder')), 'a builder import is caught even when pinned');
 });
