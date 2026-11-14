@@ -342,12 +342,12 @@ export async function withUserSettings(file, settings, fn, fs = realFs) {
   const had = fs.exists(file);
   const before = had ? fs.read(file) : null;
   const mode = had ? fs.mode(file) : null;
-  fs.write(backup, JSON.stringify({ had, mode, text: had ? before.toString('base64') : null }), 0o600);
+  fs.put(backup, JSON.stringify({ had, mode, text: had ? before.toString('base64') : null }), 0o600);
   try {
-    fs.write(file, `${JSON.stringify(settings)}\n`, mode ?? 0o600);
+    fs.put(file, `${JSON.stringify(settings)}\n`, mode ?? 0o600);
     return await fn();
   } finally {
-    if (had) fs.write(file, before, mode); else fs.rm(file);
+    if (had) fs.put(file, before, mode); else fs.rm(file);
     const now = fs.exists(file) ? fs.read(file) : null;
     if (had ? !(now && Buffer.compare(now, before) === 0) : now !== null) throw new Error(`${file} could not be put back as it was; ${backup} holds it`);
     fs.rm(backup);
@@ -358,7 +358,7 @@ const realFs = {
   exists: (p) => { try { lstatSync(p); return true; } catch { return false; } },
   read: (p) => readFileSync(p),
   mode: (p) => statSync(p).mode & 0o777,
-  write: (p, data, mode) => {
+  put: (p, data, mode) => {
     const fd = openSync(p, 'w', mode ?? 0o600);
     try { writeSync(fd, typeof data === 'string' ? data : Buffer.from(data)); fsyncSync(fd); } finally { closeSync(fd); }
     if (mode !== undefined && mode !== null) chmodSync(p, mode);

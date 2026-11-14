@@ -256,7 +256,7 @@ test('withUserSettings: the file holds the settings during the run and comes bac
 test('withUserSettings: if the file can\'t be put back, it says so and keeps the backup', async () => {
   const mem = new Map([['/u/s.json', Buffer.from('orig')]]);
   const fs = { exists: (p) => mem.has(p), read: (p) => mem.get(p), mode: () => 0o600, rm: (p) => mem.delete(p),
-    write: (p, d) => { mem.set(p, p === '/u/s.json' && String(d) === 'orig' ? Buffer.from('torn') : Buffer.from(d)); } };
+    put: (p, d) => { mem.set(p, p === '/u/s.json' && String(d) === 'orig' ? Buffer.from('torn') : Buffer.from(d)); } };
   await assert.rejects(withUserSettings('/u/s.json', {}, async () => {}, fs), /could not be put back/);
   assert.ok(mem.has(`/u/s.json${BACKUP_SUFFIX}`));
 });
