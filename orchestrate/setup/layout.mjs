@@ -320,3 +320,9 @@ export function folderTable(cfg) {
 /** The rules draft the watch-only week judges by (R-0b-122): root's copy, in orchestrate's watch folder; the config holds its hash. */
 export const watchRulesPath = (cfg) => join(cfg.base, 'watch', 'rules-draft.yaml');
 export const watchNotesPath = (cfg) => join(cfg.base, 'watch-notes');
+// The machine-wide guard's own folder (L1031, L1044 M2; setup.mjs managed-settings): root's 0755, in the base (root's), outside
+// `install`, so no reinstall or updater step removes it. It holds the guard, the two modules it imports and its rules copy,
+// each root's 0644: no one else can change them or rename them away. Written by managed-settings alone, never refreshed
+// (the hook reads the copy with no age limit).
+export const managedGuardDir = (cfg) => join(cfg.base, 'machine-wide-guard');
+export const managedRulesPath = (cfg) => join(managedGuardDir(cfg), 'rules.json');

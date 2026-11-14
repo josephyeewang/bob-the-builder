@@ -343,7 +343,7 @@ test('check 10: the machine-wide file must carry the production guard and no esc
   }
 });
 
-// ---- check 10, L900: every managed settings source claude 2.1.322 reads (and 2.1.316; checked: claude-code 2.1.316) ----
+// ---- check 10, L900: every managed settings source claude 2.1.316 reads (checked: claude-code 2.1.316) ----
 
 function managedWorld() {
   const guard = { [H.matcher]: '*', [H.hooks]: [{ [H.type]: 'command', [H.command]: '/o/node /o/hooks/production-write-guard.mjs --role any', [H.timeout]: 10, [H.onFailure]: 'block' }] };
@@ -379,22 +379,22 @@ test('L900 check 10: with only a good managed-settings.json it passes, and it lo
 });
 
 // L909 reverses L900's "the config names another file, and claude's own is checked too; none there passes" on
-// purpose: claude 2.1.322 reads only its fixed file, so a guard anywhere else never applies, and "nothing there"
-// can't pass for the file that must carry it. 2.1.316 does the same (checked: claude-code 2.1.316).
+// purpose: claude 2.1.316 reads only its fixed file, so a guard anywhere else never applies, and "nothing there"
+// can't pass for the file that must carry it. (checked: claude-code 2.1.316)
 test('L909 check 10: machineWide must be claude\'s fixed file; another path refuses before anything is read', () => {
   const w = managedWorld();
   w.files['/x/other.json'] = w.good;
   assert.deepEqual(w.run({ path: '/x/other.json' }), { ok: false,
-    reason: 'machine-wide settings must be /m/managed-settings.json, not /x/other.json: claude 2.1.322 reads only that file' });
+    reason: 'machine-wide settings must be /m/managed-settings.json, not /x/other.json: claude 2.1.316 reads only that file' });
   // The default names claude's real fixed file; nothing on this Mac is read to say so.
   assert.deepEqual(w.run({ claudeFile: undefined }), { ok: false,
-    reason: 'machine-wide settings must be /Library/Application Support/ClaudeCode/managed-settings.json, not /m/managed-settings.json: claude 2.1.322 reads only that file' });
+    reason: 'machine-wide settings must be /Library/Application Support/ClaudeCode/managed-settings.json, not /m/managed-settings.json: claude 2.1.316 reads only that file' });
   assert.deepEqual([w.read, w.listed, w.asked], [[], [], []], 'nothing read, listed or converted');
   // #419 r3 m1: near misses of claude's real fixed file, refused by check 10 itself, still before anything is read.
   for (const path of [CLAUDE_FILE + '/', CLAUDE_FILE.toLowerCase(), CLAUDE_FILE.replace(' ', '\u00a0'), CLAUDE_FILE + '.bak']) {
     w.files[path] = w.good;
     assert.deepEqual(w.run({ claudeFile: undefined, path }), { ok: false,
-      reason: `machine-wide settings must be ${CLAUDE_FILE}, not ${path}: claude 2.1.322 reads only that file` }, JSON.stringify(path));
+      reason: `machine-wide settings must be ${CLAUDE_FILE}, not ${path}: claude 2.1.316 reads only that file` }, JSON.stringify(path));
   }
   assert.deepEqual([w.read, w.listed, w.asked], [[], [], []], 'nothing read for a near miss either');
 });

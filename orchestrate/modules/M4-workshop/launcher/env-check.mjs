@@ -15,6 +15,7 @@ import { userInfo } from 'node:os';
 import { dirname, join } from 'node:path';
 import { REFUSED_ENV, SETTINGS as S, HOOK_FIELDS as H, HOOK_EVENTS as E } from './settings-names.mjs';
 import { checkSettings } from './render-settings.mjs';
+import { MANAGED_FILE } from '../hooks/lib.mjs';
 import { ACCOUNT_NAMES, accountDir } from './accounts.mjs';
 
 const refuse = (reason) => ({ ok: false, reason });
@@ -43,13 +44,11 @@ export function checkRoleEnv(env) {
 
 // MANAGED SOURCES: the managed (policy) settings sources check 10 reads, as claude reads them.
 //
-// CAPABILITY NOTE, checked on claude 2.1.322 (its bundled code) and again in 2.1.316's, the pin, 13 Nov 2026: the same
-// sources, the two plist paths in the same order, both overrides built out (checked: claude-code 2.1.316; MANAGED_SOURCES_CHECKED_ON below
-// is code, its owner's to move). RECHECK ON EVERY UPGRADE of the pin.
+// CAPABILITY NOTE, checked on claude 2.1.316, the pin (its bundled code; and first on 2.1.322): RECHECK ON EVERY UPGRADE of the pin (checked: claude-code 2.1.316).
 // A source a newer claude adds, moves or reorders gets past check 10 until this list follows it.
 // This build has two overrides built out, which a newer one may build in: CLAUDE_CODE_MANAGED_SETTINGS_PATH
 // (another managed file) and CLAUDE_CODE_REMOTE_SETTINGS_PATH (another remote cache). Its storage backend
-// for the remote cache is stubbed out (uCo() returns undefined; CLAUDE_CODE_HOVER_REST pins it), so the
+// for the remote cache is stubbed out (OZr() in 2.1.316, uCo() in 2.1.322, returns undefined; CLAUDE_CODE_HOVER_REST pins it), so the
 // cache is the file below only; on an upgrade, look for the cache moving into that storage.
 // Sources, highest precedence first. By default ONLY the highest tier with content applies, and the
 // ones beneath it are not read for policy at all (unless a source sets managedSourcesBehavior "merge").
@@ -85,11 +84,12 @@ export function checkRoleEnv(env) {
 //           kept on purpose. A linked drop-in refuses: the launcher reads every source without following a link.
 //   parent  --managed-settings <json>, or CLAUDE_CODE_MANAGED_SETTINGS_PATH: the launcher passes neither
 //           (pinned by review-launch.test.mjs).
-export const MANAGED_SOURCES_CHECKED_ON = '2.1.322';
+export const MANAGED_SOURCES_CHECKED_ON = '2.1.316';
 export const MANAGED_PREFS = Object.freeze({ dir: '/Library/Managed Preferences', name: 'com.anthropic.claudecode.plist' });
 export const DROP_INS = 'managed-settings.d';
 export const REMOTE_CACHE = 'remote-settings.json';
-export const CLAUDE_FILE = '/Library/Application Support/ClaudeCode/managed-settings.json';
+// The hooks' own name for it (hooks/lib.mjs MANAGED_FILE), so the guard's way-out message and this check name one file.
+export const CLAUDE_FILE = MANAGED_FILE;
 const HELPER_KEYS = Object.freeze(['policyHelper', 'policyHelpers']);
 const ABSENT = new Set(['ENOENT', 'ENOTDIR']);
 
@@ -130,6 +130,10 @@ function sourceProblem(obj, label, guardScript) {
   if (!guardIn(obj, guardScript)) return refuse(`the machine-wide production block is not in force${tail}`);
   return null;
 }
+
+/** The machine-wide file's own part of check 10, on its parsed value: null when it passes, else a refusal (setup.mjs
+ * managed-settings reads back what it placed with this). */
+export const machineWideFileProblem = (obj, guardScript = 'production-write-guard.mjs') => sourceProblem(obj, '', guardScript);
 
 /**
  * Check 10. `readFile(path)` returns the text of the machine-wide settings file, and of its drop-ins and the remote
