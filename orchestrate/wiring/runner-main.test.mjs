@@ -1,7 +1,7 @@
 // Part C, runner step 5: the worker runner's entry point and its LaunchAgent file. Nothing here loads a job.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { tempDir } from '../shared/test-tmp.mjs';
@@ -691,6 +691,10 @@ test('L1001: the Bob file list is read only as root\'s own plain file, never thr
     chmodSync(f, 0o644);
     const l = join(d, 'l.json'); symlinkSync(f, l);
     assert.throws(() => readRootFile(l, { uid: process.getuid() }), /ELOOP|link/);
+    // L1207: a second name (a hard link) is refused by both names, and read again once it is gone.
+    const h = join(d, 'h.json'); linkSync(f, h);
+    for (const p of [f, h]) assert.throws(() => readRootFile(p, { uid: process.getuid() }), /has 2 names, not one/);
+    rmSync(h); assert.equal(readRootFile(f, { uid: process.getuid() }), '{}');
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 

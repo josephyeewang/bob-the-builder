@@ -577,12 +577,14 @@ export async function launchInputs(c, { pinnedProblem = (root, files) => install
 export async function importBudget(file, config) { return (await import(pathToFileURL(file).href)).budget(config); }
 
 const MAX_MANIFEST_BYTES = 4 * 1024 * 1024;
-/** A plain file of root's that no one else writes, read whole without following a link. → its text, or throws. */
+/** A plain file of root's that no one else writes, with one name (L1207: as the wall job writes it), read whole without
+ * following a link. → its text, or throws. */
 export function readRootFile(p, { uid = 0 } = {}) {
   const fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const st = fstatSync(fd);
     if (!st.isFile() || st.uid !== uid || st.mode & 0o022 || st.size > MAX_MANIFEST_BYTES) throw new Error(`${p} is not root's own plain file`);
+    if (st.nlink !== 1) throw new Error(`${p} has ${st.nlink} names, not one`);
     return readFileSync(fd, 'utf8');
   } finally { closeSync(fd); }
 }
