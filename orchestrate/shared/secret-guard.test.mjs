@@ -1,7 +1,7 @@
 // secret-guard.test.mjs — a registered secret can't reach a program's command line (R-0b-179, L1176).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, spawnSync, execFile, execFileSync, exec, execSync, fork } from 'node:child_process';
+import { ChildProcess, spawn, spawnSync, execFile, execFileSync, exec, execSync, fork } from 'node:child_process';
 import { generateKeyPairSync, randomBytes } from 'node:crypto';
 import { chmodSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -181,4 +181,87 @@ test('a program started in a process that loaded safe-git has the guard on', () 
   const g = new URL('./secret-guard.mjs', import.meta.url).href;
   const r = spawnSync(process.execPath, ['--input-type=module', '-e', `await import(${JSON.stringify(url)}); const { guardInstalled } = await import(${JSON.stringify(g)}); console.log(guardInstalled());`], { encoding: 'utf8' });
   assert.equal(r.stdout.trim(), 'true', r.stderr);
+});
+
+// --- L1196 (the #581 audit) ----------------------------------------------------------------------------------------
+
+test('L1196 M1: a value with only some characters percent-encoded, or in encodeURI\'s, escape\'s or a query string\'s form, is refused; a malformed % never throws past the check', () => {
+  const s = registerSecret(fresh());
+  const one = `%${s.charCodeAt(0).toString(16)}${s.slice(1)}`;                                    // the first character only
+  const every = [...s].map((c, i) => (i % 2 ? `%${c.charCodeAt(0).toString(16)}` : c)).join('');  // every other one
+  const upper = [...s].map((c, i) => (i % 3 ? c : `%${c.charCodeAt(0).toString(16).toUpperCase()}`)).join('');
+  for (const [name, text] of [['one', one], ['every other', every], ['upper case, every third', upper]]) {
+    assert.equal(holdsSecret(`x=${text}`), true, name);
+    assert.throws(() => spawnSync('/bin/echo', [`--token=${text}`]), refusedWithout(s), name);
+  }
+  // A PEM-like value: newlines and spaces, as encodeURI, escape and URLSearchParams write them.
+  const pem = registerSecret(`-----BEGIN TEST KEY-----\n${randomBytes(48).toString('base64')}\n${randomBytes(48).toString('base64')}\n-----END TEST KEY-----\n`);
+  const spellings = {
+    encodeURI: encodeURI(pem), escape: escape(pem),
+    URLSearchParams: new URLSearchParams({ k: pem }).toString(),
+    encodeURIComponent: encodeURIComponent(pem),
+  };
+  for (const [name, text] of Object.entries(spellings)) {
+    assert.ok(text !== pem, name);
+    assert.equal(holdsSecret(text), true, name);
+    assert.throws(() => spawnSync('/bin/echo', [text]), refusedWithout(pem), name);
+  }
+  // A % that starts no run (and bytes that are not UTF-8) don't throw, and don't hide a value next to them.
+  for (const junk of ['%', '%G1', '%u12', '%ff%fe', '100%']) {
+    assert.doesNotThrow(() => holdsSecret(`${junk}abc`), junk);
+    assert.equal(holdsSecret(`${junk}${one}${junk}`), true, junk);
+    assert.equal(holdsSecret(`${junk} plain text`), false, junk);
+  }
+  assert.equal(holdsSecret('a%20b+c%2Bd, nothing secret'), false);
+});
+
+test('L1196 Minor 1: fork\'s execArgv and execPath, options after a skipped argument list, a shell named by path, and ChildProcess.prototype.spawn are checked', () => {
+  const s = registerSecret(fresh());
+  const dir = tempDir('orch-secret-guard-fork-'); const mod = join(dir, 'child.mjs'); writeFileSync(mod, '');
+  assert.throws(() => fork(mod, [], { execArgv: [`--title=${s}`] }), refusedWithout(s));
+  assert.throws(() => fork(mod, { execArgv: [`--title=${s}`] }), refusedWithout(s), 'options in the arguments\' place');
+  assert.throws(() => fork(mod, [], { execPath: `/tmp/${s}/node` }), refusedWithout(s));
+  assert.throws(() => spawn('/bin/echo', undefined, { argv0: s }), refusedWithout(s));
+  assert.throws(() => spawnSync('/bin/echo', null, { argv0: s }), refusedWithout(s));
+  assert.throws(() => execFileSync('/bin/echo', undefined, { argv0: s }), refusedWithout(s));
+  assert.throws(() => execSync('true', { shell: `/tmp/${s}/sh` }), refusedWithout(s));
+  // ChildProcess.prototype.spawn, called on a ChildProcess made directly.
+  const child = new ChildProcess();
+  assert.throws(() => child.spawn({ file: '/bin/echo', args: ['/bin/echo', s], envPairs: [], stdio: 'ignore' }), (e) => { assert.match(e.message, /refused to start a program \(ChildProcess\.spawn\)/); assert.ok(!e.message.includes(s)); return true; });
+  assert.equal(ChildProcess.prototype.spawn[Symbol.for('orchestrate.secret-guard.wrapped')], true);
+  // The ordinary forms still start.
+  assert.equal(spawnSync('/bin/echo', undefined, { encoding: 'utf8' }).status, 0);
+  assert.equal(execSync('echo ok', { shell: '/bin/sh', encoding: 'utf8' }).trim(), 'ok');
+});
+
+test('L1196 Minor 2: a PEM key is also refused trimmed and as its base64 body alone, on one line or wrapped', () => {
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 1024 });
+  const pem = registerSecret(privateKey.export({ type: 'pkcs1', format: 'pem' }));
+  const body = pem.replace(/-----[^-]+-----/g, '').replace(/\s+/g, '');
+  assert.ok(pem.endsWith('\n') && body.length > 500);
+  assert.throws(() => spawnSync('/bin/echo', [pem.trim()]), refusedWithout(body));
+  assert.throws(() => spawnSync('/bin/echo', [body]), refusedWithout(body));
+  assert.throws(() => spawnSync('/bin/echo', [`--key=${body}`]), refusedWithout(body));
+  assert.throws(() => spawnSync('/bin/echo', [pem.replace(/\n/g, '\r\n')]), refusedWithout(body), 'CRLF lines: the body, whitespace out, is the same');
+  // The key's own bytes (the body decoded) in their encodings: URL-safe base64, and hex.
+  const der = Buffer.from(body, 'base64');
+  assert.equal(holdsSecret(der.toString('base64url')), true, 'URL-safe');
+  assert.equal(holdsSecret(der.toString('hex')), true, 'hex');
+  assert.equal(holdsSecret(der.toString('hex').toUpperCase()), true, 'hex, upper case');
+});
+
+test('L1196 Minor 3: base64 wrapped at 64 or 76 columns and hex with spaces between the bytes are refused (the text with its whitespace out)', () => {
+  const s = registerSecret(fresh());
+  const b64 = Buffer.from(`prefix that pushes the value onto a second line ${s} and a tail`).toString('base64');
+  const wrap = (t, n, nl = '\n') => t.match(new RegExp(`.{1,${n}}`, 'g')).join(nl);
+  for (const n of [64, 76]) {
+    assert.equal(holdsSecret(wrap(b64, n)), true, `wrapped at ${n}`);
+    assert.equal(holdsSecret(wrap(b64, n, '\r\n')), true, `wrapped at ${n}, CRLF`);
+    assert.throws(() => spawnSync('/bin/echo', [wrap(b64, n)]), refusedWithout(s), `wrapped at ${n}`);
+  }
+  const hex = Buffer.from(s).toString('hex');
+  assert.equal(holdsSecret(hex.match(/../g).join(' ')), true, 'hex with spaces');
+  assert.equal(holdsSecret(hex.toUpperCase().match(/../g).join(' ')), true, 'upper hex with spaces');
+  assert.equal(holdsSecret(hex.match(/.{1,32}/g).join('\n')), true, 'hex wrapped (xxd -p)');
+  assert.equal(holdsSecret(wrap(Buffer.from('nothing secret at all, just text that is long enough').toString('base64'), 64)), false);
 });
