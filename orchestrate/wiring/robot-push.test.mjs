@@ -11,6 +11,7 @@ import { createPushScript } from '../modules/M4-workshop/git/push.mjs';
 import { gitOk, initMirror, GIT_TIMEOUT_MS } from '../modules/M4-workshop/git/safe-git.mjs';
 import { SCAN_BUDGET_MS, SCAN_TIMEOUT_MS } from '../modules/M4-workshop/git/gitleaks.mjs';
 import { WATCHDOG_MARGIN_MS } from '../modules/M11-dispatcher/main.mjs';
+import { RETRY_MS } from './push-pass.mjs';
 import { ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
 import { memoryRecord } from '../shared/record.mjs';
 import { BUILDER, keysPath, mirrorPath, outboxRootPath, privatePath } from '../setup/layout.mjs';
@@ -170,8 +171,8 @@ async function wiredWorld({ hangPr = null } = {}) {
   };
   // The builder's bundle: tests can't chown, so its handle is made to look the builder's (createPushScript testFstat).
   const asBuilder = (fd) => { const st = fstatSync(fd); return Object.assign(Object.create(Object.getPrototypeOf(st)), st, { uid: BUILDER_UID }); };
-  const pass = () => pushWiring({ product: PRODUCT, keyDir: keysPath({ base: root }), ownerUid: ME + 1, hostLockUid: OWNER_UID, ...OUTSIDE }, {
-    rec: w.record, rules: w.ports.rules, entry: ENTRY, tokenFor: okTokenFor(), fetchFn, now: () => Date.now() + 10_000, uid: ME,
+  const pass = ({ later = 0 } = {}) => pushWiring({ product: PRODUCT, keyDir: keysPath({ base: root }), ownerUid: ME + 1, hostLockUid: OWNER_UID, ...OUTSIDE }, {
+    rec: w.record, rules: w.ports.rules, entry: ENTRY, tokenFor: okTokenFor(), fetchFn, now: () => Date.now() + 10_000 + later, uid: ME,
     scannerAt: () => w.fake.setup, userOf: builder, testRemote: () => w.gh,
     makePush: (deps) => createPushScript({ ...deps, testFstat: asBuilder }),
   });
@@ -242,10 +243,14 @@ test('L1115: a push cut off after GitHub took the branch is finished by the next
     for (let i = 0; i < 200 && !(await w.ghRefs()).includes('card/c-1'); i += 1) await new Promise((ok) => setTimeout(ok, 50));
     assert.match(await w.ghRefs(), new RegExp(`refs/heads/card/c-1 ${tip}`));
     assert.equal(rec.read('fact', 'push.C-1.a1'), null, 'no push fact: the round was cut before it');
-    // Round two, a new process's wiring, with the pull request API answering: it finds the branch there and finishes.
+    // Round two, a new process's wiring, RETRY_MS on (the cut round left its called-mark, #536 r2 Minor 5), with the
+    // pull request API answering: it finds the branch there and finishes.
     hangPr.promise = Promise.resolve();
-    const r2 = await w.pass()();
-    assert.deepEqual(r2.pushed, ['C-1']);
+    // The sensors read the start gate's facts again in those RETRY_MS, as they do each round.
+    const readAt = new Date(Date.now() + 10_000 + RETRY_MS).toISOString();
+    for (const kind of ['vercel_skip', 'vercel_env']) assert.equal(w.writeFact(kind, { product: PRODUCT, vercel_project: 'prj_1', read_at: readAt, result: true }).ok, true);
+    const r2 = await w.pass({ later: RETRY_MS })();
+    assert.deepEqual(r2.pushed, ['C-1'], JSON.stringify(r2));
     assert.match(await w.ghRefs(), new RegExp(`refs/heads/card/c-1 ${tip}`), 'the same tip: not pushed over');
     assert.equal(rec.read('fact', 'push.C-1.a1')?.doc?.tip, tip);
     // Let round one's hung call end, as a killed process's never would; its late answer adds no second branch tip.
@@ -266,7 +271,7 @@ test('L1115: a hold the queue refused fails the pass, so robot-main\'s own tell 
       scannerAt: () => w.fake.setup, userOf: builder, testRemote: () => w.gh, hold: () => false,
       makePush: (deps) => createPushScript({ ...deps, testFstat: (fd) => Object.assign(Object.create(Object.getPrototypeOf(fstatSync(fd))), fstatSync(fd), { uid: BUILDER_UID }) }),
     });
-    await assert.rejects(p(), (e) => /the push pass's alerts could not be queued: push-wait-C-1-a1/.test(e.message) && /untold/.test(e.tell));
+    await assert.rejects(p(), (e) => /the push pass's alerts could not be queued: push-wait-C-1\.a1/.test(e.message) && /untold/.test(e.tell));
   } finally { rmSync(w.root, { recursive: true, force: true }); }
 });
 
@@ -311,5 +316,15 @@ test('#536 r1 P19: the start gate\'s alert throws only when the queue refused it
       if (throws) await assert.rejects(up, /the start gate's alert gate-shut-x could not be queued/);
       else await up;
     }
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test('#536 r2 c2: the push script is given the owner\'s Mac user (hostLockUid) as its owner, and the builder as its worker', async () => {
+  const base = await layoutBase();
+  try {
+    const d = caughtPorts(base);
+    assert.equal(d.ownerUid, OWNER_UID);
+    assert.notEqual(d.ownerUid, ME + 1, 'never the Record\'s owner (the config\'s ownerUid)');
+    assert.deepEqual(d.uids, { worker: BUILDER_UID });
   } finally { rmSync(base, { recursive: true, force: true }); }
 });

@@ -550,6 +550,10 @@ export function createPushScript(deps) {
   // reviewer and to request a merge. Head only, except where M9 asks for more: a new head on a verified or approved
   // card sends it back to in_review. Tried twice, for the Dispatcher writes the card too. -> null, or why it wasn't.
   function writeHead(card, tip) {
+    // A Record that throws is a head not noted, never a throw out of the push (#536 r2 Minor 5): the push was made.
+    try { return headOnce(card, tip); } catch (e) { return `card ${card}'s head could not be written (${String(e?.message ?? e).slice(0, 200)})`; }
+  }
+  function headOnce(card, tip) {
     let why = null;
     for (let i = 0; i < 2; i += 1) {
       const c = record.read('card', card);
@@ -587,8 +591,25 @@ export function createPushScript(deps) {
     if (from) doc.from = from;
     // The product pushed for: bytes already pushed answer again only for the same product (#170 r1 m1).
     if (res.ok && from) doc.product = res.product;
-    record.write({ actor: 'workshop', entity: 'fact', id, expectRev: cur?.rev ?? 0, doc, kind: res.ok ? 'push' : 'push_refused' });
+    // A fact that could not be written is no answer (#536 r2 Minor 5): the caller is told to try again, never that it is
+    // done, so the drain doesn't take an unrecorded push; a push made is found on the branch by the rerun (step 4).
+    let w;
+    try { w = record.write({ actor: 'workshop', entity: 'fact', id, expectRev: cur?.rev ?? 0, doc, kind: res.ok ? 'push' : 'push_refused' }); } catch (e) { w = { ok: false, reason: String(e?.message ?? e) }; }
+    // A write refused because the Record already holds this answer (nothing changed), or because another writer moved
+    // this fact since it was read (writer.mjs "changed since read"), leaves a fact: the next read answers from it.
+    if (!w?.ok && (holds(id, res) || /^changed since read\b/.test(String(w?.reason ?? '')))) return res;
+    if (!w?.ok) return { ok: false, retry: true, reason: `${res.ok ? 'the push was made, but' : `${res.reason}; and`} its record could not be written (${String(w?.reason ?? 'no reason given').slice(0, 200)})` };
     return res;
+  }
+
+  // Whether the push fact already says this answer: the same tip pushed, or this refusal (as the fact or its last refusal).
+  function holds(id, res) {
+    let d;
+    try { const f = record.read('fact', id); d = f && !f.corrupt ? f.doc : null; } catch { return false; }
+    if (!d) return false;
+    if (res.ok) return d.result === 'pushed' && d.tip === res.tip;
+    const r = d.result === 'pushed' ? d.last_refusal : d;
+    return (d.result === 'pushed' || d.result === 'refused') && r?.reason === res.reason && (r?.retry === true) === (res.retry === true);
   }
 
   /** Pushes one session's bundle. */

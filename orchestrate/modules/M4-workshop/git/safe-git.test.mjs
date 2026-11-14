@@ -1159,6 +1159,16 @@ test('no hang: a git that never ends is stopped at the time limit, with everythi
   const r = await git(['status'], { gitDir: join(repo, '.git'), workTree: repo, gitBin: stuck, timeoutMs: 500 });
   assert.ok(Date.now() - t0 < 3000, `the config read took ${Date.now() - t0} ms`);
   assert.match(r.stderr, /^safe-git: refused: its config .* could not be read: .*did not end within 500 ms/);
+  // #536 r2 Minor 3: one limit for the whole call. Each git this stand-in runs takes 1.5 s: the config read and the git
+  // after it would take 3 s with a limit each; with one 2 s limit the git is stopped at it.
+  const real = spawnSync('/bin/sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
+  const slow = fake('slow', `/bin/sleep 1.5
+exec ${real} "$@"`);
+  const t1 = Date.now();
+  const one = await git(['status'], { gitDir: join(repo, '.git'), workTree: repo, gitBin: slow, timeoutMs: 2_000 });
+  assert.equal(one.code, -1, `the call ran past its one limit: ${one.stderr}`);
+  assert.match(one.stderr, /did not end within 2000 ms/);
+  assert.ok(Date.now() - t1 < 2_900, `the call took ${Date.now() - t1} ms`);
   const t = await git(['--version'], { gitDir: '/dev/null', gitBin: tty });
   assert.equal(t.stdout.toString().trim(), 'none', 'git has no terminal to ask for a password on');
   assert.equal(safeGitEnv({}).GCM_INTERACTIVE, 'never');

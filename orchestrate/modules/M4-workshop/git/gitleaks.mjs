@@ -49,7 +49,7 @@ export const SCAN_TIMEOUT_MS = 300_000;
 // refuses. With SCAN_TIMEOUT_MS for the check, it sizes the robot's push pass limit (wiring/robot-push.mjs, L1115).
 export const SCAN_BUDGET_MS = 300_000;
 
-function run(bin, args, { env, input, timeoutMs = SCAN_TIMEOUT_MS }) {
+export function runScanner(bin, args, { env, input, timeoutMs = SCAN_TIMEOUT_MS }) {
   return new Promise((resolve) => {
     const c = spawn(bin, args, { env, stdio: ['pipe', 'pipe', 'pipe'], timeout: timeoutMs, cwd: env.HOME });
     let out = ''; let err = '';
@@ -73,7 +73,7 @@ export async function checkScanner({ bin, version, config, ignoreFile }) {
   try { if (!statSync(bin).isFile()) return refuse('the secret scanner is missing'); } catch { return refuse('the secret scanner is missing'); }
   try { if (readFileSync(config, 'utf8') !== DO_PLANE_TOML) return refuse('the Do-plane scanner config has changed'); } catch { return refuse('the Do-plane scanner config is missing'); }
   try { const st = lstatSync(ignoreFile); if (!st.isFile() || st.size !== 0) return refuse('the Do-plane ignore file is not empty'); } catch { return refuse('the Do-plane ignore file is missing'); }
-  const r = await run(bin, ['version'], { env: safeGitEnv({ gitDir: '/dev/null' }) });
+  const r = await runScanner(bin, ['version'], { env: safeGitEnv({ gitDir: '/dev/null' }) });
   const m = /(\d+\.\d+\.\d+)/.exec(r.out);
   if (r.code !== 0 || !m) return refuse('the secret scanner did not report its version');
   if (m[1] !== version) return refuse(`the secret scanner is ${m[1]}, the pin is ${version}`);
@@ -126,7 +126,7 @@ const repoPath = (blobs) => (file) => {
  * header line, the message) and the names of the files it touches. Clean is { ok: true, binaries }:
  * the allowed non-text files, for the read-back.
  */
-export async function scanSecrets({ setup, mirror, shas, blobs = [], messages, privateDir, allowedBinaries = [], maxFileBytes = MAX_FILE_BYTES, maxTotalBytes = MAX_TOTAL_BYTES, budgetMs = SCAN_BUDGET_MS, clock = Date.now }) {
+export async function scanSecrets({ setup, mirror, shas, blobs = [], messages, privateDir, allowedBinaries = [], maxFileBytes = MAX_FILE_BYTES, maxTotalBytes = MAX_TOTAL_BYTES, budgetMs = SCAN_BUDGET_MS, clock = Date.now, run = runScanner }) {
   const c = await checkScanner(setup);
   if (!c.ok) return c;
   // One budget for the whole scan (#536 r1 m1): each step gets what is left, and none starts once it is spent.

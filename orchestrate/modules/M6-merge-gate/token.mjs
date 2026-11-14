@@ -14,6 +14,11 @@
 // repositories and permissions (GitHub's own token request body), so a token for one job can't touch another
 // repository or do more than it needs (#536 r1 m4: the push's token). A bad scope, or a token GitHub gives with more
 // permissions or other repositories than asked, is no token. With no scope the token is the installation's.
+// GitHub's own grant (#536 r2 Minor 1): GitHub adds `metadata: 'read'` to an installation token unasked, so that one,
+// read only, is taken; anything else unasked, `admin`, write where read was asked, a token not limited to the chosen
+// repositories (repository_selection other than 'selected'), or other than exactly the repositories asked, is refused.
+// Unverified against a live mint until the cutover's one real narrowed mint checks the answer (robot-push.mjs BEFORE
+// IT GOES LIVE); a "the API answers this" claim, so it expires if GitHub's answer changes (Principle 9).
 // `login` is the robot's own name on GitHub, "<slug>[bot]", read with the same signed request (GET /app) because an
 // installation token can't ask who it is, and the alert channel needs it to tell the robot's issues from another app's
 // (L399). A login that can't be read doesn't stop the mint: login is null and login_reason says why.
@@ -128,15 +133,23 @@ function scrub(text, secrets) {
 
 // A narrowed token GitHub answered with more than was asked: its permissions and repositories are in the answer
 // (GitHub's token response), and one that says other or wider ones is not used.
+// GitHub's one unasked grant on every installation token, taken read only (#536 r2 Minor 1).
+const GITHUB_GRANTS = Object.freeze({ metadata: 'read' });
 function widerThanAsked(json, scope) {
   const got = json?.permissions;
-  if (!got || typeof got !== 'object') return 'GitHub did not say the token\'s permissions';
+  if (!got || typeof got !== 'object' || Array.isArray(got)) return 'GitHub did not say the token\'s permissions';
   for (const [k, v] of Object.entries(got)) {
     const want = scope.permissions[k];
-    if (want === undefined || (want === 'read' && v !== 'read')) return `GitHub gave the token more than was asked (${String(k).slice(0, 64)})`;
+    const more = `GitHub gave the token more than was asked (${String(k).slice(0, 64)})`;
+    if (want === undefined) { if (Object.hasOwn(GITHUB_GRANTS, k) && v === GITHUB_GRANTS[k]) continue; return more; }
+    if (v !== 'read' && v !== 'write') return more;
+    if (want === 'read' && v !== 'read') return more;
   }
+  if (json?.repository_selection !== 'selected') return 'GitHub did not limit the token to the repositories asked';
   const repos = json?.repositories;
   if (!Array.isArray(repos)) return 'GitHub did not say the token\'s repositories';
-  if (repos.some((r) => !scope.repositories.includes(r?.name))) return 'GitHub gave the token other repositories than were asked';
+  const names = repos.map((r) => r?.name);
+  if (names.length !== scope.repositories.length || new Set(names).size !== names.length
+    || names.some((n) => !scope.repositories.includes(n))) return 'GitHub gave the token other repositories than were asked';
   return null;
 }

@@ -55,6 +55,10 @@
 // PUSH_DEADLINE_MS, and 20 s, so about 23 minutes; a round that stalls to its end holds the robot lock until its
 // watchdog, that and WATCHDOG_MARGIN_MS, about 23.6 minutes. No round starts meanwhile: the heartbeat and the alerts
 // wait that long at worst. Moving the push to a job of its own, so they never wait on it, is a later row.
+// BEFORE IT GOES LIVE (#536 r2 Minor 1): one real narrowed mint, PUSH_SCOPE of the product's repository, with GitHub's
+// answer checked: permissions exactly contents write, pull_requests write and metadata read; repository_selection
+// 'selected'; repositories exactly the one. token.mjs widerThanAsked refuses anything else, so a GitHub that answers
+// otherwise stops every push, told; the check shows that before the first card waits on it.
 
 import { dirname, resolve } from 'node:path';
 import { createPushScript } from '../modules/M4-workshop/git/push.mjs';

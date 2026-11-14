@@ -22,7 +22,7 @@ import { ALERT_QUEUE_FACT, dropCause, outbox } from '../modules/M11-dispatcher/a
 import { HOLD_FACT, holdAlert as holdAlertReal } from '../modules/M11-dispatcher/pass.mjs';
 import { LAST_PASS_FACT } from '../modules/M11-dispatcher/tick.mjs';
 import { USAGE_FACT } from '../modules/M11-dispatcher/usage.mjs';
-import { wire as wireOwn, checkUser, lastReturn, dispatcherLate, dropLateAlerts, lockHolder, LIVE_PASS_MAX_MS, NOT_WIRED_PASSES, ROBOT_PASSES, APP_KEYS, robotToken, robotChannel, markToldByBeat, SENSORS_CAUSE, dropSensorsAlerts, SWEEP_CAUSES, SWEEP_MARGIN_MS, LATE_CAUSE } from './robot-wiring.mjs';
+import { wire as wireOwn, checkUser, lastReturn, dispatcherLate, dropLateAlerts, lockHolder, LIVE_PASS_MAX_MS, NOT_WIRED_PASSES, ROBOT_PASSES, APP_KEYS, pushTokenFor, robotToken, robotChannel, markToldByBeat, SENSORS_CAUSE, dropSensorsAlerts, SWEEP_CAUSES, SWEEP_MARGIN_MS, LATE_CAUSE } from './robot-wiring.mjs';
 import { PUSH_NOT_WIRED } from './robot-push.mjs';
 import { generateKeyPairSync } from 'node:crypto';
 import { pidDead, takePassLock } from '../modules/M11-dispatcher/pass-lock.mjs';
@@ -1878,4 +1878,13 @@ test('#464 m-C: wire passes upMs to the heartbeat probes: just after a restart a
     await (await wire(w.config, o)).passes.heartbeat();
     assert.equal([...gh.issues.values()].some((i) => /heartbeat red: sensors/.test(i.title)), red, `up ${up} ms`);
   }
+});
+
+test('#536 r2 Q21: the push\'s token getter mints with the scope it is given, never the installation\'s whole token', async () => {
+  const asked = [];
+  const c = { keyDir: '/k', appId: '1', appInstallation: 2, ownerUid: 3 };
+  const get = pushTokenFor(c, { uid: 7001, now: () => 0, mint: async (o) => { asked.push(o.scope); return { ok: true, token: 'x' }; } });
+  const scope = { repositories: ['test-repo'], permissions: { contents: 'write', pull_requests: 'write' } };
+  assert.deepEqual(await get(scope)(), { ok: true, token: 'x' });
+  assert.deepEqual(asked, [scope]);
 });

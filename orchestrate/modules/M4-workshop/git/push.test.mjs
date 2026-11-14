@@ -17,7 +17,7 @@ import { folderProblem } from '../../M11-dispatcher/proposals-intake.mjs';
 import { SETTLE_MS as INTAKE_SETTLE_MS } from '../../M11-dispatcher/proposals-intake.mjs';
 import { researchCopyProblem } from '../../M6-merge-gate/refusals.mjs';
 import { refusedPath } from './push-refusals.mjs';
-import { DO_PLANE_TOML, RULES_VERSION, scanSecrets } from './gitleaks.mjs';
+import { DO_PLANE_TOML, RULES_VERSION, runScanner, scanSecrets } from './gitleaks.mjs';
 import { crc32 } from './binary-files.mjs';
 import { chunk, makePng, ihdr } from './png-fixture.mjs';
 import { startGate, factId, vercelFact } from './start-gate.mjs';
@@ -1176,6 +1176,8 @@ test('L274 (6): the same bytes pushed twice answer the recorded push: no second 
   const broke = await w.pushP({ product: PRODUCT, card: 'C-1' }, { rules: { ...w.ports.rules, get: () => { throw new Error('rules broke'); } } });
   assert.equal(broke.ok, false);
   assert.match(w.record.read('fact', id).doc.last_refusal.reason, /rules broke/);
+  // #536 r2 Q22: a refusal that may pass by itself (a throw, not a Refusal) keeps its retry on the last refusal.
+  assert.equal(w.record.read('fact', id).doc.last_refusal.retry, true);
   // So does the shortcut's read of the push fact, when it throws (once, here): it answers, never throws (L344).
   let throws = 1;
   const factBroke = await w.pushP({ product: PRODUCT, card: 'C-1' }, { record: view((e, i) => { if (e === 'fact' && i === id && throws-- > 0) throw new Error('record broke'); return w.record.read(e, i); }) });
@@ -1664,6 +1666,23 @@ test('L325 m4: the branch already at this tip is an answer of ok, and a pushed f
   const look = await w.pushP({ product: PRODUCT, card: 'C-1' }, { look: true, ...noFact });
   assert.equal(look.ok, false);
   assert.match(look.reason, /no new commits/);
+});
+
+test('#536 r2 Minor 5: a push whose fact could not be written answers try again, never done; one the Record already holds is done', async () => {
+  const w = await world();
+  const sha256 = await docChange(w);
+  const id = `push.C-1.p-${sha256.slice(0, 12)}`;
+  for (const write of [() => ({ ok: false, reason: 'the disk is full' }), () => { throw new Error('the disk is full'); }]) {
+    const r = await w.pushP({ product: PRODUCT, card: 'C-1' }, { record: { ...w.record, write } });
+    assert.equal(r.ok, false);
+    assert.equal(r.retry, true);
+    assert.match(r.reason, /^the push was made, but its record could not be written \(the disk is full\)/);
+    assert.equal(w.record.read('fact', id), null);
+  }
+  // The rerun finds the branch there and records it.
+  const r = await w.pushP({ product: PRODUCT, card: 'C-1' });
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(w.record.read('fact', id).doc.result, 'pushed');
 });
 
 test('L325 m5: a rename over the bundle after the open pushes what was opened', async () => {
@@ -2329,4 +2348,33 @@ test('#536 r1 m1: the whole secret scan has one time limit; a scan of many commi
   const none = await scanSecrets({ setup: s.setup, mirror: w.mirror, shas: [sha], messages, privateDir: tmp(), budgetMs: 0 });
   assert.match(none.reason, /ran past its 0 s limit/);
   assert.equal(s.calls().split('\n').filter(Boolean).length, before, 'no scan run once the limit is spent');
+});
+
+// #536 r2 Q16, Q17: the scan's own runs, through scanSecrets' `run` port; reads counts the clock's reads at each run.
+async function scanRuns(s, w, sha, messages, clockAt) {
+  const runs = [];
+  let reads = 0;
+  const clock = () => { reads += 1; return clockAt(reads); };
+  const run = (bin, args, opts) => { runs.push({ kind: args[0], timeoutMs: opts.timeoutMs, reads }); return runScanner(bin, args, opts); };
+  const [, blob, path] = /^\S+ blob ([0-9a-f]{40})\t(.+)$/m.exec(await gitOk(['ls-tree', sha], { gitDir: w.mirror }));
+  const r = await scanSecrets({ setup: s.setup, mirror: w.mirror, shas: [sha], blobs: [{ id: blob, path }], messages, privateDir: tmp(), budgetMs: 60_000, clock, run });
+  return { r, runs };
+}
+
+test('#536 r2 Q16, Q17: no run starts once the budget is spent (the file scan too), and each message run gets only what is left', async () => {
+  const s = makeFakeScanner(tmp());
+  const w = await pushWorld({ root: tmp() });
+  const sha = (await gitOk(['rev-parse', 'refs/heads/main'], { gitDir: w.mirror })).trim();
+  const messages = [[sha, 'message one'], [sha, 'message two']];
+  // Q17: 5 s left at every read after the first: each run is given 5 s, never the scanner's whole limit.
+  const five = await scanRuns(s, w, sha, messages, (n) => (n === 1 ? 0 : 55_000));
+  assert.deepEqual(five.r, { ok: true, binaries: [] });
+  assert.deepEqual(five.runs.map((x) => x.kind), ['git', 'dir', 'stdin', 'stdin']);
+  for (const x of five.runs) assert.equal(x.timeoutMs, 5_000, x.kind);
+  // Q16: the budget spent just before the file scan's run: it is not started, and the scan says so.
+  const at = five.runs.find((x) => x.kind === 'dir').reads;   // the read that gave the file scan its time
+  const cut = await scanRuns(s, w, sha, messages, (n) => (n === 1 ? 0 : n >= at - 1 ? 60_001 : 1_000));
+  assert.equal(cut.r.ok, false);
+  assert.match(cut.r.reason, /ran past its 60 s limit/);
+  assert.deepEqual(cut.runs.map((x) => x.kind), ['git'], 'no run after the budget is spent');
 });

@@ -382,7 +382,7 @@ function oddFiles(dir, common, allowObjects) {
  * the whole group is killed and the call ends at once, even if a program that left the group keeps the output open
  * (lead's standing rule, 30 Oct 2026: no call may wait forever).
  */
-function runChild(bin, argv, { cwd, env, input = null, timeoutMs }) {
+function runChild(bin, argv, { cwd, env, input = null, timeoutMs, limitMs = timeoutMs }) {
   return new Promise((resolve) => {
     const out = []; let err = ''; let ended = false; let timer = null;
     const end = (r) => { if (ended) return; ended = true; clearTimeout(timer); resolve(r); };
@@ -391,7 +391,7 @@ function runChild(bin, argv, { cwd, env, input = null, timeoutMs }) {
     timer = setTimeout(() => {
       try { process.kill(-child.pid, 'SIGKILL'); } catch { /* the group has already ended */ }
       for (const s of [child.stdin, child.stdout, child.stderr]) s.destroy();
-      end({ code: -1, stdout: Buffer.concat(out), stderr: `${err}safe-git: git did not end within ${timeoutMs} ms and was stopped` });
+      end({ code: -1, stdout: Buffer.concat(out), stderr: `${err}safe-git: git did not end within ${limitMs} ms and was stopped` });
     }, timeoutMs);
     child.stdout.on('data', (d) => out.push(d));
     child.stderr.on('data', (d) => { err += d; });
@@ -403,8 +403,8 @@ function runChild(bin, argv, { cwd, env, input = null, timeoutMs }) {
 }
 
 /** The keys and values in one config file, read by git without following its includes, or { why }. */
-async function readConfigFile(file, { gitBin, timeoutMs, path }) {
-  const r = await runChild(gitBin, ['config', '--file', file, '--no-includes', '--list', '-z'], { cwd: home(), env: safeGitEnv({ path }), timeoutMs });
+async function readConfigFile(file, { gitBin, timeoutMs, limitMs, path }) {
+  const r = await runChild(gitBin, ['config', '--file', file, '--no-includes', '--list', '-z'], { cwd: home(), env: safeGitEnv({ path }), timeoutMs, limitMs });
   if (r.code !== 0) return { why: r.stderr.trim().slice(0, 200) || `exit ${r.code}` };
   const entries = r.stdout.toString('utf8').split('\0').filter((x) => x !== '').map((x) => {
     const nl = x.indexOf('\n');
@@ -420,13 +420,16 @@ const labelOf = (f, { dir, common }) => {
   return f;
 };
 
-async function checkRepo(gitDir, { gitBin = 'git', timeoutMs = 30000, allowObjects, path } = {}) {
+async function checkRepo(gitDir, { gitBin = 'git', timeoutMs = 30000, allowObjects, path, end = Date.now() + timeoutMs } = {}) {
   let found;
   try { found = repoConfigFiles(gitDir, { allowObjects }); } catch (e) { return { why: `its folders could not be read: ${e.message}` }; }
   if (found.why) return { why: found.why, missing: found.missing };
   const bad = [];
   for (const f of found.files) {
-    const r = await readConfigFile(f, { gitBin, timeoutMs, path });
+    // Each read gets what is left of the call's one limit (#536 r2 Minor 3), so the check and the git after it together
+    // take at most the call's timeoutMs.
+    const rest = end - Date.now();
+    const r = rest > 0 ? await readConfigFile(f, { gitBin, timeoutMs: rest, limitMs: timeoutMs, path }) : { why: `safe-git: git did not end within ${timeoutMs} ms and was stopped` };
     const where = labelOf(f, found);
     if (r.why) return { why: `its config ${where} could not be read: ${r.why}` };
     for (const [k, v] of r.entries) if (!inertSetting(k, v)) bad.push(`${k} (${where})`);
@@ -523,10 +526,12 @@ export function withNoPrograms(args) {
  */
 export async function git(args, { gitDir, workTree, cwd, input, extraConfig, allowObjects, address, purpose = 'unnamed', timeoutMs = GIT_TIMEOUT_MS, gitBin = 'git', path } = {}) {
   if (!gitDir) return { code: -1, stdout: Buffer.alloc(0), stderr: 'safe-git: GIT_DIR is required' };
+  // One limit for the whole call, the repository check's config reads and the git itself (#536 r2 Minor 3).
+  const end = Date.now() + timeoutMs;
   const at = commandAt(args);
   let dirs = { gitDir };
   if (at < args.length) {
-    const checked = await checkRepo(gitDir, { gitBin, allowObjects, timeoutMs, path });
+    const checked = await checkRepo(gitDir, { gitBin, allowObjects, timeoutMs, path, end });
     const why = checked.missing && args[at] === 'init' ? null : checked.why ?? placeWhy(args, at, address);
     if (why) return { code: -1, stdout: Buffer.alloc(0), stderr: `safe-git: refused: ${why}` };
     if (!checked.why) dirs = { gitDir: checked.dir, commonDir: checked.common };
@@ -534,7 +539,9 @@ export async function git(args, { gitDir, workTree, cwd, input, extraConfig, all
   const env = safeGitEnv({ ...dirs, workTree, extraConfig, ...(path ? { path } : {}) });
   const where = cwd ?? home();
   callLog.push({ purpose, gitDir, cwd: where, workTree: workTree ?? null, args: args.filter((a) => !/^http\..*extraheader/i.test(a)) });
-  return runChild(gitBin, ['--no-pager', ...withNoPrograms(args)], { cwd: where, env, input, timeoutMs });
+  const rest = end - Date.now();
+  if (rest <= 0) return { code: -1, stdout: Buffer.alloc(0), stderr: `safe-git: git did not end within ${timeoutMs} ms and was stopped` };
+  return runChild(gitBin, ['--no-pager', ...withNoPrograms(args)], { cwd: where, env, input, timeoutMs: rest, limitMs: timeoutMs });
 }
 
 /** Like git() but resolves stdout as text and refuses (throws) on a non-zero exit. */

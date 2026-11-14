@@ -157,6 +157,9 @@ export function appProblem(c, { none = null } = {}) {
  * a refused mint is not retried until the next round. A round is far shorter than the token's hour (robot-main.mjs
  * RUN_DEADLINE_MS). Never throws or rejects: a throw becomes { ok: false, reason }. The token stays in memory (R-0b-86).
  */
+/** The push's token getter for a scope (#536 r1 m4): its own mint, narrowed to the scope robot-push.mjs asks for. */
+export const pushTokenFor = (c, { fetchFn, uid, now, mint }) => (scope) => robotToken(c, { fetchFn, uid, now, mint, scope });
+
 export function robotToken(c, { fetchFn = globalThis.fetch, uid = process.getuid?.(), now = Date.now, mint = mintInstallationToken, scope } = {}) {
   let p = null;
   return () => (p ??= Promise.resolve()
@@ -343,7 +346,7 @@ export async function wire(config, { log = (s) => process.stderr.write(`${s}\n`)
   }
   // push: robot-push.mjs, refusing until every part is there (I1). `push` holds a test's ports (scannerAt, userOf, testRemote).
   // The push mints its own token, narrowed to the product's repository (#536 r1 m4), so the alerts' token is not its.
-  const tokenFor = token ? (scope) => robotToken(c, { fetchFn, uid, now, mint, scope }) : null;
+  const tokenFor = token ? pushTokenFor(c, { fetchFn, uid, now, mint }) : null;
   passes.push = pushWiring(c, { rec, rules, entry, tokenFor, fetchFn, now, uid, hold, ...push });
   let beat = null;
   let sweepRound = null;

@@ -6,7 +6,7 @@ import { mkdirSync, writeFileSync, utimesSync, rmSync, symlinkSync } from 'node:
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { tempDir } from '../shared/test-tmp.mjs';
-import { pushPass, RETRY_MS, PUSH_WAIT_CAUSE, PUSH_REFUSED_CAUSE, PUSH_TROUBLE_CAUSE, PUSH_HEAD_CAUSE, PR_WAIT_CAUSE, PR_TROUBLE_CAUSE, lastTry } from './push-pass.mjs';
+import { pushPass, RETRY_MS, PUSH_WAIT_CAUSE, PUSH_REFUSED_CAUSE, PUSH_TROUBLE_CAUSE, PUSH_HEAD_CAUSE, PUSH_CALLED_FACT, FUTURE_SKEW_MS, PR_WAIT_CAUSE, PR_TROUBLE_CAUSE, lastTry } from './push-pass.mjs';
 import { PUSH_FACT, bundleName } from '../modules/M4-workshop/git/push.mjs';
 import { HOLD_FACT } from '../modules/M11-dispatcher/pass.mjs';
 import { fakeAlert } from '../test/fake-alert.test-helper.mjs';
@@ -19,9 +19,18 @@ function world({ sessions = 1 } = {}) {
   const root = tempDir('orch-pushpass-');
   const outboxRoot = join(root, 'outboxes');
   const docs = new Map();   // `${entity}/${id}` -> { id, doc, corrupt? }
+  let writeOk = true;
   const rec = {
     read: (e, id) => docs.get(`${e}/${id}`) ?? null,
     list: (e) => [...docs.entries()].filter(([k, v]) => k.startsWith(`${e}/`) && !v.corrupt).map(([, v]) => v),
+    // The pass writes only its call marks (PUSH_CALLED_FACT), as the Workshop.
+    write: ({ actor, entity, id, expectRev, doc }) => {
+      if (!writeOk) return { ok: false, reason: 'the Record is read only' };
+      const cur = docs.get(`${entity}/${id}`);
+      if (actor !== 'workshop' || (cur?.rev ?? 0) !== expectRev) return { ok: false, reason: 'refused' };
+      docs.set(`${entity}/${id}`, { id, doc, rev: (cur?.rev ?? 0) + 1 });
+      return { ok: true };
+    },
   };
   const put = (e, id, doc, extra = {}) => docs.set(`${e}/${id}`, { id, doc, ...extra });
   const made = [];
@@ -46,7 +55,7 @@ function world({ sessions = 1 } = {}) {
   };
   let now = T0;
   const run = (o = {}) => pushPass({ rec, product: P, outboxRoot, pushCard, alert: fakeAlert(), now: () => now, hold, drop, ...o });
-  return { root, outboxRoot, rec, put, made, holds, drops, calls, bundle, run, setAnswer: (f) => { answer = f; }, setNow: (t) => { now = t; }, clock: () => now, docs };
+  return { root, outboxRoot, rec, put, made, holds, drops, calls, bundle, run, setAnswer: (f) => { answer = f; }, setNow: (t) => { now = t; }, clock: () => now, docs, setWriteOk: (v) => { writeOk = v; } };
 }
 
 test('a settled bundle is pushed once; its holds are cleared; taken bytes are not pushed again', async () => {
@@ -257,14 +266,20 @@ test('step 6: a push that opened its pull request clears the branch\'s hold', as
   assert.ok(w.drops.includes(HOLD_FACT(PR_WAIT_CAUSE('card/C-1'))));
 });
 
-test('a kill between the push and its fact: no fact, so the next round pushes again (push.mjs finds the branch there)', async () => {
+test('a kill between the push and its fact: no fact, so it is told and pushed again after RETRY_MS (push.mjs finds the branch there)', async () => {
   const w = world();
   w.bundle(w.made[0]);
   w.setAnswer(() => { throw new Error('killed'); });
   await w.run();
   w.setAnswer(() => ({ ok: true, branch: 'card/c-1', pr: { number: 3 } }));
+  // #536 r2 Minor 5: the called-mark spaces it, so a push that leaves no answer does not take the slot every round.
+  const r0 = await w.run();
+  assert.deepEqual(w.calls, ['S-1'], 'not again at once');
+  assert.deepEqual(r0.pushed, []);
+  assert.ok(w.holds.some((h) => h.cause === PUSH_WAIT_CAUSE('C-1', 'a1') && /left no answer in the Record/.test(h.text)), JSON.stringify(w.holds));
+  w.setNow(T0 + RETRY_MS);
   const r = await w.run();
-  assert.deepEqual(w.calls, ['S-1', 'S-1'], 'no fact was written, so the next round tries at once, not after RETRY_MS');
+  assert.deepEqual(w.calls, ['S-1', 'S-1'], 'pushed again after RETRY_MS');
   assert.deepEqual(r.pushed, ['C-1']);
 });
 
@@ -386,4 +401,104 @@ test('#536 r1 P8: a bundle its push already took is not pushed again, long after
   await w.run();
   assert.deepEqual(w.calls, []);
   assert.ok(w.drops.includes(HOLD_FACT(PUSH_HEAD_CAUSE('C-1', 'a1'))));
+});
+
+// ---- #536 r2 (L1145) ----
+
+test('#536 r2 Minor 2: changed bytes that were refused for good are not pushed again each round', async () => {
+  const w = world();
+  const [s] = w.made;
+  const old = createHash('sha256').update('old').digest('hex');
+  w.bundle(s, 'new', T0 - 20 * 60_000);
+  w.put('fact', PUSH_FACT('C-1', 'a1'), { result: 'pushed', branch: 'card/C-1', tip: 'x', bundle_sha256: old, at: iso(T0 - 3600_000), last_refusal: { reason: 'secret found', at: iso(T0 - 60_000) } });
+  const r = await w.run();
+  assert.deepEqual(w.calls, [], 'the refused bytes are not pushed again');
+  assert.deepEqual(r.refused, [['C-1', 'secret found']]);
+  assert.ok(w.holds.some((h) => h.cause === PUSH_REFUSED_CAUSE('C-1', 'a1') && /not tried again until the work changes/.test(h.text)));
+  // A refusal that may pass, of those bytes, is spaced RETRY_MS, then tried.
+  w.put('fact', PUSH_FACT('C-1', 'a1'), { result: 'pushed', branch: 'card/C-1', tip: 'x', bundle_sha256: old, at: iso(T0 - 3600_000), last_refusal: { reason: 'GitHub is down', retry: true, at: iso(T0 - 60_000) } });
+  await w.run();
+  assert.deepEqual(w.calls, []);
+  w.setNow(T0 + RETRY_MS);
+  await w.run();
+  assert.deepEqual(w.calls, ['S-1']);
+  // Bytes written after the refusal are new: pushed at once.
+  const v = world();
+  v.bundle(v.made[0], 'newer', T0 - 30_000);
+  v.put('fact', PUSH_FACT('C-1', 'a1'), { result: 'pushed', branch: 'card/C-1', tip: 'x', bundle_sha256: old, at: iso(T0 - 3600_000), last_refusal: { reason: 'secret found', at: iso(T0 - 60_000) } });
+  await v.run();
+  assert.deepEqual(v.calls, ['S-1']);
+});
+
+test('#536 r2 Minor 4: a bundle written while an earlier push ran is judged by a fresh clock, not told as from the future', async () => {
+  const w = world({ sessions: 2 });
+  const [a, b] = w.made;
+  w.bundle(a, 'a', T0 - 60_000);
+  w.setAnswer((id) => { w.setNow(T0 + 120_000); w.bundle(b, 'b', T0 + 119_000); return { ok: true, branch: `card/${w.rec.read('session', id).doc.card}`, pr: { number: 1 } }; });
+  const r = await w.run();
+  assert.deepEqual(w.calls, ['S-1']);
+  assert.ok(!w.holds.some((h) => h.cause === PUSH_TROUBLE_CAUSE('S-2')), JSON.stringify(w.holds));
+  assert.ok(r.waiting.some(([c, why]) => c === 'C-2' && /changed a moment ago/.test(why)));
+  // Within FUTURE_SKEW_MS ahead is the file system's own stamp, waited on untold; past it is told.
+  const v = world();
+  v.bundle(v.made[0], 'x', T0 + FUTURE_SKEW_MS - 1_000);
+  await v.run();
+  assert.equal(v.holds.length, 0);
+  v.bundle(v.made[0], 'x', T0 + FUTURE_SKEW_MS + 1_000);
+  await v.run();
+  assert.ok(v.holds.some((h) => h.cause === PUSH_TROUBLE_CAUSE('S-1') && /in the future/.test(h.text)));
+});
+
+test('#536 r2 Minor 5: a push that leaves no fact is spaced by its call mark and goes to the back; the other session is pushed', async () => {
+  const w = world({ sessions: 2 });
+  const [a, b] = w.made;
+  w.bundle(a, 'a'); w.bundle(b, 'b');
+  w.setAnswer((id) => { if (id === 'S-1') throw new Error('record write failed'); return { ok: true, branch: 'card/C-2', pr: { number: 1 } }; });
+  for (let r = 0; r < 3; r++) { w.setNow(T0 + r * 60_000); await w.run(); }
+  assert.deepEqual(w.calls, ['S-1', 'S-2'], 'S-1 once, then S-2; S-1 is not called again within RETRY_MS');
+  assert.equal(w.rec.read('fact', PUSH_CALLED_FACT('C-1', 'a1')).doc.at, iso(T0));
+  assert.ok(w.holds.some((h) => h.cause === PUSH_WAIT_CAUSE('C-1', 'a1') && /left no answer in the Record/.test(h.text)), JSON.stringify(w.holds));
+  // RETRY_MS after its call it is tried again.
+  w.setNow(T0 + RETRY_MS);
+  await w.run();
+  assert.deepEqual(w.calls, ['S-1', 'S-2', 'S-1']);
+  // New bytes after the call are a new try at once.
+  const v = world();
+  v.bundle(v.made[0], 'a');
+  v.setAnswer(() => { throw new Error('cut off'); });
+  await v.run();
+  v.bundle(v.made[0], 'a2', T0 + 1_000);
+  v.setNow(T0 + 60_000);
+  await v.run();
+  assert.deepEqual(v.calls, ['S-1', 'S-1']);
+});
+
+test('#536 r2 Minor 5: a call mark that can\'t be written stops the push, told; a fact newer than the mark is the answer', async () => {
+  const w = world();
+  w.bundle(w.made[0]);
+  w.setWriteOk(false);
+  const r = await w.run();
+  assert.deepEqual(w.calls, []);
+  assert.ok(w.holds.some((h) => h.cause === PUSH_TROUBLE_CAUSE('S-1') && /could not be marked as tried/.test(h.text)));
+  assert.ok(r.waiting.some(([, why]) => /marked as tried/.test(why)));
+  // A push that answered (its fact at or after the mark) is judged by its fact, not by the mark.
+  const v = world();
+  const sha = v.bundle(v.made[0]);
+  v.setAnswer(() => ({ ok: false, retry: true, reason: 'GitHub is down' }));
+  await v.run();
+  v.put('fact', PUSH_FACT('C-1', 'a1'), { result: 'refused', reason: 'GitHub is down', retry: true, at: iso(T0) });
+  v.setNow(T0 + 60_000);
+  await v.run();
+  assert.ok(v.holds.some((h) => h.cause === PUSH_WAIT_CAUSE('C-1', 'a1') && /GitHub is down/.test(h.text)));
+  assert.ok(!v.holds.some((h) => /left no answer/.test(h.text)));
+  void sha;
+});
+
+test('#536 r2 c1: the per-attempt causes join card and attempt with a dot, so two pairs never share one', () => {
+  for (const cause of [PUSH_WAIT_CAUSE, PUSH_REFUSED_CAUSE, PUSH_HEAD_CAUSE]) {
+    assert.notEqual(cause('C-1', 'a-1'), cause('C', '1-a-1'));
+    assert.notEqual(cause('C-1-a', '1'), cause('C-1', 'a-1'));
+  }
+  assert.notEqual(PUSH_CALLED_FACT('C-1', 'a1'), PUSH_FACT('C-1', 'a1'));
+  assert.equal(PUSH_CALLED_FACT('C-1', 'a1').split('.').length, 5);
 });
