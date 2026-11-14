@@ -87,6 +87,7 @@ import { git } from '../modules/M4-workshop/git/safe-git.mjs';
 import { PUSH_FACT, bundleName } from '../modules/M4-workshop/git/push.mjs';
 import { PRODUCT_OUTBOX_ROLES } from '../shared/product-paths.mjs';
 import { workerPrompt } from '../modules/M5-review-audit/worker-prompt.mjs';
+import { SHA256 } from '../shared/plan-fingerprint.mjs';
 
 export const TRANSCRIPT_PLACE_CHECKED_AGAINST = null;
 const refuse = (reason) => ({ ok: false, reason });
@@ -137,7 +138,6 @@ const WAITING_DONE_FOR = new Set(PRODUCT_OUTBOX_ROLES);
 const doneFor = (s, state) => INTAKE_DONE.has(state) && (state !== 'waiting' || WAITING_DONE_FOR.has(s.role));
 const noFactReader = () => ({ ok: false, reason: 'no Record fact reader is wired' });
 const noSessionReader = () => ({ ok: false, reason: 'no Record session reader is wired' });
-const SHA256 = /^[0-9a-f]{64}$/;
 // Not drained, and why (L896): a DRAIN_CAUSES name, so the runner can tell it once it lasts.
 const held = (cause) => {
   if (!DRAIN_CAUSES.includes(cause)) throw new Error(`no drain cause ${cause}`);

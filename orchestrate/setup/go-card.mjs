@@ -42,7 +42,7 @@ import { askStore } from '../modules/M2-approvals/ask-store.mjs';
 import { doneBar, raiseGo, recordGo } from '../modules/M2-approvals/go.mjs';
 import { answerByOwnerCommand, OWNER_COMMAND } from '../modules/M2-approvals/owner-command.mjs';
 import { TEST_PRODUCT_KEY, WRITERS } from '../modules/M9-record/permissions.mjs';
-import { canonicalJson, planFingerprint } from '../shared/plan-fingerprint.mjs';
+import { canonicalJson, planFingerprint, unfingerprinted } from '../shared/plan-fingerprint.mjs';
 
 // The Dispatcher's user. Written here, as dispatcher-check.mjs does, not imported from dispatcher-setup.mjs: that module
 // builds job files, and a module that loads one must be a listed job builder (M4 review-install-closure.test, L136 m1).
@@ -154,7 +154,7 @@ export async function goCard({ ctx, cardText, sudoUid, readRows, view, mainSha, 
     if (canonicalJson(stored) !== canonicalJson(doc)) return fail(`card ${cardId} is already in the Record with another plan; pick another id`);
   }
   const fp = planFingerprint({ product, card_id: cardId, tier: doc.tier, files: doc.files, done_when: doc.done_when, plan_sha256: doc.plan_sha256, main_commit: doc.main_commit });
-  if (!fp.ok) return fail(`the plan can't be fingerprinted: ${fp.reason}`);
+  if (!fp.ok) return fail(unfingerprinted(fp.reason));
   const said = confirm({ cardId, text: goText({ product, cardId, card: doc, fingerprint: fp.sha256 }) });
   if (!said?.ok) return fail(said?.reason ?? 'the go was not confirmed');
   if (!had) {

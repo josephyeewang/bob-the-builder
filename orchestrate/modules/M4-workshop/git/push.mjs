@@ -54,6 +54,7 @@ import { proposalFolder } from '../launcher/proposal-wall.mjs';
 import { plainFd } from '../../M9-record/unsent.mjs';
 import { researchPath, researchFileName, RESEARCH_ID } from '../../M2-approvals/research-ask.mjs';
 import { intakeFactId } from '../../M11-dispatcher/intake-facts.mjs';
+import { SHA256 } from '../../../shared/plan-fingerprint.mjs';
 
 export { BRANCH };
 export const BUNDLE_CAP = 200 * 1024 * 1024;
@@ -72,7 +73,6 @@ const CARD = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
 const ATTEMPT = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
 const REPO = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/;
 const SHA = /^[0-9a-f]{40}$/;
-const SHA256 = /^[0-9a-f]{64}$/;
 const isUid = (u) => Number.isSafeInteger(u) && u > 0;
 // An attempt id starting p- or r- is a proposal's or a research copy's (their facts live under it); a worker's never does.
 const DOOR_ATTEMPT = /^[pr]-/;
