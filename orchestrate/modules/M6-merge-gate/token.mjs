@@ -29,6 +29,7 @@
 import { sign } from 'node:crypto';
 import { lstatSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { registerSecret } from '../../shared/secret-guard.mjs';
 
 const APP_ID = /^[A-Za-z0-9.]{1,64}$/;           // a numeric App id or an App's client id
 const INSTALL_ID = /^[1-9][0-9]{0,19}$/;
@@ -87,15 +88,15 @@ export async function mintInstallationToken({ keyDir, keyFile = ROBOT_KEY_FILE, 
     if (st.uid !== scriptsUid) return no('the robot\'s key file is not owned by the scripts\' Mac user');
     if ((st.mode & 0o077) !== 0) return no('the robot\'s key file is readable by others (group or other permission set)');
     const pem = readFileSync(file, 'utf8');
-    secrets.push(pem);
+    secrets.push(registerSecret(pem));
 
     const jwt = makeAppJwt({ appId, privateKeyPem: pem, now: now() });
-    secrets.push(jwt);
+    secrets.push(registerSecret(jwt));
     const signed = { Authorization: `Bearer ${jwt}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' };
     const body = scope === undefined ? {} : { repositories: [...scope.repositories], permissions: { ...scope.permissions } };
     const r = await http.post(`/app/installations/${installationId}/access_tokens`, body, signed);
     const token = r?.json?.token;
-    if (typeof token === 'string') secrets.push(token);
+    if (typeof token === 'string') secrets.push(registerSecret(token));
     if (r?.status !== 201) return no(`GitHub refused the token request (${r?.status})`);
     if (typeof token !== 'string' || !/^[A-Za-z0-9_.-]{20,512}$/.test(token)) return no('GitHub gave no usable token');
     if (scope !== undefined) { const wider = widerThanAsked(r.json, scope); if (wider) return no(wider); }

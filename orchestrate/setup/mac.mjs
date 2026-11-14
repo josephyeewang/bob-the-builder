@@ -31,6 +31,7 @@ import { openRead } from '../wiring/owner-status.mjs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { chainProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
+import { registerSecret } from '../shared/secret-guard.mjs';
 
 /** The refusal when a file setup would change is not a plain file (here and managed-settings.mjs): one home (I7). */
 /** The refusal when a file to read is a link: a link is never followed (mac, approve-rules): one text (I7). */
@@ -144,7 +145,9 @@ export function readSecretFromTty(prompt, { maxBytes = 1024 } = {}) {
         bytes.push(one[0]);
       }
     } finally { stty('echo'); writeSync(fd, '\n'); }
-    return Buffer.from(bytes).toString('utf8');
+    const typed = Buffer.from(bytes).toString('utf8');
+    registerSecret(typed.trim());
+    return typed;
   } finally { closeSync(fd); }
 }
 

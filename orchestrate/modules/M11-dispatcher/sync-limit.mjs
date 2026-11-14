@@ -4,6 +4,8 @@
 // prints. This file never starts a process itself (only-send-safe.test.mjs): the wiring hands in Node's
 // `spawnSync`, and `main.mjs` hands this maker to `wire()`.
 
+import { refuseSecretArgs } from '../../shared/secret-guard.mjs';
+
 export const SYNC_PORT_TIMEOUT_MS = 20_000;
 export const SYNC_PORT_MAX_BUFFER = 8 * 1024 * 1024;
 // No limit above this (audit 0b-6 r5 m3): a synchronous command blocks the whole pass, so it must end well
@@ -20,6 +22,8 @@ export function limitedSync(spawnSync) {
   return function run(cmd, args = [], { timeoutMs = SYNC_PORT_TIMEOUT_MS, cwd, input } = {}) {
     if (!(Number.isFinite(timeoutMs) && timeoutMs > 0)) return { ok: false, why: 'no time limit given' };
     if (timeoutMs > SYNC_PORT_MAX_TIMEOUT_MS) return { ok: false, why: `a time limit of ${timeoutMs} ms is above the most allowed, ${SYNC_PORT_MAX_TIMEOUT_MS} ms` };
+    // spawnSync is handed in, so it may be one taken before secret-guard wrapped the start functions: the check is made here too.
+    try { refuseSecretArgs('a program (limitedSync)', [cmd, ...(Array.isArray(args) ? args : [])]); } catch (e) { return { ok: false, why: e.message }; }
     let r;
     try {
       r = spawnSync(cmd, args, {
