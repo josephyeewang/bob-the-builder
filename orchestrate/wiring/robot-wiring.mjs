@@ -150,6 +150,9 @@ export function appProblem(c, { none = null } = {}) {
   return null;
 }
 
+/** The push's token getter for a scope (#536 r1 m4): its own mint, narrowed to the scope robot-push.mjs asks for. */
+export const pushTokenFor = (c, { fetchFn, uid, now, mint }) => (scope) => robotToken(c, { fetchFn, uid, now, mint, scope });
+
 /**
  * The robot's installation token as M13's alert channel asks for it: `() => Promise<token.mjs's answer>`. LIMITED: minted
  * on the first ask only, never before, and that one answer, a token or a refusal, is kept for the rest of this process.
@@ -157,9 +160,6 @@ export function appProblem(c, { none = null } = {}) {
  * a refused mint is not retried until the next round. A round is far shorter than the token's hour (robot-main.mjs
  * RUN_DEADLINE_MS). Never throws or rejects: a throw becomes { ok: false, reason }. The token stays in memory (R-0b-86).
  */
-/** The push's token getter for a scope (#536 r1 m4): its own mint, narrowed to the scope robot-push.mjs asks for. */
-export const pushTokenFor = (c, { fetchFn, uid, now, mint }) => (scope) => robotToken(c, { fetchFn, uid, now, mint, scope });
-
 export function robotToken(c, { fetchFn = globalThis.fetch, uid = process.getuid?.(), now = Date.now, mint = mintInstallationToken, scope } = {}) {
   let p = null;
   return () => (p ??= Promise.resolve()
