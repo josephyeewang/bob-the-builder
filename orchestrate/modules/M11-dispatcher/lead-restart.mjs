@@ -11,7 +11,8 @@
 //      started on the same profile with the handoff first, and its launch record written (below).
 // A missing or oversize handoff gets one re-ask; after that the old Lead keeps running and Joe is
 // told. A Lead is never stopped without an applied handoff. A Lead read above
-// context.lead.hard + 50k means Claude Code's own compaction did not fire: alert once (m9).
+// context.lead.hard + 50k means Claude Code's own compaction did not fire: Joe is told (m9).
+// Each of these is a hold, so it is told through stillWaiting (I3, L1157): at once, then daily while it lasts.
 // The step's progress is the fact `lead-restart-<session>`.
 
 import { KEYS, need } from './keys.mjs';
@@ -116,10 +117,22 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
     if (w.ok) { cur = rec.read('fact', RESTART_FACT(sid)); st = cur.doc; }
     return w;
   };
-  // The old Lead keeps running, and the owner is told until a copy is delivered (L130). `asked`: a second ask was sent.
+  // A hold on this Lead, told through stillWaiting (I3, L1157): at once, then every STILL_WAITING_MS while it lasts. The
+  // mark ({ told_at }) is written under `field` only once a copy is delivered (tellThen, L130), so a refused alert is
+  // asked again next pass. Each hold ends with the phase it belongs to, or with this Lead, so there is no mark to clear.
+  // A mark from before L1157 (`true`) has no told_at, so that hold is told once more and then daily.
+  const remind = (field, text, kind) => stillWaiting({
+    now, waiting: true,
+    read: () => st[field] ?? null,
+    tell: (mark) => tellThen(alert, text, { fact: RESTART_FACT(sid), fields: { [field]: mark }, kind }),
+    clear: () => {},
+  });
+  const tellGaveUp = () => remind('gave_up_told', gaveUpText(sid, st.gave_up_why, st.gave_up_asked !== false), 'lead_gave_up_alert');
+  const tellStartFailed = (reason) => remind('start_failed_told', startFailedText(sid, reason), 'lead_start_failed_alert');
+  // The old Lead keeps running, and the owner is told, then daily while it waits on a person. `asked`: a second ask was sent.
   const giveUp = (why, asked = true) => {
     save({ phase: 'gave_up', gave_up_why: why, gave_up_asked: asked }, 'lead_restart_gave_up');
-    tellThen(alert, gaveUpText(sid, why, asked), { fact: RESTART_FACT(sid), fields: { gave_up_told: true }, kind: 'lead_gave_up_alert' });
+    tellGaveUp();
     return 'gave up; the old Lead keeps running';
   };
 
@@ -141,20 +154,21 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
   }
 
   const noSize = !size || size.tokens == null;
-  // Told only once sent (audit 0b-6 r5 MAT-2).
-  if (!noSize && size.tokens > hard + HARD_MARGIN && !st.hard_told) {
-    tellThen(alert, `the Lead ${sid} is at ${size.tokens} tokens, past ${hard} + ${HARD_MARGIN}: its compaction did not happen`, { fact: RESTART_FACT(sid), fields: { hard_told: true }, kind: 'lead_hard_alert' });
+  // Marked only once sent (audit 0b-6 r5 MAT-2). Told again daily while the Lead stays past the line (I3): its restart can
+  // wait on work in flight for as long as that lasts. A size that can't be read says nothing either way.
+  if (!noSize && size.tokens > hard + HARD_MARGIN) {
+    remind('hard_told', `the Lead ${sid} is at ${size.tokens} tokens, past ${hard} + ${HARD_MARGIN}: its compaction did not happen`, 'lead_hard_alert');
   }
-  // A give-up whose alert the queue refused is told again each pass until it is delivered (L130).
-  if (st.phase === 'gave_up' && !st.gave_up_told) tellThen(alert, gaveUpText(sid, st.gave_up_why, st.gave_up_asked !== false), { fact: RESTART_FACT(sid), fields: { gave_up_told: true }, kind: 'lead_gave_up_alert' });
+  // A give-up waits on a person: told again daily while it lasts, and each pass until a copy is delivered (L130).
+  if (st.phase === 'gave_up') tellGaveUp();
   if (['done', 'gave_up'].includes(st.phase)) return st.phase;
   // The old Lead is stopped and the new one did not start (audit 0b-6 r2 MIN-1): try again every pass,
-  // whatever the old transcript says; Joe was told once.
+  // whatever the old transcript says; Joe is told daily while it lasts.
   if (st.phase === 'start_failed') {
     const again = await startNext();
     if (!again?.ok) {
-      // Told once delivered (L130): a first alert the queue refused is asked again here, each pass.
-      if (!st.start_failed_told) tellThen(alert, startFailedText(sid, again?.reason), { fact: RESTART_FACT(sid), fields: { start_failed_told: true }, kind: 'lead_start_failed_alert' });
+      // Marked once delivered (L130): a first alert the queue refused is asked again here, each pass; then daily (I3).
+      tellStartFailed(again?.reason);
       return 'new Lead still not started; tried again next pass';
     }
     save({ phase: 'done', restarted_at: iso(now), new_lead: again.sessionId ?? null }, 'lead_restarted');
@@ -206,13 +220,13 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
     try { stopped = await stopSession(); } catch (e) { stopped = { ok: false, reason: e.message }; }
     if (!stopped?.ok) {
       save({ stop_failed_at: iso(now) }, 'lead_stop_failed');
-      if (!st.stop_told) tellThen(alert, `the Lead ${sid} handed off but could not be stopped (${stopped?.reason ?? 'no answer'}); no new Lead starts until it is`, { fact: RESTART_FACT(sid), fields: { stop_told: true }, kind: 'lead_stop_failed' });
+      remind('stop_told', `the Lead ${sid} handed off but could not be stopped (${stopped?.reason ?? 'no answer'}); no new Lead starts until it is`, 'lead_stop_failed');
       return 'old Lead not stopped; tried again next pass';
     }
     const started = await startNext();
     if (!started?.ok) {
       save({ phase: 'start_failed', stopped_at: iso(now) }, 'lead_start_failed');
-      tellThen(alert, startFailedText(sid, started?.reason), { fact: RESTART_FACT(sid), fields: { start_failed_told: true }, kind: 'lead_start_failed_alert' });
+      tellStartFailed(started?.reason);
       return 'stopped; new Lead failed to start';
     }
     save({ phase: 'done', restarted_at: iso(now), new_lead: started.sessionId ?? null }, 'lead_restarted');
