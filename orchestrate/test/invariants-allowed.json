@@ -1,51 +1,5 @@
 {
- "I3": [
-  {
-   "file": "modules/M11-dispatcher/lead-restart.mjs",
-   "line": "tellThen(alert, gaveUpText(sid, why, asked), { fact: RESTART_FACT(sid), fields: { gave_up_told: true }, kind: 'lead_gave_up_alert' });",
-   "why": "baseline (L1078)"
-  },
-  {
-   "file": "modules/M11-dispatcher/lead-restart.mjs",
-   "line": "tellThen(alert, `the Lead ${sid} is at ${size.tokens} tokens, past ${hard} + ${HARD_MARGIN}: its compaction did not happen`, { fact: RESTART_FACT(sid), fields: { hard_told: true }, kind: 'lead_hard_alert' });",
-   "why": "baseline (L1078)"
-  },
-  {
-   "file": "modules/M11-dispatcher/lead-restart.mjs",
-   "line": "if (st.phase === 'gave_up' && !st.gave_up_told) tellThen(alert, gaveUpText(sid, st.gave_up_why, st.gave_up_asked !== false), { fact: RESTART_FACT(sid), fields: { gave_up_told: true }, kind: 'lead_gave_up_alert' });",
-   "why": "baseline (L1078)"
-  },
-  {
-   "file": "modules/M11-dispatcher/lead-restart.mjs",
-   "line": "if (!st.start_failed_told) tellThen(alert, startFailedText(sid, again?.reason), { fact: RESTART_FACT(sid), fields: { start_failed_told: true }, kind: 'lead_start_failed_alert' });",
-   "why": "baseline (L1078)"
-  },
-  {
-   "file": "modules/M11-dispatcher/lead-restart.mjs",
-   "line": "if (!st.stop_told) tellThen(alert, `the Lead ${sid} handed off but could not be stopped (${stopped?.reason ?? 'no answer'}); no new Lead starts until it is`, { fact: RESTART_FACT(sid), fields: { stop_told: true }, kind: 'lead_stop_failed' });",
-   "why": "baseline (L1078)"
-  },
-  {
-   "file": "modules/M11-dispatcher/lead-restart.mjs",
-   "line": "tellThen(alert, startFailedText(sid, started?.reason), { fact: RESTART_FACT(sid), fields: { start_failed_told: true }, kind: 'lead_start_failed_alert' });",
-   "why": "baseline (L1078)"
-  },
-  {
-   "file": "modules/M11-dispatcher/phone-link.mjs",
-   "line": "else if (!toldOn(rec, FD_RESTART_FACT)) tellThen(alert, `the Front Door was not running and did not restart: ${r?.reason ?? 'no answer'}`, { fact: FD_RESTART_FACT, fields: { told: true }, kind: 'front_door_restart' });",
-   "why": "baseline (L1078)"
-  },
-  {
-   "file": "modules/M11-dispatcher/phone-link.mjs",
-   "line": "if (!toldOn(rec, FD_STRAY_FACT)) tellThen(alert, `a Front Door may still run on the other account: ${r?.reason ?? 'no answer'}; two under the one name can confuse the phone`, { fact: FD_STRAY_FACT, fields: { told: true }, kind: 'front_door_stray' });",
-   "why": "baseline (L1078)"
-  },
-  {
-   "file": "modules/M11-dispatcher/phone-link.mjs",
-   "line": "tellThen(alert, `the phone cannot reach the Front Door; ${st.failures} tries to reconnect it failed`, { fact: LINK_FACT, fields: { told: true }, kind: 'phone_link' });",
-   "why": "baseline (L1078)"
-  }
- ],
+ "I3": [],
  "I4": [
   {
    "file": "modules/M1-front-door/fixtures.mjs",
