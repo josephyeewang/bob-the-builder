@@ -22,11 +22,15 @@
 // takes, and PASS needs both refused: a link under a folder the builder can't enter is refused on the way in, while the
 // place it leads to may be open. Just before each proof root looks again; a place whose kind or real place has changed
 // since the list was made is NOT TRIED (r3 m1). A place that is not there is NOT TRIED as well: nothing is proven about it.
+// What a place reaches includes (#528 r4, L1143): what is inside a folder of secrets (a link in it that leads out is its
+// own place, proven the same way; root walks it, and a walk that can't finish is NOT TRIED); a file's other names (a file
+// with more than one is NOT TRIED: another name may sit where the builder can go); and the folders above it, on the
+// name's way and the real one's, which the builder must neither write nor own, so it can't swap a place mid-run.
 // And the builder's groups are an allowed list: its own group and the groups macOS gives every local user, nothing else
 // (so no later membership, staff above all, quietly opens the owner's home, which macOS makes 0750 to staff). A group
 // list that can't be read is a FAIL, never an empty list.
 
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { RUNNER_ROLES } from '../shared/review-roles.mjs';
 import { runnerPlaces } from '../shared/product-paths.mjs';
 import { BUILDER, BUILDER_SHELL, FLAT_OUTBOX_ROLES, PRODUCT_OUTBOX_ROLES, USERS, WORKER_RUNNER_CONFIG, baseMarkerPath, proposalRows, homeOf, outboxRootPath, workerCopiesPath } from './layout.mjs';
@@ -60,7 +64,9 @@ export function proofInputs(io, cfg) {
   if (!why && !rules) why = `the installed ${file} names no rules`;
   // The builder's sessions run under the worker runner, whose rules are per product (wiring/runner-main.mjs, #528 r3):
   // its installed config's lists are proven too, the union of both. No such file: no worker runner is set up, nothing to
-  // add. One that is there but can't be read is said, NOT TRIED, never skipped.
+  // add. One that is there but can't be read is said, NOT TRIED, never skipped. A product with no rules adds nothing, by
+  // design: the worker runner gives such a product's sessions no production lists to deny (checkRunnerConfig allows rules
+  // to be left out, and refuses lists that are there but not lists of text).
   const wfile = join(installPaths(cfg).installRoot, WORKER_RUNNER_CONFIG);
   let worker = []; let workerWhy = null;
   try {
@@ -79,7 +85,7 @@ export function proofInputs(io, cfg) {
 /** The proofs: [{ what, args, expect: 'ok' | 'fail', control?, notTried? }]. `args` are what follows `sudo -n -H -u builder`.
  *  A "cannot write" proof shows the state now; that the builder cannot gain write (own it and chmod it) is check's job:
  *  it wants each folder owned by root, orchestrate or review (never the builder), with the exact mode and access list. */
-export function proofList(cfg, { ownerHome = null, rules = { files: [], why: 'not read' }, kindOf = () => null } = {}) {
+export function proofList(cfg, { ownerHome = null, rules = { files: [], why: 'not read' }, kindOf = () => null, walkOf = () => ({ error: 'not walked' }), stickyOf = () => false } = {}) {
   const p = (...s) => join(cfg.base, ...s);
   const B = BUILDER;
   const places = cfg.products.map((prod) => [prod, runnerPlaces({ copiesRoot: workerCopiesPath(cfg), outboxRoot: outboxRootPath(cfg), product: prod })]);
@@ -88,28 +94,55 @@ export function proofList(cfg, { ownerHome = null, rules = { files: [], why: 'no
   // real }. `make(at, kind)` gives the proofs for one path; it is called for the name and, when root's real place differs,
   // for that real place too ("where <name> leads"). The kind is the real target's. Each proof keeps what root saw
   // (`look`), so that proveList looks again just before it runs.
-  const reach = (what, f, make, { missing = 'not on this Mac: nothing was tried', folderOnly = null } = {}) => {
+  // The folders above a place (#528 r4 m4): the builder can't write one (so it can't swap the place, or a link on the
+  // way, while the proofs run) and owns none (an owner can give itself write). In a shared folder everyone may write
+  // (the sticky bit: /private/tmp, /Users/Shared) a name can be renamed only by its owner or the folder's, so there the
+  // proof is that the builder owns neither. Each folder is proven once (the list drops repeats).
+  const above = (q) => {
+    const out = [];
+    for (let c = q, d = dirname(q); c !== '/'; c = d, d = dirname(d)) {
+      out.push({ what: `${B} does not own ${d} (a folder above a place it must not reach)`, args: [TEST, '-O', d], expect: 'fail', above: true });
+      out.push(stickyOf(d)
+        ? { what: `${B} does not own ${c} (in the shared folder ${d} only its owner can move it)`, args: [TEST, '-O', c], expect: 'fail', above: true }
+        : { what: `${B} cannot write ${d} (a folder above a place it must not reach)`, args: [TEST, '-w', d], expect: 'fail', above: true });
+    }
+    return out;
+  };
+  const walked = new Set();
+  const reach = (what, f, make, { missing = 'not on this Mac: nothing was tried', folderOnly = null, walk = false } = {}) => {
     const l = kindOf(f);
     if (!l) return [notTried(what, missing)];
     if (typeof l.kind !== 'string' || l.kind.startsWith('error:')) return [notTried(what, `root could not look at it (${String(l.kind ?? 'no answer').replace(/^error:/, '')}): nothing was tried`)];   // #528 r1 m8
     if (typeof l.real !== 'string' || !l.real.startsWith('/')) return [notTried(what, 'root could not find where it really is: nothing was tried')];
     if (folderOnly && l.kind !== 'dir') return [notTried(what, folderOnly)];
-    const look = { at: f, kind: l.kind, real: l.real };
+    if (l.kind === 'file' && l.names > 1) return [notTried(what, `another name for this file exists (it has ${l.names}): through a folder the builder can enter it would read the same file, so nothing was proven`)];   // #528 r4 m3
+    // A folder is judged by what is inside it too (#528 r4 m2): a link in it that leads out is its own place, proven the
+    // same way; a file in it with another name can't be proven. A walk that can't finish is NOT TRIED. Each real folder is
+    // walked once, so links that lead back and forth end.
+    let inner = []; let w;
+    if (walk && l.kind === 'dir' && !walked.has(l.real)) {
+      walked.add(l.real); w = walkOf(l.real);
+      if (!w || w.error) return [notTried(what, `root could not look through what is inside it (${w?.error ?? 'no answer'}): nothing was tried`)];
+      const inside = (q, k) => make(q, k).map((pr) => ({ ...pr, what: `${pr.what} (a link inside ${f})` }));
+      inner = [...w.links.flatMap((x) => reach(`${B} cannot read ${x.at} (a link inside ${f})`, x.at, inside, { walk: true })),
+        ...w.named.map((x) => notTried(`${B} cannot read ${x} (inside ${f})`, 'another name for this file exists: through a folder the builder can enter it would read the same file, so nothing was proven'))];
+    }
+    const look = { at: f, kind: l.kind, real: l.real, ...(w ? { walk: walkSig(w) } : {}) };
     const at = (q, via) => make(q, l.kind).map((pr) => ({ ...pr, what: via ? `${pr.what} (where ${f} leads)` : pr.what, look }));
-    return l.real === f ? at(f) : [...at(f), ...at(l.real, true)];
+    return [...(l.real === f ? at(f) : [...at(f), ...at(l.real, true)]), ...above(f), ...(l.real === f ? [] : above(l.real)), ...inner];
   };
   const readProof = (f) => {
     const what = `${B} cannot read ${f}`;
     if (!f.startsWith('/')) return notTried(what, 'a relative name, not a place on this Mac: nothing was tried');
     if (/[*?[\]{}]/.test(f)) return notTried(what, 'a pattern, not one file: nothing was tried');
-    return reach(what, f, (q, k) => (k === 'dir' ? folderProofs(`${B} cannot list ${q}`, q) : [{ what: `${B} cannot read ${q}`, args: [HEAD, '-c', '1', q], expect: 'denied' }]));
+    return reach(what, f, (q, k) => (k === 'dir' ? folderProofs(`${B} cannot list ${q}`, q) : [{ what: `${B} cannot read ${q}`, args: [HEAD, '-c', '1', q], expect: 'denied' }]), { walk: true });
   };
   // A folder: it can't be listed (the Mac's own refusal) and it can't be passed through (#528 r1 M1, m3).
   const folderProofs = (what, d) => [{ what, args: [LS, d], expect: 'denied' }, { what: `${B} cannot pass through ${d}`, args: [TEST, '-x', d], expect: 'fail' }];
   const GONE = 'not there: a missing folder can\'t be written or listed by anyone, so nothing was proven';
   const noWrite = (label, d) => reach(label(d), d, (q) => [{ what: label(q), args: [TEST, '-w', q], expect: 'fail' }], { missing: GONE });
-  const noList = (label, d) => reach(label(d), d, (q) => folderProofs(label(q), q), { missing: GONE, folderOnly: 'not a folder on this Mac: nothing was proven' });
-  return [
+  const noList = (label, d, walk = false) => reach(label(d), d, (q) => folderProofs(label(q), q), { missing: GONE, folderOnly: 'not a folder on this Mac: nothing was proven', walk });
+  const list = [
     { what: `can run a program as ${B}`, args: [TRUE], expect: 'ok', control: true },
     { what: `${B} CAN write ${workerCopiesPath(cfg)} (the control: "cannot write" below means something)`, args: [TEST, '-w', workerCopiesPath(cfg)], expect: 'ok', control: true },
     { what: `${B} CAN write its own home ${homeOf(cfg, B)}`, args: [TEST, '-w', homeOf(cfg, B)], expect: 'ok', control: true },
@@ -119,7 +152,7 @@ export function proofList(cfg, { ownerHome = null, rules = { files: [], why: 'no
     ...cfg.products.flatMap((prod) => noWrite((d) => `${B} cannot write the record ${d}`, p('products', prod, 'store'))),
     ...NO_WRITE.flatMap((d) => noWrite((q) => `${B} cannot write ${q}`, p(d))),
     ...places.flatMap(([prod, at]) => noWrite((d) => `${B} cannot write ${prod}'s outbox folder ${d} (root's: its role folders can't be renamed away)`, at.outboxes)),
-    ...noList((d) => `${B} cannot read the robot keys (${d})`, p('keys')),
+    ...noList((d) => `${B} cannot read the robot keys (${d})`, p('keys'), true),   // what is inside is walked too (r4 m2)
     ...USERS.filter((u) => u !== B).flatMap((u) => noList((d) => `${B} cannot list ${u}'s home ${d}`, homeOf(cfg, u))),
     ...(!ownerHome ? [{ what: `${B} cannot list the owner's home`, args: null, expect: 'fail', bad: `the owner ${cfg.owner}'s home could not be read from this Mac` }]
       : noList((d) => `${B} cannot list the owner's home ${d}`, ownerHome)),
@@ -134,10 +167,16 @@ export function proofList(cfg, { ownerHome = null, rules = { files: [], why: 'no
       { missing: 'not made yet (sudo node setup.mjs proposals makes it): nothing was tried', folderOnly: 'it is not a folder: nothing was tried' })),
     // The Dispatcher's rules state and approvals (L1112 (3)): orchestrate's alone. Without a dispatcher entry neither exists.
     ...(cfg.dispatcher ? [cfg.dispatcher.rulesStateDir, cfg.dispatcher.approvalsStateDir].flatMap(readProof) : []),
-    ...(rules.files.length || rules.odd?.length ? rules.files.flatMap(readProof) : [notTried(`${B} cannot read the product's production files and secrets`, rules.why ?? 'none named')]),
+    // review.json's own problem is always said (#528 r4 m1): the worker runner's entries proving fine must not hide that
+    // none of review.json's were tried.
+    ...(rules.why || !(rules.files.length || rules.odd?.length) ? [notTried(`${B} cannot read the product's production files and secrets`, rules.why ?? 'none named')] : []),
+    ...rules.files.flatMap(readProof),
     ...(rules.odd ?? []).map((x) => notTried(`${B} cannot read the rules entry ${String(JSON.stringify(x) ?? typeof x).slice(0, 60)}`, 'it is not text, so it names no file: nothing was tried')),
     ...(rules.workerWhy ? [notTried(`${B} cannot read the worker runner's production files and secrets`, rules.workerWhy)] : []),
   ];
+  // A folder above many places is proven once (r4 m4).
+  const once = new Set();
+  return list.filter((pr) => { if (!pr.above) return true; const k = pr.args.join('\0'); if (once.has(k)) return false; once.add(k); return true; });
 }
 
 /** Null, or why the builder's groups are not its own and the allowed ones (L1079). `out`: `id -Gn builder`'s answer. */
@@ -153,8 +192,8 @@ export function groupsProblem(r) {
 /** → [{ ok, what, why?, notTried? }]. Reads only. A failed control makes every later proof FAIL as well, since it would prove nothing. */
 export function runProofs(io, cfg) {
   const inputs = proofInputs(io, cfg);
-  const kindOf = kindOn(io);
-  const out = proveList(io, proofList(cfg, { ...inputs, kindOf }), kindOf);
+  const kindOf = kindOn(io); const walkOf = walkOn(io);
+  const out = proveList(io, proofList(cfg, { ...inputs, kindOf, walkOf, stickyOf: stickyOn(io) }), kindOf, walkOf);
   // Its shell is zsh (#487 r5 m1): the production guard's message shapes are safe as zsh reads them, not as bash 3.2 does.
   const u = readUser(io, BUILDER);
   out.push({ ok: u.exists && u.shell === BUILDER_SHELL, what: `${BUILDER}'s shell is ${BUILDER_SHELL} (its sessions' Bash tool runs it)`, ...(u.exists && u.shell === BUILDER_SHELL ? {} : { why: u.exists ? `its shell is ${u.shell || 'unset'}` : `${BUILDER} is not a user on this Mac` }) });
@@ -168,18 +207,23 @@ export function changedWhy(look, now) {
   const was = `${look.kind} at ${look.real}`;
   if (!now) return `it was ${was} when the list was made and is gone now: nothing was proven`;
   if (now.kind !== look.kind || now.real !== look.real) return `it was ${was} when the list was made and is ${now.kind} at ${now.real ?? 'no known place'} now: nothing was proven`;
+  if (now.kind === 'file' && now.names > 1) return `another name for this file exists now (it has ${now.names}): nothing was proven`;   // r4 m3
   return null;
 }
 
 /** Runs a proof list as the builder → [{ ok, what, why?, notTried? }]. A failed control makes every later proof FAIL as
  *  well, since it would prove nothing. Each proof made from a look at a place looks again first (#528 r3 m1). */
-export function proveList(io, list, kindOf = kindOn(io)) {
+export function proveList(io, list, kindOf = kindOn(io), walkOf = walkOn(io)) {
   const out = []; let controlsHold = true;
   for (const pr of list) {
     if (pr.notTried) { out.push({ ok: false, notTried: true, what: pr.what, why: pr.notTried }); continue; }
     if (pr.bad) { out.push({ ok: false, what: pr.what, why: pr.bad }); continue; }
     if (!controlsHold) { out.push({ ok: false, what: pr.what, why: 'not proven: a control above failed' }); continue; }   // one way of asking is already broken
-    if (pr.look) { const ch = changedWhy(pr.look, kindOf(pr.look.at)); if (ch) { out.push({ ok: false, notTried: true, what: pr.what, why: ch }); continue; } }
+    if (pr.look) {
+      const ch = changedWhy(pr.look, kindOf(pr.look.at))
+        ?? (pr.look.walk !== undefined && walkSig(walkOf(pr.look.real)) !== pr.look.walk ? 'what is inside it changed since the list was made (a link or a file\'s other name came or went): nothing was proven' : null);   // r4 m2
+      if (ch) { out.push({ ok: false, notTried: true, what: pr.what, why: ch }); continue; }
+    }
     const r = io.run(SUDO, ['-n', '-H', '-u', BUILDER, ...pr.args]);
     const gotOk = r.status === 0;
     if (pr.control) {
@@ -220,12 +264,41 @@ export const kindOn = (io) => (f) => {
   const error = (e, ifGone) => ({ kind: gone(e) ? ifGone : `error:${e?.code ?? 'unknown'}`, real: null });
   let st; try { st = io.lstat(f); } catch (e) { return gone(e) ? null : error(e); }
   let real; try { real = io.realpath(f); } catch (e) { return error(e, 'error:a link that leads nowhere'); }
-  if (real === f && !st.isSymbolicLink()) return { kind: st.isDirectory() ? 'dir' : 'file', real };
-  try { return { kind: io.stat(real).isDirectory() ? 'dir' : 'file', real }; } catch (e) { return error(e, 'error:a link that leads nowhere'); }
+  // `names`: how many names a file has (its link count, #528 r4 m3). Each name reaches the same file through its own folders.
+  const of = (s) => (s.isDirectory() ? { kind: 'dir', real } : { kind: 'file', real, names: Number(s.nlink ?? 1) });
+  if (real === f && !st.isSymbolicLink()) return of(st);
+  try { return of(io.stat(real)); } catch (e) { return error(e, 'error:a link that leads nowhere'); }
 };
+
+/**
+ * What is inside the folder `d` (a real place), as root sees it (#528 r4 m2): → { links: [{ at, real }], named: [paths] }
+ * or { error }. `links`: each link anywhere below whose real place is outside `d` (or that leads nowhere:
+ * real null); `named`: each file below with more than one name. Links are not followed into, so the walk ends; a folder
+ * with more than WALK_MAX things below it is not walked to the end, and that is an error, never "nothing found".
+ */
+export const WALK_MAX = 5000;
+export const walkOn = (io) => (d) => {
+  const links = []; const named = []; let seen = 0;
+  const inside = (r) => r === d || r.startsWith(d === '/' ? '/' : `${d}/`);
+  const down = (dir) => {
+    for (const n of io.list(dir)) {
+      if (++seen > WALK_MAX) throw Object.assign(new Error(`more than ${WALK_MAX} things inside`), { code: 'too many' });
+      const p = join(dir, n); const st = io.lstat(p);
+      if (st.isSymbolicLink()) { let r = null; try { r = io.realpath(p); } catch { /* leads nowhere: kept, with no real place */ } if (r === null || !inside(r)) links.push({ at: p, real: r }); }
+      else if (st.isDirectory()) down(p);
+      else if (Number(st.nlink ?? 1) > 1) named.push(p);
+    }
+  };
+  try { down(d); } catch (e) { return { error: e?.code ?? e?.message ?? 'unknown' }; }
+  return { links, named };
+};
+/** The same walk as one line of text, to see whether it changed between the list and the proof. */
+const walkSig = (w) => JSON.stringify(w);
+/** Is `d` a shared folder (the sticky bit), as root sees it, its link followed? Not known → false: the plain "cannot write" proof. */
+export const stickyOn = (io) => (d) => { try { return (io.stat(d).mode & 0o1000) !== 0; } catch { return false; } };
 
 /** What `--dry-run` prints: the commands, not run, and what will not be tried. */
 export const proofCommands = (io, cfg) => {
   const inputs = proofInputs(io, cfg);
-  return [...proofList(cfg, { ...inputs, kindOf: kindOn(io) }).map((pr) => (pr.args ? `sudo -n -H -u ${BUILDER} ${pr.args.join(' ')}   (${pr.expect === 'ok' ? 'must work' : pr.expect === 'denied' ? 'must be refused: Permission denied' : 'must fail'})` : `not tried: ${pr.what} (${pr.notTried ?? pr.bad})`)), `${ID} -Gn ${BUILDER}   (its own group and the allowed ones only)`];
+  return [...proofList(cfg, { ...inputs, kindOf: kindOn(io), walkOf: walkOn(io), stickyOf: stickyOn(io) }).map((pr) => (pr.args ? `sudo -n -H -u ${BUILDER} ${pr.args.join(' ')}   (${pr.expect === 'ok' ? 'must work' : pr.expect === 'denied' ? 'must be refused: Permission denied' : 'must fail'})` : `not tried: ${pr.what} (${pr.notTried ?? pr.bad})`)), `${ID} -Gn ${BUILDER}   (its own group and the allowed ones only)`];
 };

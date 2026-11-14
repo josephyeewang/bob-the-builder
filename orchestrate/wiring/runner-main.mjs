@@ -110,6 +110,9 @@ export function checkRunnerConfig(c) {
     // an empty snapshot.
     const prod = p.rules?.production;
     if (p.rules !== undefined && !(prod && ['env_files', 'programs', 'hosts'].every((k) => Array.isArray(prod[k]) && prod[k].every((v) => typeof v === 'string')))) fail(`product ${name}: rules.production must list env_files, programs and hosts`);
+    // secrets.paths, when there, is a list of text as review-runner-main.mjs readConfig wants it (#528 r4 c2): setup's
+    // proofs read it, and a value that is not a list would be proven as nothing at all.
+    if (p.rules?.secrets !== undefined && !(Array.isArray(p.rules.secrets?.paths) && p.rules.secrets.paths.every((v) => typeof v === 'string'))) fail(`product ${name}: rules.secrets.paths must list the secrets' full paths`);
     // Every deny entry a worker session must have (#364 r1 M2, as review-runner-main.mjs refuses an empty deny list):
     // render-settings leaves a missing one out without a word, so here a missing one stops the runner instead.
     const d = p.render.paths.deny;
