@@ -42,7 +42,10 @@ export const DO_PLANE_SHA256 = 'b6dbe4e0be74fdcba5453b8ea0353ef6175bee578d292f63
 const sha256 = (t) => createHash('sha256').update(t).digest('hex');
 const refuse = (reason) => ({ ok: false, reason });
 
-function run(bin, args, { env, input, timeoutMs = 300000 }) {
+// How long one scan may run. One value: the robot's push pass limit is sized from it (wiring/robot-push.mjs, L1115).
+export const SCAN_TIMEOUT_MS = 300_000;
+
+function run(bin, args, { env, input, timeoutMs = SCAN_TIMEOUT_MS }) {
   return new Promise((resolve) => {
     const c = spawn(bin, args, { env, stdio: ['pipe', 'pipe', 'pipe'], timeout: timeoutMs, cwd: env.HOME });
     let out = ''; let err = '';

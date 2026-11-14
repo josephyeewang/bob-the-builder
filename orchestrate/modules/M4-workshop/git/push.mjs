@@ -303,7 +303,7 @@ async function messages(mirror, shas, names, about) {
  *   testGit                 tests only, refused outside them: { bin, timeouts, failStart } for every git call (gitTest).
  *   afterStage()            tests only: runs right after the private copy is taken, so a test can
  *                           swap the outbox bundle at the earliest moment (review R-0b-47 MAT-4).
- *   uids.worker             the Mac user a worker's bundle must be owned by (`orchestrate`, L65)
+ *   uids.worker             the Mac user a worker's bundle must be owned by (the `builder` user, L1079; robot-push.mjs reads its id from the layout's USERS)
  *   outboxRoot              the TOP outboxes folder (<base>/outboxes), not a product's folder under it: a worker's
  *                           outbox must really be either runner role's folder, <root>/<product>/{worker|script}/<session id>
  *                           (L767, L836; outboxProblemFor, #378 r1 m2, #403 r1 M1)

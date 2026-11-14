@@ -23,11 +23,14 @@
 //   caught-up   M13 caughtUpOnce. REAL: the idea issues are read with the read-only client, the ideas and the push
 //               request are written as the Ledger. See lastReturn() for what "the Mini came back" means here.
 //   watch       M12 watchOnce. Needs a Vercel client and M13 alerts: not wired, refuses.
-//   deliver     LAST, so every alert the passes above queued goes out in the same round (L242). The alert queue is the
+//   deliver     After every pass but push, so every alert the passes above queued goes out in the same round (L242). The alert queue is the
 //               Record's, and delivery runs here, never in the Dispatcher (L236, L237): a dead Dispatcher is still told.
 //               REAL when the config names the robot App (APP_KEYS, L600): M13 deliverAlertsPass through deliverWith, with
 //               the robot's installation token minted once per round (robotToken). Without those keys it refuses, and
 //               the alerts stay queued. A test may still inject `deliver({ rec, now })`.
+//   push        LAST (L1115): push-pass.mjs over M4's push script, wired in robot-push.mjs, with a time limit of its own
+//               (PASS_LIMITS_MS: one git stall and one secret scan), so the heartbeat and deliver never wait on it. Its
+//               alerts go out with the next round's deliver. Refuses until every part it needs is there (robot-push.mjs).
 // A pass that refuses fails, and robot-main.mjs tells Joe ("the robot job's <pass> pass failed: not wired yet: …").
 //
 // The config: the Dispatcher's keys (dispatcher-wiring.mjs) and these.
@@ -39,6 +42,8 @@
 //   alert repository), alertRepo (owner/name: where alert issues go; the App must be installed there, and never Bob's
 //   repository) and alertOwner (the GitHub login the issues are assigned to). With none, deliver refuses as not wired;
 //   with some but not all, or a bad value, the job does not start.
+//   OUTSIDE_KEYS (robot-push.mjs), all four or none: outsideRepo, outsideWorkflow, outsideSlot, outsideTag, the outside
+//   check the push's start gate trusts. With none, push refuses as not wired; some, or a bad value: the job does not start.
 //
 // THE STORE-FREE CHANNEL. robotChannel(config) is the same App and alert repository with no Record behind it, for a
 // start that failed before the Record opened (L587: robot-main.mjs's catch hands it to M13 store-stopped.mjs). It never
@@ -63,13 +68,14 @@ import { heartbeatProbes } from './heartbeat-probes.mjs';
 import { deliverWith, githubIssues, repoProblem } from '../modules/M13-ledger/alert-channel.mjs';
 import { mintInstallationToken } from '../modules/M6-merge-gate/token.mjs';
 import { appMintClient } from '../modules/M6-merge-gate/watch-run.mjs';
+import { OUTSIDE_KEYS, PUSH_DEADLINE_MS, PUSH_NOT_WIRED, outsideKeysProblem, pushWiring } from './robot-push.mjs';
 
 // approvalsStateDir is the Dispatcher's alone (M2 runs only in its approvals step), and so are the review runner's keys
 // (L639), and the worker and cleanup ports' (L739), so the robot config refuses them.
 // The robot App and where its alerts go (L600): all four or none.
 export const APP_KEYS = Object.freeze(['appId', 'appInstallation', 'alertRepo', 'alertOwner']);
 export const CONFIG_KEYS = Object.freeze([...DISPATCHER_KEYS.filter((k) => k !== 'approvalsStateDir' && k !== 'rulesSnapshotFile' && !REVIEW_CONFIG_KEYS.includes(k) && !WORKER_CONFIG_KEYS.includes(k)), 'keyDir', 'dispatcherLockFile',
-  ...APP_KEYS]);
+  ...APP_KEYS, ...OUTSIDE_KEYS]);
 const PATHS = Object.freeze(['recordRoot', 'productsFile', 'rulesStateDir', 'tokenFile', 'keyDir', 'dispatcherLockFile']);
 // The longest a live Dispatcher pass may hold its lock: M11's run deadline, its watchdog's margin, and a minute (audit
 // #137 M6). Past this, a live holder is stuck, and the Dispatcher counts as late. It uses M11's default deadline. A
@@ -115,10 +121,12 @@ export const SWEEP_DEADLINE_MS = 30_000;
 export const SWEEP_MARGIN_MS = 5_000;
 // M13's sweep whys, by kind (alerts.mjs sweep): each that matches names a cause; a why matching none is GitHub's side (list).
 const SWEEP_WHY_KINDS = [['login', /login is not known/], ['mark', /the Record refused the (sweep's mark|sweep's list mark|mark of)/]];
-export const ROBOT_PASSES = Object.freeze(['gate', 'heartbeat', 'caught-up', 'watch', 'deliver']);
+export const ROBOT_PASSES = Object.freeze(['gate', 'heartbeat', 'caught-up', 'watch', 'deliver', 'push']);
+// A pass's own time limit, where robot-main's one PASS_DEADLINE_MS is too short (robot-main.mjs passLimit; L1115).
+export const PASS_LIMITS_MS = Object.freeze({ push: PUSH_DEADLINE_MS });
 // What each pass that is not wired yet is waiting for: the port named in its refusal.
 export const NOT_WIRED_PASSES = Object.freeze({ gate: 'robot.github (R-0b-02)', heartbeat: `robot.heartbeat: the config names no robot App (${APP_KEYS.join(', ')}; L600)`, watch: 'robot.vercel',
-  deliver: `robot.deliver: the config names no robot App (${APP_KEYS.join(', ')}; L600)` });
+  deliver: `robot.deliver: the config names no robot App (${APP_KEYS.join(', ')}; L600)`, push: PUSH_NOT_WIRED.app });
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MAX_IDEAS = 100;
 const APP_ID = /^[A-Za-z0-9.]{1,64}$/;            // token.mjs's: a numeric App id or an App's client id
@@ -305,13 +313,15 @@ export async function ideaIssues(gh, { owner, repo }) {
 }
 
 export async function wire(config, { log = (s) => process.stderr.write(`${s}\n`), fetchFn = globalThis.fetch, now = () => Date.now(),
-  uid = process.getuid?.(), deliver = null, hold = holdAlert, mint = mintInstallationToken, sweepDeadlineMs = SWEEP_DEADLINE_MS, passDeadlineMs = null, alertsOf = makeAlerts, upMs = null } = {}) {
+  uid = process.getuid?.(), deliver = null, hold = holdAlert, mint = mintInstallationToken, sweepDeadlineMs = SWEEP_DEADLINE_MS, passDeadlineMs = null, alertsOf = makeAlerts, upMs = null, push = {} } = {}) {
   // The heartbeat pass's own limit is robot-main's, handed in by its main (one value; #465 r2 M1: never imported from
   // robot-main here, whose top-level main would then wait on this wire for ever). Without one the sweep is not run.
   const passLimitMs = Number.isFinite(passDeadlineMs) && passDeadlineMs > 0 ? passDeadlineMs : null;
   const c = checkConfig(config, { keys: CONFIG_KEYS, paths: PATHS });
   const appBad = appProblem(c);
   if (appBad) throw new Error(`config: ${appBad}`);
+  const outsideBad = outsideKeysProblem(c);
+  if (outsideBad) throw new Error(`config: ${outsideBad}`);
   // Its own live pid in that file would read as a running Dispatcher, every round, for ever (audit #150 Minor 3).
   if (resolve(c.dispatcherLockFile) === resolve(c.lockFile)) throw new Error('dispatcherLockFile is this job\'s own lockFile: it must be the Dispatcher\'s');
   checkUser({ uid, ownerUid: c.ownerUid, keyDir: c.keyDir });
@@ -331,6 +341,8 @@ export async function wire(config, { log = (s) => process.stderr.write(`${s}\n`)
       owner: c.alertOwner, token, fetchFn });
     passes.deliver = () => send({ rec, now });
   }
+  // push: robot-push.mjs, refusing until every part is there (I1). `push` holds a test's ports (scannerAt, userOf, testRemote).
+  passes.push = pushWiring(c, { rec, rules, entry, token, fetchFn, now, uid, hold, ...push });
   let beat = null;
   let sweepRound = null;
   if (token) {

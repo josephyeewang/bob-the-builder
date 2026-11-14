@@ -79,6 +79,9 @@ export const SAFE_CONFIG = Object.freeze([
 const FIXED_PATH = '/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin';
 // The PATH for git that runs as root (the updater, L73 point 6): only folders only root can write. /opt/homebrew/bin is
 // the admin group's, so a program git looks up there could be swapped by the workers' Mac user.
+// How long one git call may run unless its caller says less. One value: the robot's push pass limit is sized from it
+// (wiring/robot-push.mjs, L1115).
+export const GIT_TIMEOUT_MS = 120_000;
 export const ROOT_PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
 let privateHome = null;
 const HOME_PREFIX = 'orch-git-home-';
@@ -518,7 +521,7 @@ export function withNoPrograms(args) {
  * call with no command (`--version`) opens no repository, so it is not checked. `path` replaces the PATH git gets
  * (ROOT_PATH for git run as root).
  */
-export async function git(args, { gitDir, workTree, cwd, input, extraConfig, allowObjects, address, purpose = 'unnamed', timeoutMs = 120000, gitBin = 'git', path } = {}) {
+export async function git(args, { gitDir, workTree, cwd, input, extraConfig, allowObjects, address, purpose = 'unnamed', timeoutMs = GIT_TIMEOUT_MS, gitBin = 'git', path } = {}) {
   if (!gitDir) return { code: -1, stdout: Buffer.alloc(0), stderr: 'safe-git: GIT_DIR is required' };
   const at = commandAt(args);
   let dirs = { gitDir };

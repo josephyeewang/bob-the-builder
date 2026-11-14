@@ -268,7 +268,8 @@ test('R-0b-162 B (L242): with the Dispatcher never run, the late alert is queued
   assert.ok(got.includes('the Dispatcher has no full pass on record: nothing is started or merged until it runs'), got.join(' | '));
   // Every pass before it had run: their failures were queued first, so delivery saw them too.
   for (const p of ['gate', 'watch']) assert.ok(got.some((t) => t.startsWith(`the robot job's ${p} pass failed`)), p);
-  assert.equal(ROBOT_PASSES.at(-1), 'deliver');
+  // Deliver is after every pass but push, which is last so a slow push never holds up the round's alerts (L1115).
+  assert.deepEqual(ROBOT_PASSES.slice(-2), ['deliver', 'push']);
 });
 
 test('audit #144 r2 n1: a config that names no installRoot is refused by main, which says installRoot', async () => {
@@ -891,6 +892,26 @@ test('L600 PR 1: without the App keys deliver is not wired; some but not all, or
   const r = boot(world({ extra: three }));
   assert.equal(r.code, 1);
   assert.match(r.err, /robot: not started: config: the robot App keys go together, all four or none: alertOwner missing/);
+});
+
+test('L1115: the push pass refuses until every part is there; some outside check keys, or a bad one, stop the start', async () => {
+  const OUTSIDE = { outsideRepo: 'owner-x/outside', outsideWorkflow: '.github/workflows/outside-check.yml', outsideSlot: 'product 1', outsideTag: 'abcd1234' };
+  // No App: the push says so.
+  const none = world();
+  const a = await wire(none.config, { fetchFn: fakeGitHubFetch(none.fake), log: () => {} });
+  assert.throws(() => a.passes.push(), (e) => e.message === notWiredText(NOT_WIRED_PASSES.push));
+  // The App and the outside check named: the next missing part is the scanner's paths (lane 4, #525), still refusing.
+  const both = world({ extra: { ...APP, ...OUTSIDE } });
+  const b = await wire(both.config, { fetchFn: fakeGitHubFetch(both.fake), log: () => {} });
+  assert.throws(() => b.passes.push(), /not wired yet: robot\.push: the secret scanner's paths are not wired/);
+  // Some but not all, or a bad value: the job does not start.
+  for (const k of Object.keys(OUTSIDE)) {
+    const { [k]: _, ...three } = OUTSIDE;
+    const w = world({ extra: three });
+    await assert.rejects(wire(w.config, { fetchFn: fakeGitHubFetch(w.fake), log: () => {} }), new RegExp(`config: the outside check keys go together, all four or none: ${k} missing`));
+  }
+  const bad = world({ extra: { ...OUTSIDE, outsideSlot: 'slot one' } });
+  await assert.rejects(wire(bad.config, { fetchFn: fakeGitHubFetch(bad.fake), log: () => {} }), /config: outsideSlot must be/);
 });
 
 test('L600 PR 1: robotToken mints on the first ask only, keeps that one answer, and never rejects', async () => {
