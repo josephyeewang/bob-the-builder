@@ -9,6 +9,9 @@ waiting on whom, and the "caught up" message after the Mini was away.
 | `heartbeat.mjs` | R-0b-73, L143 | The pinned heartbeat issue, rewritten every 10 min; an alert per red fact; signed-out; account switch; usage steps. The new login is saved only once its change alert (unplanned) or push request (planned) went out, on every path: a lost or refused one is told again on the next pass. Every switch is counted and its notice carries that number and the saved record's time, so a repeat switch to the same account, planned or not, is a fresh notice, and a lost count never reuses a closed one, unless the record has no time or the clock gives the same millisecond twice (L152, L158, #98 r2). |
 | `caught-up.mjs` | R-0b-76 | Idea issues from the owner (by numeric user ID) into the inbox; one "caught up" push after the Mini was away. |
 | `waiting.mjs` | R-0b-77 | Who / what / since for every waiting item, from the record; a missing field shows as a record error. |
+| `digest.mjs` | R-1-29 | The digest of a window of the record's diary: every merge (card, PR), every flag (a merge the post-merge audit flagged, a card undone) and every wait open now (who / what / since, from `waiting.mjs`, marked when it began in the window). A line it can't place is a record error, shown, never dropped; a diary that can't be read throws. Stored times are read through `pastTime`. Not wired yet: nothing writes `reports/digest.json` or the digest issue. |
+| `handoff-copy.mjs` | R-1-31 | The Ledger writes the record's newest Lead handoff, word for word, to `<its folder>/<product>.md`. A handoff list it can't read, a corrupt entry or an empty newest handoff writes nothing, so the copy stays the last good one. It never writes into Dropbox. Not wired yet: no Ledger pass calls it. |
+| `handoff-copier.mjs` | R-1-32 | A plain script, no AI, run as the owner's own user every 15 minutes: copies the Ledger's file to Dropbox's `handoffs/<product>.md` and makes the copy read-only. An edit synced back from another Mac, or a permission change, is overwritten at the next run and the difference logged (`handoff-copier.log` in its own folder). Links, a bad product name and root are refused. The folder itself stays writable, so a copy deleted and written again is caught at the next run, not prevented. |
 | `outside-check/` | R-0b-72 | The template for the hourly outside check's own public repo (its README has the owner steps). |
 
 ## What is proven, and what is not yet
@@ -25,3 +28,7 @@ As in M12: the code is tested against fakes; each row's real half needs the owne
    repo within about 2 hours, updated hourly, not re-opened.
 3. **Phone fallbacks** (R-0b-76), Mini's network off: file an idea issue and Approve a test PR from the phone; network
    back within the hour → the idea is in the inbox, the merge happens, one "caught up" push arrives.
+4. **Read-only handoff copy** (R-1-32): make a folder for the copier (`mkdir -m 700`), then load its LaunchAgent as your own
+   user (the plist comes from `copierAgentPlist`, with the Ledger's handoff folder, the Dropbox `handoffs/` folder and
+   the product names). Then: the copy is read-only on the Mini; edit it on another Mac → within 15 minutes it is the
+   record's again and the edit is in the log.

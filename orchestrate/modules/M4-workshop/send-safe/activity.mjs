@@ -11,6 +11,8 @@
 // boundary, or the session's end says the dialog is gone. Helper (subagent) traffic,
 // notifications and a lost hook never clear it. When unsure, it stays blocked.
 
+import { LAUNCH_EVENT, withChange } from './changes.mjs';
+
 export const State = Object.freeze({
   ACTIVE: 'active',
   IDLE: 'idle',
@@ -48,7 +50,8 @@ export const notThePerson = (s) => (typeof s?.watchdog === 'boolean' ? s.watchdo
 
 /**
  * Tracks every session's activity from hook signals. `store` holds session records:
- * { id, activity: { state, at }, firstSignalAt, terminated }. In-flight tool state is
+ * { id, activity: { state, at }, firstSignalAt, terminated, seq, changes } (seq and changes: R-0b-155b, changes.mjs).
+ * In-flight tool state is
  * in memory only: a restart loses it and the session clears at its next turn boundary. This assumes one
  * permission dialog on screen at a time (README open items: a live check next to L1).
  */
@@ -178,12 +181,16 @@ export class ActivityTracker {
     if (!rec || typeof launchId !== 'string' || !launchId) return false;
     this.flights.delete(id);
     const { terminated, ...rest } = rec;
-    this.store.set(id, { ...rest, launchId, firstSignalAt: null, openAsks: [], activity: { state: State.ACTIVE, at: this.now() } });
+    const at = this.now();
+    // R-0b-155b: a launch is a change of its own, so a "took" wait from before it ends aborted.
+    this.store.set(id, withChange({ ...rest, launchId, firstSignalAt: null, openAsks: [], activity: { state: State.ACTIVE, at } }, { event: LAUNCH_EVENT, launchId, at }));
     return true;
   }
 
   // Applies one hook signal { valid, state, event, toolName, toolUseId, prompt | watchdog, at, launchId }.
   // → 'applied', 'same' (nothing to write) or 'dropped'; callers before R-0b-175a ignore it.
+  // R-0b-155b: every line taken for the current launch, 'applied' or 'same', is numbered (changes.mjs): a typed prompt
+  // often leaves the state as it was, and the "took" wait must still see it. A dropped line is not numbered.
   applySignal(id, signal) {
     const rec = this.store.get(id);
     if (!rec || rec.terminated) return 'dropped';
@@ -202,12 +209,12 @@ export class ActivityTracker {
     if (rec.activity.state === State.EXITED && s.state !== State.EXITED
       && !(s.event === 'user-prompt-submit' && !notThePerson(s))) return 'dropped';
     if (s.valid) s = this.applyToolPrecedence(id, rec.activity.state, s);
-    if (!s.valid) return 'same';
+    if (!s.valid) return this.numbered(id, signal, 'same');
     const now = this.store.get(id) ?? rec; // precedence may have stored the open questions
     const at = s.at ?? this.now();
     const prev = rec.activity.state;
     // A same-state repeat after the first signal is not a write.
-    if (prev === s.state && (rec.activity.reason ?? null) === (s.reason ?? null) && rec.firstSignalAt) return 'same';
+    if (prev === s.state && (rec.activity.reason ?? null) === (s.reason ?? null) && rec.firstSignalAt) return this.numbered(id, signal, 'same');
     // `reason: 'question'` marks a wait on an open AskUserQuestion (nudgeUrgent never types into it).
     const next = { ...now, activity: { state: s.state, at, ...(s.reason ? { reason: s.reason } : {}) } };
     if (!next.firstSignalAt) next.firstSignalAt = at;
@@ -215,7 +222,12 @@ export class ActivityTracker {
     this.store.set(id, next);
     // Entering the needs-input family pings the person once; escalation inside it doesn't.
     if (!needsInput(prev) && needsInput(next.activity.state)) this.notify({ type: 'needs_input', id });
-    return 'applied';
+    return this.numbered(id, signal, 'applied');
+  }
+
+  numbered(id, signal, did) {
+    this.store.set(id, withChange(this.store.get(id), { event: signal.event, launchId: signal.launchId, at: signal.at ?? this.now(), promptHash: signal.promptHash }));
+    return did;
   }
 
   // A crash or kill fires no session-end hook, so the reaper is the last chance to

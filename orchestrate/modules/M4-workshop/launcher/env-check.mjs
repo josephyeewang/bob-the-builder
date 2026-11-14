@@ -28,7 +28,7 @@ export const LAUNCHER_ENV = Object.freeze([CONFIG_VAR]);   // accounts.mjs's one
 // names: a session variable of whatever started the launcher (CLAUDECODE, CLAUDE_CODE_SESSION_ID, CODEX_THREAD_ID, a
 // name a newer claude adds) is off it, so it never reaches a role. CAPABILITY NOTE: the leaking names were seen on claude
 // 2.1.322 (13 Nov, R-0b-155's check); the allow-list does not depend on them, but the planted test lists them; RECHECK
-// at every pin change.
+// at every pin change (checked: claude-code 2.1.322, open until 2027-01-20 (R-0b-156)).
 export const ROLE_ENV_ALLOWED = Object.freeze([...PASS_ENV, 'PATH', ...LAUNCHER_ENV]);
 // Names that look like a key for some service: named as such when refused, so the reason says what slipped in.
 const KEYISH = /(^|_)(TOKEN|API_KEY|SECRET|PASSWORD|PRIVATE_KEY|ACCESS_KEY)(_|$)|^(GH|GITHUB)_|^GIT_ASKPASS$|^SSH_AUTH_SOCK$/;
@@ -70,7 +70,7 @@ export function startEnv(base, opts = {}) {
 
 // MANAGED SOURCES: the managed (policy) settings sources check 10 reads, as claude reads them.
 //
-// CAPABILITY NOTE, checked on claude 2.1.316, the pin (its bundled code; and first on 2.1.322): RECHECK ON EVERY UPGRADE of the pin.
+// CAPABILITY NOTE, checked on claude 2.1.316, the pin (its bundled code; and first on 2.1.322): RECHECK ON EVERY UPGRADE of the pin (checked: claude-code 2.1.316).
 // A source a newer claude adds, moves or reorders gets past check 10 until this list follows it.
 // This build has two overrides built out, which a newer one may build in: CLAUDE_CODE_MANAGED_SETTINGS_PATH
 // (another managed file) and CLAUDE_CODE_REMOTE_SETTINGS_PATH (another remote cache). Its storage backend

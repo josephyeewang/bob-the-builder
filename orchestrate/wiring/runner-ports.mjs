@@ -57,10 +57,11 @@
 //     stop step waits for its late hard stop, never a guess of "safe".
 // Capability note (Principle 9): where Claude Code keeps a conversation is <config dir>/projects/<folder>/<session id>.jsonl,
 // <folder> being the working folder with each character but a letter or digit made "-", cut at 200 characters with "-" and
-// the folder's 32-bit string hash in base 36 added when longer. CHECKED AGAINST 2.1.316 by reading its code (EL, Zhe, qw,
-// Lm; not a live run; L1098): void at the next pin. 2.1.316 takes the folder from CLAUDE_CODE_PROJECT_DIR_NAME instead when
-// CLAUDE_CONFIG_DIR is set; the environment allow-list (env-check.mjs ROLE_ENV_ALLOWED, R-0b-156) keeps that name out of
-// every session, so the rule above is the one that applies. transcript.mjs's line shapes are a separate note.
+// the folder's 32-bit string hash in base 36 added when longer. Read in 2.1.316's code (EL, Zhe, qw, Lm; checked:
+// claude-code 2.1.316), not yet proved live (L1139): TRANSCRIPT_PLACE_CHECKED_AGAINST stays null until Joe's live run
+// (L1134, L1137). 2.1.316 takes the folder from CLAUDE_CODE_PROJECT_DIR_NAME instead when CLAUDE_CONFIG_DIR is set; the
+// environment allow-list (env-check.mjs ROLE_ENV_ALLOWED, R-0b-156) keeps that name out of every session.
+// transcript.mjs's line shapes are a separate note.
 
 import { fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeSync, closeSync, constants } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -94,7 +95,7 @@ const refuse = (reason) => ({ ok: false, reason });
 const notWired = (what) => refuse(`not wired: ${what}`);
 const SHA = /^[0-9a-f]{40}$/;
 
-/** Claude Code's folder for a working folder's conversations (2.1.316's rule: see the capability note above). */
+/** Claude Code's folder for a working folder's conversations (2.1.316's rule: see the capability note above; checked: claude-code 2.1.316). */
 export const PROJECT_FOLDER_MAX = 200;
 const stringHash = (t) => { let h = 0; for (let i = 0; i < t.length; i++) h = ((h << 5) - h + t.charCodeAt(i)) | 0; return h; };
 export const projectFolderName = (cwd) => {
@@ -163,7 +164,8 @@ function nameCause(id, name) {
 }
 // The bundle taken by its push (L898): the attempt from the session's own doc, its push fact pushed with these bytes.
 // → null when taken, else its cause.
-function bundleHeld(s, path, { readFact, readSession, hashOf }) {
+// Exported (lane N, I7): the robot's push pass asks this same rule whether a bundle is already taken, so the two can't drift.
+export function bundleHeld(s, path, { readFact, readSession, hashOf }) {
   let sd; try { sd = readSession(s.id); } catch { return 'record-unreadable'; }
   if (sd?.ok !== true) return sd?.missing === true ? 'bundle-no-attempt' : 'record-unreadable';
   const doc = sd.doc;
@@ -177,7 +179,7 @@ function bundleHeld(s, path, { readFact, readSession, hashOf }) {
   let hash; try { hash = hashOf(path); } catch (e) { return hashCause(e); }
   return hash === d.bundle_sha256 ? null : 'bundle-changed';
 }
-function fileSha256(p) {
+export function fileSha256(p) {
   const fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try { if (!fstatSync(fd).isFile()) throw new Error('not a plain file'); return createHash('sha256').update(readFileSync(fd)).digest('hex'); } finally { closeSync(fd); }
 }
@@ -232,8 +234,8 @@ export function saveWorkPort({ mirrorOf, runLocked, settingsDir, make = createSa
         if (st.uid !== uid) throw new Error('the copy\'s .git is not the runner\'s own');
         let cwd; try { cwd = realpath(git); } catch (e) { throw new Error(`the copy's .git can't be read (${e?.code ?? e?.message})`); }
         return runLocked({ ...j, sessionId: s.id, role: RUNNER_ROLE_OF[s.kind], settingsFile: typeof settingsDir === 'string' ? join(settingsDir, saveSettingsName(s.id)) : undefined,
-          // cwd .git: see runner-locked.mjs's capability note (read in claude 2.1.322, which denies <cwd>/.git/config and
-          // hooks; not yet checked on the pin, 2.1.316: Mini proof 9).
+          // cwd .git: see runner-locked.mjs's capability note (read in claude 2.1.322 and the pin, 2.1.316, which deny
+          // <cwd>/.git/config and hooks; checked: claude-code 2.1.316; Mini proof 9 runs it).
           settingsSha: s.save_settings_sha, cwd, ...(typeof onGroup === 'function' ? { onGroup } : {}) });
       }
       : undefined;
