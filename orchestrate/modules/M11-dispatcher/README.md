@@ -73,7 +73,7 @@ For a fact M12 writes, the shape is the fields this folder reads, the same list 
 |---|---|---|
 | `usage-<account>` | M12 Sensors (lane 3), to the review's M5 contract | `{ account, observed_at, week: {used_pct, resets_at}, h5: {used_pct, resets_at} }` |
 | `band-usage` | this folder | `{ band: green/amber/red/unknown, own_building, reason, account, decided_at, unknown_since }` |
-| `signed-in-account` | M12 | `{ account, observed_at }` |
+| `signed-in-account` | M12 | `{ account, reason, observed_at }` |
 | `pr-<n>` | M12 | `{ state, merged, merge_commit_sha, head_sha, observed_at }` |
 | `outage` | this folder | `{ state: open/ended, ... }` |
 | `limit-hit-<account>` | M12 (screen rules) or a worker's exit result | `{ resets_at, observed_at }` |
