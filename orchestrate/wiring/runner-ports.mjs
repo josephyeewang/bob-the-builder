@@ -58,8 +58,14 @@
 // Capability note (Principle 9): where Claude Code keeps a conversation (<config dir>/projects/<the working folder with
 // each character but a letter or digit made "-">/<session id>.jsonl) is CHECKED AGAINST NOTHING YET, as transcript.mjs's
 // line shapes are; void at the next pin. TRANSCRIPT_PLACE_CHECKED_AGAINST names the version once the live proof runs.
-// Read in 2.1.316's own code, 13 Nov 2026: that is its rule, and a folder name over 200 characters is cut and given a
-// hash suffix, which this does not do (checked: claude-code 2.1.316; the constant is code, its owner's to set).
+// Read in 2.1.316's own code, 13 Nov 2026: that is its rule, applied to the working folder's real path put in NFC, and
+// a folder name over 200 characters is cut and given a hash suffix. projectFolderName (claude-folder-name.mjs, which
+// sets the rule out step by step) does the NFC step and the cut as read there; the real-path step it leaves to runner-main.mjs, which refuses to start unless copiesRoot is its own real
+// path (L1134, L1141; checked: claude-code 2.1.316). Not yet proved on a live session: the constant stays null until
+// the live proof (setup/live-proofs/transcript-place.mjs) finds every case's transcript where this code says.
+// 2.1.316 takes the folder from CLAUDE_CODE_PROJECT_DIR_NAME instead when CLAUDE_CONFIG_DIR is set; the environment
+// allow-list (env-check.mjs ROLE_ENV_ALLOWED, R-0b-156) keeps that name out of every session. Read (checked: claude-code 2.1.316), not yet proved live
+// (L1139). transcript.mjs's line shapes are a separate note.
 
 import { fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeSync, closeSync, constants } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -74,12 +80,13 @@ import { SESSION_ID } from '../shared/record.mjs';
 import { CARD_ID } from '../modules/M9-record/outbox.mjs';
 import { leaderStart } from './runner-loop.mjs';
 import { readTranscriptFile } from '../modules/M11-dispatcher/transcript.mjs';
+import { folderNameAsGiven, projectFolderName } from './claude-folder-name.mjs';
 import { launch } from '../modules/M4-workshop/launcher/launch.mjs';
 import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.mjs';
 import { prepareWorkerCopy } from '../modules/M4-workshop/launcher/worker-copy.mjs';
 import { sessionArgs, spawnClaude } from '../modules/M4-workshop/launcher/review-launch.mjs';
 import { accountInUse } from '../modules/M4-workshop/launcher/accounts.mjs';
-import { roleEnv } from '../modules/M4-workshop/launcher/env-check.mjs';
+import { startEnv } from '../modules/M4-workshop/launcher/env-check.mjs';
 import { readCardFile } from '../modules/M4-workshop/launcher/review-runner-main.mjs';
 import { createSaveWork } from '../modules/M4-workshop/git/save-work.mjs';
 import { cardBranch } from '../modules/M4-workshop/git/branch.mjs';
@@ -88,13 +95,12 @@ import { PUSH_FACT, bundleName } from '../modules/M4-workshop/git/push.mjs';
 import { PRODUCT_OUTBOX_ROLES } from '../shared/product-paths.mjs';
 import { workerPrompt } from '../modules/M5-review-audit/worker-prompt.mjs';
 
-export const TRANSCRIPT_PLACE_CHECKED_AGAINST = null;
+export const TRANSCRIPT_PLACE_CHECKED_AGAINST = null;   // read, not yet proved live (L1139): read in 2.1.316's code (see the note above); set to the version only after Joe's live run (L1134, L1137)
 const refuse = (reason) => ({ ok: false, reason });
 const notWired = (what) => refuse(`not wired: ${what}`);
 const SHA = /^[0-9a-f]{40}$/;
 
-/** Claude Code's folder for a working folder's conversations (see the capability note above; checked: claude-code 2.1.316). */
-export const projectFolderName = (cwd) => String(cwd).replace(/[^A-Za-z0-9]/g, '-');
+export { folderNameAsGiven, projectFolderName };
 export const transcriptPath = ({ configDir, copy, sessionId }) => join(configDir, 'projects', projectFolderName(copy), `${sessionId}.jsonl`);
 
 /** size(session) → { size, lastWriteAt }, or a throw (the pass then lists no size). */
@@ -157,7 +163,8 @@ function nameCause(id, name) {
 }
 // The bundle taken by its push (L898): the attempt from the session's own doc, its push fact pushed with these bytes.
 // → null when taken, else its cause.
-function bundleHeld(s, path, { readFact, readSession, hashOf }) {
+// Exported (lane N, I7): the robot's push pass asks this same rule whether a bundle is already taken, so the two can't drift.
+export function bundleHeld(s, path, { readFact, readSession, hashOf }) {
   let sd; try { sd = readSession(s.id); } catch { return 'record-unreadable'; }
   if (sd?.ok !== true) return sd?.missing === true ? 'bundle-no-attempt' : 'record-unreadable';
   const doc = sd.doc;
@@ -171,7 +178,7 @@ function bundleHeld(s, path, { readFact, readSession, hashOf }) {
   let hash; try { hash = hashOf(path); } catch (e) { return hashCause(e); }
   return hash === d.bundle_sha256 ? null : 'bundle-changed';
 }
-function fileSha256(p) {
+export function fileSha256(p) {
   const fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try { if (!fstatSync(fd).isFile()) throw new Error('not a plain file'); return createHash('sha256').update(readFileSync(fd)).digest('hex'); } finally { closeSync(fd); }
 }
@@ -235,8 +242,11 @@ export function saveWorkPort({ mirrorOf, runLocked, settingsDir, make = createSa
   };
 }
 
-/** The session's environment (#463 r1 m6): the one form, for the start and the lock-down runner. */
-export const sessionEnv = (c, who, base = process.env) => roleEnv(base, { path: c.path, extra: { ...who.env, HOME: c.home } });
+/**
+ * The session's environment (#463 r1 m6): the one form, for the start and the lock-down runner, built by the launcher's
+ * one check (R-0b-156 startEnv: the allow-list). → { ok: true, env } | { ok: false, reason }.
+ */
+export const sessionEnv = (c, who, base = process.env) => startEnv(base, { path: c.path, extra: { ...who.env, HOME: c.home } });
 
 /** pauseLead({ product }): not wired (see the top of this file). */
 export const pauseLeadPort = () => async () => notWired('the Lead\'s wrap-up needs the activity tracker\'s feed, which the runner does not have yet');
@@ -505,7 +515,9 @@ export function startPort(c, deps = {}) {
     const saveText = `${JSON.stringify(ws.settings, null, 2)}\n`;
     try { fs.writeNew(saveFile, saveText); ours.push(saveFile); } catch (e) { return undo(`the save's settings file can't be written (${e?.code ?? e?.message})`); }
     const saveSha = createHash('sha256').update(saveText).digest('hex');
-    const env = sessionEnv(c, who);
+    const built = sessionEnv(c, who);
+    if (!built?.ok) return undo(`the session's environment: ${built?.reason ?? 'no answer'}`);
+    const { env } = built;
     // A throwaway copy of the same commit for the baseline (#369 r1 M1), with settings that allow writes there and in its
     // own outbox only, and deny the session's copy and outbox; done() removes it. The session's own settings deny it.
     const throwaway = async () => {

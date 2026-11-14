@@ -439,7 +439,9 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
     [S.hooks]: hooks,
     [S.env]: { [ENV.autoCompactWindow]: String(profile.compactWindow), [ENV.disableUpdates]: '1' },
     [S.disableClaudeAiConnectors]: true,
-    [S.enabledPlugins]: {},
+    // No enabledPlugins (L1114): an empty map turns nothing on, `--setting-sources ""` loads no file that could turn a
+    // plugin on, and launch check 6 refuses a start whose start message lists a plugin. Its behaviour proof is R-0b-178,
+    // before it comes back. checkSettings below still refuses a role file that turns one on.
     [S.crossSessionInbound]: 'refuse',
     [S.disableSkillShellExecution]: true,
     [S.disableBundledSkills]: true,
