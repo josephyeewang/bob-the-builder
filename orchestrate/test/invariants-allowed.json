@@ -789,11 +789,6 @@
   },
   {
    "file": "wiring/sensors-ports.mjs",
-   "line": "const age = nowMs - Date.parse(a.observed_at);",
-   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
-  },
-  {
-   "file": "wiring/sensors-ports.mjs",
    "line": "const r = Date.parse(sw?.resets_at ?? '');",
    "why": "baseline (L1078)"
   },

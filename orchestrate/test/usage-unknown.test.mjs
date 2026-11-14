@@ -22,6 +22,10 @@ import { KEYS as K } from '../modules/M11-dispatcher/keys.mjs';
 import { rulesWith, recWith, change, usageFact, undoEntries, filesOfCommits, VALUES, T0, MIN, iso } from '../modules/M11-dispatcher/fixtures.test-helper.mjs';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { fakeAlert } from './fake-alert.test-helper.mjs';
+import { chmodSync } from 'node:fs';
+import { writeAnswer, ANSWER_FILE } from '../wiring/owner-answer.mjs';
+import { sensorsPorts } from '../wiring/sensors-ports.mjs';
+import { writeSignedInAccount } from '../modules/M12-sensors/state-facts.mjs';
 
 const ACCT = 'acct-a';
 const HEAD = 'h'.repeat(40);
@@ -153,4 +157,43 @@ test('no usage reading: Joe\'s Undo still starts (the band never holds an undo)'
   const m = mac([account(), ...undoEntries('U-1')]);
   await m.at(0);
   assert.deepEqual(m.launched, ['U-1']);
+});
+
+// L1099 m2: no separate alert for a dead owner job. A stale or missing owner's answer holds starts (the Sensors write the
+// account as not known), so the hold itself must tell Joe: at once, not every tick, and again each day it lasts (I3, through
+// the shared still-waiting clock: holdAlert's dueToTell). Real from the answer file on: sensors-ports reads it, the Sensors'
+// writer writes the account fact from it, and runTick holds and tells.
+test('L1099 m2: a stale or missing owner\'s answer holds starts and tells Joe once, then once a day while it lasts', async () => {
+  for (const kind of ['stale', 'missing']) {
+    const dir = tempDir('orch-usage-unknown-');
+    chmodSync(dir, 0o755);
+    const file = join(dir, ANSWER_FILE);
+    if (kind === 'stale') {
+      const doc = { v: 1, account: 'a', signed_in: true, observed_at: iso(T0 - 11 * MIN), usage: null, usage_reason: 'not asked' };
+      assert.equal(writeAnswer({ to: file, answer: doc }).ok, true);
+    }
+    const m = mac([['fact', ACCOUNT_FACT, { account: 'a', observed_at: iso(T0 - MIN) }], card('A'), card('T1', { tier: 1 })]);
+    // One Sensors pass at `min`: the owner's answer through the real ports and the real account writer.
+    const sense = async (min) => {
+      const at = () => new Date(T0 + min * MIN);
+      const p = sensorsPorts({ file, ownerUid: process.getuid(), now: at, acl: () => null, stored: () => null });
+      let doc = null;
+      await writeSignedInAccount({ put: (_id, d) => { doc = d; return { ok: true }; } }, p.whoIsSignedIn, { now: at });
+      change(m.rec, 'fact', ACCOUNT_FACT, doc);
+      return doc;
+    };
+    const HELD = /^nothing new starts but undo cards: the signed-in account is not known$/;
+    const held = () => m.told.filter((t) => HELD.test(t)).length;
+    const first = await sense(0);
+    assert.equal(first.account, null, kind);
+    assert.match(first.reason, kind === 'stale' ? /the owner's answer is 11 min old/ : /the owner's answer is missing/, `${kind}: the account is not known because of the owner's answer`);
+    await m.at(0);
+    assert.deepEqual(m.launched, [], `${kind}: nothing starts`);
+    assert.equal(held(), 1, `${kind}, told at once: ${m.told.join(' | ')}`);
+    for (const min of [1, 2, 60, 23 * 60]) { await sense(min); await m.at(min); }
+    assert.equal(held(), 1, `${kind}, not again within the day: ${m.told.join(' | ')}`);
+    await sense(24 * 60 + 1); await m.at(24 * 60 + 1);
+    assert.equal(held(), 2, `${kind}, told again a day later: ${m.told.join(' | ')}`);
+    assert.deepEqual(m.launched, [], `${kind}: still nothing starts`);
+  }
 });
