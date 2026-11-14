@@ -1179,12 +1179,13 @@
     "modules/M6-merge-gate/refusals.mjs",
     "modules/M6-merge-gate/undo.mjs",
     "modules/M6-merge-gate/watch-only.mjs",
+    "setup/approve-rules.mjs",
     "setup/bob-manifest.mjs",
     "wiring/review-ports.mjs",
     "wiring/runner-checks.mjs",
     "wiring/runner-ports.mjs"
    ],
-   "why": "baseline (L1078)"
+   "why": "baseline (L1078) #543 adds a copy in setup/approve-rules.mjs (L1151)."
   },
   {
    "kind": "definition",
@@ -1239,6 +1240,15 @@
     "setup/proofs.mjs"
    ],
    "why": "baseline (L1078)"
+  },
+  {
+   "kind": "definition",
+   "copy": "TTY_PATH = '/dev/tty'",
+   "files": [
+    "setup/approve-rules.mjs",
+    "setup/go-card.mjs"
+   ],
+   "why": "#543 landing (L1151): approve-rules (L1127) and go-card each retype at /dev/tty; lane 1b folds the one TTY_PATH into setup/mac.mjs."
   },
   {
    "kind": "definition",
@@ -1322,6 +1332,15 @@
     "setup/sensors-setup.mjs"
    ],
    "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
+  },
+  {
+   "kind": "text",
+   "copy": " is a link, and a link is not followed",
+   "files": [
+    "setup/approve-rules.mjs",
+    "setup/mac.mjs"
+   ],
+   "why": "#543 landing (L1151): approve-rules refuses a linked record with mac.mjs's wording; lane 1b folds the text into one place."
   },
   {
    "kind": "text",
