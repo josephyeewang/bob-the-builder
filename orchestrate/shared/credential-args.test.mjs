@@ -630,7 +630,7 @@ test('R-0b-179 (b, #556 r4): a word passes only when each part of it is read: ca
  * (flag, value or text), a reader site, or a listing (unread). No plant may be said more weakly than its entry: a
  * finding that becomes a listing is a regression, even though the listing still fails closed. One said more strongly
  * fails too, so the entry is moved up when a fix lands. A plant left silent is a stated limit, named in LIMITS with its
- * ruling. When made (#556 r8) no plant was weaker than on the r7 scan, and 60 were stronger. r9 added twelve plants.
+ * ruling. When made (#556 r8) no plant was weaker than on the r7 scan, and 60 were stronger. r9 added twelve plants, r10 fourteen more.
  */
 const LIMITS = {
   // L1186 m4: a read verb is told from the rest of a name by case or _ (readTokenPath, READ_TOKEN_PATH, read_token).
@@ -640,7 +640,7 @@ const LIMITS = {
 };
 test('R-0b-179 (b, #556 r8): every plant from every audit round is a finding, listed, or a reader site, as strongly as recorded, but the stated limits', () => {
   const corpus = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'credential-args.plants.json'), 'utf8'));
-  assert.ok(Object.keys(corpus).length >= 327, 'the corpus lost plants');
+  assert.ok(Object.keys(corpus).length >= 341, 'the corpus lost plants');
   // Each entry is exactly [strength, source] (#556 r9 cosmetic): a third element would be quietly dropped.
   const bad = Object.entries(corpus).filter(([, e]) => !Array.isArray(e) || e.length !== 2 || !['finding', 'reader', 'listed', 'silent'].includes(e[0]) || typeof e[1] !== 'string').map(([k]) => k);
   assert.deepEqual(bad, [], 'a corpus entry is not [strength, source]');

@@ -780,18 +780,25 @@ export function credentialArgFindings(text) {
     return [...src.slice(d.start, d.end).matchAll(/(?<![\w$.])return\b[ \t]*/g)]
       .map((m) => { const s = d.start + m.index + m[0].length; return { at: s, expr: src.slice(s, exprEnd(src, s)).trim() }; }).filter((x) => x.expr);
   };
+  /** A written-out value that can not be undefined: a string, number, template, list, object, function or `new`. */
+  const definite = (g) => /^(?:-?\d[\d_.e]*|true|false|null)$/.test(g) || /^'(?:[^'\\\n]|\\.)*'$|^"(?:[^"\\\n]|\\.)*"$/.test(g)
+    || ((g[0] === '`' || g[0] === '[' || g[0] === '{') && balanced(g, 0)?.length === g.length)
+    || /^(?:new\s|async\b|function\b|\([^()]*\)\s*=>|[\w$]+\s*=>)/.test(g);
   /**
-   * A helper's parameters bound to one call's arguments. A parameter the call leaves out, or gives `undefined`, takes
-   * its default, read where the helper is written (#556 r9 M).
+   * A helper's parameters bound to one call's arguments. A parameter with a default takes it unless the call gives it a
+   * written-out value that can not be undefined (#556 r9 M, r10 M: `f(cfg.label)`, `f(...[])`, `f(void(0))` may all be
+   * undefined). The default is read where the helper is written, seeing the parameters before it, as JavaScript does.
    */
   const bindParams = (d, given, at, env) => {
-    const bind = new Map();
+    const bind = new Map(); let spread = false;
     d.params.forEach((q, j) => {
+      const g = given[j]?.trim();
+      if (g?.startsWith('...')) spread = true;   // from a spread on, which argument lands where is not known
       if (!q.name) return;
       if (q.rest) return void bind.set(q.name, { expr: `[${given.slice(j).join(', ')}]`, at, env });
-      const g = given[j]?.trim();
-      if ((g === undefined || g === 'undefined' || g === 'void 0') && q.dflt) return void bind.set(q.name, { expr: q.dflt, at: d.at, env: null, dflt: true });
-      bind.set(q.name, { expr: g ?? 'undefined', at, env });
+      const alt = q.dflt && (g === undefined || spread || !definite(g)) ? { expr: q.dflt, at: d.at, env: bind.size ? new Map(bind) : null, dflt: true } : null;
+      if (alt && (g === undefined || g === 'undefined')) return void bind.set(q.name, alt);
+      bind.set(q.name, { expr: g ?? 'undefined', at, env, alt });
     });
     return bind;
   };
@@ -1039,6 +1046,8 @@ export function credentialArgFindings(text) {
     // plain name passes as any name does, and the rest is listed (#556 r9 m1). `this` stays quiet for the name scan.
     if (n === 'this') {
       if (credName(c)) return push(at, 'value', c.join('.'), c.join('.'));
+      // An environment variable's spelling (`this.e.GH_PAT`, `this['GH_PAT']`) is read as process.env's are (r10).
+      if (c.length > 1 && /^[A-Z][A-Z0-9_]*$/.test(c.at(-1)) && !SAFE_ENV.test(c.at(-1))) return push(at, 'value', c.join('.'), c.join('.'));
       if (c.length > 1 && !/(?:env|vars?)$/i.test(c.at(-1)) && (SAFE_END.test(c.at(-1)) || SAFE_START.test(c.at(-1)))) return undefined;
       return unreadLeaf(at, label, `${c.join('.')} is set where it is not read`, c.join('.'));
     }
@@ -1055,8 +1064,16 @@ export function credentialArgFindings(text) {
     // A value is read with the chain's tail (`p.env.X` with p given process is process.env.X, #556 r8): never the name alone.
     // The value is also read as it was, for what it lists, so a value met at several properties is listed once.
     const tailed = (x, xat, xenv) => { if (c.length < 2) return; quiet++; try { leaf(`(${x})${c.slice(1).map((k) => `.${k}`).join('')}`, xat, level, label, xenv, new Set(seen)); } finally { quiet--; } };
-    // A default's text is in no caller's call, so it is judged here, as a word's is (#556 r9 M).
-    if (env?.has(n)) { const b = env.get(n); if (b.dflt) add(b.at, `[${b.expr}]`); tailed(b.expr, b.at, b.env); return leaf(b.expr, b.at, level, label, b.env, seen); }
+    // A default's text is in no caller's call, so it is judged here, as a word's is (#556 r9 M). A parameter that may
+    // be given undefined is read as both what it is given and its default (r10 M).
+    if (env?.has(n)) {
+      const b0 = env.get(n); const before = new Set(seen);
+      for (const b of [b0, b0.alt].filter(Boolean)) {
+        if (b.dflt) add(b.at, `[${b.expr}]`);
+        tailed(b.expr, b.at, b.env); leaf(b.expr, b.at, level, label, b.env, b === b0 ? seen : before);
+      }
+      return undefined;
+    }
     const d = declaring(at, n); const k = d ? d.params.findIndex((p) => p.name === n) : -1;
     if (k >= 0) return forward(d, k, 'word', at, label, level, n, c.slice(1).map((x) => `.${x}`).join(''));
     const as = assigns(n).filter((a) => !isFunction(a.expr));
@@ -1119,7 +1136,7 @@ export function credentialArgFindings(text) {
       }
     }
     if (NAME_RE.test(e)) {
-      if (env?.has(e)) { const b = env.get(e); return resolve(b.expr, b.at, label, level, b.env); }
+      if (env?.has(e)) { const b = env.get(e); if (b.alt) resolve(b.alt.expr, b.alt.at, label, level, b.alt.env); return resolve(b.expr, b.at, label, level, b.env); }
       const d = declaring(at, e); const k = d ? d.params.findIndex((p) => p.name === e) : -1;
       if (k >= 0) return forward(d, k, 'list', at, label, level, e);
       const as = assigns(e).filter((a) => !isFunction(a.expr));
