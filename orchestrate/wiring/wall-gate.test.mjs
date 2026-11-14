@@ -3,14 +3,14 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { wallFrom, wallHeld, wallProblem, wallStatusProblem } from './wall-gate.mjs';
 import { chainProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { readRootFile } from './runner-main.mjs';
 import * as builderWall from '../setup/builder-wall.mjs';
+import { tempDir } from '../shared/test-tmp.mjs';
 
 // Lane A's own names (#585, setup/builder-wall.mjs): the rules, the beat, the reader and the writer. No stand-in for them.
 const { anchorSha256, statusOf, statusText } = builderWall;
@@ -82,25 +82,23 @@ const ME = process.getuid();
 const realPorts = (top) => ({ chain: (p) => chainProblem(p, { owner: ME, top, acl: () => null }), readRoot: (p) => readRootFile(p, { uid: ME }) });
 
 test('L1193 plants on a real folder: missing, a link, writable by others (file or folder), and a good file', () => {
-  const d = mkdtempSync(join(tmpdir(), 'orch-wall-')); chmodSync(d, 0o755);
-  try {
-    const dir = join(d, 'builder-wall'); mkdirSync(dir, { mode: 0o755 }); chmodSync(dir, 0o755);
-    const f = join(dir, 'status.json');
-    const go = (o = {}) => wallProblem({ file: f, wall: WALL, uid: UID, now: () => NOW, ...realPorts(d), ...o });
-    assert.match(go(), /status file is not root's alone \(.*status\.json is missing\)/, 'missing');
-    writeFileSync(f, text(), { mode: 0o644 }); chmodSync(f, 0o644);
-    assert.equal(go(), null, 'root\'s own file, folders root\'s: passes');
-    chmodSync(f, 0o664); assert.match(go(), /not root's alone \(.*can be written by others/, 'group-writable file'); chmodSync(f, 0o644);
-    chmodSync(f, 0o646); assert.match(go(), /not root's alone/, 'world-writable file'); chmodSync(f, 0o644);
-    chmodSync(dir, 0o775); assert.match(go(), /not root's alone \(.*builder-wall can be written by others/, 'group-writable folder'); chmodSync(dir, 0o755);
-    chmodSync(d, 0o757); assert.match(go(), /not root's alone/, 'a folder higher up writable by others'); chmodSync(d, 0o755);
-    const other = join(dir, 'real.json'); writeFileSync(other, text(), { mode: 0o644 });
-    rmSync(f); symlinkSync(other, f);
-    assert.match(go(), /not root's alone \(.*is a link/, 'a link');
-    assert.match(go({ chain: () => null }), /can't be read/, 'a link opened anyway is refused by O_NOFOLLOW');
-    rmSync(f); writeFileSync(f, text({ ok: false, why: ['the builder reached the owner\'s listener'] }), { mode: 0o644 });
-    assert.match(go(), /last check failed \(the builder reached the owner's listener\)/);
-  } finally { rmSync(d, { recursive: true, force: true }); }
+  const d = tempDir('orch-wall-'); chmodSync(d, 0o755);
+  const dir = join(d, 'builder-wall'); mkdirSync(dir, { mode: 0o755 }); chmodSync(dir, 0o755);
+  const f = join(dir, 'status.json');
+  const go = (o = {}) => wallProblem({ file: f, wall: WALL, uid: UID, now: () => NOW, ...realPorts(d), ...o });
+  assert.match(go(), /status file is not root's alone \(.*status\.json is missing\)/, 'missing');
+  writeFileSync(f, text(), { mode: 0o644 }); chmodSync(f, 0o644);
+  assert.equal(go(), null, 'root\'s own file, folders root\'s: passes');
+  chmodSync(f, 0o664); assert.match(go(), /not root's alone \(.*can be written by others/, 'group-writable file'); chmodSync(f, 0o644);
+  chmodSync(f, 0o646); assert.match(go(), /not root's alone/, 'world-writable file'); chmodSync(f, 0o644);
+  chmodSync(dir, 0o775); assert.match(go(), /not root's alone \(.*builder-wall can be written by others/, 'group-writable folder'); chmodSync(dir, 0o755);
+  chmodSync(d, 0o757); assert.match(go(), /not root's alone/, 'a folder higher up writable by others'); chmodSync(d, 0o755);
+  const other = join(dir, 'real.json'); writeFileSync(other, text(), { mode: 0o644 });
+  unlinkSync(f); symlinkSync(other, f);
+  assert.match(go(), /not root's alone \(.*is a link/, 'a link');
+  assert.match(go({ chain: () => null }), /can't be read/, 'a link opened anyway is refused by O_NOFOLLOW');
+  unlinkSync(f); writeFileSync(f, text({ ok: false, why: ['the builder reached the owner\'s listener'] }), { mode: 0o644 });
+  assert.match(go(), /last check failed \(the builder reached the owner's listener\)/);
 });
 
 test('L1193: a status file not owned by root, or an owner check that throws, holds the start', () => {
@@ -152,13 +150,11 @@ test('L1193 round trip: the writer\'s ok status passes the gate, from text and f
   assert.equal(REAL.beatMs, builderWall.RECHECK_EVERY_S * 1000, 'the beat is lane A\'s');
   assert.equal(JSON.parse(good).anchorSha256, shaOf(builderWall.anchorText(UID)), 'the hash both sides use: sha256 of anchorText(uid) as utf8, lowercase hex');
   assert.equal(wallStatusProblem(statusText(statusOf([{ ok: true, what: 'x' }], UID, new Date(NOW - 2 * BEAT))), { uid: UID, now: NOW, wall: REAL }), null, 'exactly two beats old');
-  const d = mkdtempSync(join(tmpdir(), 'orch-wall-rt-')); chmodSync(d, 0o755);
-  try {
-    const dir = join(d, 'builder-wall-status'); mkdirSync(dir, { mode: 0o755 }); chmodSync(dir, 0o755);
-    const f = join(dir, 'status.json'); writeFileSync(f, good, { mode: 0o644 }); chmodSync(f, 0o644);
-    assert.equal(builderWall.STATUS_FILE({ base: d }), f, 'the place is layout\'s wallStatusPath, under the name the gate reads it by');
-    assert.equal(wallProblem({ file: f, wall: REAL, uid: UID, now: () => NOW, ...realPorts(d) }), null);
-  } finally { rmSync(d, { recursive: true, force: true }); }
+  const d = tempDir('orch-wall-rt-'); chmodSync(d, 0o755);
+  const dir = join(d, 'builder-wall-status'); mkdirSync(dir, { mode: 0o755 }); chmodSync(dir, 0o755);
+  const f = join(dir, 'status.json'); writeFileSync(f, good, { mode: 0o644 }); chmodSync(f, 0o644);
+  assert.equal(builderWall.STATUS_FILE({ base: d }), f, 'the place is layout\'s wallStatusPath, under the name the gate reads it by');
+  assert.equal(wallProblem({ file: f, wall: REAL, uid: UID, now: () => NOW, ...realPorts(d) }), null);
 });
 
 test('L1193 round trip: every status the writer writes that does not confirm the wall, and every line it never writes, holds', () => {
