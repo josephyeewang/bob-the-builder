@@ -31,6 +31,8 @@ import { dirname, join } from 'node:path';
 import { chainProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
 
 /** The refusal when a file setup would change is not a plain file (here and managed-settings.mjs): one home (I7). */
+/** The refusal when a file to read is a link: a link is never followed (mac, approve-rules): one text (I7). */
+export const linkNotFollowed = (what) => `${what} is a link, and a link is not followed`;
 export const notPlainFile = (path) => `${path} is not a plain file; nothing was changed`;
 
 /**
@@ -100,7 +102,7 @@ export function unlinkName(real) { unlinkSync(real); }
 export function readConfigFile(real, { strict = false, rootUid = 0, top = '/', ownerOf = (st) => st.uid, chain = chainProblem, what = 'the config', fstat = fstatSync } = {}) {
   let fd;
   try { fd = openSync(real, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) {   // O_NONBLOCK: a named pipe must not hold the open forever (R6 m-1)
-    throw new Error(e?.code === 'ELOOP' ? `${what} is a link, and a link is not followed` : e?.code === 'ENOENT' ? (/ file$/.test(what) ? `${what} was not found` : `${what} file was not found`) : `${what} could not be opened (${e?.code ?? 'error'})`);
+    throw new Error(e?.code === 'ELOOP' ? linkNotFollowed(what) : e?.code === 'ENOENT' ? (/ file$/.test(what) ? `${what} was not found` : `${what} file was not found`) : `${what} could not be opened (${e?.code ?? 'error'})`);
   }
   try {
     const st = fstat(fd);

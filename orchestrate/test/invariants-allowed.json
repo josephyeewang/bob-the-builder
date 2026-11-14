@@ -384,12 +384,12 @@
   },
   {
    "file": "modules/M13-ledger/alerts.mjs",
-   "line": "const seen = Math.max(Date.parse(at.f.told) || 0, Date.parse(/ · last seen (\\S+) · /.exec(lastSeenPart(at.i.body))?.[1]) || 0);",
+   "line": "const seen = Math.max(Date.parse(at.f.told) || 0, Date.parse(/ \u00b7 last seen (\\S+) \u00b7 /.exec(lastSeenPart(at.i.body))?.[1]) || 0);",
    "why": "baseline (L1078)"
   },
   {
    "file": "modules/M13-ledger/alerts.mjs",
-   "line": "const seen = Math.max(Date.parse(at.f.told) || 0, Date.parse(/ · last seen (\\S+) · /.exec(lastSeenPart(at.i.body))?.[1]) || 0);",
+   "line": "const seen = Math.max(Date.parse(at.f.told) || 0, Date.parse(/ \u00b7 last seen (\\S+) \u00b7 /.exec(lastSeenPart(at.i.body))?.[1]) || 0);",
    "why": "baseline (L1078)"
   },
   {
@@ -1117,7 +1117,7 @@
     "wiring/runner-checks.mjs",
     "wiring/runner-ports.mjs"
    ],
-   "why": "baseline (L1078)"
+   "why": "baseline (L1078) #543 adds a copy in setup/approve-rules.mjs (L1151)."
   },
   {
    "kind": "definition",

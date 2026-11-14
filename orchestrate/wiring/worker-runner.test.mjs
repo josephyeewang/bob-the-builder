@@ -661,18 +661,25 @@ test('#456 runLocked self-review M1: a save still on after portMs is held, answe
   assert.deepEqual(w.read().answers[`saveWork-S-1-${n3}`], { ok: false, reason: 'the save failed (boom)' });
 });
 
-test('#463 r1 m1: every save of a pass is started before any is waited for, and all are waited for once', async () => {
+// Its own time cap (#530 r1 m5): node:test has no default timeout, so a regression that leaves S-1 waiting fails by name
+// here, never as a hung run. Generous: it bounds a hang, it does not time the pass.
+test('#463 r1 m1: every save of a pass is started before any is waited for, and all are waited for once', { timeout: 30_000 }, async () => {
   const w = world();
   await w.pass([launchReq('S-1'), launchReq('S-2')]);
   const ev = [];
-  w.ports.saveWork = async (s) => { ev.push(`start ${s.id}`); await new Promise((r) => setTimeout(r, 30)); ev.push(`end ${s.id}`); return { ok: true }; };
+  // Waits on events, not the clock (L1109): S-1 ends only once S-2 has started, so had the pass waited for S-1 before
+  // starting S-2, S-1 would never end and the order below would fail. No timer, so a loaded Mac can't make it late.
+  let openGate; const secondStarted = new Promise((r) => { openGate = r; });
+  w.ports.saveWork = async (s) => {
+    ev.push(`start ${s.id}`);
+    if (s.id === 'S-2') openGate(); else await secondStarted;
+    ev.push(`end ${s.id}`); return { ok: true };
+  };
   const ask = (id, n) => ({ name: `saveWork-${id}-${n}.json`, body: { saveWork: { id }, asked_at: new Date(w.now).toISOString() } });
-  const t = Date.now();
   await w.pass([ask('S-1', N1), ask('S-2', N2)]);
   assert.deepEqual(ev.slice(0, 2), ['start S-1', 'start S-2'], 'the second starts before the first is waited for');
   assert.deepEqual(w.read().answers[`saveWork-S-1-${N1}`], { ok: true });
   assert.deepEqual(w.read().answers[`saveWork-S-2-${N2}`], { ok: true }, 'both answered in their own pass');
-  assert.ok(Date.now() - t < 1000);
   // Two that outlast the one wait are both held and noted, and both answered by the next pass.
   const ends = [];
   w.ports.saveWork = () => new Promise((r) => ends.push(r));

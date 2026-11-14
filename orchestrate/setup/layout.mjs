@@ -26,6 +26,8 @@ export const NO_SHELL = '/usr/bin/false';
 // one launchctl the setup calls: one home each (I7).
 export const JOB_PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
 export const LAUNCHCTL = '/bin/launchctl';
+/** The owner's terminal: an answer is read from it, never from standard input (go-card, approve-rules): one home (I7). */
+export const TTY_PATH = '/dev/tty';
 // Root takes its orders from ONE file at a fixed place, root's own (NEW-1, L100): never from a home folder, where the
 // person's own user could change it between a read-back and the run. The person edits a copy in their home, then a
 // single `sudo install -o root -g wheel -m 0644 /dev/stdin <here> < <copy>` puts it here (README; `install` follows links,
