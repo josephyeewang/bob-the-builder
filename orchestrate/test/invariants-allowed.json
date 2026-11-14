@@ -1528,6 +1528,15 @@
   },
   {
    "kind": "text",
+   "copy": ", but the worker runner's own folder ",
+   "files": [
+    "setup/live-proofs/runlocked.mjs",
+    "setup/live-proofs/settings-names.mjs"
+   ],
+   "why": "Both live proofs run as the worker runner's user with its lock held, and each repeats the same before-run refusals (runner running, lock, config, pin, record). #533 (runlocked.mjs) copied settings-names.mjs's. Allowed until lane 4 moves the shared before-run checks into one live-proofs helper (L1164)."
+  },
+  {
+   "kind": "text",
    "copy": ", run install), which carries ",
    "files": [
     "setup/dispatcher-setup.mjs",
@@ -1552,6 +1561,15 @@
     "setup/setup.mjs"
    ],
    "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": ". Run it with the pinned claude",
+   "files": [
+    "setup/live-proofs/runlocked.mjs",
+    "setup/live-proofs/settings-names.mjs"
+   ],
+   "why": "Both live proofs run as the worker runner's user with its lock held, and each repeats the same before-run refusals (runner running, lock, config, pin, record). #533 (runlocked.mjs) copied settings-names.mjs's. Allowed until lane 4 moves the shared before-run checks into one live-proofs helper (L1164)."
   },
   {
    "kind": "text",
@@ -1581,6 +1599,15 @@
     "modules/M13-ledger/outside-check/supported.mjs"
    ],
    "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "The record of this run could not be written (",
+   "files": [
+    "setup/live-proofs/runlocked.mjs",
+    "setup/live-proofs/settings-names.mjs"
+   ],
+   "why": "Both live proofs run as the worker runner's user with its lock held, and each repeats the same before-run refusals (runner running, lock, config, pin, record). #533 (runlocked.mjs) copied settings-names.mjs's. Allowed until lane 4 moves the shared before-run checks into one live-proofs helper (L1164)."
   },
   {
    "kind": "text",
@@ -1766,6 +1793,15 @@
   },
   {
    "kind": "text",
+   "copy": "the config names no claude pin (pin)",
+   "files": [
+    "setup/live-proofs/runlocked.mjs",
+    "setup/live-proofs/settings-names.mjs"
+   ],
+   "why": "Both live proofs run as the worker runner's user with its lock held, and each repeats the same before-run refusals (runner running, lock, config, pin, record). #533 (runlocked.mjs) copied settings-names.mjs's. Allowed until lane 4 moves the shared before-run checks into one live-proofs helper (L1164)."
+  },
+  {
+   "kind": "text",
    "copy": "the file count is not a whole number",
    "files": [
     "modules/M10-rules/classify.mjs",
@@ -1948,6 +1984,33 @@
     "wiring/worker-runner.mjs"
    ],
    "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "the worker runner is running. Stop it first, then run this again",
+   "files": [
+    "setup/live-proofs/runlocked.mjs",
+    "setup/live-proofs/settings-names.mjs"
+   ],
+   "why": "Both live proofs run as the worker runner's user with its lock held, and each repeats the same before-run refusals (runner running, lock, config, pin, record). #533 (runlocked.mjs) copied settings-names.mjs's. Allowed until lane 4 moves the shared before-run checks into one live-proofs helper (L1164)."
+  },
+  {
+   "kind": "text",
+   "copy": "the worker runner's config can't be read (",
+   "files": [
+    "setup/live-proofs/runlocked.mjs",
+    "setup/live-proofs/settings-names.mjs"
+   ],
+   "why": "Both live proofs run as the worker runner's user with its lock held, and each repeats the same before-run refusals (runner running, lock, config, pin, record). #533 (runlocked.mjs) copied settings-names.mjs's. Allowed until lane 4 moves the shared before-run checks into one live-proofs helper (L1164)."
+  },
+  {
+   "kind": "text",
+   "copy": "the worker runner's lock can't be taken (",
+   "files": [
+    "setup/live-proofs/runlocked.mjs",
+    "setup/live-proofs/settings-names.mjs"
+   ],
+   "why": "Both live proofs run as the worker runner's user with its lock held, and each repeats the same before-run refusals (runner running, lock, config, pin, record). #533 (runlocked.mjs) copied settings-names.mjs's. Allowed until lane 4 moves the shared before-run checks into one live-proofs helper (L1164)."
   },
   {
    "kind": "text",
