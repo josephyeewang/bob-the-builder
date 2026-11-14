@@ -9,7 +9,7 @@ import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { refusalSeen } from './settings-names.mjs';
-import { BACKUP_SUFFIX, BAD_EFFORT, CONNECTORS_FALLBACK, META_SUFFIX, REFUSAL, accountSettingsFiles, effortWarning, NOT_TRIED, NOT_USED, SPELLING_LABEL, misspell, READBACK_NAMES, TESTS, allNames, finish, guardProblem, judgeNames, main, report, restoreUserFile, roleReadback, runAll, runArgs, runProblem, runToEnd, withUserSettings, writeReceipt } from './settings-names.mjs';
+import { BACKUP_SUFFIX, BAD_EFFORT, CONNECTORS_FALLBACK, HOST, META_SUFFIX, PEER_FROM, PEER_WORD, REFUSAL, STDIN_ARGS, peerLine, saidWord, unbuildable, accountSettingsFiles, effortWarning, NOT_TRIED, NOT_USED, SPELLING_LABEL, misspell, READBACK_NAMES, TESTS, allNames, finish, guardProblem, judgeNames, main, report, restoreUserFile, roleReadback, runAll, runArgs, runProblem, runToEnd, withUserSettings, writeReceipt } from './settings-names.mjs';
 import { CONFIRMED, FLAGS as F, PROOF_KIND, REFUSED_SETTINGS, SPELLING_ONLY, noToolServerArgs, proofCounts, sourcesArgs, unconfirmedNames } from '../../modules/M4-workshop/launcher/settings-names.mjs';
 import { FIRST_ROUND_EFFORT, SEND_BACK_EFFORT } from '../../modules/M4-workshop/launcher/review-launch.mjs';
 import { sourcesProblem } from '../../modules/M4-workshop/launcher/readback.mjs';
@@ -63,7 +63,8 @@ test('each test is a pair that differs in one thing, and every run limits the se
     for (const [side, args, o] of [['on', a, on], ['off', b, off]]) {
       if (o.sources === false) assert.ok(!args.includes(F.settingSources), `${t.id} ${side}`);
       else assert.equal(sourcesProblem(args), null, `${t.id} ${side}: ${sourcesProblem(args)}`);
-      assert.equal(args[args.length - 1], o.prompt ?? 'Reply with the word ready.', `${t.id}: the prompt is last`);
+      if (o.input) { assert.deepEqual(args.slice(-2), [...STDIN_ARGS], `${t.id}: a stdin run ends with the input-format words`); assert.equal(o.prompt, undefined, t.id); }
+      else assert.equal(args[args.length - 1], o.prompt ?? 'Reply with the word ready.', `${t.id}: the prompt is last`);
     }
     assert.ok(t.names.length > 0 && t.names.every((n) => allNames().includes(n)), `${t.id}: names a name the launcher does not use`);
   }
@@ -81,6 +82,8 @@ test('every judge passes only what the setting does: nothing happening on both s
   const sp = [['skipped|-', 'loaded|-'], ['loaded|-', 'loaded|-'], ['skipped|named', 'skipped|named'], ['loaded|named', 'loaded|named'], ['loaded|-', 'skipped|-'], ['loaded|-', 'loaded|named'], ['skipped|named', 'skipped|-'], ['skipped|- then loaded|-', 'loaded|-'], ['loaded|- then skipped|-', 'loaded|-']];
   const samples = { disableBundledSkills: [[3, 9], [9, 9], [9, 3], [null, 9]], disableClaudeAiConnectors: [[0, 2], [0, 0], [2, 2], [null, 2], [0, null], [null, null]], strictMcp: [[false, true], [false, false], [true, true], [null, true], [true, false], [null, null], [false, null]],
     'spelling-failIfUnavailable': sp, 'spelling-strictAllowlist': sp, 'spelling-crossSessionInbound': sp,
+    strictAllowlist: [['A|-', 'A|B'], ['A|B', 'A|B'], ['A|-', 'A|-'], ['A|B', 'A|-'], ['-|-', 'A|B'], ['A|-', '-|B'], ['-|-', '-|-'], [null, 'A|B'], ['A|-', null]],
+    crossSessionInbound: [[false, true], [false, false], [true, true], [true, false], [null, true], [false, null]],
     model: [['claude-haiku-4', 'claude-sonnet-4'], ['claude-sonnet-4', 'claude-sonnet-4'], ['', ''], ['claude-sonnet', 'claude-haiku']] };
   for (const t of TESTS.filter((x) => !x.byGuard)) {
     const [good, ...bad] = samples[t.id] ?? (() => {
@@ -124,11 +127,15 @@ test('L1114: a spelling pair with no difference, or an account with no connector
   const c = { crossSessionInbound: { by: 'spelling:settings-names.mjs "x"', version: PIN } };
   assert.equal(judgeNames({ outcomes: { 'spelling-crossSessionInbound': { ok: null, notTried: 'the spelling pair showed no difference here' } }, version: PIN, confirmed: c })
     .find((l) => l.name === 'crossSessionInbound').result, 'NOT TRIED');
-  // A spelling PASS is labelled as a name confirmed, never as behaviour, in the line and the printed report.
-  const sp = lines.find((l) => l.name === 'failIfUnavailable');
+  // R-0b-178: with its behaviour pair passed too, the name stands on that pair, not on its spelling.
+  const be = lines.find((l) => l.name === 'failIfUnavailable');
+  assert.equal(be.result, 'PASS'); assert.equal(be.proof, undefined); assert.match(be.by, /^break-it:settings-names\.mjs "/);
+  // A spelling PASS alone is labelled as a name confirmed, never as behaviour, in the line and the printed report.
+  const spOnly = judgeNames({ outcomes: all, tests: TESTS.filter((t) => t.id !== 'failIfUnavailable'), readback: { ok: true }, version: PIN, confirmed: {} });
+  const sp = spOnly.find((l) => l.name === 'failIfUnavailable');
   assert.equal(sp.result, 'PASS'); assert.equal(sp.proof, SPELLING_LABEL); assert.match(sp.by, /^spelling:settings-names\.mjs "/);
   assert.equal(lines.find((l) => l.name === 'deny').proof, undefined);
-  assert.ok(report(lines, PIN).text.split('\n').some((l) => l.startsWith('PASS') && l.includes('failIfUnavailable') && l.includes(SPELLING_LABEL)));
+  assert.ok(report(spOnly, PIN).text.split('\n').some((l) => l.startsWith('PASS') && l.includes('failIfUnavailable') && l.includes(SPELLING_LABEL)));
   // enabledPlugins: NOT USED, not counted.
   assert.equal(lines.find((l) => l.name === 'enabledPlugins').result, 'NOT USED');
   // Every pair passing and the read-back passing leaves only allowUnsandboxedCommands (proven by the walls proof).
@@ -287,6 +294,9 @@ test('m1: the real run keeps stderr, the exit code and a run past its time', asy
   assert.equal(t.timedOut, true); assert.equal(t.signal, 'SIGKILL');
   assert.match(runProblem(t), /time limit/);
   assert.ok((await runToEnd('/nowhere/claude', [], { cwd, env: process.env })).error);
+  // R-0b-178: `input` reaches stdin and is closed, so a reader to its end finishes; one that never reads still ends.
+  assert.equal((await runToEnd('/bin/cat', [], { cwd, env: process.env, input: 'a\nb\n' })).out, 'a\nb\n');
+  assert.equal((await runToEnd('/bin/sh', ['-c', 'exit 0'], { cwd, env: process.env, input: 'x'.repeat(1 << 20) })).code, 0);
 });
 
 test('m5: a receipt is never overwritten', () => {
@@ -752,4 +762,118 @@ test('L1128 c3: the run reads its pipes as text and ends soon after claude exits
   // A character split across two writes comes through whole.
   const split = await runToEnd('/bin/sh', ['-c', 'printf "\\303"; sleep 0.3; printf "\\251\\n"; printf "\\303" >&2; sleep 0.3; printf "\\251" >&2'], { cwd, env: process.env });
   assert.equal(split.out, 'é\n'); assert.equal(split.err, 'é');
+});
+
+
+// ---- R-0b-178: the three lock-down settings' behaviour pairs ----
+// Stand-ins that do what 2.1.316's code does (read, not run); each `plant` is one way the setting could fail to hold.
+const settingsOf = (args) => JSON.parse(readFileSync(word(args, F.settings), 'utf8'));
+const callOf = (args) => /run exactly this shell command, once, and nothing else: (.*)\n/.exec(args[args.length - 1])?.[1];
+const REQUIRED = 'Sandbox is required but failed to initialize: Path contains null bytes. Fix the sandbox settings to retry.';
+
+function failFake(plant = {}) {
+  return async (args, { cwd }) => {
+    const s = settingsOf(args); const cmd = callOf(args); const m = cmd.replace(/^touch /, '');
+    const bad = (s.sandbox?.filesystem?.denyWrite ?? []).some((p) => p.includes('\u0000'));
+    const refuse = plant.refuseBoth || (bad && s.sandbox?.failIfUnavailable === true && !plant.ignore);
+    const out = [INIT, call('t1', { command: cmd })];
+    if (refuse) out.push(result('t1', plant.otherError ? 'Exit code 1\ntouch: timed out' : REQUIRED, true));
+    else { writeFileSync(m, ''); out.push(result('t1', '')); }
+    return { out: [...out, OK].join('\n'), err: '', code: 0 };
+  };
+}
+
+function strictFake(plant = {}) {
+  return async (args, { cwd }) => {
+    const s = settingsOf(args); const cmd = callOf(args);
+    const project = join(cwd, '.claude', 'settings.json');
+    const own = s.sandbox?.network?.allowedDomains ?? [];
+    const strict = s.sandbox?.network?.strictAllowlist === true && !plant.ignore;
+    const fromProject = existsSync(project) && !args.includes(F.settingSources) ? JSON.parse(readFileSync(project, 'utf8')).sandbox?.network?.allowedDomains ?? [] : [];
+    const allowed = plant.offline ? [] : [...own, ...(strict ? [] : fromProject)];
+    const out = [INIT, call('t1', { command: cmd })]; let last = '';
+    for (const [, file, host] of cmd.matchAll(/-o (\S+) https:\/\/(\S+)/g)) {
+      if (allowed.includes(host)) { writeFileSync(file, 'x'); last = ''; } else last = `curl: (56) CONNECT tunnel failed, response 403 (${host})`;
+    }
+    out.push(result('t1', last, last !== '' || undefined));
+    return { out: [...out, OK].join('\n'), err: '', code: 0 };
+  };
+}
+
+function inboundFake(plant = {}) {
+  return async (args, { cwd, input }) => {
+    const mode = settingsOf(args).crossSessionInbound;
+    const out = [INIT];
+    for (const l of String(input ?? '').split('\n').filter(Boolean)) {
+      const text = JSON.parse(l).message.content;
+      const peer = new RegExp(`^<cross-session-message from="${PEER_FROM}">`).test(text);
+      if (peer && (plant.dropAll || (mode === 'refuse' && !plant.ignore))) continue;
+      const w = /reply with the word (\S+?)\./i.exec(text)?.[1] ?? 'x';
+      out.push(evt({ type: 'assistant', message: { content: [{ type: 'text', text: w }] } }), evt({ type: 'result', subtype: 'success', is_error: false, result: w }));
+    }
+    return { out: out.join('\n'), err: '', code: 0 };
+  };
+}
+
+test('R-0b-178: each lock-down setting\'s pair differs only in the setting, with the setups the pin needs', () => {
+  const d = '/x/run';
+  // failIfUnavailable: the same sandbox, the same unbuildable entry, the setting the one difference.
+  const f = byId('failIfUnavailable');
+  const [fOn, fOff] = ['on', 'off'].map((sd) => f.run(sd, d).settings);
+  assert.equal(fOn.sandbox.failIfUnavailable, true); assert.equal(fOff.sandbox.failIfUnavailable, false);
+  assert.equal(JSON.stringify({ ...fOn, sandbox: { ...fOn.sandbox, failIfUnavailable: 0 } }), JSON.stringify({ ...fOff, sandbox: { ...fOff.sandbox, failIfUnavailable: 0 } }));
+  assert.ok(fOn.sandbox.filesystem.denyWrite.includes(unbuildable(d)) && unbuildable(d).includes('\u0000'));
+  // The null byte survives the --settings file as JSON writes it.
+  assert.ok(JSON.parse(JSON.stringify(fOn)).sandbox.filesystem.denyWrite[0].includes('\u0000'));
+  // strictAllowlist: host A only in --settings, host B only in the project file; no sources limit, so the project loads.
+  const s = byId('strictAllowlist');
+  for (const sd of ['on', 'off']) {
+    const o = s.run(sd, d);
+    assert.equal(o.sources, false); assert.deepEqual(o.settings.sandbox.network.allowedDomains, [HOST.a]);
+    assert.equal(o.settings.sandbox.network.strictAllowlist, sd === 'on');
+    assert.equal(o.settings.sandbox.allowUnsandboxedCommands, undefined, 'a --settings false would drop the project\'s hosts on both sides');
+    assert.deepEqual(JSON.parse(s.files(sd, d)[join(d, 'work', '.claude', 'settings.json')]).sandbox.network.allowedDomains, [HOST.b]);
+    assert.ok(o.prompt.includes(`https://${HOST.a}`) && o.prompt.includes(`https://${HOST.b}`));
+  }
+  assert.deepEqual(HOST, { a: 'api.github.com', b: 'example.com' });
+  // crossSessionInbound: refuse against an explicit accept (unset would hold on a mode mismatch), the same two messages.
+  const c = byId('crossSessionInbound');
+  assert.equal(c.run('on', d).settings.crossSessionInbound, 'refuse'); assert.equal(c.run('off', d).settings.crossSessionInbound, 'accept');
+  assert.deepEqual(c.run('on', d).input, c.run('off', d).input);
+  assert.match(JSON.parse(c.run('on', d).input[0]).message.content, /^<cross-session-message from="[^"]+">/);
+  assert.equal(peerLine('hi'), c.run('on', d).input[0].replace(/Please reply with the word [^.]+\./, 'hi'));
+  // The behaviour pair comes before the spelling pair, so a PASS stands on behaviour.
+  for (const n of ['failIfUnavailable', 'strictAllowlist', 'crossSessionInbound']) assert.ok(TESTS.findIndex((t) => t.id === n) < TESTS.findIndex((t) => t.id === `spelling-${n}`), n);
+});
+
+test('R-0b-178: an honest stand-in passes each pair; the refusal it must show is the setting\'s own', async () => {
+  for (const [id, fake] of [['failIfUnavailable', failFake()], ['strictAllowlist', strictFake()], ['crossSessionInbound', inboundFake()]]) {
+    const o = await runOne(byId(id), fake);
+    assert.equal(o.ok, true, `${id}: ${JSON.stringify(o)}`);
+  }
+  assert.equal(refusalSeen({ out: [INIT, call('t1', { command: 'touch /x/m' }), result('t1', REQUIRED, true), OK].join('\n') }, { tool: 'Bash', needle: '/x/m', refused: 'required' }), true);
+  assert.equal(refusalSeen({ out: [INIT, call('t1', { command: 'touch /x/m' }), result('t1', 'touch: /x/m: Operation not permitted', true), OK].join('\n') }, { tool: 'Bash', needle: '/x/m', refused: 'required' }), false);
+  assert.equal(saidWord([INIT, evt({ type: 'user', message: { content: [{ type: 'text', text: PEER_WORD }] } })].join('\n'), PEER_WORD), false, 'the echoed message is not the model saying it');
+});
+
+test('R-0b-178 plants: each way a lock-down setting could fail to hold turns its pair red, never PASS', async () => {
+  const cases = [
+    // failIfUnavailable
+    ['failIfUnavailable', failFake({ ignore: true }), false, /on side shows what the setting must stop/],
+    ['failIfUnavailable', failFake({ refuseBoth: true }), false, /want false and true/],
+    ['failIfUnavailable', failFake({ otherError: true }), null, /no refusal from claude/],
+    // strictAllowlist
+    ['strictAllowlist', strictFake({ ignore: true }), false, /on side shows what the setting must stop/],
+    ['strictAllowlist', strictFake({ offline: true }), null, /was not reached on both sides/],
+    // crossSessionInbound
+    ['crossSessionInbound', inboundFake({ ignore: true }), false, /on side shows what the setting must stop/],
+    ['crossSessionInbound', inboundFake({ dropAll: true }), null, /drew no answer either/],
+  ];
+  for (const [id, fake, ok, why] of cases) {
+    const o = await runOne(byId(id), fake);
+    assert.equal(o.ok, ok, `${id}: ${JSON.stringify(o)}`);
+    assert.match(o.why ?? o.notTried, why, id);
+    const line = judgeNames({ outcomes: { [id]: o, [`spelling-${id}`]: { ok: true } }, readback: { ok: true }, version: PIN, confirmed: {} }).find((l) => l.name === id);
+    assert.notEqual(line.result, 'PASS', `${id}: a spelling PASS does not carry a behaviour pair that failed`);
+  }
 });
