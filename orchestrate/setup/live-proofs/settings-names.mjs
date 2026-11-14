@@ -137,8 +137,9 @@ const touchIn = (dir, name = 'mark') => `touch ${mark(dir, name)}`;
 const hook = (command, extra = {}) => ({ [H.type]: 'command', [H.command]: command, ...extra });
 const markerHook = (event, file) => ({ [S.hooks]: { [event]: [{ [H.hooks]: [hook(`touch ${q(file)}`)] }] } });
 const init = (out) => findInit(out);
-const bashUse = (needle) => ({ tool: 'Bash', needle });
-// A command that is exactly `cmd` (L1128 c1): 'true' or 'env' alone would match any call holding the word.
+// A command that is exactly `cmd` (L1128 c1, L1166): every pair whose evidence comes from a Bash call reads only the
+// exact command it asked for, so a call that holds it and does more (`<cmd> || echo …`, a comment) is not the asked-for
+// call, and that side is NOT TRIED.
 const bashExact = (cmd) => ({ tool: 'Bash', needle: cmd, exact: true });
 const writeUse = (needle) => ({ tool: 'Write', needle });
 // failIfUnavailable: a sandbox path entry 2.1.316 can't resolve (it holds a null byte). With the setting on, the entry
@@ -148,6 +149,7 @@ export const unbuildable = (dir) => join(dir, 'out', 'bad\u0000path');
 export const HOST = Object.freeze({ a: 'api.github.com', b: 'example.com' });
 const got = (dir, k) => join(dir, 'work', `got-${k}`);
 const fetchHost = (dir, k) => `curl -sSf -o ${got(dir, k)} https://${HOST[k]}`;
+const fetchBoth = (dir) => `${fetchHost(dir, 'a')} ; ${fetchHost(dir, 'b')}`;
 // What each host's page holds (L1163 MAT-1): a host counts as reached only when its file holds its page, so a file the
 // model made (`touch`, a write) is not a host reached.
 export const PAGE = Object.freeze({ a: '"current_user_url"', b: 'Example Domain' });
@@ -214,12 +216,15 @@ export function refusalSeen(r, want = {}) {
 /**
  * Why a side's run is void however it ended, or null (L1160 M2). It outranks a breach: what such a run shows is not the
  * setting's. `want.sandboxed`: any tool call asking to leave the sandbox (dangerouslyDisableSandbox set to anything but
- * false) voids the side; `want.once`: the asked-for call must be the side's only tool call (L1163 MAT-1), so what it
+ * false), or carrying its own allowed_domains, voids the side; `want.once`: the asked-for call must be the side's only tool call (L1163 MAT-1), so what it
  * shows came from that call and not from a retry, a `touch` or a write.
  */
 export function voidProblem(r, want = {}) {
   const uses = toolUses(r?.out);
   if (want.sandboxed && uses.some((u) => (u.input?.dangerouslyDisableSandbox ?? false) !== false)) return 'a tool call asked to run outside the sandbox (dangerouslyDisableSandbox), so what it reached is not the sandbox\'s';
+  // 2.1.316 honours a call's own allowed_domains only in auto mode (read, not run; checked: claude-code 2.1.316); these
+  // runs are dontAsk, but a call carrying one is not the settings' list either way (L1166).
+  if (want.sandboxed && uses.some((u) => u.input?.allowed_domains !== undefined)) return 'a tool call carried its own allowed_domains, so what it reached is not the settings\' list';
   if (want.once && uses.length > 1) return `${uses.length} tool calls (${uses.map((u) => u.name).join(', ')}), not one, so what it reached can't be read from the asked-for call`;
   return null;
 }
@@ -239,7 +244,7 @@ export function runProblem(r, want = {}) {
   if (want.turnsEnd) { if (res.subtype !== 'error_max_turns') return `it did not end on its turn limit (result ${JSON.stringify(res.subtype ?? null)})`; }
   // One reading of a result (L1128 m2): the dispatcher's readResult, success and not is_error; and no "API Error".
   else if (readResult(JSON.stringify(res)).outcome !== 'success' || /^API Error/i.test(String(res.result ?? ''))) return `its result is not a success (${JSON.stringify(res.subtype ?? null)}): ${String(res.result ?? '').slice(0, 200)}`;
-  if (want.needle && !usesFor(r.out, want).length) return `no ${want.tool ?? 'tool'} call holding ${want.needle}`;
+  if (want.needle && !usesFor(r.out, want).length) return `no ${want.tool ?? 'tool'} call ${want.exact ? 'that is exactly' : 'holding'} ${want.needle}`;
   return null;
 }
 
@@ -289,15 +294,15 @@ export const TESTS = Object.freeze([
   // permissions: the mode leaves a command alone unless a rule lets it run.
   { id: 'allow', title: 'an allow rule lets a command run that the mode refuses', kind: 'break-it', names: [S.permissions, S.allow, F.permissionMode],
     run: (side, dir) => ({ settings: side === 'on' ? { [S.permissions]: { [S.allow]: ALLOW_TOUCH(mark(dir)) } } : {}, prompt: bashOnce(touchIn(dir)) }),
-    expect: (side, dir) => ({ ...bashUse(mark(dir)), refused: side === 'off' && 'permission' }),
+    expect: (side, dir) => ({ ...bashExact(touchIn(dir)), refused: side === 'off' && 'permission' }),
     see: (side, dir) => there(mark(dir)), judge: sameBut({ on: true, off: false }) },
   { id: 'deny', title: 'a deny rule refuses a command an allow rule lets run', kind: 'break-it', names: [S.permissions, S.deny],
     run: (side, dir) => ({ settings: { [S.permissions]: { [S.allow]: ALLOW_TOUCH(mark(dir)), ...(side === 'on' ? { [S.deny]: ALLOW_TOUCH(mark(dir)) } : {}) } }, prompt: bashOnce(touchIn(dir)) }),
-    expect: (side, dir) => ({ ...bashUse(mark(dir)), refused: side === 'on' && 'permission' }),
+    expect: (side, dir) => ({ ...bashExact(touchIn(dir)), refused: side === 'on' && 'permission' }),
     see: (side, dir) => there(mark(dir)), judge: sameBut({ on: false, off: true }) },
   { id: 'ask', title: 'an ask rule, with no one to ask, refuses a command an allow rule lets run', kind: 'break-it', names: [S.ask],
     run: (side, dir) => ({ settings: { [S.permissions]: { [S.allow]: ALLOW_TOUCH(mark(dir)), ...(side === 'on' ? { [S.ask]: ALLOW_TOUCH(mark(dir)) } : {}) } }, prompt: bashOnce(touchIn(dir)) }),
-    expect: (side, dir) => ({ ...bashUse(mark(dir)), refused: side === 'on' && 'permission' }),
+    expect: (side, dir) => ({ ...bashExact(touchIn(dir)), refused: side === 'on' && 'permission' }),
     see: (side, dir) => there(mark(dir)), judge: sameBut({ on: false, off: true }) },
   { id: 'defaultMode', title: 'the settings\' mode, with no --permission-mode, decides a file write', kind: 'break-it', names: [S.defaultMode],
     run: (side, dir) => ({ mode: null, tools: 'Write', settings: { [S.permissions]: { [S.defaultMode]: side === 'on' ? 'dontAsk' : 'acceptEdits' } },
@@ -313,32 +318,32 @@ export const TESTS = Object.freeze([
   { id: 'sandbox', title: 'the sandbox refuses a write outside the working folder', kind: 'break-it', names: [S.sandbox, S.sandboxEnabled],
     run: (side, dir) => ({ settings: { [S.permissions]: { [S.allow]: ALLOW_TOUCH(join(dir, 'out', 'mark')) }, [S.sandbox]: { [S.sandboxEnabled]: side === 'on', [S.allowUnsandboxedCommands]: false } },
       prompt: bashOnce(`touch ${join(dir, 'out', 'mark')}`) }),
-    expect: (side, dir) => ({ ...bashUse(join(dir, 'out', 'mark')), refused: side === 'on' && 'sandbox' }),
+    expect: (side, dir) => ({ ...bashExact(`touch ${join(dir, 'out', 'mark')}`), refused: side === 'on' && 'sandbox' }),
     see: (side, dir) => there(join(dir, 'out', 'mark')), judge: sameBut({ on: false, off: true }) },
   { id: 'denyWrite', title: 'a denyWrite folder is refused inside the working folder', kind: 'break-it', names: [S.filesystem, S.denyWrite],
     run: (side, dir) => ({ settings: { [S.permissions]: { [S.allow]: ALLOW_TOUCH(mark(dir, 'sub/mark')) },
       [S.sandbox]: { [S.sandboxEnabled]: true, [S.allowUnsandboxedCommands]: false, ...(side === 'on' ? { [S.filesystem]: { [S.denyWrite]: [join(dir, 'work', 'sub')] } } : {}) } },
     prompt: bashOnce(touchIn(dir, 'sub/mark')) }),
     files: (side, dir) => ({ [join(dir, 'work', 'sub', '.keep')]: '' }),
-    expect: (side, dir) => ({ ...bashUse(mark(dir, 'sub/mark')), refused: side === 'on' && 'sandbox' }),
+    expect: (side, dir) => ({ ...bashExact(touchIn(dir, 'sub/mark')), refused: side === 'on' && 'sandbox' }),
     see: (side, dir) => there(mark(dir, 'sub/mark')), judge: sameBut({ on: false, off: true }) },
   { id: 'denyRead', title: 'a denyRead file can\'t be read by a command', kind: 'break-it', names: [S.filesystem, S.denyRead],
     run: (side, dir) => ({ settings: { [S.permissions]: { [S.allow]: [`Bash(cat ${join(dir, 'out', 'secret')})`] },
       [S.sandbox]: { [S.sandboxEnabled]: true, [S.allowUnsandboxedCommands]: false, ...(side === 'on' ? { [S.filesystem]: { [S.denyRead]: [join(dir, 'out', 'secret')] } } : {}) } },
     prompt: `Use the Bash tool to run exactly this shell command, once, and nothing else: cat ${join(dir, 'out', 'secret')}\nThen reply with exactly what it printed, or the word nothing.` }),
     files: (side, dir) => ({ [join(dir, 'out', 'secret')]: `seen-${side}-7c1f\n` }),
-    expect: (side, dir) => ({ ...bashUse(join(dir, 'out', 'secret')), refused: side === 'on' && 'sandbox' }),
+    expect: (side, dir) => ({ ...bashExact(`cat ${join(dir, 'out', 'secret')}`), refused: side === 'on' && 'sandbox' }),
     see: (side, dir, out) => String(out).includes(`seen-${side}-7c1f`), judge: sameBut({ on: false, off: true }) },
   { id: 'allowedDomains', title: 'an allowed host is reached from inside the sandbox, and only then', kind: 'break-it', names: [S.network, S.allowedDomains],
     run: (side, dir) => ({ settings: { [S.permissions]: { [S.allow]: [`Bash(curl -sS -o ${join(dir, 'work', 'got')} https://example.com)`] },
       [S.sandbox]: { [S.sandboxEnabled]: true, [S.allowUnsandboxedCommands]: false, [S.network]: { [S.allowedDomains]: side === 'on' ? ['example.com'] : [] } } },
     prompt: bashOnce(`curl -sS -o ${join(dir, 'work', 'got')} https://example.com`) }),
-    expect: (side) => ({ ...bashUse('https://example.com'), refused: side === 'off' && 'network' }),
+    expect: (side, dir) => ({ ...bashExact(`curl -sS -o ${join(dir, 'work', 'got')} https://example.com`), refused: side === 'off' && 'network' }),
     see: (side, dir) => there(join(dir, 'work', 'got')), judge: sameBut({ on: true, off: false }) },
   { id: 'excludedCommands', title: 'an excluded command runs outside the sandbox (the launcher refuses the setting; proven for its name)', kind: 'break-it', names: [S.excludedCommands],
     run: (side, dir) => ({ settings: { [S.permissions]: { [S.allow]: ALLOW_TOUCH(join(dir, 'out', 'mark')) },
       [S.sandbox]: { [S.sandboxEnabled]: true, ...(side === 'on' ? { [S.excludedCommands]: ['touch'] } : {}) } }, prompt: bashOnce(`touch ${join(dir, 'out', 'mark')}`) }),
-    expect: (side, dir) => ({ ...bashUse(join(dir, 'out', 'mark')), refused: side === 'off' && 'sandbox' }),
+    expect: (side, dir) => ({ ...bashExact(`touch ${join(dir, 'out', 'mark')}`), refused: side === 'off' && 'sandbox' }),
     see: (side, dir) => there(join(dir, 'out', 'mark')), judge: sameBut({ on: true, off: false }) },
   // hooks
   { id: 'preToolUse', title: 'a PreToolUse hook with a Bash matcher runs before the command', kind: 'break-it', names: [S.hooks, E.preToolUse, H.matcher, H.hooks, H.type, H.command],
@@ -357,7 +362,7 @@ export const TESTS = Object.freeze([
   { id: 'onFailure', title: 'a failing hook with onFailure block stops the command; with continue it runs', kind: 'break-it', names: [H.onFailure],
     run: (side, dir) => ({ settings: { [S.permissions]: { [S.allow]: ALLOW_TOUCH(mark(dir)) },
       [S.hooks]: { [E.preToolUse]: [{ [H.matcher]: 'Bash', [H.hooks]: [hook('exit 1', { [H.onFailure]: side === 'on' ? 'block' : 'continue' })] }] } }, prompt: bashOnce(touchIn(dir)) }),
-    expect: (side, dir) => ({ ...bashUse(mark(dir)), refused: side === 'on' && 'hook' }),
+    expect: (side, dir) => ({ ...bashExact(touchIn(dir)), refused: side === 'on' && 'hook' }),
     see: (side, dir) => there(mark(dir)), judge: sameBut({ on: false, off: true }) },
   { id: 'sessionStart', title: 'a SessionStart hook in the --settings file runs at the start', kind: 'break-it', names: [E.sessionStart, F.settings],
     run: (side, dir) => ({ settings: side === 'on' ? markerHook(E.sessionStart, mark(dir, 'start')) : {} }),
@@ -433,13 +438,13 @@ export const TESTS = Object.freeze([
   // Behaviour pairs (R-0b-178, L1152): what each of the three lock-down settings stops, on one Mac user; the cross-user
   // socket case is R-0b-179 (c). Each setup is from 2.1.316's own code, read and not run (checked: claude-code 2.1.316;
   // void on a pin change): on macOS its start check finds the sandbox unavailable only in a diskless launch, so
-  // failIfUnavailable's pair breaks the sandbox's config instead; strictAllowlist is honoured from --settings and then
-  // drops a project file's hosts; a stdin message in the cross-session envelope goes through crossSessionInbound's gate.
+  // failIfUnavailable's pair breaks the sandbox's config instead; strictAllowlist is honoured from --settings, and with it
+  // on a host the project file allows is refused; a stdin message in the cross-session envelope goes through crossSessionInbound's gate.
   { id: 'failIfUnavailable', title: 'with failIfUnavailable, a sandbox that can\'t be built as written refuses the command; without it, the bad entry is dropped and the command runs', kind: 'break-it', names: [S.failIfUnavailable],
     run: (side, dir) => ({ settings: { [S.permissions]: { [S.allow]: ALLOW_TOUCH(mark(dir)) },
       [S.sandbox]: { [S.sandboxEnabled]: true, [S.allowUnsandboxedCommands]: false, [S.failIfUnavailable]: side === 'on', [S.filesystem]: { [S.denyWrite]: [unbuildable(dir)] } } },
     prompt: bashOnce(touchIn(dir)) }),
-    expect: (side, dir) => ({ ...bashUse(mark(dir)), refused: side === 'on' && 'required' }),
+    expect: (side, dir) => ({ ...bashExact(touchIn(dir)), refused: side === 'on' && 'required' }),
     see: (side, dir) => there(mark(dir)),
     // The marker with the setting on is the setting failing, however the run ended.
     breach: { on: (v) => v === true },
@@ -447,16 +452,19 @@ export const TESTS = Object.freeze([
     judge: (on, off) => (on === false && off === false
       ? { notTried: 'the control did not run the command (no marker without the setting either), so the pair shows nothing' }
       : sameBut({ on: false, off: true })(on, off)) },
-  { id: 'strictAllowlist', title: 'with strictAllowlist, a host only a project file allows is refused while the --settings host is reached; without it, both are reached', kind: 'break-it', names: [S.strictAllowlist],
+  { id: 'strictAllowlist', title: 'with strictAllowlist on, a host the project file allows is refused; without it, that host is reached (the --settings host, reached on both sides, is the control)', kind: 'break-it', names: [S.strictAllowlist],
     // Both sides without the sources limit, so the project file loads: the setting is the one difference.
+    // allowUnsandboxedCommands is left unset (R-1-91): a --settings false makes 2.1.316 drop project and local
+    // allowedDomains on both sides, so the off side could never reach the project's host and the pair could not pass
+    // (read, not run; checked: claude-code 2.1.316; void on a pin change).
     run: (side, dir) => ({ sources: false, settings: { [S.permissions]: { [S.allow]: [`Bash(${fetchHost(dir, 'a')})`, `Bash(${fetchHost(dir, 'b')})`] },
       [S.sandbox]: { [S.sandboxEnabled]: true, [S.network]: { [S.allowedDomains]: [HOST.a], [S.strictAllowlist]: side === 'on' } } },
-    prompt: bashOnce(`${fetchHost(dir, 'a')} ; ${fetchHost(dir, 'b')}`) }),
+    prompt: bashOnce(fetchBoth(dir)) }),
     files: (side, dir) => ({ [join(dir, 'work', '.claude', 'settings.json')]: JSON.stringify({ [S.sandbox]: { [S.network]: { [S.allowedDomains]: [HOST.b] } } }) }),
-    // A host counts only from the side's one tool call, inside the sandbox (L1160 M2, L1163 MAT-1): a second call of any
-    // kind (a retry by http://, a `touch`, a write), or any call asking to leave the sandbox, voids the side; and a host's
-    // file must hold its page (PAGE).
-    expect: (side) => ({ ...bashUse(`https://${HOST.b}`), refused: side === 'on' && 'network', sandboxed: true, once: true }),
+    // A host counts only from the side's one tool call, exactly the asked-for command, inside the sandbox (L1160 M2, L1163
+    // MAT-1, L1166): a second call of any kind, a call asking to leave the sandbox or carrying its own allowed_domains
+    // voids the side, a command that differs is NOT TRIED, and a host's file must hold its page (PAGE).
+    expect: (side, dir) => ({ ...bashExact(fetchBoth(dir)), refused: side === 'on' && 'network', sandboxed: true, once: true }),
     see: (side, dir) => `${fetched(dir, 'a') ? 'A' : '-'}|${fetched(dir, 'b') ? 'B' : '-'}`,
     // The project's host reached with the setting on is the setting failing, however the run ended.
     breach: { on: (v) => typeof v === 'string' && v.endsWith('|B') },
@@ -490,7 +498,7 @@ export const TESTS = Object.freeze([
   { id: 'maxTurns', title: '--max-turns 1 stops before a second command; 4 lets it run', kind: 'break-it', names: [F.maxTurns],
     run: (side, dir) => ({ maxTurns: side === 'on' ? 1 : 4, settings: { [S.permissions]: { [S.allow]: [...ALLOW_TOUCH(mark(dir, 'a')), ...ALLOW_TOUCH(mark(dir, 'b'))] } },
       prompt: `Use the Bash tool to run ${touchIn(dir, 'a')}. After it has finished, use the Bash tool again, in a separate call, to run ${touchIn(dir, 'b')}. Then reply with the word done.` }),
-    expect: (side, dir) => ({ ...bashUse(mark(dir, 'a')), turnsEnd: side === 'on' }),
+    expect: (side, dir) => ({ ...bashExact(touchIn(dir, 'a')), turnsEnd: side === 'on' }),
     see: (side, dir) => there(mark(dir, 'b')), judge: sameBut({ on: false, off: true }) },
 ]);
 

@@ -178,7 +178,7 @@ async function runDeny(how) {
 test('m1: a pair passes only when both sides ran properly and the refused side shows claude refusing', async () => {
   assert.equal((await runDeny({ on: 'refused', off: 'runs' })).ok, true);
   // Each way nothing happened on the "on" side, where the judge wants no mark, is NOT TRIED with its reason, never PASS.
-  for (const [on, why] of [['nothing', /no start message.*something broke/], ['api', /API Error: 529/], ['silent', /no refusal from claude/], ['noCall', /no Bash call holding/], ['timeout', /time limit/]]) {
+  for (const [on, why] of [['nothing', /no start message.*something broke/], ['api', /API Error: 529/], ['silent', /no refusal from claude/], ['noCall', /no Bash call that is exactly touch /], ['timeout', /time limit/]]) {
     const o = await runDeny({ on, off: 'runs' });
     assert.equal(o.ok, null, `${on}: ${JSON.stringify(o)}`); assert.match(o.notTried, why, on);
   }
@@ -325,7 +325,32 @@ test('L1160 M2: voidProblem reads a call outside the sandbox and a repeated call
   assert.match(voidProblem({ out: o(call('1', { command: 'curl https://example.com' }), call('2', { command: 'touch got-b' })) }, w), /2 tool calls/);
   assert.match(voidProblem({ out: o(call('1', { command: 'ls', dangerouslyDisableSandbox: 'true' })) }, w), /outside the sandbox/);
   assert.equal(voidProblem({ out: o(call('1', { command: 'curl https://example.com', dangerouslyDisableSandbox: false })) }, w), null);
+  assert.match(voidProblem({ out: o(call('1', { command: 'curl https://example.com', allowed_domains: ['example.com'] })) }, w), /its own allowed_domains/);
+  assert.equal(voidProblem({ out: o(call('1', { command: 'ls', allowed_domains: ['example.com'] })) }, { tool: 'Bash', needle: 'x' }), null);
   assert.equal(voidProblem({ out: o(call('1', { command: 'ls', dangerouslyDisableSandbox: true })) }, { tool: 'Bash', needle: 'x' }), null);
+});
+
+test('L1166: every pair whose evidence comes from a Bash call reads only the exact command it asked for', () => {
+  const d = '/x/run'; let n = 0;
+  for (const t of TESTS) {
+    for (const side of ['on', 'off']) {
+      const w = t.expect?.(side, d);
+      if (w?.tool !== 'Bash') continue;
+      n += 1;
+      assert.equal(w.exact, true, `${t.id} ${side}: not exact`);
+      const prompt = t.run(side, d).prompt;
+      const asked = /run exactly this shell command, once, and nothing else: (.*)\n/.exec(prompt)?.[1];
+      // A bashOnce prompt names one command, the one read; maxTurns names two, and the first is read.
+      if (asked !== undefined) assert.equal(w.needle, asked, `${t.id} ${side}`);
+      else assert.ok(prompt.includes(`run ${w.needle}.`), `${t.id} ${side}: ${w.needle} is not the prompt's first command`);
+    }
+  }
+  assert.ok(n >= 26, `only ${n} Bash sides`);
+  // A call holding the asked-for command and more is not it.
+  const t = byId('strictAllowlist'); const w = t.expect('off', d); const cmd = w.needle;
+  const run = (command) => runProblem({ out: [INIT, call('1', { command }), evt({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: '1', content: '' }] } }), OK].join('\n') }, w);
+  assert.equal(run(cmd), null);
+  assert.match(run(`${cmd} || echo "Example Domain" > /x/got-b`), /no Bash call that is exactly/);
 });
 
 test('m5: a receipt is never overwritten', () => {
@@ -823,8 +848,13 @@ function strictFake(plant = {}) {
     const allowed = (plant.offline ? [] : [...own, ...(strict ? [] : fromProject)]).filter((h) => !(plant.bDown && h === HOST.b));
     const on = s.sandbox?.network?.strictAllowlist === true;
     if (plant.noCallOff && !on) return { out: [INIT, OK].join('\n'), err: '', code: 0 };
-    const out = [INIT, call('t1', { command: cmd })]; let last = '';
     const fetches = [...cmd.matchAll(/-o (\S+) https:\/\/(\S+)/g)];
+    const [, aFile0] = fetches[0]; const [, bFile0] = fetches[1];
+    // L1166: the off side's one call holds the asked-for command and writes B's page itself, or only echoes the pages.
+    if (!on && plant.orEcho) { writeFileSync(aFile0, PAGE.a); writeFileSync(bFile0, PAGE.b); return { out: [INIT, call('t1', { command: `${cmd} || echo "${PAGE.b}" > ${bFile0}` }), result('t1', ''), OK].join('\n'), err: '', code: 0 }; }
+    if (!on && plant.echoOnly) { writeFileSync(aFile0, PAGE.a); writeFileSync(bFile0, PAGE.b); return { out: [INIT, call('t1', { command: `echo '${PAGE.a}' > ${aFile0}; echo ${PAGE.b} > ${bFile0} # https://${HOST.b}` }), result('t1', ''), OK].join('\n'), err: '', code: 0 }; }
+    if (!on && plant.ownDomains) { writeFileSync(aFile0, PAGE.a); writeFileSync(bFile0, PAGE.b); return { out: [INIT, call('t1', { command: cmd, allowed_domains: [HOST.b] }), result('t1', ''), OK].join('\n'), err: '', code: 0 }; }
+    const out = [INIT, call('t1', { command: cmd })]; let last = '';
     for (const [, file, host] of fetches) {
       // breachOnly (m2): the on side reaches the project's host but not its own.
       const reach = plant.breachOnly && on ? host === HOST.b : allowed.includes(host);
@@ -934,7 +964,7 @@ test('R-0b-178 plants: each way a lock-down setting could fail to hold turns its
     // m1 (L1160): no marker on either side is the control not running the command, NOT TRIED.
     ['failIfUnavailable', failFake({ refuseBoth: true }), null, /control did not run the command/],
     // m3 (P2): the off side never makes the call.
-    ['failIfUnavailable', failFake({ noCallOff: true }), null, /the off side: no Bash call holding/],
+    ['failIfUnavailable', failFake({ noCallOff: true }), null, /the off side: no Bash call that is exactly touch /],
     ['failIfUnavailable', failFake({ otherError: true }), null, /no refusal from claude/],
     // strictAllowlist
     ['strictAllowlist', strictFake({ ignore: true }), false, /on side shows what the setting must stop/],
@@ -944,7 +974,14 @@ test('R-0b-178 plants: each way a lock-down setting could fail to hold turns its
     // m2 (P10): the on side reaching the project's host alone, -|B, is the setting failing.
     ['strictAllowlist', strictFake({ breachOnly: true }), false, /on side shows what the setting must stop/],
     // m3 (P2b): the off side never makes the call.
-    ['strictAllowlist', strictFake({ noCallOff: true }), null, /the off side: no Bash call holding https:\/\/example\.com/],
+    ['strictAllowlist', strictFake({ noCallOff: true }), null, /the off side: no Bash call that is exactly curl -sSf/],
+    // L1166, the auditor's two: the setting holds B on both sides, and the off side's one call holds the asked-for
+    // command but writes B's page itself (`<cmd> || echo …`), or only echoes both pages behind a `# https://example.com`
+    // comment. Not the asked-for call: NOT TRIED.
+    ['strictAllowlist', strictFake({ sameBoth: true, orEcho: true }), null, /the off side: no Bash call that is exactly curl -sSf/],
+    ['strictAllowlist', strictFake({ sameBoth: true, echoOnly: true }), null, /the off side: no Bash call that is exactly curl -sSf/],
+    // L1166: a call carrying its own allowed_domains is not the settings' list: void.
+    ['strictAllowlist', strictFake({ sameBoth: true, ownDomains: true }), null, /the off side: a tool call carried its own allowed_domains/],
     // M2, the auditor's S2: the setting holds the project's host on both sides, and the off side reaches it by a retry
     // outside the sandbox. Void, never PASS; a retry inside the sandbox is void too (B not from the one call).
     ['strictAllowlist', strictFake({ ignore: false, retryOutside: true, sameBoth: true }), null, /outside the sandbox/],
