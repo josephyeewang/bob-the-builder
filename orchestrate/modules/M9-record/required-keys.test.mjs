@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { REQUIRED_KEYS, OPTIONAL_KEYS } from './required-keys.mjs';
+import { REQUIRED_KEYS, OPTIONAL_KEYS, FLAG_KEYS } from './required-keys.mjs';
 import { GO_FREE, GO_FREE_KEY } from './ready.mjs';
 import { KEYS as M11_KEYS } from '../M11-dispatcher/keys.mjs';
 import { listed, moduleReads, moduleSources, readsListed, rulesReads } from '../M10-rules/rules-reads.test-helper.mjs';
@@ -88,9 +88,35 @@ test('L164 m1: claims.stuck_min and claims.unlaunched_min, when set, must be who
   const { policyProblems } = await import('./required-keys.mjs');
   const { fakeRules } = await import('../../shared/rules.mjs');
   const P = 'sample-app';
-  for (const key of OPTIONAL_KEYS) {
+  for (const key of OPTIONAL_KEYS.filter((k) => !FLAG_KEYS.includes(k))) {
     const line = `M9: ${key}, when set, must be a whole number of minutes, at least 1`;
     for (const bad of [0, 'soon', -2, 1.5]) assert.ok(policyProblems(fakeRules({ values: { [key]: bad } }), P).includes(line), `${key}: ${bad}`);
     for (const good of [1, 30, '30', undefined]) assert.ok(!policyProblems(fakeRules({ values: good === undefined ? {} : { [key]: good } }), P).includes(line), `${key}: ${good}`);
   }
 });
+
+test('L1122 m4: product.test_product, when set, must be exactly true or false, and a good one passes the whole rules check', async () => {
+  const { policyProblems } = await import('./required-keys.mjs');
+  const { fakeRules } = await import('../../shared/rules.mjs');
+  const { FIRST, ENTRY, fit, swap } = await import('../M10-rules/first-cutover.test-helper.mjs');
+  const P = 'sample-app';
+  const line = 'M9: product.test_product, when set, must be true or false';
+  const minutes = /product\.test_product, when set, must be a whole number of minutes/;
+  for (const bad of ['yes', 1, 0, 'TRUE', 'on']) {
+    const out = policyProblems(fakeRules({ values: { 'product.test_product': bad } }), P);
+    assert.ok(out.includes(line), `refused: ${bad}`);
+    assert.ok(!out.some((x) => minutes.test(x)), `never read as minutes: ${bad}`);
+  }
+  for (const good of [true, false, 'true', 'false', undefined]) {
+    const out = policyProblems(fakeRules({ values: good === undefined ? {} : { 'product.test_product': good } }), P);
+    assert.ok(!out.some((x) => /test_product/.test(x)), `passes: ${good} (${out.join('; ')})`);
+  }
+  // The whole rules check (firstCutoverProblems, which runs moduleProblems over every module's list): orchestrate-test's
+  // line passes, quoted or not; a bad one is refused as a switch, never as minutes.
+  const withFlag = (v) => swap(FIRST, 'product:\n  cutover_stage: first\n', `product:\n  cutover_stage: first\n  test_product: ${v}\n`);
+  for (const v of ['true', '"true"', 'false']) assert.deepEqual(fit(withFlag(v), ENTRY), [], `the rules file passes with test_product: ${v}`);
+  const bad = fit(withFlag('yes'), ENTRY);
+  assert.ok(bad.some((x) => /test_product.*must be true or false/.test(x)), bad.join('; '));
+  assert.ok(!bad.some((x) => minutes.test(x)), bad.join('; '));
+});
+
