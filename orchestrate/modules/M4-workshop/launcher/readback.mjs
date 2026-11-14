@@ -3,7 +3,10 @@
 // field means no start.
 //
 // Capability note: NOT VERIFIED against the pinned Claude Code (live proofs L2, L6). The fields the
-// start message carries are named in settings-names.mjs (INIT_FIELDS); a missing one refuses.
+// start message carries are named in settings-names.mjs (INIT_FIELDS); a missing one refuses. Read in 2.1.316's own code
+// (13 Nov 2026): its start message has no setting_sources field (nor 2.1.322's), so checkInit would refuse every real
+// start until that field's check is settled; told to the lead for lane 2 (checked: claude-code 2.1.316, open until
+// 2027-01-20 (R-0b-177)).
 
 import { spawn } from 'node:child_process';
 import { FLAGS as F, INIT_FIELDS as I, ALLOWED_SETTING_SOURCES, MIN_CLAUDE_CODE } from './settings-names.mjs';

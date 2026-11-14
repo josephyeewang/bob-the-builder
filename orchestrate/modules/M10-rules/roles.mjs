@@ -37,7 +37,8 @@ export const NEVER_STARTED = Object.freeze(['learning']);
 
 // Claude Code's built-in tool names, as checked against one version. This is a claim about a tool we depend on, so it
 // names the version and expires with it (Principle 9, R2-m8): a rules pin other than this version refuses every
-// profile until someone re-checks the list against the new version's tool reference and moves this line.
+// profile until someone re-checks the list against the new version's tool reference and moves this line
+// (checked: claude-code 2.1.316).
 export const TOOLS_CHECKED = Object.freeze({ claude_code: '2.1.316', date: '2026-11-05', source: 'the tool names found in the 2.1.316 program, and a start of each role on 2.1.316 without its role settings (lead, front_door and thinking did not get AskUserQuestion)' });
 // The subagent tool goes by two names: the tool reference says Agent, and 2.1.316's own start message says Task (L629).
 // A never-allowed tool is refused under every name it goes by.
