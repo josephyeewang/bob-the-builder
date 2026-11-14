@@ -1,0 +1,188 @@
+// Root's worker-rules job (L1225, L1226, L1227): the rules snapshot each worker session's hooks read, written by root.
+//
+// Why root. The worker runner and its sessions both run as the builder user (L1079). While the runner wrote the snapshot
+// (runner-main.mjs keepSnapshots), anything that runs as the builder outside the sessions' deny lines (a product's install
+// or test command, a shell form the list misses) could rewrite the rules with a correct hash, and the hooks would take
+// it (L1125). Here root writes it, in a folder only root writes, so the builder can't change it by any route; the readers
+// (PR (ii): the hooks and the runner's check 8) take it only when it is root's alone (M4 hooks/snapshot.mjs readSnapshot
+// with ownerUid 0: the folder chain, no link, one name, root's, no group or other write).
+//
+//   the job      <label>.worker-rules: node <copy>/setup/worker-rules.mjs write, as root, at load and every WRITE_EVERY_S
+//                (60 s: four beats can be missed inside the snapshot's 5-minute limit). On exactly when the worker runner is
+//                (daemons.mjs jobsFor), placed, loaded, checked and taken out the way setup's other jobs are.
+//   the source   the copy's worker-runner.json (worker-runner-setup.mjs worker-config writes it), read the way the runner
+//                reads it (shared/job-config.mjs readJobConfig: one handle, no link, the whole copy root's alone) and
+//                checked by the runner's own check (runner-main.mjs checkRunnerConfig). Each product's `rules` there is
+//                the one source (I7): the same object the runner loads as p.rules.
+//   the files    <base>/worker-rules/<product>.json (layout.mjs workerRulesPath), root:wheel 0644, written whole beside its
+//                name and renamed over it (dispatcher-setup.mjs writeAside), so it always has one name: a hard link the
+//                builder made to an old one (nlink 2, which every reader refuses) is healed by the next beat's rename.
+//                The shape is M4's ({ written_at, hash, rules }, hash = snapshotHash(rules)) plus `product` and
+//                `config_sha256`, the sha256 of JSON.stringify of the whole parsed config, so the runner can tell the
+//                snapshot is from the very config it loaded (a config changed under a running runner is held).
+//
+// Liveness (L1227, option C). Worker sessions are spawned detached, each leading its own process group, and are carried
+// over when the runner restarts (runner-main.mjs carriedOverProblem): that is intended, so a session does not die with the
+// runner. What stops one once the runner is gone is its snapshot going stale: the hooks refuse every call after 5 minutes.
+// To keep exactly that, root writes only while launchd shows the worker runner's job running, with a pid whose user is the
+// builder: the pid is read from launchctl's own answer for the job's exact label, never found by a process name, and its
+// user is read with ps. The builder can't forge launchd's answer. A job that is not loaded, not running, or whose answer
+// can't be read writes nothing (fail closed) and says why in its log; the snapshot then goes stale within 5 minutes, as
+// it did when the runner wrote it. (A pid reused in the moment between the two reads could earn one more beat: at most a
+// minute more on a 5-minute limit.)
+//
+// Commands (root only):  write             one beat: check the runner is running, then write every product's snapshot
+//                        write --dry-run   say what one beat would do, writing nothing (root not needed)
+
+import { createHash } from 'node:crypto';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { realpathSync } from 'node:fs';
+import { BUILDER, JOB_PATH, LAUNCHCTL, ROOT_CONFIG_PATH, workerRulesDir, workerRulesPath } from './layout.mjs';
+import { readUser } from './users-folders.mjs';
+import { realIo, rootProblem } from './mac.mjs';
+import { writeAside } from './dispatcher-setup.mjs';
+import { installPaths, parseInstallConfig } from './install.mjs';
+import { NODE, chainProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
+import { snapshotHash } from '../modules/M4-workshop/hooks/snapshot.mjs';
+import { readJobConfig } from '../shared/job-config.mjs';
+import { checkRunnerConfig } from '../wiring/runner-main.mjs';
+import { WORKER_RUNNER_CONFIG, WORKER_RUNNER_JOB } from './worker-runner-setup.mjs';
+
+export const WORKER_RULES_JOB = 'worker-rules';
+/** This file, as the job starts it from the installed copy. */
+export const WORKER_RULES_SCRIPT = 'setup/worker-rules.mjs';
+export const WRITE_EVERY_S = 60;
+export const PS = '/bin/ps';
+
+// The job file's plist, written the way builder-wall.mjs writes its check job's.
+const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const str = (s) => `<string>${esc(s)}</string>`;
+const arr = (xs) => `<array>${xs.map(str).join('')}</array>`;
+const plist = (entries) => ['<?xml version="1.0" encoding="UTF-8"?>',
+  '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+  '<plist version="1.0">', '<dict>', ...entries.map((e) => `  ${e}`), '</dict>', '</plist>', ''].join('\n');
+
+export function workerRulesPlist(cfg) {
+  const P = installPaths(cfg);
+  return plist([
+    `<key>Label</key>${str(`${cfg.label}.${WORKER_RULES_JOB}`)}`,
+    `<key>ProgramArguments</key>${arr([join(P.installRoot, NODE), join(P.installRoot, WORKER_RULES_SCRIPT), 'write'])}`,
+    `<key>EnvironmentVariables</key><dict><key>PATH</key>${str(JOB_PATH)}</dict>`,
+    '<key>WorkingDirectory</key><string>/</string>',
+    '<key>Umask</key><integer>18</integer>',
+    `<key>StartInterval</key><integer>${WRITE_EVERY_S}</integer>`,
+    '<key>RunAtLoad</key><true/>',
+    `<key>StandardErrorPath</key>${str(join(P.logDir, `${WORKER_RULES_JOB}.err.log`))}`,
+  ]);
+}
+
+const said = (r) => (String(r?.stderr ?? '').trim() || String(r?.stdout ?? '').trim()).slice(0, 160) || `exit ${r?.status}`;
+const lstatOr = (io, p) => { try { return io.lstat(p); } catch (e) { if (e?.code === 'ENOENT') return null; throw e; } };
+
+/**
+ * Whether the worker runner's job is running now, by launchd's own answer for its exact label (L1227): → { live: true,
+ * pid } or { live: false, why }. `builderUid` is the builder's uid from this Mac. Anything launchctl or ps says that
+ * can't be read is not live (fail closed), with the reason.
+ */
+export function runnerLive(io, cfg, builderUid) {
+  const label = `${cfg.label}.${WORKER_RUNNER_JOB}`;
+  const r = io.run(LAUNCHCTL, ['print', `system/${label}`]);
+  if (r.status !== 0) {
+    return { live: false, why: /could not find service/i.test(`${r.stderr}\n${r.stdout}`) ? `the worker runner's job (${label}) is not loaded` : `launchctl print system/${label} failed (${said(r)})` };
+  }
+  // The job's own fields are its top level: one tab in. Nested sections (its endpoints, its environment) are two or more.
+  const top = (key) => [...String(r.stdout).matchAll(new RegExp(`^\\t${key} = (.*)$`, 'gm'))].map((m) => m[1]);
+  const states = top('state'); const pids = top('pid');
+  if (states.length !== 1) return { live: false, why: `launchctl's answer for ${label} has ${states.length} top-level state lines, not one, so it can't be read` };
+  if (states[0] !== 'running') return { live: false, why: `the worker runner's job (${label}) is ${states[0].slice(0, 40)}, not running` };
+  if (pids.length !== 1 || !/^[1-9][0-9]{0,9}$/.test(pids[0])) return { live: false, why: `launchctl's answer for ${label} says running but gives ${pids.length === 1 ? `the pid ${JSON.stringify(pids[0].slice(0, 20))}` : `${pids.length} pid lines`}, so it can't be read` };
+  const pid = Number(pids[0]);
+  const p = io.run(PS, ['-o', 'uid=', '-p', String(pid)]);
+  if (p.status !== 0) return { live: false, why: `the worker runner's pid ${pid} is gone (ps: ${said(p)})` };
+  const uid = String(p.stdout).trim();
+  if (!/^[0-9]+$/.test(uid)) return { live: false, why: `ps gave the worker runner's pid ${pid} the user ${JSON.stringify(uid.slice(0, 20))}, which can't be read` };
+  if (Number(uid) !== builderUid) return { live: false, why: `the worker runner's pid ${pid} runs as uid ${uid}, not the ${BUILDER} user's (${builderUid})` };
+  return { live: true, pid };
+}
+
+/** The snapshot's text for one product: M4's shape, with the product and the config's fingerprint. */
+export function rulesText(product, rules, configSha256, at = new Date()) {
+  return `${JSON.stringify({ written_at: at.toISOString(), hash: snapshotHash(rules), rules, product, config_sha256: configSha256 })}\n`;
+}
+/** The fingerprint of a parsed config: sha256 over JSON.stringify of it (what the runner computes over the config it loaded). */
+export const configSha256 = (config) => createHash('sha256').update(JSON.stringify(config), 'utf8').digest('hex');
+
+/**
+ * Writes one product's snapshot, whole or not at all, in the folder (root's 0755, made here when missing). The base and the
+ * folder must be root's alone all the way up; anything else throws, and nothing is written. An old name that is not a
+ * plain file of root's (a link, a folder, someone else's) is removed and the write refused, as the wall's status is
+ * (builder-wall.mjs writeStatus); only root can put anything in this folder, so that is said loudly. A plain file of root's
+ * with more than one name is replaced by the rename, which leaves the new one with one.
+ */
+export function writeRules(io, cfg, product, text) {
+  const base = chainProblem(io.at(cfg.base), { owner: io.rootUid, top: io.prefix || '/' });
+  if (base) throw new Error(`${cfg.base} is not safe for root to write in (${base})`);
+  const dir = workerRulesDir(cfg); const st = lstatOr(io, dir);
+  if (!st) { io.mkdir(dir, 0o755); io.secure(dir, { uid: io.rootUid, gid: 0, mode: 0o755 }); }
+  else if (!st.isDirectory() || st.isSymbolicLink() || st.uid !== io.rootUid) throw new Error(`${dir} is there but is not a folder of root's; look at it and remove it by hand`);
+  else if ((st.mode & 0o7777) !== 0o755 || st.gid !== 0) io.secure(dir, { uid: io.rootUid, gid: 0, mode: 0o755, ino: st.ino, dev: st.dev });
+  const above = chainProblem(io.at(dir), { owner: io.rootUid, top: io.prefix || '/' });
+  if (above) throw new Error(`${dir} is not safe for root to write in (${above})`);
+  const f = workerRulesPath(cfg, product); const old = lstatOr(io, f);
+  if (old && (!old.isFile() || old.isSymbolicLink() || old.uid !== io.rootUid)) {
+    io.unlink(f);
+    throw new Error(`${f} was not a plain file of root's (${old.isSymbolicLink() ? 'a link' : !old.isFile() ? 'not a plain file' : `uid ${old.uid}`}); it was removed, and nothing new was written`);
+  }
+  writeAside(io, f, text);
+}
+
+/**
+ * One beat's plan: → { writes: [{ product, path, text }], problems }. Nothing is written when there is any problem: the
+ * runner not running (runnerLive), the builder user missing, the config unreadable or one the runner refuses, or a product
+ * in it that the setup config does not list. `readConfig(file)` → the parsed config (a port for tests; the real one is the
+ * runner's own reading, as root, of root's copy).
+ */
+export function planBeat(io, cfg, { readConfig = (file) => readJobConfig(io.at(file), { code: [], optionalCode: ['budget'], ownUid: io.rootUid }), now = new Date() } = {}) {
+  const b = readUser(io, BUILDER);
+  if (!b.exists || !Number.isSafeInteger(b.uid) || b.uid <= 0) return { writes: [], problems: [`the ${BUILDER} user is not on this Mac${b.error ? ` (${b.error})` : ''}, so whose the runner's pid is can't be told, so no snapshot was written (its sessions' snapshots go stale within 5 minutes)`] };
+  const live = runnerLive(io, cfg, b.uid);
+  if (!live.live) return { writes: [], problems: [`${live.why}, so no snapshot was written (its sessions' snapshots go stale within 5 minutes, as they did when the runner wrote them)`] };
+  const file = join(installPaths(cfg).installRoot, WORKER_RUNNER_CONFIG);
+  let c;
+  try { c = readConfig(file); checkRunnerConfig(c); } catch (e) { return { writes: [], problems: [`the copy's ${WORKER_RUNNER_CONFIG} can't be used (${e?.message ?? e}), so no snapshot was written`] }; }
+  const products = c.products && typeof c.products === 'object' && !Array.isArray(c.products) ? Object.entries(c.products) : [];
+  if (!products.length) return { writes: [], problems: [`the copy's ${WORKER_RUNNER_CONFIG} names no product, so no snapshot was written`] };
+  const problems = []; const sha = configSha256(c); const writes = [];
+  for (const [product, p] of products) {
+    if (!cfg.products.includes(product)) { problems.push(`the copy's ${WORKER_RUNNER_CONFIG} names ${JSON.stringify(product.slice(0, 40))}, which the setup config does not list`); continue; }
+    if (!p?.rules || typeof p.rules !== 'object' || Array.isArray(p.rules)) { problems.push(`the copy's ${WORKER_RUNNER_CONFIG} has no rules for ${product}`); continue; }
+    writes.push({ product, path: workerRulesPath(cfg, product), text: rulesText(product, p.rules, sha, now) });
+  }
+  return problems.length ? { writes: [], problems: problems.map((x) => `${x}, so no snapshot was written`) } : { writes, problems: [] };
+}
+
+const USAGE = 'usage: node setup/worker-rules.mjs write [--dry-run]   (as root; the worker-rules job runs it every minute)';
+
+export function main(argv, { io = realIo(), out = (s) => process.stdout.write(`${s}\n`), err = (s) => process.stderr.write(`${new Date().toISOString()} ${s}\n`), plan = {} } = {}) {
+  const [cmd, ...rest] = argv; const dry = rest.includes('--dry-run');
+  if (cmd !== 'write' || rest.some((a) => a !== '--dry-run')) { err(USAGE); return 2; }
+  if (!dry) { const p = rootProblem(io); if (p) { err(`refused: ${p}`); return 2; } }
+  let cfg;
+  try {
+    let raw; try { raw = JSON.parse(io.readConfig(ROOT_CONFIG_PATH, { strict: true })); } catch (e) { throw new Error(e instanceof SyntaxError ? 'the config is not valid JSON' : e.message); }
+    cfg = parseInstallConfig(raw);
+  } catch (e) { err(`refused: ${e.message}`); return 2; }
+  if (!cfg.workerRunner) { err('refused: the config has no workerRunner entry, so there is no worker runner to write rules for'); return 2; }
+  const { writes, problems } = planBeat(io, cfg, plan);
+  if (problems.length) { for (const p of problems) err(p); return 1; }
+  if (dry) { for (const w of writes) out(`would write ${w.path}   (root:wheel 0644)`); return 0; }
+  let bad = 0;
+  for (const w of writes) {
+    try { writeRules(io, cfg, w.product, w.text); } catch (e) { bad += 1; err(`${w.product}'s rules snapshot was not written: ${e?.message ?? e}`); }
+  }
+  return bad ? 1 : 0;
+}
+
+const self = (() => { try { return pathToFileURL(realpathSync(process.argv[1])).href; } catch { return null; } })();
+if (self === import.meta.url) process.exitCode = main(process.argv.slice(2));

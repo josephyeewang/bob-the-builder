@@ -516,3 +516,28 @@ the rules of the script that wrote it, and the worker runner compares them with 
 | `/usr/local/bin/node <base>/install/orchestrate/setup/builder-wall.mjs place --dry-run` | prints each step `place` would take; changes nothing | no |
 | `sudo /usr/local/bin/node <base>/install/orchestrate/setup/builder-wall.mjs place` | puts the rules, the token folder and the job in place, loads the job (which turns pf on and holds it), waits for its first run, reads the wall back and writes the status. Any FAIL takes the wall out again. Safe to run again: what is already right is left, and the job is reloaded | yes |
 | `sudo /usr/local/bin/node <base>/install/orchestrate/setup/builder-wall.mjs check` | the read-back alone, and the status. The `builder-wall-check` job runs this every 5 minutes | yes |
+
+## Part 9 — the worker sessions' rules, written by root (L1225, L1226, L1227)
+
+**What it changes.** Setup's `worker-rules` job (`worker-rules.mjs`, on exactly when the config's `workerRunner` entry
+is) runs as root at load and every minute. Each run writes every worker product's rules snapshot to
+`<base>/worker-rules/<product>.json`, root's 0644, in that folder, root's 0755, which it makes itself. The rules come
+from the copy's `worker-runner.json`, the same file the worker runner loads, so there is one source. Root writes the
+file, so nothing the `builder` user runs (a session, a product's own install or test command) can change the rules its
+sessions' safety checks read.
+
+**It writes only while the worker runner is running.** Each run asks launchd for the worker runner's job by its exact
+label, takes the pid from that answer, and asks `ps` whose that pid is. It writes only when the job is running as
+`builder`. Otherwise, or when launchd's answer can't be read, it writes nothing and says why in
+`worker-rules.err.log`. Worker sessions outlive a runner restart by design, so a stopped runner shows as its sessions'
+snapshots going stale: after 5 minutes their safety checks refuse every call, as they did when the runner wrote the
+snapshots itself.
+
+**What reads it.** Nothing yet. The worker runner's check 8 and the sessions' safety checks move to it in the next
+change (L1226 PR (ii)); until then the job only writes.
+
+| Command | What it does | Root? |
+|---|---|---|
+| `/usr/local/bin/node <base>/install/orchestrate/setup/worker-rules.mjs write --dry-run` | says which files one run would write, or why it would write none; writes nothing | no |
+| `sudo /usr/local/bin/node <base>/install/orchestrate/setup/worker-rules.mjs write` | one run, as the job does it | yes |
+| `sudo /usr/local/bin/node setup.mjs daemons unload --only worker-rules` | takes the job out; the snapshots then go stale within 5 minutes | yes |
