@@ -128,8 +128,9 @@ export function proofList(cfg, { ownerHome = null, rules = { files: [], why: 'no
     return out;
   };
   // A place's proofs by what is there (a folder: list and pass through; else: read); a link inside a folder is proven
-  // so, by its target's kind (#528 r5 m-3).
-  const readMake = (q, k) => (k === 'dir' ? folderProofs(`${B} cannot list ${q}`, q) : [{ what: `${B} cannot read ${q}`, args: [HEAD, '-c', '1', q], expect: 'denied' }]);
+  // so, by its target's kind (#528 r5 m-3). A file can't be written either (#528 r7 mn-1): at 0602, or root:builder 0620,
+  // its read is refused while the builder can overwrite it.
+  const readMake = (q, k) => (k === 'dir' ? folderProofs(`${B} cannot list ${q}`, q) : [{ what: `${B} cannot read ${q}`, args: [HEAD, '-c', '1', q], expect: 'denied' }, { what: `${B} cannot write ${q}`, args: [TEST, '-w', q], expect: 'fail' }]);
   const walks = new Map();   // each real folder's walk, kept (#528 r5 m-1): a walk that failed stays NOT TRIED for every name that reaches it
   const reach = (what, f, make, { missing = 'not on this Mac: nothing was tried', folderOnly = null, walk = false } = {}) => {
     const l = kindOf(f);
@@ -238,12 +239,13 @@ export const ACL_CHANGE = Object.freeze(['write', 'append', 'add_file', 'add_sub
  * list. Root reads it with `ls -led`, which looks at a link itself, never through it. An allow entry for the builder, its
  * own group, or a group macOS gives every local user (its only others: groupsProblem) that grants any of ACL_CHANGE.
  */
+const UNREADABLE = 'unreadable entry: ';   // aclEntries' own words for a line it can't parse
 export function builderAclWhy(io, p) {
   let a; try { a = aclEntries(io, p); } catch (e) { return { notTried: `root could not read its access list (${String(e?.message ?? e).slice(0, 80)})` }; }
   if (a.error) return { notTried: `root ${a.error}` };
   const who = new Set([`user:${BUILDER}`, `group:${BUILDER}`, ...BUILDER_GROUPS_ALLOWED.map((g) => `group:${g}`)]);
   for (const e of a.entries) {
-    if (e.startsWith('unreadable entry')) return { notTried: `root could not read an access-list entry (${e.slice(18, 80)})` };
+    if (e.startsWith(UNREADABLE)) return { notTried: `root could not read an access-list entry (${e.slice(UNREADABLE.length).slice(0, 62)})` };
     const m = /^(\S+)(?: inherited)? (allow|deny) (\S+)$/.exec(e);
     if (!m || m[2] !== 'allow' || !who.has(m[1])) continue;
     const bad = m[3].split(',').filter((x) => ACL_CHANGE.includes(x));
@@ -278,6 +280,8 @@ export function proveList(io, list, kindOf = kindOn(io), walkOf = walkOn(io), { 
       const b = uidNow();
       if (b === null) { no(`${BUILDER}'s id could not be read`); continue; }
       if (!pr.ident || pr.ident.ino === undefined) { no('root could not look at it when the list was made'); continue; }
+      // Two looks follow (lstat here, `ls -led` below), not one: safe, since the builder can't swap the name between them
+      // without write on its folder, which the `test -w` proofs show it lacks (a shared folder: the owner look on the name).
       let st; try { st = io.lstat(pr.ownerOf); } catch (e) { no(`root could not look at it now (${e?.code ?? 'unknown'})`); continue; }
       if (st.ino !== pr.ident.ino || st.dev !== pr.ident.dev) { no('it is not the very thing root saw when the list was made (it was replaced)'); continue; }
       if (!st.isDirectory() && Number(st.nlink ?? 1) > 1) { no(`it has another name (${st.nlink} in all), which may sit where ${BUILDER} can go`); continue; }

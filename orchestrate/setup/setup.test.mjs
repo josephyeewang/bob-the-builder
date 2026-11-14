@@ -1310,9 +1310,9 @@ test('#528 r3 M1: a place whose real place differs is proven at both, each with 
   const kinds = look({ '/h/prod.cred': { kind: 'file', real: '/out/real.cred' }, '/h/creds': { kind: 'dir', real: '/out/d' }, '/h/proj/x.cred': { kind: 'file', real: '/out/proj/x.cred' } });
   const list = proofList(cfg, { ownerHome: '/Users/sam', rules: { files: ['/h/prod.cred', '/h/creds', '/h/proj/x.cred'] }, kindOf: kinds, walkOf: () => ({ links: [], named: [] }) });
   const of = (f) => list.filter((x) => x.args && x.what.includes(f)).map((x) => x.args.join(' '));   // root's owner looks (r6) run no program
-  assert.deepEqual(of('/h/prod.cred'), ['/usr/bin/head -c 1 /h/prod.cred', '/usr/bin/head -c 1 /out/real.cred']);
+  assert.deepEqual(of('/h/prod.cred'), ['/usr/bin/head -c 1 /h/prod.cred', '/bin/test -w /h/prod.cred', '/usr/bin/head -c 1 /out/real.cred', '/bin/test -w /out/real.cred'], 'r7 mn-1: a file is not written either');
   assert.deepEqual(of('/h/creds'), ['/bin/ls /h/creds', '/bin/test -x /h/creds', '/bin/ls /out/d', '/bin/test -x /out/d'], 'a link to a folder: the folder proofs at both');
-  assert.deepEqual(of('/h/proj/x.cred'), ['/usr/bin/head -c 1 /h/proj/x.cred', '/usr/bin/head -c 1 /out/proj/x.cred'], 'a link higher up the path');
+  assert.deepEqual(of('/h/proj/x.cred'), ['/usr/bin/head -c 1 /h/proj/x.cred', '/bin/test -w /h/proj/x.cred', '/usr/bin/head -c 1 /out/proj/x.cred', '/bin/test -w /out/proj/x.cred'], 'a link higher up the path');
   assert.ok(list.find((x) => x.args?.at(-1) === '/out/real.cred').what.endsWith('(where /h/prod.cred leads)'));
   assert.deepEqual(list.find((x) => x.args?.at(-1) === '/out/real.cred').look, { at: '/h/prod.cred', kind: 'file', real: '/out/real.cred' });
   // The class (L1130): every "cannot" place takes the same rule, the setup's own folders and homes too.
@@ -1374,7 +1374,7 @@ const REAL_MAC = { skip: process.platform !== 'darwin' || process.getuid?.() ===
 const realCase = (setup) => {
   const T = realpathSync(tempDir('orch-r3-')); const { entry, shut } = setup(T);
   const io = realIo(); const k = kindOn(io); const seen = new Map(); const rootView = (f) => (seen.has(f) ? seen.get(f) : (seen.set(f, k(f)), seen.get(f)));
-  const list = proofList(cfg, { ownerHome: '/Users/sam', rules: { files: [entry] }, kindOf: rootView, walkOf: walkOn(io) }).filter((x) => x.what.includes(entry) && !x.above);
+  const list = proofList(cfg, { ownerHome: '/Users/sam', rules: { files: [entry] }, kindOf: rootView, walkOf: walkOn(io) }).filter((x) => x.what.includes(entry) && !x.above && x.args?.[1] !== '-w');   // the reads; a file's write proof (r7 mn-1) has its own test
   chmodSync(shut, 0);
   try {
     const asMe = { run: (c, a) => io.run(a[4], a.slice(5)) };   // drop `sudo -n -H -u builder`
@@ -1407,7 +1407,7 @@ test('#528 r3 m1 REAL J: a link changed between making the list and proving (fil
   const T = realpathSync(tempDir('orch-r3j-'));
   mkdirSync(join(T, 'J')); writeFileSync(join(T, 'J/k'), 'k'); writeFileSync(join(T, 'Jf'), 'x'); chmodSync(join(T, 'Jf'), 0); symlinkSync(join(T, 'Jf'), join(T, 'Jl'));
   const io = realIo();
-  const list = proofList(cfg, { ownerHome: '/Users/sam', rules: { files: [join(T, 'Jl')] }, kindOf: kindOn(io) }).filter((x) => x.args && x.what.includes(join(T, 'Jl')));
+  const list = proofList(cfg, { ownerHome: '/Users/sam', rules: { files: [join(T, 'Jl')] }, kindOf: kindOn(io) }).filter((x) => x.args && x.args[1] !== '-w' && x.what.includes(join(T, 'Jl')));
   assert.deepEqual(list.map((x) => x.args.at(-1)), [join(T, 'Jl'), join(T, 'Jf')]);
   unlinkSync(join(T, 'Jl')); symlinkSync(join(T, 'J'), join(T, 'Jl')); chmodSync(join(T, 'J'), 0o100);
   try {
@@ -1667,8 +1667,8 @@ test('#528 r5 m-2: on a fake Mac, a real loop of folder links is walked once eac
 
 test('#528 r5 m-3: a link inside the keys folder is proven by its target\'s kind: a file is read, never listed', () => {
   const list = proofList(cfg, { ownerHome: '/Users/sam', kindOf: (f) => (f === P('keys/k') ? { kind: 'file', real: '/open/k', names: 1 } : { kind: 'dir', real: f }), walkOf: (d) => (d === P('keys') ? { links: [{ at: P('keys/k'), real: '/open/k' }], named: [] } : { links: [], named: [] }) });
-  const mine = list.filter((x) => x.args?.at(-1) === '/open/k' && !x.above).map((x) => x.args[0]);
-  assert.deepEqual(mine, ['/usr/bin/head']);
+  const mine = list.filter((x) => x.args?.at(-1) === '/open/k' && !x.above).map((x) => x.args.slice(0, 2).join(' '));
+  assert.deepEqual(mine, ['/usr/bin/head -c', '/bin/test -w'], 'read and write, never listed (r7 mn-1)');
 });
 
 test('#528 r5 m-4: a file whose names are all inside the walked folder is fine; one with a name outside is NOT TRIED', () => {
@@ -1780,4 +1780,26 @@ test('#528 r6 m-2 REAL: root reads the access list on this Mac: an "everyone may
   assert.equal(spawnSync('/bin/chmod', ['+a', 'group:everyone allow delete', f]).status, 0);
   assert.match(builderAclWhy(io, f) ?? '', /group:everyone allow delete/);
   assert.equal(builderAclWhy(io, join(T, 'l')), null, 'the link\'s own list (none), never its target\'s');
+});
+
+// ── #528 r7 (L1174) ──────────────────────────────────────────────────────────────────────────────────────────────────
+test('#528 r7 mn-1: a secret file the builder can\'t read but can write (0602, or the builder\'s group at 0620) FAILs', () => {
+  for (const [mode, grp] of [[0o602, 20], [0o620, 'builder']]) {
+    const mac = proven({ files: [SECRET, '/opt/s/k.cred'] }); const sam = { uid: uidOf(mac, 'sam'), gid: 20 };
+    mkdirSync(mac.at('/opt/s'), { recursive: true }); chmodSync(mac.at('/opt'), 0o755); chmodSync(mac.at('/opt/s'), 0o755);
+    mac.owners.set('/opt', { uid: mac.rootUid, gid: 0 }); mac.owners.set('/opt/s', sam);
+    const gid = grp === 'builder' ? Number(mac.users.get('builder').PrimaryGroupID) : grp;
+    writeFileSync(mac.at('/opt/s/k.cred'), 'k'); chmodSync(mac.at('/opt/s/k.cred'), mode); mac.owners.set('/opt/s/k.cred', { uid: mac.rootUid, gid });
+    const res = runProofs(mac, cfg);
+    assert.equal(res.find((r) => r.what === 'builder cannot read /opt/s/k.cred')?.ok, true, `${mode.toString(8)}: the read itself is refused`);
+    const w = res.find((r) => r.what === 'builder cannot write /opt/s/k.cred');
+    assert.equal(w?.ok, false, `${mode.toString(8)}: ${sFor(res, /\/opt/)}`); assert.match(w.why, /CAN do this/);
+    assert.equal(run(mac, ['proofs']).code, 1);
+  }
+  // 0600, root's: both refused.
+  const mac = proven({ files: [SECRET, '/opt/s/k.cred'] });
+  mkdirSync(mac.at('/opt/s'), { recursive: true }); chmodSync(mac.at('/opt'), 0o755); chmodSync(mac.at('/opt/s'), 0o755);
+  mac.owners.set('/opt', { uid: mac.rootUid, gid: 0 }); mac.owners.set('/opt/s', { uid: mac.rootUid, gid: 0 });
+  writeFileSync(mac.at('/opt/s/k.cred'), 'k'); chmodSync(mac.at('/opt/s/k.cred'), 0o600); mac.owners.set('/opt/s/k.cred', { uid: mac.rootUid, gid: 0 });
+  assert.equal(runProofs(mac, cfg).find((r) => r.what === 'builder cannot write /opt/s/k.cred')?.ok, true);
 });
