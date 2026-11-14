@@ -117,7 +117,8 @@ export function runArgs(o) {
 // of that call the side must show (REFUSAL); `turnsEnd`, the run ends on its turn limit; `startOrWarns`, no start is
 // proper only if claude's warnings name that text. `repeatOn`: the on side runs twice, and counts only if both runs
 // show the same. `see` also gets the run itself, { out, err, … }, as its fifth argument. A judge made by sameBut carries
-// its `want`, so a marker on a side that wants none is a FAIL however that run ended (L1128 m1).
+// its `want`, so a marker on a side that wants none is a FAIL however that run ended (L1128 m1). `breach`, per side, a
+// check of `see`'s value for what that side must never show, for a judge that is not sameBut's true/false (L1131 m1).
 const mark = (dir, name = 'mark') => join(dir, 'work', name);
 const there = (p) => existsSync(p);
 const sameBut = (want) => Object.assign((on, off) => (on === want.on && off === want.off ? null : `the setting on gave ${JSON.stringify(on)}, off gave ${JSON.stringify(off)}; want ${JSON.stringify(want.on)} and ${JSON.stringify(want.off)}`), { want });
@@ -218,12 +219,14 @@ function spelling(name, place) {
 // uses (no --model). 2.1.316 does not refuse a level it doesn't know: it starts, warning "Unknown --effort value '<v>'
 // — ignoring it and using the default effort" (its own words, read in its code). So both sides must start, and only the
 // made-up level's side may carry that warning, naming it. That proves the flag and the level are read (an unknown flag
-// would be refused both ways; a level ignored would warn on its side too), not the review depth.
+// would be refused both ways; a level ignored would warn on its side too), not the review depth. The level's side may
+// carry no warning about effort at all (L1131 m3): 2.1.316 also says "Effort '<v>' exceeds the cap for <model> set by
+// your settings or organization; using '<s>'", and a level capped is not the level a review asked for.
 export const BAD_EFFORT = 'not-a-level-7c';
 export const effortWarning = (v) => `Unknown --effort value '${v}'`;
 const effortTest = (level) => ({ id: `effort-${level}`, title: `--effort ${level} is taken with no warning, and a made-up level is named in claude's warning`, kind: 'readback', names: [F.effort],
   run: (side) => ({ model: null, extra: [F.effort, side === 'on' ? level : BAD_EFFORT] }),
-  see: (side, dir, out, x, r) => `${init(out) !== null ? 'start' : '-'}|${warningsOf(r).includes(effortWarning(side === 'on' ? level : BAD_EFFORT)) ? 'warned' : '-'}`,
+  see: (side, dir, out, x, r) => `${init(out) !== null ? 'start' : '-'}|${(side === 'on' ? /effort/i.test(warningsOf(r)) : warningsOf(r).includes(effortWarning(BAD_EFFORT))) ? 'warned' : '-'}`,
   judge: sameBut({ on: 'start|-', off: 'start|warned' }) });
 
 export const TESTS = Object.freeze([
@@ -326,6 +329,8 @@ export const TESTS = Object.freeze([
   { id: 'disableClaudeAiConnectors', title: 'no claude.ai connector is in the start message with them off (no tool-server lock)', kind: 'readback', names: [S.disableClaudeAiConnectors],
     run: (side) => ({ mcp: false, settings: side === 'on' ? { [S.disableClaudeAiConnectors]: true } : {} }),
     see: (side, dir, out) => { const i = init(out); return Array.isArray(i?.mcp_servers) ? i.mcp_servers.filter((s) => /^claude\.ai\b/i.test(String(s?.name ?? ''))).length : null; },
+    // A connector listed with them off is the setting failing (L1131 m1).
+    breach: { on: (v) => Number.isInteger(v) && v > 0 },
     // An account with no connector can't show it (L1114): NOT TRIED, with the fallback, (b), in the receipt.
     judge: (on, off) => (off === 0 ? { notTried: CONNECTORS_FALLBACK, fallback: 'b' }
       : on === 0 && Number.isInteger(off) && off > 0 ? null : `claude.ai connectors listed: ${on} with them off, ${off} without; want none and some`) },
@@ -338,6 +343,8 @@ export const TESTS = Object.freeze([
     run: (side) => ({ mcp: false, sources: false, settings: { enableAllProjectMcpServers: true }, extra: [...(side === 'on' ? [F.strictMcpConfig] : []), F.mcpConfig, '{"mcpServers":{}}'] }),
     files: (side, dir) => ({ [join(dir, 'work', '.mcp.json')]: JSON.stringify({ mcpServers: { [PROBE_SERVER]: { command: '/usr/bin/true' } } }) }),
     see: (side, dir, out) => { const i = init(out); return Array.isArray(i?.mcp_servers) ? i.mcp_servers.some((s) => s?.name === PROBE_SERVER) : null; },
+    // The project's server in the locked run is the lock failing (L1131 m1).
+    breach: { on: (v) => v === true },
     // If the project's server reaches neither run, the lock had nothing to hold out: NOT TRIED, never PASS.
     judge: (on, off) => (on === false && off === false ? { notTried: 'the project\'s tool server reached neither run, so the lock had nothing to hold out' }
       : sameBut({ on: false, off: true })(on, off)) },
@@ -348,6 +355,8 @@ export const TESTS = Object.freeze([
       [join(dir, 'work', '.claude', 'settings.local.json')]: JSON.stringify(markerHook(E.sessionStart, mark(dir, 'local'))) }),
     user: (side, dir) => markerHook(E.sessionStart, mark(dir, 'user')),
     see: (side, dir) => ['user', 'project', 'local'].map((n) => (there(mark(dir, n)) ? n : '-')).join(','),
+    // Any file's marker on the limited side is the limit failing (L1131 m1).
+    breach: { on: (v) => typeof v === 'string' && v !== '-,-,-' },
     judge: sameBut({ on: '-,-,-', off: 'user,project,local' }) },
   { id: 'restricted', title: '--restricted loads no project settings file either', kind: 'break-it', names: [F.restricted],
     run: (side) => ({ sources: false, extra: side === 'on' ? [F.restricted] : [] }),
@@ -553,7 +562,8 @@ export async function runAll({ base, io, tests = TESTS }) {
       }
       const why = t.judge(seen.on, seen.off);
       // A marker on a side that must have none is the setting failing, however that run ended (L1128 m1).
-      const breach = ['on', 'off'].filter((sd) => t.judge.want?.[sd] === false && seen[sd] === true);
+      // A test's own `breach` says what its side must never show; a sameBut judge's false side, the marker (L1131 m1).
+      const breach = ['on', 'off'].filter((sd) => (t.breach?.[sd] ? t.breach[sd](seen[sd]) : t.judge.want?.[sd] === false && seen[sd] === true));
       // A side that did not run properly shows nothing about the name (L1124 m1): NOT TRIED, whatever the judge says.
       outcomes[t.id] = breach.length ? { ok: false, why: `the ${breach.join(' and ')} side shows what the setting must stop, so it does not hold: ${why}${sick.length ? ` (and ${sick.join('; ')})` : ''}`, seen }
         : sick.length ? { ok: null, notTried: `a run did not go properly, so the pair shows nothing: ${sick.join('; ')}`, seen }
@@ -727,6 +737,7 @@ export async function main(argv, { print = (t) => process.stdout.write(t), uid =
     // --restore (L1124 m4, L1128 m6): puts back the user settings file of each account folder a cut-off run left a
     // backup beside, whichever account is in use now. It runs as the same user.
     if (!Number.isInteger(uid) || uid === 0 || ownDirUid !== uid) return stop(`run it as the worker runner's own user (sudo -H -u ${basename(String(c.home ?? 'builder'))} …), not root`);
+    if (typeof c.home !== 'string' || !c.home) return stop('the worker runner\'s config names no home folder, so there are no account folders to look in');
     let files; try { files = accountSettingsFiles(c.home); } catch (e) { return stop(`an account folder's settings file is a link that leads nowhere (${e?.message ?? e})`); }
     const left = files.filter((x) => backupLeft(x.file));
     if (!left.length) { print(`Nothing to put back: no backup beside ${files.map((x) => x.file).join(' or ')}\n`); return 0; }

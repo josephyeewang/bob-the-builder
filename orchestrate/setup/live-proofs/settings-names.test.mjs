@@ -319,6 +319,11 @@ test('m7, L1128: --effort is proven for each level a review passes, on the revie
   assert.equal((await go({ on: fine, off: { ...fine, err: warn(BAD_EFFORT) } })).ok, true);
   // The level ignored too (it warns on its side): FAIL. No warning for the made-up level: FAIL.
   assert.equal((await go({ on: { ...fine, err: warn(SEND_BACK_EFFORT) }, off: { ...fine, err: warn(BAD_EFFORT) } })).ok, false);
+  // L1131 m3: any warning about effort on the level's side is a FAIL: the level capped is not the level asked for.
+  const cap = `Effort '${SEND_BACK_EFFORT}' exceeds the cap for claude-x set by your settings or organization; using 'high'\n`;
+  assert.equal((await go({ on: { ...fine, err: cap }, off: { ...fine, err: warn(BAD_EFFORT) } })).ok, false);
+  const capEvent = { ...fine, out: [INIT, evt({ type: 'system', subtype: 'warning', message: cap.toUpperCase() }), OK].join('\n') };
+  assert.equal((await go({ on: capEvent, off: { ...fine, err: warn(BAD_EFFORT) } })).ok, false);
   assert.equal((await go({ on: fine, off: fine })).ok, false);
   // Other words in stderr (a crash echoing the argv, P6) are no warning; a side that didn't start is NOT TRIED.
   assert.equal((await go({ on: fine, off: { ...fine, err: `TypeError\n  argv: --effort ${BAD_EFFORT}` } })).ok, false);
@@ -572,6 +577,39 @@ test('L1128 m1: a marker on a side that must have none is a FAIL, however that r
   assert.equal((await runDeny({ on: 'api', off: 'runs' })).ok, null);
 });
 
+test('L1131 m1: settingSources, strictMcp and the connectors FAIL when the limited side shows what it must not, however that run ended', async () => {
+  const bad = evt({ type: 'result', subtype: 'error_during_execution', is_error: true, result: 'API Error: 500' });
+  const initWith = (names) => evt({ type: 'system', subtype: 'init', session_id: 's', model: 'claude-x', claude_code_version: PIN, cwd: '/x', skills: [], mcp_servers: names.map((name) => ({ name })) });
+  // The auditor's probe: every file's marker, the project's server and a connector on both sides; the on side ends badly.
+  for (const id of ['settingSources', 'strictMcp', 'disableClaudeAiConnectors']) {
+    const o = await runOne(byId(id), async (args, { cwd }) => {
+      for (const n of ['user', 'project', 'local']) writeFileSync(join(cwd, n), '');
+      return { out: [initWith(['orch-names-probe', 'claude.ai Gmail']), sideOf(cwd) === 'on' ? bad : OK].join('\n'), err: '', code: 0 };
+    });
+    assert.equal(o.ok, false, `${id}: ${JSON.stringify(o)}`); assert.match(o.why, /on side shows what the setting must stop/, id);
+  }
+  // One file's marker is enough; a clean limited side on a broken run stays NOT TRIED.
+  const one = await runOne(byId('settingSources'), async (args, { cwd }) => {
+    if (sideOf(cwd) === 'on') writeFileSync(join(cwd, 'local'), ''); else for (const n of ['user', 'project', 'local']) writeFileSync(join(cwd, n), '');
+    return { out: [INIT, sideOf(cwd) === 'on' ? bad : OK].join('\n'), err: '', code: 0 };
+  });
+  assert.equal(one.ok, false, JSON.stringify(one));
+  const clean = await runOne(byId('disableClaudeAiConnectors'), async (args, { cwd }) => ({ out: [initWith(sideOf(cwd) === 'on' ? [] : ['claude.ai Gmail']), sideOf(cwd) === 'on' ? bad : OK].join('\n'), err: '', code: 0 }));
+  assert.equal(clean.ok, null, JSON.stringify(clean));
+  // No start message on the limited side: nothing seen, so no breach (NOT TRIED).
+  const none = await runOne(byId('strictMcp'), async (args, { cwd }) => ({ out: sideOf(cwd) === 'on' ? '' : [initWith(['orch-names-probe']), OK].join('\n'), err: '', code: 1 }));
+  assert.equal(none.ok, null, JSON.stringify(none));
+});
+
+test('L1131 m2: a marker on the off side, where the setting is absent and the test wants none, is a FAIL though that run ended badly (plant 05)', async () => {
+  // allow wants the command run with the rule (on) and refused without it (off).
+  const o = await runOne(byId('allow'), async (args, { cwd }) => {
+    const m = join(cwd, 'mark'); writeFileSync(m, '');
+    return { out: [INIT, call('1', { command: `touch ${m}` }), result('1', ''), sideOf(cwd) === 'off' ? evt({ type: 'result', subtype: 'success', is_error: true, result: 'API Error: 529' }) : OK].join('\n'), err: '', code: 0 };
+  });
+  assert.equal(o.ok, false, JSON.stringify(o)); assert.match(o.why, /off side shows what the setting must stop/);
+});
+
 test('L1128 m3: each refusal is of the kind its test expects, for the asked-for call only (plants 04, 06, P5)', async () => {
   const deny = byId('deny');
   const go = (onLines) => runOne(deny, async (args, { cwd }) => {
@@ -690,6 +728,10 @@ test('L1128 m6: --restore looks in both account folders, with no account in use;
   const r2 = await runMain(['--config', '/c.json', '--restore'], S2);
   assert.equal(r2.code, 0, r2.out); assert.ok(!existsSync(bf), r2.out);
   assert.match((await runMain(['--config', '/c.json', '--restore'], S2)).out, /Nothing to put back/);
+  // L1131: a config with no home folder says so, not "a link that leads nowhere".
+  const S4 = mainSetup(); delete S4.c.home;
+  const noHome = await runMain(['--config', '/c.json', '--restore'], S4);
+  assert.equal(noHome.code, 1, noHome.out); assert.match(noHome.out, /config names no home folder/); assert.doesNotMatch(noHome.out, /leads nowhere/);
   // Never as root.
   const asRoot = await runMain(['--config', '/c.json', '--restore'], S2, { uid: 0, ownDirUidOf: () => 0 });
   assert.equal(asRoot.code, 1); assert.match(asRoot.out, /Not put back: run it as the worker runner's own user \(sudo -H -u builder/);
