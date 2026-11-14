@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { writeSnapshot } from '../modules/M4-workshop/hooks/snapshot.mjs';
 import { makeLock } from '../modules/M9-record/lock.mjs';
 import { loginJobPlist } from '../modules/M11-dispatcher/login-job.mjs';
-import { anchorHash } from './wall-gate.mjs';
+import { statusOf, statusText } from '../setup/builder-wall.mjs';
 import { DENY_KEYS, personUserProblem, aclWriteEntries, carriedOverProblem, checkRunnerConfig, hookStoreOf, keepSnapshots, launchInputs, readRunnerConfig, snapshotFolderProblem, startDeps, listenStop, main, readRootFile, realRunnerPorts, testProductHeld, testProductProblem } from './runner-main.mjs';
 import { RUNNER_JOB_LOG, RUNNER_JOB_UMASK, RUNNER_JOB_USER, fullPath, workerRunnerPlist } from './runner-job.mjs';
 import { BUILDER } from '../setup/layout.mjs';
@@ -250,12 +250,10 @@ test('#369 r2 c2: a RECHECK check that throws is a failure with its reason, neve
 
 // L1125: a test whose product stands for the test product passes main's gate this way (no budget is loaded in these tests).
 const TEST_PRODUCT_OK = () => null;
-// L1193: a test whose Mac has the builder wall confirmed passes main's wall gate this way: lane A's two names stood in for,
-// and a fresh ok status for this test's uid, as root's wall job writes it (wall-gate.mjs).
-const WALL_RULES = (u) => `rules for ${u}\n`;
-const WALL_OK = { loadWall: async () => ({ anchorText: WALL_RULES, parseStatus: (t) => JSON.parse(t), RECHECK_EVERY_S: 300 }),
-  wallPorts: { chain: () => null, now: () => Date.parse('2026-11-14T12:00:00.000Z'),
-    readRoot: () => JSON.stringify({ v: 1, time: '2026-11-14T11:59:00.000Z', builderUid: process.getuid(), anchorSha256: anchorHash(WALL_RULES, process.getuid()), ok: true, why: [] }) } };
+// L1193: a test whose Mac has the builder wall confirmed passes main's wall gate this way: lane A's real module (the
+// default loadWall, #585) and its own writer's line for this test's uid, written a minute before the clock.
+const WALL_OK = { wallPorts: { chain: () => null, now: () => Date.parse('2026-11-14T12:00:00.000Z'),
+    readRoot: () => statusText(statusOf([{ ok: true, what: 'pf is on' }], process.getuid(), new Date('2026-11-14T11:59:00.000Z'))) } };
 
 test('#369 r2 m2 self-review: main gives the start port its keeper, so a product whose snapshot is not kept fresh starts nothing; a die, a restart that works, a die again', async () => {
   const d = roots(tempDir('orch-rmain-'));

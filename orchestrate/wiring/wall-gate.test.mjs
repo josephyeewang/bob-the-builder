@@ -9,12 +9,15 @@ import { tmpdir } from 'node:os';
 import { anchorHash, wallFrom, wallHeld, wallProblem, wallStatusProblem } from './wall-gate.mjs';
 import { chainProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { readRootFile } from './runner-main.mjs';
+import * as builderWall from '../setup/builder-wall.mjs';
 
-const UID = 403; const NOW = Date.parse('2026-11-14T12:00:00.000Z'); const BEAT = 300_000;
-const anchorText = (u) => `pass out quick on lo0 proto { tcp udp } from any to any user ${u} tag ORCH_BUILDER no state\n`;
-// Lane A's parseStatus is stood in for by a plain JSON read: its own shape checks (keys, version, one line) are lane A's
-// to test; here every value it might let through is judged by the gate itself, so a lax reader is the harder case.
-const WALL = { anchorText, beatMs: BEAT, parseStatus: (t) => JSON.parse(t) };
+// Lane A's own names (#585, setup/builder-wall.mjs): the rules, the beat, the reader and the writer. No stand-in for them.
+const { anchorText, statusOf, statusText } = builderWall;
+const REAL = wallFrom(builderWall);
+const UID = 403; const NOW = Date.parse('2026-11-14T12:00:00.000Z'); const BEAT = REAL.beatMs;
+// The gate's own judgments are also run under a lax reader (a plain JSON read, the same anchorText and beat): lane A's
+// parseStatus refuses most bad lines first, so this shows the gate holds on its own for any value a reader lets through.
+const WALL = { ...REAL, parseStatus: (t) => JSON.parse(t) };
 const iso = (ms) => new Date(ms).toISOString();
 const status = (o = {}) => ({ v: 1, time: iso(NOW - 60_000), builderUid: UID, anchorSha256: anchorHash(anchorText, UID), ok: true, why: [], ...o });
 const text = (o) => JSON.stringify(status(o));
@@ -58,6 +61,9 @@ test('L1193 plants: each status that does not confirm the wall holds the start, 
   for (const [name, t, why] of cases) {
     const p = check(t);
     assert.ok(p, `${name}: must refuse`); assert.match(p, why, name); assert.match(p, HELD, name);
+    // And with lane A's real reader: refused too, by the reader or by the gate.
+    const q = check(t, { wall: REAL });
+    assert.ok(q, `${name}: must refuse with the real reader`); assert.match(q, HELD, name);
   }
   // Lane A's parseStatus refusing the text (not JSON, a key more or less, another version) holds, with its reason.
   for (const t of ['{"v":1,', '', 'x']) assert.match(check(t), /is not one the wall job writes \(.*JSON/, JSON.stringify(t));
@@ -132,4 +138,55 @@ test('L1193: wallHeld asks the gate first, every time; the rest only when the wa
   why = 'down again'; assert.equal(held('p1'), 'down again', 'asked again at the next start, not remembered');
   assert.match(wallHeld(() => { throw new Error('boom'); }, () => null)('p1'), /can't be checked \(boom\), so no session starts/);
   assert.equal(wallHeld(() => null, () => 'snapshot stale')('p1'), 'snapshot stale');
+});
+
+// The round trip (L1193, #585): what lane A's writer writes, the gate reads. Its statusOf → statusText is the line the
+// root job writes after every check; nothing here is retyped from the format.
+test('L1193 round trip: the writer\'s ok status passes the gate, from text and from a real file', () => {
+  const at = new Date(NOW - 60_000);
+  const good = statusText(statusOf([{ ok: true, what: 'pf is on' }, { ok: true, what: 'the probes and their controls' }], UID, at));
+  assert.equal(wallStatusProblem(good, { uid: UID, now: NOW, wall: REAL }), null);
+  assert.equal(REAL.beatMs, builderWall.RECHECK_EVERY_S * 1000, 'the beat is lane A\'s');
+  assert.equal(JSON.parse(good).anchorSha256, anchorHash(anchorText, UID), 'one hash, both sides: sha256 of anchorText(uid) as utf8, lowercase hex');
+  assert.equal(builderWall.anchorSha256(UID), anchorHash(anchorText, UID));
+  assert.equal(wallStatusProblem(statusText(statusOf([{ ok: true, what: 'x' }], UID, new Date(NOW - 2 * BEAT))), { uid: UID, now: NOW, wall: REAL }), null, 'exactly two beats old');
+  const d = mkdtempSync(join(tmpdir(), 'orch-wall-rt-')); chmodSync(d, 0o755);
+  try {
+    const dir = join(d, 'builder-wall-status'); mkdirSync(dir, { mode: 0o755 }); chmodSync(dir, 0o755);
+    const f = join(dir, 'status.json'); writeFileSync(f, good, { mode: 0o644 }); chmodSync(f, 0o644);
+    assert.equal(builderWall.STATUS_FILE({ base: d }), f, 'the place is layout\'s wallStatusPath, under the name the gate reads it by');
+    assert.equal(wallProblem({ file: f, wall: REAL, uid: UID, now: () => NOW, ...realPorts(d) }), null);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test('L1193 round trip: every status the writer writes that does not confirm the wall, and every line it never writes, holds', () => {
+  const at = new Date(NOW - 60_000); const OK = [{ ok: true, what: 'pf is on' }];
+  const w = (rows, uid = UID, when = at) => statusText(statusOf(rows, uid, when));
+  const gate = (t) => wallStatusProblem(t, { uid: UID, now: NOW, wall: REAL });
+  const written = [
+    ['a row failed', w([...OK, { ok: false, what: 'probe 127.0.0.1:5432', why: 'the builder reached it' }]), /last check failed \(probe 127\.0\.0\.1:5432: the builder reached it\)/],
+    ['the check gave no rows', w([]), /last check failed \(the check gave no rows\)/],
+    ['the builder\'s uid not known', w(OK, null), /last check failed \(the builder's uid is not known\)/],
+    ['place refused', w([{ ok: false, what: 'place', why: 'the read-back refused, so the wall was taken out again' }, ...OK]), /last check failed \(place: the read-back refused/],
+    ['stale', w(OK, UID, new Date(NOW - 2 * BEAT - 1)), /older than two of the wall job's beats \(10 minutes\)/],
+    ['days old', w(OK, UID, new Date(NOW - 86_400_000)), /older than two/],
+    ['after this clock', w(OK, UID, new Date(NOW + 1)), /after this runner's clock/],
+    ['far after', w(OK, UID, new Date(NOW + 3_600_000)), /no date or is after this runner's clock/],
+    ['another uid', w(OK, UID + 1), /for uid 404, not this runner's \(403\)/],
+    ['other rules', statusText({ ...statusOf(OK, UID, at), anchorSha256: anchorHash(() => 'set skip on lo0\n', UID) }), /for other rules than this copy's wall/],
+    ['another uid\'s rules', statusText({ ...statusOf(OK, UID, at), anchorSha256: builderWall.anchorSha256(UID + 1) }), /for other rules/],
+  ];
+  for (const [name, t, why] of written) { const p = gate(t); assert.ok(p, name); assert.match(p, why, name); assert.match(p, HELD, name); }
+  const g = JSON.parse(w(OK)); const line = (o) => JSON.stringify(o);
+  const { why: _w, ...noWhy } = g;
+  const never = [
+    ['a key more', line({ ...g, extra: 1 })], ['a key less', line(noWhy)], ['version 2', line({ ...g, v: 2 })],
+    ['two lines', w(OK) + w(OK)], ['a CR inside', line(g).replace(',', ',\r')], ['hash in capitals', line({ ...g, anchorSha256: g.anchorSha256.toUpperCase() })],
+    ['ok as text', line({ ...g, ok: 'true' })], ['ok as 1', line({ ...g, ok: 1 })], ['uid as text', line({ ...g, builderUid: String(UID) })],
+    ['ok with a reason', line({ ...g, why: ['x'] })], ['not ok, no reason', line({ ...g, ok: false })], ['ok without a uid', line({ ...g, builderUid: null })],
+    ['ok without a hash', line({ ...g, anchorSha256: null })], ['time without ms', line({ ...g, time: g.time.replace('.000Z', 'Z') })],
+    ['time not a date', line({ ...g, time: '2026-13-40T00:00:00.000Z' })], ['time as a number', line({ ...g, time: NOW })],
+    ['not JSON', '{'], ['empty', ''], ['an array', '[]'], ['null', 'null'],
+  ];
+  for (const [name, t] of never) { const p = gate(t); assert.ok(p, name); assert.match(p, /is not one the wall job writes \(/, name); assert.match(p, HELD, name); }
 });
