@@ -15,6 +15,7 @@ import { AI_ROLES } from '../shared/record.mjs';
 // A product name is a folder name setup makes: shared/product-paths.mjs PRODUCT, the one rule (L836, L848, #378 M1).
 import { PRODUCT, productRoleClash, runnerPlaces, PRODUCT_OUTBOX_ROLES } from '../shared/product-paths.mjs';
 import { RUNNER_ROLES } from '../shared/review-roles.mjs';
+import { RULES_VERSION } from '../modules/M4-workshop/git/gitleaks.mjs';
 
 // The three plain-script Mac users (L44, R-0b-05). `review` is also REVIEW_USER in the launcher; the setup test pins them equal.
 export const USERS = Object.freeze(['orchestrate', 'pages', 'review']);
@@ -326,3 +327,11 @@ export const watchNotesPath = (cfg) => join(cfg.base, 'watch-notes');
 // (the hook reads the copy with no age limit).
 export const managedGuardDir = (cfg) => join(cfg.base, 'machine-wide-guard');
 export const managedRulesPath = (cfg) => join(managedGuardDir(cfg), 'rules.json');
+
+/** The secret scanner the push step runs (L1083): root's folder, made by `scanner` (scanner-setup.mjs), not by users-folders. */
+export const scannerDir = (cfg) => join(cfg.base, 'scanner');
+/** Its three files, as the push step's `scanner` setting takes them (gitleaks.mjs checkScanner adds the version): the one place they are named (I7). */
+export const scannerPaths = (cfg) => Object.freeze({ bin: join(scannerDir(cfg), 'gitleaks'), config: join(scannerDir(cfg), 'gitleaks.toml'), ignoreFile: join(scannerDir(cfg), 'gitleaksignore') });
+/** The push step's whole `scanner` setting (gitleaks.mjs checkScanner's first argument): the three paths and the pinned
+ *  version. The one thing the push wiring reads for it (L1123 c3). */
+export const scannerSetting = (cfg) => Object.freeze({ ...scannerPaths(cfg), version: RULES_VERSION });

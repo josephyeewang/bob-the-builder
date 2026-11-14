@@ -28,7 +28,7 @@ import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.m
 import { uidsProblem } from '../modules/M4-workshop/launcher/review-user.mjs';
 import { reviewUserProblem } from '../modules/M9-record/outbox.mjs';
 import { PLAN_REVIEW_ROLE, RUNNER_ROLES } from '../shared/review-roles.mjs';
-import { COPY_CLAUDE_CODE as CLAUDE_CODE, COPY_HOOKS as HOOKS, managedGuardDir, parseConfig } from './layout.mjs';
+import { COPY_CLAUDE_CODE as CLAUDE_CODE, COPY_HOOKS as HOOKS, managedGuardDir, parseConfig, scannerDir } from './layout.mjs';
 import { parseRobot } from './robot-setup.mjs';
 import { DISPATCHER_CONFIG, dispatcherConfigFor, dispatcherConfigText, dispatcherSourcePath, parseDispatcher } from './dispatcher-setup.mjs';
 import { SENSORS_CONFIG, sensorsConfigFor, sensorsConfigText, sensorsSourcePath } from './sensors-setup.mjs';
@@ -77,10 +77,10 @@ export function installPaths(cfg) {
   };
 }
 
-/** The entries the install and the jobs put directly under the base, so `check` does not call them strangers (r3 n4). */
+/** The entries the install and the jobs put directly under the base, so `check` does not call them strangers (r3 n4). The scanner's folder is `scanner`'s (L1083). */
 // The base dispatcher.json and sensors.json only with a dispatcher entry: a leftover one from a removed entry is then a stranger check names (L807 c2).
 // `dispatcher`: whether the config has a dispatcher entry (check reads the config without the install's keys, so main says).
-export const rootMadeEntries = (cfg, { dispatcher = cfg.dispatcher !== undefined } = {}) => { const P = installPaths(cfg); return [P.install, P.work, P.logDir, P.accountCopy, managedGuardDir(cfg), ...(dispatcher ? [dispatcherSourcePath(cfg), sensorsSourcePath(cfg)] : [])]; };
+export const rootMadeEntries = (cfg, { dispatcher = cfg.dispatcher !== undefined } = {}) => { const P = installPaths(cfg); return [P.install, P.work, P.logDir, P.accountCopy, managedGuardDir(cfg), scannerDir(cfg), ...(dispatcher ? [dispatcherSourcePath(cfg), sensorsSourcePath(cfg)] : [])]; };
 
 const op = (text, run) => ({ text, run });
 /** Why `p` (a real path outside the prefix) cannot be carried into the copy, or null: it must exist, be a plain file or folder, and hold no link anywhere inside (the copy is root's alone and carries no links). */
