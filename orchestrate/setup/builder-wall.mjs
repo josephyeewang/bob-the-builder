@@ -243,22 +243,28 @@ export function parseStatus(text) {
   const keys = Object.keys(s).sort();
   if (keys.join() !== [...STATUS_KEYS].sort().join()) throw new Error(`the status's keys are ${keys.join(', ').slice(0, 120)}, not ${STATUS_KEYS.join(', ')}`);
   if (s.v !== STATUS_VERSION) throw new Error(`the status is version ${JSON.stringify(s.v).slice(0, 20)}, not ${STATUS_VERSION}`);
-  if (typeof s.time !== 'string' || !ISO.test(s.time) || new Date(s.time).toISOString() !== s.time) throw new Error('the status\'s time is not a UTC time as toISOString writes it');
+  // The form, round-tripped: a date that is none makes toISOString throw, which is caught to say so plainly.
+  const iso = () => { try { return new Date(s.time).toISOString(); } catch { return null; } };
+  const real = typeof s.time === 'string' && ISO.test(s.time) && iso() === s.time;
+  if (!real) throw new Error('the status\'s time is not a real UTC time as toISOString writes it');
   if (s.builderUid !== null && (!Number.isSafeInteger(s.builderUid) || s.builderUid <= 0)) throw new Error('the status\'s builderUid is not a uid above 0, nor null');
   if (s.anchorSha256 !== null && (typeof s.anchorSha256 !== 'string' || !SHA256.test(s.anchorSha256))) throw new Error('the status\'s anchorSha256 is not 64 lowercase hex, nor null');
   if (typeof s.ok !== 'boolean') throw new Error('the status\'s ok is not true or false');
   if (!Array.isArray(s.why) || s.why.length > WHY_MAX || !s.why.every((w) => typeof w === 'string' && w.length > 0 && w.length <= WHY_CHARS)) throw new Error(`the status's why is not a list of at most ${WHY_MAX} short reasons`);
   if (s.ok && (s.builderUid === null || s.anchorSha256 === null || s.why.length)) throw new Error('the status says ok without a uid, its rules\' hash, or with a reason against it');
   if (!s.ok && !s.why.length) throw new Error('the status says not ok but gives no reason');
+  // Exactly the writer's bytes: a key given twice, space around the JSON or another key order is refused (L1205).
+  if (`${body}\n` !== lineOf(s)) throw new Error('the status is not written exactly as statusText writes it');
   return Object.freeze({ ...s, why: Object.freeze([...s.why]) });
 }
 
 /** The status's text: one line, as parseStatus reads it (it is checked by parseStatus before it is returned). */
 export function statusText(status) {
-  const line = `${JSON.stringify(Object.fromEntries(STATUS_KEYS.map((k) => [k, status?.[k]])))}\n`;
+  const line = lineOf(status);
   parseStatus(line);
   return line;
 }
+const lineOf = (status) => `${JSON.stringify(Object.fromEntries(STATUS_KEYS.map((k) => [k, status?.[k]])))}\n`;
 
 /**
  * The status a check's rows give: ok only when there are rows, every one passed (the settings half and every probe pair
@@ -289,7 +295,14 @@ export function writeStatus(io, cfg, status) {
   else if ((st.mode & 0o7777) !== 0o755 || st.gid !== 0) io.secure(dir, { uid: io.rootUid, gid: 0, mode: 0o755, ino: st.ino, dev: st.dev });
   const above = chainProblem(io.at(dir), { owner: io.rootUid, top: io.prefix || '/' });
   if (above) throw new Error(`${dir} is not safe for root to write in (${above})`);
-  writeAside(io, wallStatusPath(cfg), text);
+  // The old status must be one plain file of root's with one name (L1205). Anything else is only a name in root's own
+  // folder: it is removed, so no old "ok" stands behind the refusal, and the run says so.
+  const f = wallStatusPath(cfg); const old = lstatOr(io, f);
+  if (old && (!old.isFile() || old.isSymbolicLink() || old.nlink !== 1 || old.uid !== io.rootUid)) {
+    io.unlink(f);
+    throw new Error(`${f} was not one plain file of root's (${old.isSymbolicLink() ? 'a link' : !old.isFile() ? 'not a plain file' : old.nlink !== 1 ? `${old.nlink} names` : 'not root\'s'}); it was removed, and nothing new was written`);
+  }
+  writeAside(io, f, text);
 }
 
 /** The builder's uid from this Mac (users-folders.mjs, #528), never written down: { uid } or { problem }. */
@@ -354,7 +367,7 @@ export function wayOut(io, cfg) {
   return { done, lines };
 }
 
-export const WAY_OUT_TEXT = (cfg) => `To take the builder wall out: sudo launchctl bootout system/${wallLabel(cfg)}; sudo rm ${wallPlistPath(cfg)}; sudo ${PFCTL} -a ${ANCHOR} -F rules; and sudo ${PFCTL} -X with the number in ${tokenPath(cfg)}.`;
+export const WAY_OUT_TEXT = (cfg) => `To take the builder wall out: sudo launchctl bootout system/${wallLabel(cfg)}; sudo rm ${wallPlistPath(cfg)}; sudo ${PFCTL} -a ${ANCHOR} -F rules; and sudo ${PFCTL} -X with the number in ${tokenPath(cfg)}. Until the wall is back, every worker session stays held: the check job keeps writing ok false. To stop that too, sudo node setup.mjs daemons unload --only worker-runner and sudo node setup.mjs daemons unload --only ${WALL_CHECK_JOB}.`;
 
 // --- the read-back ---------------------------------------------------------------------------------------------------
 
@@ -532,32 +545,38 @@ export async function main(argv, { io = realIo(), net, wait = {}, out = (s) => p
   const probes = net ?? realNet();
   const report = (res) => { for (const r of res) out(r.ok ? `PASS  ${r.what}` : `FAIL  ${r.what} — ${r.why}`); const bad = res.filter((r) => !r.ok).length; out(bad ? `${bad} of ${res.length} FAILED` : `all ${res.length} PASS`); return bad; };
   // L1193: every check and every place leaves the status, so a stale "ok" never stands; a write that fails is said and fails the run.
-  const record = (rows, uid) => { try { writeStatus(io, cfg, statusOf(rows, uid)); return true; } catch (e) { err(`the wall's status could not be written to ${wallStatusPath(cfg)} (${e?.message ?? e}); the worker runner holds every start once it is two beats old`); return false; } };
+  const record = (rows, uid, at = new Date()) => { try { writeStatus(io, cfg, statusOf(rows, uid, at)); return true; } catch (e) { err(`the wall's status could not be written to ${wallStatusPath(cfg)} (${e?.message ?? e}); the worker runner holds every start once it is two beats old`); return false; } };
   const takeOut = (why) => {
     const w = wayOut(io, cfg);
     err(w.done ? `${why}, so the wall was taken out again:` : `${why}. Taking the wall out again did NOT fully work; do the NOT done steps by hand:`);
     for (const l of w.lines) err(l);
   };
+  // L1205 m1: a throw anywhere in the read-back (a probe, a settle, a command) is a failing row, never a run that ends
+  // with the old status standing. m2: the status is stamped with the time the check started, not when it ended.
+  const idOf = () => { try { return builderUid(io, cfg); } catch (e) { return { problem: `reading the ${BUILDER} user failed: ${e?.message ?? e}` }; } };
+  const readBack = async (steps) => {
+    try { return await steps(); } catch (e) { return [{ ok: false, what: 'the check', why: `it stopped: ${e?.message ?? e}` }]; }
+  };
   if (cmd === 'check') {
-    const id = builderUid(io, cfg);
-    const rows = await checkWall(io, cfg, { net: probes, id });
-    const bad = report(rows); const wrote = record(rows, id.uid ?? null);
+    const id = idOf(); const at = new Date();
+    const rows = await readBack(() => checkWall(io, cfg, { net: probes, id }));
+    const bad = report(rows); const wrote = record(rows, id.uid ?? null, at);
     out(WAY_OUT_TEXT(cfg));
     return bad || !wrote ? 1 : 0;
   }
   const plan = planWall(io, cfg);
   if (plan.problems.length) { for (const p of plan.problems) err(`refused: ${p}`); return 1; }
   if (dry) { for (const o of plan.ops) out(`would: ${o.text}`); out('would then wait for the job\'s first run, run the read-back, and take the wall out again if either refuses'); return 0; }
-  const id = builderUid(io, cfg);
+  const id = idOf();
   for (const o of plan.ops) {
     out(`doing: ${o.text}`);
     try { o.run(); } catch (e) { err(`stopped: ${e.message}`); takeOut('A step failed'); record([{ ok: false, what: 'place', why: `a step failed (${e.message}) and the wall was taken out again` }], id.uid ?? null); return 1; }
   }
-  const first = await waitForFirstRun(io, cfg, wait);
-  const rows = [first, ...await checkWall(io, cfg, { net: probes, id })];
+  const at = new Date();
+  const rows = await readBack(async () => [await waitForFirstRun(io, cfg, wait), ...await checkWall(io, cfg, { net: probes, id })]);
   const bad = report(rows);
-  if (bad) { takeOut('The read-back refused'); record([{ ok: false, what: 'place', why: 'the read-back refused, so the wall was taken out again' }, ...rows], id.uid ?? null); return 1; }
-  const wrote = record(rows, id.uid ?? null);
+  if (bad) { takeOut('The read-back refused'); record([{ ok: false, what: 'place', why: 'the read-back refused, so the wall was taken out again' }, ...rows], id.uid ?? null, at); return 1; }
+  const wrote = record(rows, id.uid ?? null, at);
   out(WAY_OUT_TEXT(cfg));
   return wrote ? 0 : 1;
 }
