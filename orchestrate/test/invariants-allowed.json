@@ -1181,11 +1181,12 @@
     "modules/M6-merge-gate/watch-only.mjs",
     "setup/approve-rules.mjs",
     "setup/bob-manifest.mjs",
+    "setup/live-proofs/slice-dry-run.mjs",
     "wiring/review-ports.mjs",
     "wiring/runner-checks.mjs",
     "wiring/runner-ports.mjs"
    ],
-   "why": "baseline (L1078) #543 adds a copy in setup/approve-rules.mjs (L1151)."
+   "why": "baseline (L1078) #543 adds a copy in setup/approve-rules.mjs (L1151). #544 adds a copy in setup/live-proofs/slice-dry-run.mjs (L1153)."
   },
   {
    "kind": "definition",
