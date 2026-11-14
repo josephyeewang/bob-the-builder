@@ -48,6 +48,21 @@ export function blobSha(buf) {
 }
 
 // products.json: [{ product, owner, repo, joe_github_id }]. Anything malformed → throw (the caller denies all).
+/**
+ * GitHub's contents answer for the rules file → { blob, text }, or a throw saying why it is not one: the file at the fixed
+ * path, base64, at most 1 MB, its bytes hashing to the blob GitHub named, and UTF-8. The one check of a fetched rules file:
+ * the reader's, and setup's approve-rules (L1127 c), which shows Joe exactly the version the reader would adopt.
+ */
+export function rulesFileOf(j) {
+  if (j?.type !== 'file' || j.path !== RULES_PATH) throw new Error('not the rules file');
+  const blob = j.sha;
+  if (!SHA.test(blob ?? '') || j.encoding !== 'base64' || typeof j.content !== 'string') throw new Error('odd contents answer');
+  if (!Number.isSafeInteger(j.size) || j.size > MAX_BYTES) throw new Error('rules file over 1 MB');
+  const buf = Buffer.from(j.content.replace(/\n/g, ''), 'base64');
+  if (buf.length !== j.size || blobSha(buf) !== blob) throw new Error('contents do not match the named version');
+  return { blob, text: new TextDecoder('utf-8', { fatal: true }).decode(buf) };
+}
+
 export function readProducts(file) {
   return checkProducts(JSON.parse(readFileSync(file, 'utf8')));
 }
@@ -212,14 +227,7 @@ export function makeReader({ gh, stateDir, products, verifyApproved, alert, now 
     const { commit } = file;
     const blob = j.sha;
     let text;
-    try {
-      if (j.type !== 'file' || j.path !== RULES_PATH) throw new Error('not the rules file');
-      if (!SHA.test(blob ?? '') || j.encoding !== 'base64' || typeof j.content !== 'string') throw new Error('odd contents answer');
-      if (!Number.isSafeInteger(j.size) || j.size > MAX_BYTES) throw new Error('rules file over 1 MB');
-      const buf = Buffer.from(j.content.replace(/\n/g, ''), 'base64');
-      if (buf.length !== j.size || blobSha(buf) !== blob) throw new Error('contents do not match the named version');
-      text = new TextDecoder('utf-8', { fatal: true }).decode(buf);
-    } catch (e) {
+    try { ({ text } = rulesFileOf(j)); } catch (e) {
       return keep(p, st, 'corrupt_rules', blob, e.message);
     }
 
