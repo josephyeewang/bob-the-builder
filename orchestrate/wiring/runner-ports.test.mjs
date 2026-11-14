@@ -11,7 +11,8 @@ import { tempDir } from '../shared/test-tmp.mjs';
 import { SETTINGS as S } from '../modules/M4-workshop/launcher/settings-names.mjs';
 import { gitOk, initMirror } from '../modules/M4-workshop/git/safe-git.mjs';
 import { launch } from '../modules/M4-workshop/launcher/launch.mjs';
-import { INTAKE_DONE, chmodTree, removeAll, cardStartCommit, undoCommitProblem, drainedPort, groupThere, pauseLeadPort, liveWallProblem, productWallGap, projectFolderName, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath, workerPromptText } from './runner-ports.mjs';
+import { INTAKE_DONE, chmodTree, removeAll, cardStartCommit, undoCommitProblem, drainedPort, groupThere, pauseLeadPort, liveWallProblem, productWallGap, projectFolderName, folderNameAsGiven, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath, workerPromptText, TRANSCRIPT_PLACE_CHECKED_AGAINST } from './runner-ports.mjs';
+import { roleEnv } from '../modules/M4-workshop/launcher/env-check.mjs';
 import { walledLaunchSettings } from './runner-launch.mjs';
 import { leaderStart } from './runner-loop.mjs';
 import { FLAGS, namesIn } from '../modules/M4-workshop/launcher/settings-names.mjs';
@@ -29,6 +30,12 @@ test('step 5: size reads the session\'s conversation file and its last write; a 
     const s = { id: SID, config_dir: join(d, 'cfg'), copy: '/copies/C-1' };
     assert.equal(projectFolderName('/copies/C-1'), '-copies-C-1');
     assert.equal(projectFolderName('/copies/a.b_c d'), '-copies-a-b-c-d', 'every character but a letter or digit');
+    // L1098: 2.1.316 cuts a name over 200 characters and adds the path's string hash in base 36 (values worked by hand from its code).
+    const at200 = '/' + 'a'.repeat(199);
+    assert.equal(projectFolderName(at200), '-' + 'a'.repeat(199), 'exactly 200: kept whole');
+    assert.equal(projectFolderName(at200 + 'b'), '-' + 'a'.repeat(199) + '-' + 'b6ymvk');   // b6ymvk: worked in Python from the rule, not by this code
+    assert.notEqual(projectFolderName('/' + 'x'.repeat(250)), projectFolderName('/' + 'x'.repeat(251)), 'two long paths sharing 200 characters still differ');
+    assert.equal(TRANSCRIPT_PLACE_CHECKED_AGAINST, null, 'read, not yet proved live (L1139): only a live run sets it');
     const f = transcriptPath({ configDir: s.config_dir, copy: s.copy, sessionId: SID });
     assert.equal(f, join(d, 'cfg', 'projects', '-copies-C-1', `${SID}.jsonl`));
     const size = sizePort();
@@ -43,6 +50,39 @@ test('step 5: size reads the session\'s conversation file and its last write; a 
     assert.throws(() => size(s), /not a plain file/);
     assert.throws(() => sizePort({ read: () => null })({ ...s, id: SID }), /not a plain file|can't be read/);
   } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test('L1134: the conversation folder name is cut as 2.1.316 cuts it: 200 characters, then "-" and the path\'s hash', () => {
+  // Expected names worked out apart from this code (a Python copy of the rule read in 2.1.316's bundle), not by it.
+  const exact = `/copies/${'a'.repeat(192)}`;
+  assert.equal(projectFolderName(exact), `-copies-${'a'.repeat(192)}`, 'exactly 200: kept whole, no hash');
+  assert.equal(projectFolderName(exact).length, 200);
+  const over = `/copies/${'a'.repeat(193)}`;
+  assert.equal(projectFolderName(over), `-copies-${'a'.repeat(192)}-sne018`, '201: the first 200, "-", the hash');
+  const long = `/Users/builder/orchestrate/copies/${'C-1234-'.repeat(40)}`;
+  const n = projectFolderName(long);
+  assert.equal(n.length, 207); assert.ok(n.endsWith('-C-1234-C-123-d21u1r'), n);
+  assert.equal(n.slice(0, 200), long.replace(/[^A-Za-z0-9]/g, '-').slice(0, 200));
+  // The hash is of the path, so two paths alike for 200 characters get two folders.
+  const [a, b] = [`/copies/${'q'.repeat(200)}one`, `/copies/${'q'.repeat(200)}two`];
+  assert.ok(projectFolderName(a).endsWith('-g01wx3')); assert.ok(projectFolderName(b).endsWith('-g01szl'));
+  // Not ASCII: each UTF-16 code unit is one character, as in claude (an accented e is one "-", an emoji two).
+  assert.equal(projectFolderName('/copies/caf\u00e9/\u{1F600}'), '-copies-caf----');
+  const wide = `/copies/caf\u00e9-\u{1F600}-${'b'.repeat(200)}`;
+  assert.equal(projectFolderName(wide), `${'-copies-caf-----'}${'b'.repeat(184)}-b6b4tn`);
+  assert.equal(transcriptPath({ configDir: '/cfg', copy: over, sessionId: SID }), join('/cfg', 'projects', `-copies-${'a'.repeat(192)}-sne018`, `${SID}.jsonl`));
+  // L1141 m1: 2.1.316 puts the path in NFC before naming and hashing (realpathSync(cwd).normalize("NFC")), so an e typed
+  // with a separate accent mark names the same folder as the one-character e, short or cut.
+  assert.equal(projectFolderName('/copies/cafe\u0301'), '-copies-caf-');
+  assert.equal(folderNameAsGiven('/copies/cafe\u0301'), '-copies-cafe-', 'without the NFC step the mark is one more "-"');
+  const [nfd, nfc] = [`/copies/cafe\u0301-${'b'.repeat(200)}`, `/copies/caf\u00e9-${'b'.repeat(200)}`];
+  assert.equal(projectFolderName(nfd), projectFolderName(nfc));
+  assert.ok(projectFolderName(nfd).endsWith('-9gvujl'), 'the hash is of the NFC path');
+  assert.ok(folderNameAsGiven(nfd).endsWith('-ukv9m2'));
+  // Not proved on a live session yet (L1134): it stays null until a real run finds its transcript at this path.
+  assert.equal(TRANSCRIPT_PLACE_CHECKED_AGAINST, null);
+  // CLAUDE_CODE_PROJECT_DIR_NAME would replace the name (with a config folder set, as the runner's is): never passed on.
+  assert.equal('CLAUDE_CODE_PROJECT_DIR_NAME' in roleEnv({ CLAUDE_CODE_PROJECT_DIR_NAME: 'x', HOME: '/h' }), false);
 });
 
 test('L835: an outbox is drained once every file in it has the Record\'s done intake fact with its sha256, or it is empty or gone', () => {
@@ -401,6 +441,8 @@ test('step 5: a start refused before the copy makes nothing; one refused after i
     ['a Tier 1 card with no main_commit', { startCommit: cardStartCommit }, /main_commit/],
     ['a runner that is stopping', { stopped: () => true }, /is stopping$/],
     ['no sign-in', { account: () => ({ account: null, reason: 'not set up' }) }, /not set up/],
+    // R-0b-156: the start builds the environment through the launcher's one check (the allow-list).
+    ['a sign-in handing a session variable', { account: () => ({ account: 'a', dir: '/nowhere', env: { CLAUDE_CODE_SESSION_ID: 'x' } }) }, /allow-list.*CLAUDE_CODE_SESSION_ID/],
     ['no start commit', { startCommit: async () => { throw new Error('no main'); } }, /no main/],
     ['a copy that can\'t be made', { prepare: async () => ({ ok: false, reason: 'copy folder already exists' }) }, /already exists/],
   ];

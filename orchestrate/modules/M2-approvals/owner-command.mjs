@@ -22,13 +22,13 @@
 
 import { activeKind } from '../../shared/asks.mjs';
 import { answerCounts } from '../../shared/approval.mjs';
-import { askStore, writeDoc } from './ask-store.mjs';
+import { askStore, recordRefused, writeDoc } from './ask-store.mjs';
 import { releaseBoxes } from './binding.mjs';
+import { SHA256 } from '../../shared/plan-fingerprint.mjs';
 
 export const OWNER_COMMAND = 'owner_command';
 // The one ask kind a command may answer (L1082: Tier 2 only).
 export const OWNER_COMMAND_KIND = 'go_t2';
-const SHA256 = /^[0-9a-f]{64}$/;
 const iso = (ms) => new Date(ms).toISOString();
 const fail = (reason) => ({ ok: false, reason });
 
@@ -60,5 +60,5 @@ export function answerByOwnerCommand(ctx, askId, { sudoUid, cardJsonSha256 } = {
   const doc = structuredClone(a.doc);
   releaseBoxes(doc, 'answered_elsewhere', ctx.now(), { moveBack: false });
   const w = writeDoc(ctx.record, 'ask', a, { ...doc, state: 'answered', answer });
-  return w.ok ? { ok: true, answer } : fail(`the record refused the answer: ${w.reason}`);
+  return w.ok ? { ok: true, answer } : fail(recordRefused(w.reason));
 }

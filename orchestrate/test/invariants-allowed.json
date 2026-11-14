@@ -379,12 +379,12 @@
   },
   {
    "file": "modules/M13-ledger/alerts.mjs",
-   "line": "const seen = Math.max(Date.parse(at.f.told) || 0, Date.parse(/ · last seen (\\S+) · /.exec(lastSeenPart(at.i.body))?.[1]) || 0);",
+   "line": "const seen = Math.max(Date.parse(at.f.told) || 0, Date.parse(/ \u00b7 last seen (\\S+) \u00b7 /.exec(lastSeenPart(at.i.body))?.[1]) || 0);",
    "why": "baseline (L1078)"
   },
   {
    "file": "modules/M13-ledger/alerts.mjs",
-   "line": "const seen = Math.max(Date.parse(at.f.told) || 0, Date.parse(/ · last seen (\\S+) · /.exec(lastSeenPart(at.i.body))?.[1]) || 0);",
+   "line": "const seen = Math.max(Date.parse(at.f.told) || 0, Date.parse(/ \u00b7 last seen (\\S+) \u00b7 /.exec(lastSeenPart(at.i.body))?.[1]) || 0);",
    "why": "baseline (L1078)"
   },
   {
@@ -593,11 +593,6 @@
    "why": "baseline (L1078)"
   },
   {
-   "file": "modules/M4-workshop/send-safe/hook-store.mjs",
-   "line": "&& typeof h.since === 'string' && Number.isFinite(Date.parse(h.since)) && (h.sessionId === null) === (h.role === null);",
-   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
-  },
-  {
    "file": "modules/M6-merge-gate/gate.mjs",
    "line": ".filter((x) => typeof x === 'string' && Number.isFinite(Date.parse(x))).sort()[0] ?? iso();",
    "why": "baseline (L1078)"
@@ -691,16 +686,6 @@
    "file": "shared/still-waiting.mjs",
    "line": "const t = typeof value === 'string' ? Date.parse(value) : NaN;",
    "why": "pastTime itself: the one home of the stored-time read (I4)"
-  },
-  {
-   "file": "wiring/gate-ports.mjs",
-   "line": "const byNew = [...runs].sort((a, b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0));",
-   "why": "#516 landing (L1138): lane 1b reads it through pastTime"
-  },
-  {
-   "file": "wiring/gate-ports.mjs",
-   "line": "const byNew = [...runs].sort((a, b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0));",
-   "why": "#516 landing (L1138): lane 1b reads it through pastTime"
   },
   {
    "file": "wiring/heartbeat-probes.mjs",
@@ -870,15 +855,6 @@
   },
   {
    "kind": "definition",
-   "copy": "BODY_MAX = 60_000",
-   "files": [
-    "modules/M13-ledger/alert-channel.mjs",
-    "wiring/pr-writer.mjs"
-   ],
-   "why": "#516 landing (L1138): lane 1b folds it into one home or gives its reason"
-  },
-  {
-   "kind": "definition",
    "copy": "CARD = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/",
    "files": [
     "modules/M11-dispatcher/cleanup.mjs",
@@ -932,15 +908,6 @@
     "modules/M13-ledger/outside-check/supported.mjs"
    ],
    "why": "baseline (L1078)"
-  },
-  {
-   "kind": "definition",
-   "copy": "GUARD_STEP = 'product 1 / repo-guard'",
-   "files": [
-    "modules/M12-sensors/outside-watch.mjs",
-    "wiring/gate-ports.mjs"
-   ],
-   "why": "#516 landing (L1138): lane 1b folds it into one home or gives its reason"
   },
   {
    "kind": "definition",
@@ -1019,15 +986,6 @@
   },
   {
    "kind": "definition",
-   "copy": "LAUNCHCTL = '/bin/launchctl'",
-   "files": [
-    "setup/daemons.mjs",
-    "setup/owner-answer-setup.mjs"
-   ],
-   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
-  },
-  {
-   "kind": "definition",
    "copy": "LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/",
    "files": [
     "modules/M13-ledger/alert-channel.mjs",
@@ -1095,26 +1053,6 @@
   },
   {
    "kind": "definition",
-   "copy": "PATH = '/usr/bin:/bin:/usr/sbin:/sbin'",
-   "files": [
-    "setup/dispatcher-setup.mjs",
-    "setup/robot-setup.mjs",
-    "setup/sensors-setup.mjs"
-   ],
-   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
-  },
-  {
-   "kind": "definition",
-   "copy": "RETRY_MS = 15 * 60_000",
-   "files": [
-    "modules/M11-dispatcher/research-intake.mjs",
-    "modules/M4-workshop/launcher/review-runner.mjs",
-    "wiring/push-pass.mjs"
-   ],
-   "why": "#516 landing (L1138): lane 1b folds it into one home or gives its reason"
-  },
-  {
-   "kind": "definition",
    "copy": "ROUTE_STATES = Object.freeze(['ready', 'claimed', 'running'])",
    "files": [
     "modules/M11-dispatcher/proposal-route.mjs",
@@ -1174,21 +1112,7 @@
     "wiring/runner-checks.mjs",
     "wiring/runner-ports.mjs"
    ],
-   "why": "baseline (L1078)"
-  },
-  {
-   "kind": "definition",
-   "copy": "SHA256 = /^[0-9a-f]{64}$/",
-   "files": [
-    "modules/M11-dispatcher/proposal-route.mjs",
-    "modules/M2-approvals/go-view.mjs",
-    "modules/M2-approvals/owner-command.mjs",
-    "modules/M4-workshop/git/push.mjs",
-    "modules/M6-merge-gate/workflow-route.mjs",
-    "shared/plan-review.mjs",
-    "wiring/runner-ports.mjs"
-   ],
-   "why": "baseline (L1078); #523 adds a copy at its landing (L1144), lane 1b folds it"
+   "why": "baseline (L1078) #543 adds a copy in setup/approve-rules.mjs (L1151). #544 adds a copy in setup/live-proofs/slice-dry-run.mjs (L1153)."
   },
   {
    "kind": "definition",
@@ -1250,24 +1174,6 @@
   },
   {
    "kind": "text",
-   "copy": " alert could not be queued; it is tried again next pass",
-   "files": [
-    "modules/M11-dispatcher/drain-alerts.mjs",
-    "modules/M11-dispatcher/interactive-holds.mjs"
-   ],
-   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
-  },
-  {
-   "kind": "text",
-   "copy": " and would drop it on the next update: install again (README, part 6)",
-   "files": [
-    "setup/dispatcher-setup.mjs",
-    "setup/sensors-setup.mjs"
-   ],
-   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
-  },
-  {
-   "kind": "text",
    "copy": " are not safe for root to work in (",
    "files": [
     "setup/extras.mjs",
@@ -1305,16 +1211,6 @@
   },
   {
    "kind": "text",
-   "copy": " in the copy is not root's alone: ",
-   "files": [
-    "setup/dispatcher-setup.mjs",
-    "setup/robot-setup.mjs",
-    "setup/sensors-setup.mjs"
-   ],
-   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
-  },
-  {
-   "kind": "text",
    "copy": " is not a plain file with one name",
    "files": [
     "modules/M4-workshop/launcher/accounts.mjs",
@@ -1322,24 +1218,6 @@
     "wiring/sensors-ports.mjs"
    ],
    "why": "baseline (L1078)"
-  },
-  {
-   "kind": "text",
-   "copy": " is not a plain file; nothing was changed",
-   "files": [
-    "setup/mac.mjs",
-    "setup/managed-settings.mjs"
-   ],
-   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
-  },
-  {
-   "kind": "text",
-   "copy": " is not in the copy (run dispatcher-config)",
-   "files": [
-    "setup/dispatcher-setup.mjs",
-    "setup/sensors-setup.mjs"
-   ],
-   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
   },
   {
    "kind": "text",
@@ -1398,24 +1276,6 @@
   },
   {
    "kind": "text",
-   "copy": " is root's 0644 and the config this setup writes",
-   "files": [
-    "setup/dispatcher-setup.mjs",
-    "setup/sensors-setup.mjs"
-   ],
-   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
-  },
-  {
-   "kind": "text",
-   "copy": " is that config, and the copy keeps it",
-   "files": [
-    "setup/dispatcher-setup.mjs",
-    "setup/sensors-setup.mjs"
-   ],
-   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
-  },
-  {
-   "kind": "text",
    "copy": " minutes old; the runner may be stopped",
    "files": [
     "modules/M4-workshop/launcher/review-runner.mjs",
@@ -1450,15 +1310,6 @@
     "setup/robot-setup.mjs"
    ],
    "why": "baseline (L1078)"
-  },
-  {
-   "kind": "text",
-   "copy": "), so root won't write in it; install the copy again (unload the jobs, remove ",
-   "files": [
-    "setup/dispatcher-setup.mjs",
-    "setup/sensors-setup.mjs"
-   ],
-   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
   },
   {
    "kind": "text",
@@ -1498,12 +1349,12 @@
   },
   {
    "kind": "text",
-   "copy": ", run install), which carries ",
+   "copy": ", but the worker runner's own folder ",
    "files": [
-    "setup/dispatcher-setup.mjs",
-    "setup/sensors-setup.mjs"
+    "setup/live-proofs/runlocked.mjs",
+    "setup/live-proofs/settings-names.mjs"
    ],
-   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
+   "why": "Both live proofs run as the worker runner's user with its lock held, and each repeats the same before-run refusals (runner running, lock, config, pin, record). #533 (runlocked.mjs) copied settings-names.mjs's. Allowed until lane 4 moves the shared before-run checks into one live-proofs helper (L1164)."
   },
   {
    "kind": "text",
@@ -1522,6 +1373,15 @@
     "setup/setup.mjs"
    ],
    "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": ". Run it with the pinned claude",
+   "files": [
+    "setup/live-proofs/runlocked.mjs",
+    "setup/live-proofs/settings-names.mjs"
+   ],
+   "why": "Both live proofs run as the worker runner's user with its lock held, and each repeats the same before-run refusals (runner running, lock, config, pin, record). #533 (runlocked.mjs) copied settings-names.mjs's. Allowed until lane 4 moves the shared before-run checks into one live-proofs helper (L1164)."
   },
   {
    "kind": "text",
@@ -1551,6 +1411,15 @@
     "modules/M13-ledger/outside-check/supported.mjs"
    ],
    "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "The record of this run could not be written (",
+   "files": [
+    "setup/live-proofs/runlocked.mjs",
+    "setup/live-proofs/settings-names.mjs"
+   ],
+   "why": "Both live proofs run as the worker runner's user with its lock held, and each repeats the same before-run refusals (runner running, lock, config, pin, record). #533 (runlocked.mjs) copied settings-names.mjs's. Allowed until lane 4 moves the shared before-run checks into one live-proofs helper (L1164)."
   },
   {
    "kind": "text",
@@ -1596,15 +1465,6 @@
     "modules/M11-dispatcher/gate.mjs"
    ],
    "why": "baseline (L1078)"
-  },
-  {
-   "kind": "text",
-   "copy": "config: product must be a product name (lower case letters, digits and -, a letter or digit first)",
-   "files": [
-    "wiring/dispatcher-wiring.mjs",
-    "wiring/sensors-wiring.mjs"
-   ],
-   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
   },
   {
    "kind": "text",
@@ -1736,6 +1596,15 @@
   },
   {
    "kind": "text",
+   "copy": "the config names no claude pin (pin)",
+   "files": [
+    "setup/live-proofs/runlocked.mjs",
+    "setup/live-proofs/settings-names.mjs"
+   ],
+   "why": "Both live proofs run as the worker runner's user with its lock held, and each repeats the same before-run refusals (runner running, lock, config, pin, record). #533 (runlocked.mjs) copied settings-names.mjs's. Allowed until lane 4 moves the shared before-run checks into one live-proofs helper (L1164)."
+  },
+  {
+   "kind": "text",
    "copy": "the file count is not a whole number",
    "files": [
     "modules/M10-rules/classify.mjs",
@@ -1751,24 +1620,6 @@
     "setup/watch-setup.mjs"
    ],
    "why": "baseline (L1078)"
-  },
-  {
-   "kind": "text",
-   "copy": "the install is not there yet (run the install first)",
-   "files": [
-    "setup/dispatcher-setup.mjs",
-    "setup/sensors-setup.mjs"
-   ],
-   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
-  },
-  {
-   "kind": "text",
-   "copy": "the installed copy is not root's alone (",
-   "files": [
-    "setup/dispatcher-setup.mjs",
-    "setup/sensors-setup.mjs"
-   ],
-   "why": "on main when the I-list check landed (#514, L1133): lane 1b folds it into one home or gives its reason"
   },
   {
    "kind": "text",
@@ -1814,25 +1665,6 @@
     "modules/M4-workshop/launcher/outbox.mjs"
    ],
    "why": "baseline (L1078)"
-  },
-  {
-   "kind": "text",
-   "copy": "the plan can't be fingerprinted: ",
-   "files": [
-    "modules/M2-approvals/go.mjs",
-    "setup/go-card.mjs"
-   ],
-   "why": "#523 landing (L1144): lane 1b folds it into one home or gives its reason"
-  },
-  {
-   "kind": "text",
-   "copy": "the record refused the answer: ",
-   "files": [
-    "modules/M2-approvals/decision.mjs",
-    "modules/M2-approvals/owner-command.mjs",
-    "modules/M2-approvals/schedule.mjs"
-   ],
-   "why": "baseline (L1078); #523 adds a copy at its landing (L1144), lane 1b folds it"
   },
   {
    "kind": "text",
@@ -1918,6 +1750,33 @@
     "wiring/worker-runner.mjs"
    ],
    "why": "baseline (L1078)"
+  },
+  {
+   "kind": "text",
+   "copy": "the worker runner is running. Stop it first, then run this again",
+   "files": [
+    "setup/live-proofs/runlocked.mjs",
+    "setup/live-proofs/settings-names.mjs"
+   ],
+   "why": "Both live proofs run as the worker runner's user with its lock held, and each repeats the same before-run refusals (runner running, lock, config, pin, record). #533 (runlocked.mjs) copied settings-names.mjs's. Allowed until lane 4 moves the shared before-run checks into one live-proofs helper (L1164)."
+  },
+  {
+   "kind": "text",
+   "copy": "the worker runner's config can't be read (",
+   "files": [
+    "setup/live-proofs/runlocked.mjs",
+    "setup/live-proofs/settings-names.mjs"
+   ],
+   "why": "Both live proofs run as the worker runner's user with its lock held, and each repeats the same before-run refusals (runner running, lock, config, pin, record). #533 (runlocked.mjs) copied settings-names.mjs's. Allowed until lane 4 moves the shared before-run checks into one live-proofs helper (L1164)."
+  },
+  {
+   "kind": "text",
+   "copy": "the worker runner's lock can't be taken (",
+   "files": [
+    "setup/live-proofs/runlocked.mjs",
+    "setup/live-proofs/settings-names.mjs"
+   ],
+   "why": "Both live proofs run as the worker runner's user with its lock held, and each repeats the same before-run refusals (runner running, lock, config, pin, record). #533 (runlocked.mjs) copied settings-names.mjs's. Allowed until lane 4 moves the shared before-run checks into one live-proofs helper (L1164)."
   },
   {
    "kind": "text",

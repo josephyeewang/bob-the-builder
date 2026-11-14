@@ -2,7 +2,15 @@
 // N2; LEAD-CALLS L1078, L1082, L1096, L1100). For the first run only: no Lead can be launched yet and no phone channel is
 // wired, so nothing else can make the card or give the go.
 //
-//   sudo -u orchestrate node <installed copy>/setup/go-card.mjs <the Dispatcher's config> <card.json>
+//   sudo -k -u orchestrate node <installed copy>/setup/go-card.mjs <the Dispatcher's config> <card.json>
+//
+// THE GUARD IS SUDO'S PASSWORD (L1132). A Claude session can't give its own go only because sudo asks for the owner's
+// password, and the owner types it. The Lead and lane sessions run as the owner's own Mac user, so a password sudo still
+// remembers (its few-minute timestamp) would let one of them run this with no one typing anything. `-k` makes sudo ask
+// again whatever it remembers; it is in USAGE and in every paste block that runs this, and must stay there. This command
+// can't tell whether `-k` was given (sudo passes nothing that says so): the guard holds when the owner runs it as
+// written. SUDO_UID is only an environment variable sudo sets; it says which user sudo let through, not who typed. The
+// retyped card id (step 4) is a second check that the owner read the card, not the guard.
 //
 // The card file is a JSON object: { id, product, module, kind: "ordinary", tier: 2, what, files, lane?, brief?,
 // desired? } (the owner_command create row of M9 permissions.mjs, less the two this command sets). The pass test is not
@@ -10,17 +18,18 @@
 //
 // WHAT IT DOES, in order, and refuses on any failure (I1: nothing is guessed):
 //   1. It runs as the Dispatcher's user (orchestrate), started through sudo by the owner: SUDO_UID is the config's
-//      ownerUid. A builder session runs as its own user and can't sudo.
+//      ownerUid. A builder session runs as its own user and can't sudo; a session running as the owner's user is
+//      stopped by sudo's password (above), not by this check.
 //   2. The product's own rules mark it the test product (M9 TEST_PRODUCT_KEY, exactly true), and the card is ordinary,
 //      Tier 2, of that product.
 //   3. Its rows are read at main the way the Merge Gate reads them (wiring/review-ports.mjs planRows), and its pass
 //      test is set to theirs (M2 doneBar), so the Dispatcher's pass has nothing to change and the go binds what was shown.
 //   4. The card, its files, its pass test and the plan's fingerprint are shown, and the owner retypes the card id at the
-//      terminal. It is read from /dev/tty only, never stdin (L1096 Q11): with no terminal, or another id, nothing is
-//      written. That stops a pipe, not a determined program: a shell running as the owner can make a terminal of its
-//      own (`script`, or any pseudo-terminal) and type into it. What stops a session there is sudo's password, which
-//      sudo asks for on each terminal (its per-terminal timestamp), so a new pseudo-terminal needs the password again.
-//      The retype is a check that the owner read the card, not a lock (L1111).
+//      terminal. It is read from /dev/tty only, never stdin (L1096 Q11), and stdin must be a terminal too (L1132): with
+//      stdin piped or redirected, no terminal, or another id, nothing is written. That stops a pipe, not a determined
+//      program: a shell running as the owner can make a terminal of its own (`script`, or any pseudo-terminal) and type
+//      into it. What stops a session there is sudo's password, asked again because of `-k` (above). The retype is a
+//      second check that the owner read the card, not a lock (L1111, L1132).
 //   5. The card is written under the Record actor `owner_command` (L1100), which M9 lets create only an ordinary Tier-2
 //      draft on a test product (permissions CARD_CREATORS, writer checkNewCard), so the diary names who made it.
 //   6. M2 raiseGo asks for the go exactly as the Dispatcher would; its fingerprint must be the one shown. M2
@@ -42,13 +51,19 @@ import { askStore } from '../modules/M2-approvals/ask-store.mjs';
 import { doneBar, raiseGo, recordGo } from '../modules/M2-approvals/go.mjs';
 import { answerByOwnerCommand, OWNER_COMMAND } from '../modules/M2-approvals/owner-command.mjs';
 import { TEST_PRODUCT_KEY, WRITERS } from '../modules/M9-record/permissions.mjs';
-import { canonicalJson, planFingerprint } from '../shared/plan-fingerprint.mjs';
+import { canonicalJson, planFingerprint, unfingerprinted } from '../shared/plan-fingerprint.mjs';
+import { TTY_PATH } from './layout.mjs';
 
 // The Dispatcher's user. Written here, as dispatcher-check.mjs does, not imported from dispatcher-setup.mjs: that module
 // builds job files, and a module that loads one must be a listed job builder (M4 review-install-closure.test, L136 m1).
 // go-card.test pins it to dispatcher-setup's DISPATCHER_USER.
 export const RUN_AS = 'orchestrate';
-export const USAGE = 'sudo -u orchestrate node …/setup/go-card.mjs <the Dispatcher\'s config> <card.json>';
+// `-k`: sudo asks for the owner's password even if it remembers it (L1132; the header's THE GUARD).
+export const USAGE = 'sudo -k -u orchestrate node …/setup/go-card.mjs <the Dispatcher\'s config> <card.json>';
+// The terminal the retype is read from (L1096 Q11). openTty is ttyConfirm's real port: it throws when this process has
+// no terminal (go-card.test.mjs checks both).
+export { TTY_PATH };
+export const openTty = () => openSync(TTY_PATH, 'r+');
 const CARD_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const MAX_LINE = 256;
 const MAX_CARD_FILE = 64 * 1024;
@@ -69,10 +84,12 @@ export function whoProblem({ uid, sudoUid, dispatcherUid, ownerUid }) {
 }
 
 /**
- * The owner's retyped card id, read from the terminal only (L1096 Q11). → { ok: true } | { ok: false, reason }.
- * `open`, `isTty` and `show` (the prompt's writer) are for a test; production passes none.
+ * The owner's retyped card id, read from the terminal only (L1096 Q11), with stdin a terminal too (L1132).
+ * → { ok: true } | { ok: false, reason }. A second check that the owner read the card; the guard is sudo's password.
+ * `open`, `isTty`, `stdinIsTty` and `show` (the prompt's writer) are for a test; production passes none.
  */
-export function ttyConfirm({ cardId, text, open = () => openSync('/dev/tty', 'r+'), isTty = isatty, show = writeSync }) {
+export function ttyConfirm({ cardId, text, open = openTty, isTty = isatty, stdinIsTty = () => isatty(0), show = writeSync }) {
+  if (!stdinIsTty()) return fail('its input is piped or redirected, not the Terminal, so the go can\'t be confirmed. Run this yourself in the Terminal app; a session can\'t give a go');
   let fd;
   try { fd = open(); } catch { fd = null; }
   if (fd === null || fd === undefined || !isTty(fd)) {
@@ -154,7 +171,7 @@ export async function goCard({ ctx, cardText, sudoUid, readRows, view, mainSha, 
     if (canonicalJson(stored) !== canonicalJson(doc)) return fail(`card ${cardId} is already in the Record with another plan; pick another id`);
   }
   const fp = planFingerprint({ product, card_id: cardId, tier: doc.tier, files: doc.files, done_when: doc.done_when, plan_sha256: doc.plan_sha256, main_commit: doc.main_commit });
-  if (!fp.ok) return fail(`the plan can't be fingerprinted: ${fp.reason}`);
+  if (!fp.ok) return fail(unfingerprinted(fp.reason));
   const said = confirm({ cardId, text: goText({ product, cardId, card: doc, fingerprint: fp.sha256 }) });
   if (!said?.ok) return fail(said?.reason ?? 'the go was not confirmed');
   if (!had) {
