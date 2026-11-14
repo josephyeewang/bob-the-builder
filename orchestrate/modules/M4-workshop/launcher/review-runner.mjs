@@ -1416,7 +1416,7 @@ export async function runnerPass(ctx) {
     try { writeLaunch(P.planLaunches, sid, doc); } catch (e) { delete state.packages[sid]; return again(`its launch record could not be written (${e?.code ?? e?.message})`); }
     // The reviewer reads main as the plan was made on it, and the plan from its package.
     let r;
-    try { r = await ctx.start({ role: PLAN_REVIEW_ROLE, card, head: d.main_commit, fingerprint, sessionId: sid, outbox, configDir, env: accountEnv(ctx.reviewHome, acct), signin: acct, earlier: '', packageDir: join(P.packages, sid), planFile: pk.file }); } catch (e) { r = { ok: false, reason: e?.message ?? String(e) }; }
+    try { r = await ctx.start({ role: PLAN_REVIEW_ROLE, card, head: d.main_commit, fingerprint, sessionId: sid, outbox, configDir, home: ctx.reviewHome, env: accountEnv(ctx.reviewHome, acct), signin: acct, earlier: '', packageDir: join(P.packages, sid), planFile: pk.file }); } catch (e) { r = { ok: false, reason: e?.message ?? String(e) }; }
     if (!r?.ok || !Number.isInteger(r.pid)) {
       // As for a review (L70 point 4, L71 point 2): it never ran only when no live claude carries its id and its outbox
       // is review's own and empty; then its launch stays, marked never_ran, and the runner tries again itself.
@@ -1625,7 +1625,7 @@ export async function runnerPass(ctx) {
       writeLaunch(P.launches, sid, { session_id: sid, role, card, head, tree, launched_at: iso(now), signin: acct, config_dir: configDir });
     } catch (e) { failStart(`its launch record could not be written (${e?.code ?? e?.message})`); continue; }
     let r;
-    try { r = await ctx.start({ role, card, head, tree, sessionId: sid, outbox, configDir, env: accountEnv(ctx.reviewHome, acct), signin: acct, earlier: earlierBlock(earlier), packageDir: join(P.packages, sid) }); } catch (e) { r = { ok: false, reason: e?.message ?? String(e) }; }
+    try { r = await ctx.start({ role, card, head, tree, sessionId: sid, outbox, configDir, home: ctx.reviewHome, env: accountEnv(ctx.reviewHome, acct), signin: acct, earlier: earlierBlock(earlier), packageDir: join(P.packages, sid) }); } catch (e) { r = { ok: false, reason: e?.message ?? String(e) }; }
     // The package's sha256 is pinned at once, whatever the start says next, so any end of this session checks it.
     // The runner keeps the sha256 in its state too, and whether the pin was written: a session whose pin failed is
     // refused at its end whatever the pin file then says (L91 m-2).

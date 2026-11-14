@@ -41,6 +41,9 @@
 //   check-proposals  owner, mode, access list; with sudo, who can read or write (read only)
 //   safe-directory  [--dry-run]  the owner's git trusts exactly the mirror folder  (root, runs git as the owner)
 //   check-safe-directory (read only; sudo to look)
+//   approve-rules <product> [--dry-run]  the owner approves the rules version on the product's GitHub main: shown, then the
+//                                       product's name typed at the terminal; added to M10's approval list (approve-rules.mjs)
+//                                       (sudo -k -u orchestrate, from the owner's own login; never root, never --config)
 //   token  [--dry-run]  save the watch-only token (typed hidden, never shown)  (root)
 //   prove-token  the repository is the config's watch.repo (private, not archived); read works, a no-op pull-request write is refused as "this token may not"; each kind of read the watch job makes works (the check runs with the watcher App's token, minted as orchestrate); then a note to check the token page by eye  (sudo: the token is read as orchestrate)
 //   watch-rules --rules-source <full path> [--dry-run]  put the watch-only week's rules in place (the file's hash must match the config)  (root)
@@ -79,6 +82,8 @@ import { WAY_OUT, checkManagedSettings, planManagedSettings } from './managed-se
 import { checkScannerFiles, checkScannerSetup, planScanner } from './scanner-setup.mjs';
 import { bobGit, checkBob, planBob } from './bob-manifest.mjs';
 import { readUser } from './users-folders.mjs';
+import { approveRules, realPorts as approvePortsOf } from './approve-rules.mjs';
+import { PRODUCT } from '../shared/product-paths.mjs';
 import { proveToken, checkProposals, checkSafeDirectory, checkToken, planProposals, planSafeDirectory, planToken } from './extras.mjs';
 
 // What prove-token did NOT prove, said after a PASS (L173 n1): only that the token cannot write pull requests.
@@ -88,7 +93,7 @@ const TOKEN_PAGE_NOTE = [
   '  - Repository access: only the one repository named in the config;',
   '  - Permissions: Metadata = Read-only (GitHub adds it by itself; fine if absent), Contents = Read-only (GitHub may call it "code"), Pull requests = Read-only, Commit statuses = Read-only (the watch job reads it to judge a merge), and nothing else. (Not Checks: the job reads check runs with the watcher App, which holds Checks: read.)',
 ];
-const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install [--watch-only]|check-dispatcher|dispatcher-config|dispatcher-keys|host-lock-copier|scanner --from <the gitleaks program>|check-scanner (without sudo)|review-config --pin <x.y.z> --input <file> --out <file> [--for-install]|add-to-install --pin <x.y.z> --sha256 <hex>|bob --from <Bob checkout> --commit <sha>|managed-settings|daemons place|load|unload|list|check [--only <job>]|daemons reload-account|owner-job place|load|unload|check (as the owner, no sudo)|prove-token|proposals|check-proposals|safe-directory|check-safe-directory|token|check-token|watch-rules|check-watch-rules|watch-app> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
+const USAGE ='usage: node setup.mjs <users-folders|check|proofs|install|check-install [--watch-only]|check-dispatcher|dispatcher-config|dispatcher-keys|host-lock-copier|scanner --from <the gitleaks program>|check-scanner (without sudo)|review-config --pin <x.y.z> --input <file> --out <file> [--for-install]|add-to-install --pin <x.y.z> --sha256 <hex>|bob --from <Bob checkout> --commit <sha>|managed-settings|daemons place|load|unload|list|check [--only <job>]|daemons reload-account|owner-job place|load|unload|check (as the owner, no sudo)|prove-token|proposals|check-proposals|safe-directory|check-safe-directory|token|check-token|watch-rules|check-watch-rules|watch-app|approve-rules <product>> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
 // Tests only, refused outside them: a stand-in gitleaks' hash in place of the real pin, so a whole `scanner` run, its
 // after-run check included, can be tried (L1123 m4). Nothing a config or an argument can set.
 const scannerPin = (sha) => {
@@ -97,7 +102,7 @@ const scannerPin = (sha) => {
   return { binSha: sha };
 };
 const DAEMON_SUBS = ['place', 'load', 'unload', 'list', 'check', 'reload-account'];
-const COMMANDS = ['users-folders', 'check', 'proofs', 'install', 'check-install', 'check-dispatcher', 'dispatcher-config', 'dispatcher-keys', 'host-lock-copier', 'scanner', 'check-scanner', 'review-config', 'add-to-install', 'bob', 'managed-settings', 'daemons', 'owner-job', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app'];
+const COMMANDS = ['users-folders', 'check', 'proofs', 'install', 'check-install', 'check-dispatcher', 'dispatcher-config', 'dispatcher-keys', 'host-lock-copier', 'scanner', 'check-scanner', 'review-config', 'add-to-install', 'bob', 'managed-settings', 'daemons', 'owner-job', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app', 'approve-rules'];
 const READ_ONLY = ['check', 'check-scanner', 'check-install', 'check-dispatcher', 'dispatcher-keys', 'check-proposals', 'check-safe-directory', 'check-token', 'prove-token', 'check-watch-rules'];
 const PLAIN_CONFIG = ['users-folders', 'scanner', 'check-scanner', 'check', 'check-dispatcher', 'dispatcher-keys', 'proofs', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app', 'review-config'];
 
@@ -107,7 +112,10 @@ export function parseArgs(argv) {
   let rest = argv.slice(1); let sub = null;
   if (cmd === 'daemons') { sub = rest[0]; rest = rest.slice(1); if (!DAEMON_SUBS.includes(sub)) throw new Error(`daemons needs one of ${DAEMON_SUBS.join(', ')}`); }
   if (cmd === 'owner-job') { sub = rest[0]; rest = rest.slice(1); if (!OWNER_JOB_SUBS.includes(sub)) throw new Error(`owner-job needs one of ${OWNER_JOB_SUBS.join(', ')}`); }
-  const o = { cmd, sub, config: null, dry: false, prefix: '', main: null, repo: null, rulesSource: null, printLine: false, watchOnly: false, only: null, app: {}, pin: null, claudePin: null, sha256: null, input: null, out: null, forInstall: false, from: null, commit: null };
+  // approve-rules takes the product's name first, and nothing else but --dry-run (L1127 c).
+  let product = null;
+  if (cmd === 'approve-rules') { product = rest[0]; rest = rest.slice(1); if (typeof product !== 'string' || !PRODUCT.test(product)) throw new Error('approve-rules needs the product\'s name first: approve-rules <product>'); }
+  const o = { product, cmd, sub, config: null, dry: false, prefix: '', main: null, repo: null, rulesSource: null, printLine: false, watchOnly: false, only: null, app: {}, pin: null, claudePin: null, sha256: null, input: null, out: null, forInstall: false, from: null, commit: null };
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (a === '--dry-run') o.dry = true;
@@ -158,6 +166,7 @@ export function parseArgs(argv) {
   if (cmd === 'scanner' && o.from === null) throw new Error('scanner needs --from <the full path of the gitleaks program taken out of the checked download>');
   if (cmd === 'bob' && (o.from === null || o.commit === null)) throw new Error('bob needs --from <the full path of a Bob checkout> and --commit <its 40-hex commit>');
   if (cmd === 'add-to-install' && (o.claudePin === null || o.sha256 === null)) throw new Error('add-to-install needs --pin <x.y.z> and --sha256 <hex>');
+  if (cmd === 'approve-rules' && (o.config !== null || o.prefix)) throw new Error('approve-rules reads only root\'s setup config at its fixed place: no --config or --root-prefix');
   return o;
 }
 
@@ -193,8 +202,8 @@ export function planCommand(io, cfg, o, { readSource = (p) => io.readSource(p), 
   return guarded(io, cfg, res);
 }
 
-/** Runs one command. `io`, `runUpdater`, `bobGitOf` and `managed` (managed-settings' nodeBin and guard) are ports for tests. → exit code. */
-export function main(argv, { io: given, runUpdater = spawnUpdater, bobGitOf, managed = {}, testScannerSha, out = (s) => process.stdout.write(`${s}\n`), err = (s) => process.stderr.write(`${s}\n`) } = {}) {
+/** Runs one command. `io`, `runUpdater`, `bobGitOf`, `managed` (managed-settings' nodeBin and guard), `approvePorts` and `env` (approve-rules') are ports for tests; `testScannerSha` is tests only. → exit code. */
+export function main(argv, { io: given, runUpdater = spawnUpdater, bobGitOf, managed = {}, testScannerSha, approvePorts, env = process.env, out = (s) => process.stdout.write(`${s}\n`), err = (s) => process.stderr.write(`${s}\n`) } = {}) {
   let o; let cfg;
   try { o = parseArgs(argv); } catch (e) { err(`${e.message}\n${USAGE}`); return 2; }
   const io = given ?? realIo({ prefix: o.prefix });
@@ -219,6 +228,7 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, bobGitOf, man
     if (o.only !== null) o.jobs = onlyJobs(cfg, o.only, { anyKnown: o.cmd === 'daemons' && (o.sub === 'unload' || o.sub === 'list') });   // a name that is no job of this config is refused before anything runs (unload and list take any job setup makes)
   } catch (e) { err(`${e.message}\n${USAGE}`); return 2; }
 
+  if (o.cmd === 'approve-rules') return approveRules({ io, cfg, product: o.product, dry: o.dry, env, ports: approvePorts ?? approvePortsOf(io, cfg), out, err });
   if (o.cmd === 'review-config') return reviewConfigCommand(cfg, { pin: o.claudePin, input: o.input, out: o.out, dry: o.dry, forInstall: o.forInstall }, { euid: io.euid(), userOf: (n) => readUser(io, n), out, err });
   if (o.cmd === 'check') return report(check(io, cfg, { alsoKnown: rootMadeEntries(cfg, { dispatcher: o.dispatcherOn }) }), out);
   if (o.cmd === 'check-install') {

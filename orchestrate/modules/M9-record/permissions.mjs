@@ -107,7 +107,12 @@ export function factFrom(role, entry, family) {
 export const CARD_CREATORS = Object.freeze({
   lead: Object.freeze(['ordinary', 'lead_daily_card']),
   dispatcher: Object.freeze(['fix', 'exact_reverse', 'research_copy']),
+  // L1100: the owner's go command, ordinary cards only; the writer adds Tier 2 and the test product (checkNewCard).
+  owner_command: Object.freeze(['ordinary']),
 });
+// The rules flag that marks a product as the test product (L1100): exactly true there, missing or false elsewhere. M10
+// policy.mjs declares it; the writer and setup/go-card.mjs read it under this one name.
+export const TEST_PRODUCT_KEY = 'product.test_product';
 
 const f = (...a) => Object.freeze(a.flat());
 const createOnly = (fields = '*') => Object.freeze({ create: fields });
@@ -140,6 +145,12 @@ export const WRITERS = Object.freeze({
       // GO_FREE), so a bar changed there would be one nobody approved. Missing draftKinds means every kind (the Lead).
       draftKinds: f('ordinary'),
       kinds: CARD_CREATORS.dispatcher,
+    }),
+    // L1100: creates a Tier-2 card and never changes one (no update, no draft grant). No plan_sha256 or main_commit (Tier
+    // 1 only), no depends_on, merge request or needs_joe: the thin first-run card the owner's go is given on.
+    owner_command: Object.freeze({
+      create: f('state', 'product', 'module', 'lane', 'kind', 'what', 'files', 'done_when', 'tier', 'brief', 'desired'),
+      kinds: CARD_CREATORS.owner_command,
     }),
     worker: Object.freeze({ update: f('summary', 'report_ref') }),
     // L838: a script hands in as a worker does, its own claimed card only (writer.mjs's hand-in checks), and nothing else.
