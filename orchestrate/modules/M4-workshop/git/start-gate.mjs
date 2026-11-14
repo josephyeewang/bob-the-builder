@@ -8,6 +8,10 @@
 //   3. The Vercel project's skip command is the pinned one, and
 //   4. no Vercel variable is set in both Preview and Production. M12 Sensors read Vercel and write
 //      facts 3 and 4 into the record (L3); this file only reads them. Older than 10 minutes = shut.
+//      A product with no Vercel project says so in its rules with exactly `none` (NO_VERCEL, L1081): it has no skip
+//      command and no variables, so facts 3 and 4 hold with no fact read. Only that exact word: a missing, empty or
+//      other value is read as before (missing or empty shuts; any other name must be matched by a fresh fact). So a real
+//      Vercel project named "none" can't be gated: its rules value would mean no project.
 // Anything missing, malformed, for the wrong repo or project, or stale shuts the gate. A shut
 // gate raises one GitHub issue to the owner, updated rather than opened again while it stays shut.
 //
@@ -22,6 +26,8 @@ export const FACT1_READ_EVERY_MS = 3600 * 1000;
 export const VERCEL_FACT_MAX_AGE_MS = 10 * 60 * 1000;
 export const OUTSIDE_EVENTS = Object.freeze(['schedule', 'workflow_dispatch']);
 export const factId = (kind, product) => `start_gate.${kind}.${product}`;
+/** The one rules value meaning "this product has no Vercel project" (L1081). Never a default: a rule must say it. */
+export const NO_VERCEL = 'none';
 
 const shut = (reason) => ({ ok: false, reason });
 export const FUTURE_ALLOWANCE_MS = 60 * 1000;
@@ -75,6 +81,8 @@ export function vercelFact({ record, kind, product, vercelProject, now }) {
   const label = kind === 'vercel_skip' ? 'the pinned Vercel skip command' : 'no Vercel value in both Preview and Production';
   // Asked first: with no project, a fact naming none would match, and would say nothing about any project (L570).
   if (typeof vercelProject !== 'string' || !vercelProject) return shut(`the rules name no Vercel project, so ${label} cannot be checked`);
+  // Asked second, so only the exact word written in the rules opens these two facts (L1081); nothing reads a fact for it.
+  if (vercelProject === NO_VERCEL) return { ok: true };
   const f = record.read('fact', factId(kind, product));
   const d = f?.doc;
   if (!d || typeof d !== 'object') return shut(`no fact yet for ${label}`);
