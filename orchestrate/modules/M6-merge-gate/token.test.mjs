@@ -27,11 +27,12 @@ function keyFolder(mode = 0o600) {
 }
 
 // A fake GitHub that checks the signed request the way GitHub would, then answers with `status`.
-function fakeGitHub({ status = 201, app = { status: 200, json: { slug: 'robot-app' } } } = {}) {
+function fakeGitHub({ status = 201, app = { status: 200, json: { slug: 'robot-app' } }, grant = null } = {}) {
   const seen = [];
+  const bodies = [];
   const apps = [];
   return {
-    seen, apps,
+    seen, apps, bodies,
     async get(path, headers) {
       const [h, p, s] = String(/^Bearer (.+)$/.exec(headers?.Authorization ?? '')?.[1]).split('.');
       apps.push({ path, okSig: verify('RSA-SHA256', Buffer.from(`${h}.${p}`), publicKey, Buffer.from(s ?? '', 'base64url')) });
@@ -45,8 +46,16 @@ function fakeGitHub({ status = 201, app = { status: 200, json: { slug: 'robot-ap
       const head = JSON.parse(Buffer.from(h, 'base64url'));
       const claims = JSON.parse(Buffer.from(p, 'base64url'));
       seen.push({ path, okSig, head, claims, jwt });
+      bodies.push(body);
       if (!okSig) return { status: 401, json: { message: 'bad signature' } };
-      return status === 201 ? { status, json: { token: TOKEN, expires_at: '2026-10-30T13:00:00Z' } } : { status, json: { message: 'no' } };
+      if (status !== 201) return { status, json: { message: 'no' } };
+      // As GitHub answers (#536 r2 Minor 1): a narrowed token says the permissions asked plus metadata read, which GitHub
+      // adds unasked, and exactly the repositories asked, 'selected'; an unnarrowed one says the installation's. `grant`
+      // replaces those fields, for a test of an answer GitHub should not give.
+      const said = Array.isArray(body?.repositories)
+        ? { permissions: { ...body.permissions, metadata: 'read' }, repository_selection: 'selected', repositories: body.repositories.map((name, i) => ({ id: 1000 + i, name, full_name: `sample-org/${name}` })) }
+        : { permissions: { contents: 'read', metadata: 'read', issues: 'write' }, repository_selection: 'all' };
+      return { status, json: { token: TOKEN, expires_at: '2026-10-30T13:00:00Z', ...said, ...(grant ?? {}) } };
     },
   };
 }
@@ -205,4 +214,55 @@ test("L246: 'eyJ' in a file beside the key does not trip the no-request-on-disk 
 // every installed key orphaned: change it only with a step that moves the installed key.
 test('L734: the robot key file keeps its installed name', () => {
   assert.equal(ROBOT_KEY_FILE, 'robot-app.pem');
+});
+
+// #536 r1 m4: the push's token is narrowed to the product's repository, with only what a push and a pull request need.
+test('#536 r1 m4: a scope is sent as the token request body; a token GitHub gives wider than asked is no token', async () => {
+  const { key } = keyFolder();
+  const scope = { repositories: ['test-repo'], permissions: { contents: 'write', pull_requests: 'write' } };
+  const asked = { permissions: { contents: 'write', pull_requests: 'write', metadata: 'read' }, repository_selection: 'selected', repositories: [{ id: 1000, name: 'test-repo' }] };
+  // GitHub's own answer (the fake answers as GitHub does: metadata read added unasked): taken.
+  const gh = fakeGitHub();
+  const r = await mintInstallationToken(args(key, gh, { scope }));
+  assert.equal(r.ok, true, r.reason);
+  assert.deepEqual(gh.bodies, [{ repositories: ['test-repo'], permissions: { contents: 'write', pull_requests: 'write' } }]);
+  // No scope: the body is empty, as before (the installation's token, for the alerts).
+  const plain = fakeGitHub();
+  assert.equal((await mintInstallationToken(args(key, plain))).ok, true);
+  assert.deepEqual(plain.bodies, [{}]);
+  // GitHub answering wider: another permission, write where read was asked, another repository, or none said.
+  for (const [grant, re] of [
+    [{ ...asked, permissions: { ...asked.permissions, administration: 'write' } }, /more than was asked \(administration\)/],
+    [{ ...asked, repositories: [{ name: 'test-repo' }, { name: 'other' }] }, /other repositories/],
+    [{ permissions: undefined }, /did not say the token's permissions/],
+    [{ repositories: undefined }, /did not say the token's repositories/],
+    // #536 r2 Minor 1: only metadata read is GitHub's own grant; admin, metadata write, another selection, none or
+    // a doubled repository is refused.
+    [{ ...asked, permissions: { ...asked.permissions, contents: 'admin' } }, /more than was asked \(contents\)/],
+    [{ ...asked, permissions: { ...asked.permissions, metadata: 'write' } }, /more than was asked \(metadata\)/],
+    [{ ...asked, permissions: { ...asked.permissions, checks: 'read' } }, /more than was asked \(checks\)/],
+    [{ ...asked, repository_selection: 'all' }, /did not limit the token to the repositories asked/],
+    [{ ...asked, repository_selection: undefined }, /did not limit the token/],
+    [{ ...asked, repositories: [] }, /other repositories/],
+    [{ ...asked, repositories: [{ name: 'test-repo' }, { name: 'test-repo' }] }, /other repositories/],
+    [{ ...asked, repositories: [{ id: 2, name: 'other-repo', full_name: 'o/other-repo' }] }, /other repositories/],
+  ]) {
+    const w = await mintInstallationToken(args(key, fakeGitHub({ grant }), { scope }));
+    assert.equal(w.ok, false); assert.match(w.reason, re);
+    assert.ok(!String(w.reason).includes(TOKEN), 'the token is never in the reason');
+  }
+  const ro = await mintInstallationToken(args(key, fakeGitHub({ grant: { ...asked, permissions: { contents: 'write', pull_requests: 'write' } } }), { scope: { ...scope, permissions: { contents: 'read', pull_requests: 'write' } } }));
+  assert.match(ro.reason, /more than was asked \(contents\)/);
+  // Two repositories asked: one of them twice is not both (#536 r2 Minor 1); both is taken.
+  const two = { ...scope, repositories: ['test-repo', 'test-two'] };
+  const dup = await mintInstallationToken(args(key, fakeGitHub({ grant: { ...asked, repositories: [{ name: 'test-repo' }, { name: 'test-repo' }] } }), { scope: two }));
+  assert.match(dup.reason, /other repositories/);
+  const both = await mintInstallationToken(args(key, fakeGitHub({ grant: { ...asked, repositories: [{ name: 'test-two' }, { name: 'test-repo' }] } }), { scope: two }));
+  assert.equal(both.ok, true, both.reason);
+  // A bad scope asks nothing of GitHub.
+  for (const bad of [{}, { repositories: [], permissions: { contents: 'write' } }, { repositories: ['a/b'], permissions: { contents: 'write' } }, { repositories: ['x'], permissions: {} }, { repositories: ['x'], permissions: { contents: 'admin' } }, { repositories: ['x'], permissions: { contents: 'write' }, extra: 1 }]) {
+    const g = fakeGitHub();
+    const b = await mintInstallationToken(args(key, g, { scope: bad }));
+    assert.equal(b.ok, false, JSON.stringify(bad)); assert.equal(g.seen.length, 0);
+  }
 });

@@ -52,6 +52,7 @@ const at = (f) => a[a.indexOf(f) + 1];
 if (at('--config') !== ${JSON.stringify(join(dir, 'do-plane.toml'))} || at('--gitleaks-ignore-path') !== ${JSON.stringify(join(dir, 'empty-ignore'))} || !a.includes('--ignore-gitleaks-allow')) process.exit(7);
 if (Object.keys(process.env).some((k) => k.startsWith('GITLEAKS'))) process.exit(8);
 fs.appendFileSync(${JSON.stringify(join(dir, 'calls'))}, a[0] + '\\n');
+if (mode === 'slow') Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 400);
 if (mode === 'crash') process.exit(2);
 if (mode === 'noreport') process.exit(0);
 if (mode === 'stdinquit' && a[0] === 'stdin') process.exit(3);
@@ -96,7 +97,7 @@ else { if (rule.stdout) process.stdout.write(rule.stdout); if (rule.stderr) proc
  * out). `seed`: write session S-1 and card C-1 into it as the real Record takes them (push.test.mjs); the launch test
  * passes false, since the Dispatcher's pass makes them. `onPushAsked(subject)` sees each push_branch question.
  */
-export async function pushWorld({ root, record = memoryRecord(), seed = true, card = 'C-1', product = PRODUCT, scanner: scannerOverride, gate = {}, onPushAsked = () => {} } = {}) {
+export async function pushWorld({ root, record = memoryRecord(), seed = true, card = 'C-1', product = PRODUCT, scanner: scannerOverride, gate = {}, onPushAsked = () => {}, ciText = 'name: ci\n' } = {}) {
   const gh = join(root, 'gh.git');
   await gitOk(['init', '--bare', '-q', gh], { gitDir: gh });
   const seedDir = join(root, 'seed');
@@ -104,7 +105,8 @@ export async function pushWorld({ root, record = memoryRecord(), seed = true, ca
   const sg = { gitDir: join(seedDir, '.git'), workTree: seedDir, cwd: seedDir };
   await gitOk(['init', '-q', seedDir], sg);
   mkdirSync(join(seedDir, '.github/workflows'), { recursive: true });
-  writeFileSync(join(seedDir, '.github/workflows/ci.yml'), 'name: ci\n');
+  // ciText: main's one workflow (a test of the real start gate's workflow rule gives one that passes it).
+  writeFileSync(join(seedDir, '.github/workflows/ci.yml'), ciText);
   writeFileSync(join(seedDir, 'README.md'), 'hello\n');
   writeFileSync(join(seedDir, 'app.txt'), 'app\n');
   await gitOk(['add', '-A'], sg);
