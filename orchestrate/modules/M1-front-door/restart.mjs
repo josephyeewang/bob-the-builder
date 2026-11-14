@@ -12,6 +12,7 @@
 import { ownerTurns, ownerTurnsWithReplies, lastTurnFinished, openQuestions } from './transcript.mjs';
 import { stripControls, cleanOutside } from '../M12-sensors/escape.mjs';
 import { makeMasker } from '../M12-sensors/mask.mjs';
+import { pastTime } from '../../shared/still-waiting.mjs';
 
 const { maskSecrets } = makeMasker();
 
@@ -32,9 +33,11 @@ export function shouldRestartFrontDoor({ sizeTokens, entries, now = () => new Da
   const all = ownerTurns(entries);
   if (all.length && !Number.isFinite(all.at(-1).at)) return no('the owner\'s newest turn has no time');
   const timed = all.map((t) => t.at).filter(Number.isFinite);
-  const last = timed.length ? Math.max(...timed) : (startedAt ? Date.parse(startedAt) : null);
+  // Session start goes through pastTime (I4, L1157 d): one ahead of now can't measure quiet, so it is no time at all.
+  const nowMs = now().getTime();
+  const last = timed.length ? Math.max(...timed) : pastTime(startedAt, nowMs);
   if (!Number.isFinite(last)) return no('no turn of the owner\'s to measure quiet from');
-  const quiet = (now().getTime() - last) / 60e3;
+  const quiet = (nowMs - last) / 60e3;
   if (quiet < QUIET_MIN) return no(`the owner was last active ${Math.floor(quiet)} min ago (needs ${QUIET_MIN})`);
   return { restart: true, reason: `size ${sizeTokens}, quiet ${Math.floor(quiet)} min, no question open, last turn finished` };
 }

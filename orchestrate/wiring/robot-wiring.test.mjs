@@ -472,11 +472,18 @@ test('L265 M5, M6: a running Dispatcher pass is not late (a 20-minute live pass)
   assert.match(dispatcherLate(rec, { nowMs: now, holder: { live: true, takenAt: null } }).text, /an unknown time/);
   // The lock file, read as the wiring reads it.
   writeFileSync(w.f('dispatcher.lock'), JSON.stringify({ pid: process.pid, taken_at: new Date(now - 20 * MIN).toISOString() }));
-  assert.deepEqual(lockHolder(w.f('dispatcher.lock')), { live: true, takenAt: now - 20 * MIN });
+  assert.deepEqual(lockHolder(w.f('dispatcher.lock'), { nowMs: now }), { live: true, takenAt: now - 20 * MIN });
   writeFileSync(w.f('dispatcher.lock'), JSON.stringify({ pid: deadPid(), taken_at: 'x' }));
-  assert.deepEqual(lockHolder(w.f('dispatcher.lock')), { live: false, takenAt: null });
+  assert.deepEqual(lockHolder(w.f('dispatcher.lock'), { nowMs: now }), { live: false, takenAt: null });
+  // I4 (L1157 d): a taken time ahead of now is unknown, so a live holder with a wrong clock is stuck, never running for ever.
+  writeFileSync(w.f('dispatcher.lock'), JSON.stringify({ pid: process.pid, taken_at: new Date(now + 30 * MIN).toISOString() }));
+  const ahead = lockHolder(w.f('dispatcher.lock'), { nowMs: now });
+  assert.deepEqual(ahead, { live: true, takenAt: null });
+  assert.match(dispatcherLate(rec, { nowMs: now, holder: ahead }).text, /held its lock for an unknown time/);
+  writeFileSync(w.f('dispatcher.lock'), JSON.stringify({ pid: process.pid, taken_at: new Date(now + 30_000).toISOString() }));
+  assert.equal(lockHolder(w.f('dispatcher.lock'), { nowMs: now }).takenAt, now + 30_000, 'within the minute of clock slack it is read');
   writeFileSync(w.f('dispatcher.lock'), 'not json');
-  assert.equal(lockHolder(w.f('dispatcher.lock')), null);
+  assert.equal(lockHolder(w.f('dispatcher.lock'), { nowMs: now }), null);
   rmSync(w.f('dispatcher.lock'));
   // M5: late (no holder) → queued; the Dispatcher passes again → the late alert leaves the queue unsent.
   t = now;
@@ -1127,7 +1134,7 @@ test('L730 m2 (probe D): a live Dispatcher pass inside its run limit is on time 
   writeFileSync(w.config.dispatcherLockFile, JSON.stringify({ pid: process.pid, taken_at: isoAt(T730 - 18 * MIN) }));
   const { rec, passes } = await wire(w.config, { fetchFn: gh.fetchFn, now: () => T730, log: () => {} });
   dPass(rec, T730 - 20 * MIN);
-  assert.equal(dispatcherLate(rec, { nowMs: T730, holder: lockHolder(w.config.dispatcherLockFile) }), null);
+  assert.equal(dispatcherLate(rec, { nowMs: T730, holder: lockHolder(w.config.dispatcherLockFile, { nowMs: T730 }) }), null);
   const out = await passes.heartbeat();
   assert.ok(!out.red.includes('dispatcher'), JSON.stringify(out.red));
   assert.ok(![...gh.issues.values()].some((i) => /heartbeat red: dispatcher/.test(i.title)));

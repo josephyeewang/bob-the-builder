@@ -119,13 +119,17 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
   };
   // A hold on this Lead, told through stillWaiting (I3, L1157): at once, then every STILL_WAITING_MS while it lasts. The
   // mark ({ told_at }) is written under `field` only once a copy is delivered (tellThen, L130), so a refused alert is
-  // asked again next pass. Each hold ends with the phase it belongs to, or with this Lead, so there is no mark to clear.
+  // asked again next pass. Each hold ends with the phase it belongs to, or with this Lead, so there is no mark to clear,
+  // except the hard line's, which a Lead can leave and cross again (`waiting`, below).
   // A mark from before L1157 (`true`) has no told_at, so that hold is told once more and then daily.
-  const remind = (field, text, kind) => stillWaiting({
-    now, waiting: true,
+  const remind = (field, text, kind, waiting = true) => stillWaiting({
+    now, waiting,
     read: () => st[field] ?? null,
     tell: (mark) => tellThen(alert, text, { fact: RESTART_FACT(sid), fields: { [field]: mark }, kind }),
-    clear: () => {},
+    // Back under the line: the mark goes, so a Lead that crosses again is told at once (L1173 Minor). No queue drop
+    // (clearCause): it would drop this Lead's other queued alerts on the same fact. A copy delivered after this clear
+    // marks it again, which only moves the next tell to its daily time (alert-sites LATE_MARK_OK).
+    clear: () => { if (st[field] != null) save({ [field]: null }, `${kind}_cleared`); },
   });
   const tellGaveUp = () => remind('gave_up_told', gaveUpText(sid, st.gave_up_why, st.gave_up_asked !== false), 'lead_gave_up_alert');
   const tellStartFailed = (reason) => remind('start_failed_told', startFailedText(sid, reason), 'lead_start_failed_alert');
@@ -155,9 +159,11 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
 
   const noSize = !size || size.tokens == null;
   // Marked only once sent (audit 0b-6 r5 MAT-2). Told again daily while the Lead stays past the line (I3): its restart can
-  // wait on work in flight for as long as that lasts. A size that can't be read says nothing either way.
-  if (!noSize && size.tokens > hard + HARD_MARGIN) {
-    remind('hard_told', `the Lead ${sid} is at ${size.tokens} tokens, past ${hard} + ${HARD_MARGIN}: its compaction did not happen`, 'lead_hard_alert');
+  // wait on work in flight for as long as that lasts. A size that can't be read says nothing either way; one back under
+  // the line clears the mark, so a later crossing is told at once (L1173 Minor).
+  if (!noSize) {
+    remind('hard_told', `the Lead ${sid} is at ${size.tokens} tokens, past ${hard} + ${HARD_MARGIN}: its compaction did not happen`, 'lead_hard_alert',
+      size.tokens > hard + HARD_MARGIN);
   }
   // A give-up waits on a person: told again daily while it lasts, and each pass until a copy is delivered (L130).
   if (st.phase === 'gave_up') tellGaveUp();

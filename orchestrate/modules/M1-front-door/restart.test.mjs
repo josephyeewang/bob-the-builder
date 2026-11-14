@@ -95,6 +95,14 @@ test('0b-8 audit round 1 minor 10: quiet runs from the owner\'s latest timed tur
   assert.equal(shouldRestartFrontDoor({ sizeTokens: 200_000, entries, now: at(16), startedAt: new Date(T0 - 3600e3).toISOString() }).restart, false);
 });
 
+test('I4 (L1157 d): a session start ahead of now is no time to measure quiet from; a past one is', () => {
+  const asksOnly = [said(0, 'hello')];
+  const ahead = shouldRestartFrontDoor({ sizeTokens: 200_000, entries: asksOnly, now: at(16), startedAt: new Date(T0 + 60 * 60e3).toISOString() });
+  assert.deepEqual(ahead, { restart: false, reason: 'no turn of the owner\'s to measure quiet from' });
+  const past = shouldRestartFrontDoor({ sizeTokens: 200_000, entries: asksOnly, now: at(16), startedAt: new Date(T0).toISOString() });
+  assert.equal(past.restart, true, past.reason);
+});
+
 test('0b-8 audit round 1 minors 1, 2: with 60 asks all 5 of the owner\'s turns survive; a key in an ask link or the re-read list is masked', () => {
   const entries = [];
   for (let i = 0; i < 5; i++) entries.push(typed(i, `message ${i} ${'x'.repeat(300)}`), said(i, `reply ${i} ${'y'.repeat(300)}`));

@@ -634,3 +634,19 @@ test('I3: a once-mark from before L1157 (true) is told once more, then quiet wit
   await w.step(midTurn(460_000), 3);
   assert.equal(count(w, /compaction did not happen/), 2, 'then quiet');
 });
+
+test('L1173 Minor: a Lead that goes back under the hard line and crosses it again within the day is told again at once', async () => {
+  const w = world();
+  await w.step(midTurn(460_000), 1);
+  assert.equal(count(w, /compaction did not happen/), 1);
+  await w.step(midTurn(100_000), 2);
+  assert.equal(w.rec.read('fact', RESTART_FACT(SID)).doc.hard_told, null, 'under the line: the mark is cleared');
+  await w.step(midTurn(100_000), 3);
+  assert.equal(count(w, /compaction did not happen/), 1, 'nothing told while under the line');
+  await w.step(midTurn(460_000), 4);
+  assert.equal(count(w, /compaction did not happen/), 2, 'crossing again is told at once, not at the next daily mark');
+  await w.step(midTurn(460_000), 5);
+  assert.equal(count(w, /compaction did not happen/), 2, 'then quiet within the day');
+  await w.step({ tokens: null }, 6);
+  assert.equal(typeof w.rec.read('fact', RESTART_FACT(SID)).doc.hard_told?.told_at, 'string', 'a size that can\'t be read keeps the mark');
+});

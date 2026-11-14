@@ -54,6 +54,7 @@ import { LAST_PASS_FACT } from '../modules/M11-dispatcher/tick.mjs';
 import { holdAlert, HOLD_FACT } from '../modules/M11-dispatcher/pass.mjs';
 import { outbox, dropCause, writeFrom, ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
 import { readDoc } from '../shared/record-read.mjs';
+import { pastTime } from '../shared/still-waiting.mjs';
 import { pidDead } from '../modules/M11-dispatcher/pass-lock.mjs';
 import { RUN_DEADLINE_MS as DISPATCHER_RUN_MS, WATCHDOG_MARGIN_MS } from '../modules/M11-dispatcher/main.mjs';
 import { aclProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
@@ -228,12 +229,13 @@ export function lastReturn(rec, { nowMs, gapMin = RETURN_GAP_MIN, withinMs = DAY
 /**
  * Who holds the Dispatcher's pass lock: { live, takenAt (ms | null) }, or null when no one does (or it can't be read:
  * that is not a running pass). `live` is true unless the pid surely does not exist (pass-lock.mjs pidDead).
+ * The taken time is read through pastTime (I4, L1157 d): one ahead of nowMs is unknown, so a live holder is not taken for
+ * a running pass for ever while a clock is wrong; dispatcherLate counts it held for an unknown time, as it does no time.
  */
-export function lockHolder(file, { read = (f) => readFileSync(f, 'utf8'), dead = pidDead } = {}) {
+export function lockHolder(file, { read = (f) => readFileSync(f, 'utf8'), dead = pidDead, nowMs = Date.now() } = {}) {
   let held; try { held = JSON.parse(read(file)); } catch { return null; }
   const pid = held?.pid;
-  const t = Date.parse(held?.taken_at ?? '');
-  return { live: Number.isInteger(pid) && pid > 0 && !dead(pid), takenAt: Number.isFinite(t) ? t : null };
+  return { live: Number.isInteger(pid) && pid > 0 && !dead(pid), takenAt: pastTime(held?.taken_at, nowMs) };
 }
 
 /**
@@ -411,7 +413,8 @@ export async function wire(config, { log = (s) => process.stderr.write(`${s}\n`)
   }
   passes.heartbeat = async () => {
     const passStart = now();   // the sweep's limit is what this pass has left (#465 r1 m1)
-    const late = dispatcherLate(rec, { nowMs: now(), holder: lockHolder(c.dispatcherLockFile) });
+    const nowMs = now();
+    const late = dispatcherLate(rec, { nowMs, holder: lockHolder(c.dispatcherLockFile, { nowMs }) });
     if (late) log(`robot: alert: ${late.text}`);
     // The late alert is queued FIRST, before any GitHub call, so a heartbeat that hangs past the pass's time limit can't
     // lose it (L730 m1). With the App, the heartbeat's own Dispatcher alert then tells it, and the queued copy leaves
