@@ -45,6 +45,7 @@ import { approveNeeded } from '../M2-approvals/go.mjs';
 import { makeRules } from '../../shared/rules.mjs';
 import { botId, checksAt, failedRead, linesOf, namedChecks, statusesAt, threads as threadsOf, threadsQuery } from './gather.mjs';
 import { judge } from './refusals.mjs';
+import { registerSecret } from '../../shared/secret-guard.mjs';
 
 export const NOT_JUDGED = Object.freeze([2, 3, 5, 10, 11, 12, 13]);
 export const ASSUMED = Object.freeze({ declared_tier: 2, product_state: 'active' });
@@ -68,7 +69,7 @@ export function tokenFile(path, { uid = process.getuid?.() } = {}) {
     try {
       const st = fstatSync(fd);
       if (!st.isFile() || st.uid !== uid || (st.mode & 0o077) !== 0 || st.size < 20 || st.size > 1024) throw new Error('the watch-only token file is not this user\'s own private file');
-      return readFileSync(fd, 'utf8').trim();
+      return registerSecret(readFileSync(fd, 'utf8').trim());
     } finally { closeSync(fd); }
   };
 }

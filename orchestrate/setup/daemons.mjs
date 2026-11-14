@@ -2,7 +2,7 @@
 // place that builds them); this file puts them where launchd looks, and loads, lists and unloads them.
 //
 //   place    write the three plists (plus the hourly watch-only job, when the config's `watch` entry has `rulesSha256`, and the robot
-//            job, when the config says `"robot": true`, and the Dispatcher and Sensors jobs, when it has a `dispatcher` entry) into /Library/LaunchDaemons, root:wheel 0644 (launchd refuses any other owner or mode)
+//            job, when the config says `"robot": true`, and the Dispatcher and Sensors jobs, when it has a `dispatcher` entry, and the builder wall's check job and the worker runner's, when it has a `workerRunner` entry) into /Library/LaunchDaemons, root:wheel 0644 (launchd refuses any other owner or mode)
 //            and make each log file launchd opens for a job with a UserName, owned by that user (jobLogs)
 //            in the log folder, which it repairs, or refuses if the job's user could change it
 //   load     launchctl bootstrap system <plist>, for each job not loaded yet; a job loaded from an OLDER file is reloaded (bootout, then
@@ -20,7 +20,7 @@ import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { reviewDaemonPlists, updaterPlist } from '../modules/M4-workshop/launcher/review-daemons.mjs';
 import { RUNNER_CONFIG, aclProblem, chainProblem, currentCopy } from '../modules/M4-workshop/launcher/install-check.mjs';
-import { LAUNCHCTL, homeOf, watchRulesPath } from './layout.mjs';
+import { DAEMON_DIR, LAUNCHCTL, homeOf, watchRulesPath } from './layout.mjs';
 import { checkInstall, installPaths } from './install.mjs';
 import { readUser } from './users-folders.mjs';
 import { watchPlist, WATCH_NO_HASH } from './watch-setup.mjs';
@@ -29,11 +29,12 @@ import { WORKER_RUNNER_JOB, WORKER_RUNNER_OFF, workerRunnerJobPlist, workerRunne
 import { DISPATCHER_JOB, DISPATCHER_OFF, DISPATCHER_RUN_LIMIT_S, dispatcherConfigProblem, dispatcherKeysProblem, dispatcherLoadProblem, dispatcherPlist, robotMatchProblem, writeAside } from './dispatcher-setup.mjs';
 import { answerRows } from './owner-answer-setup.mjs';
 import { SENSORS_JOB, SENSORS_RUN_LIMIT_S, sensorsConfigProblem, sensorsLoadProblem, sensorsPlist } from './sensors-setup.mjs';
+import { WALL_CHECK_JOB, wallCheckPlist } from './builder-wall.mjs';
 
 // The worker runner's script, as its job starts it from the copy (wiring/runner-job.mjs): an old job is found by it (#528 r2 m7).
 const WORKER_RUNNER_SCRIPT = 'wiring/runner-main.mjs';
 
-export const DAEMON_DIR = '/Library/LaunchDaemons';
+export { DAEMON_DIR };   // layout.mjs's one definition (I7)
 export const JOBS = Object.freeze(['review-updater', 'review-account', 'review-runner']);   // load order: the updater first
 // The hourly watch-only job (watch-setup.mjs) is a fourth job only when the config's `watch` entry has the rules fingerprint (R6 M-1):
 // a repo-only entry (all prove-token needs) leaves the three review jobs exactly as before.
@@ -41,9 +42,11 @@ export const JOBS = Object.freeze(['review-updater', 'review-account', 'review-r
 // The Dispatcher job (dispatcher-setup.mjs) likewise, only when the config has its `dispatcher` entry; it loads before the robot job.
 // The Sensors job (sensors-setup.mjs) is on exactly when the Dispatcher is (L1049), and loads after it, before the robot job.
 // The worker runner's job (worker-runner-setup.mjs, L1092) likewise, only with the config's `workerRunner` entry; it loads last.
-export const jobsFor = (cfg) => [...JOBS, ...(cfg.watch?.rulesSha256 ? ['watch-only'] : []), ...(cfg.dispatcher ? [DISPATCHER_JOB, SENSORS_JOB] : []), ...(cfg.robot ? [ROBOT_JOB] : []), ...(cfg.workerRunner ? [WORKER_RUNNER_JOB] : [])];
+// The builder wall's check job (builder-wall.mjs, L1193) is on exactly when the worker runner is: it leaves the status the
+// runner's gate reads before every start, so it loads just before the runner.
+export const jobsFor = (cfg) => [...JOBS, ...(cfg.watch?.rulesSha256 ? ['watch-only'] : []), ...(cfg.dispatcher ? [DISPATCHER_JOB, SENSORS_JOB] : []), ...(cfg.robot ? [ROBOT_JOB] : []), ...(cfg.workerRunner ? [WALL_CHECK_JOB, WORKER_RUNNER_JOB] : [])];
 /** The jobs a config may turn on or leave off. One left off must not be placed or loaded either (a full check says so). */
-export const OPTIONAL_JOBS = Object.freeze(['watch-only', DISPATCHER_JOB, SENSORS_JOB, ROBOT_JOB, WORKER_RUNNER_JOB]);
+export const OPTIONAL_JOBS = Object.freeze(['watch-only', DISPATCHER_JOB, SENSORS_JOB, ROBOT_JOB, WALL_CHECK_JOB, WORKER_RUNNER_JOB]);
 export const ALL_JOBS = Object.freeze([...JOBS, ...OPTIONAL_JOBS]);
 const ROBOT_OFF = 'the config does not turn the robot job on: add "robot": true, with its robot.json among the extras';
 /**
@@ -53,12 +56,12 @@ const ROBOT_OFF = 'the config does not turn the robot job on: add "robot": true,
  * tests pin it, and changing it is outside this change (raised with the lead).
  */
 export function onlyJobs(cfg, name, { anyKnown = false } = {}) {
-  if (anyKnown && (name === ROBOT_JOB || name === DISPATCHER_JOB || name === SENSORS_JOB || name === WORKER_RUNNER_JOB)) return [name];
+  if (anyKnown && (name === ROBOT_JOB || name === DISPATCHER_JOB || name === SENSORS_JOB || name === WALL_CHECK_JOB || name === WORKER_RUNNER_JOB)) return [name];
   const all = jobsFor(cfg);
   if (name === 'watch-only' && cfg.watch && !cfg.watch.rulesSha256) throw new Error(WATCH_NO_HASH);
   if (name === ROBOT_JOB && !cfg.robot) throw new Error(ROBOT_OFF);
   if ((name === DISPATCHER_JOB || name === SENSORS_JOB) && !cfg.dispatcher) throw new Error(DISPATCHER_OFF);
-  if (name === WORKER_RUNNER_JOB && !cfg.workerRunner) throw new Error(WORKER_RUNNER_OFF);
+  if ((name === WORKER_RUNNER_JOB || name === WALL_CHECK_JOB) && !cfg.workerRunner) throw new Error(WORKER_RUNNER_OFF);
   if (!all.includes(name)) throw new Error(`--only names no job of this config: ${JSON.stringify(String(name).slice(0, 60))}; the jobs are ${all.join(', ')}`);
   return [name];
 }
@@ -89,7 +92,7 @@ export function plistTexts(io, cfg) {
     if (cfg.watch?.rulesSha256) plists['watch-only'] = watchPlist(io, cfg);
     if (cfg.dispatcher) { plists[DISPATCHER_JOB] = dispatcherPlist(cfg); plists[SENSORS_JOB] = sensorsPlist(cfg); }
     if (cfg.robot) plists[ROBOT_JOB] = robotPlist(cfg);
-    if (cfg.workerRunner) plists[WORKER_RUNNER_JOB] = workerRunnerJobPlist(cfg);
+    if (cfg.workerRunner) { plists[WALL_CHECK_JOB] = wallCheckPlist(cfg); plists[WORKER_RUNNER_JOB] = workerRunnerJobPlist(cfg); }
     return { plists, problems };
   } catch (e) { return { plists: {}, problems: [`the job files cannot be built from the owner's Mac user ${cfg.owner} (${e.message}); is its home folder set?`] }; }
 }
@@ -440,7 +443,7 @@ export function checkDaemons(io, cfg, jobs = jobsFor(cfg)) {
       why ?? `${agents.map((n) => join(dir, n)).join(', ')}: the old worker runner, which would start a second runner as ${cfg.owner}. As ${cfg.owner}: launchctl bootout gui/$(id -u)/<its label>, then delete the file (README, "Moving the workers to the builder user", step 1)`);
   }
   // Each job the config leaves off: none placed or loaded (listed only when there is one).
-  const offWhy = { 'watch-only': 'the config names no rules fingerprint', [ROBOT_JOB]: 'the config does not turn the robot job on', [DISPATCHER_JOB]: 'the config has no dispatcher entry', [SENSORS_JOB]: 'the config has no dispatcher entry', [WORKER_RUNNER_JOB]: 'the config has no workerRunner entry' };
+  const offWhy = { 'watch-only': 'the config names no rules fingerprint', [ROBOT_JOB]: 'the config does not turn the robot job on', [DISPATCHER_JOB]: 'the config has no dispatcher entry', [SENSORS_JOB]: 'the config has no dispatcher entry', [WALL_CHECK_JOB]: 'the config has no workerRunner entry', [WORKER_RUNNER_JOB]: 'the config has no workerRunner entry' };
   for (const off of subset ? [] : OPTIONAL_JOBS.filter((j) => !jobsFor(cfg).includes(j))) {
     const s = jobState(io, cfg, off); let placed = false; try { io.lstat(plistPath(cfg, off)); placed = true; } catch { /* none */ }
     item(!s.loaded && !placed, `no ${labelOf(cfg, off)} job is placed or loaded (${offWhy[off]})`, `${s.loaded ? `it is loaded: take it out with sudo node setup.mjs daemons unload --only ${off}, then` : 'its file is there:'} delete ${plistPath(cfg, off)}`, !s.loaded && !placed);
