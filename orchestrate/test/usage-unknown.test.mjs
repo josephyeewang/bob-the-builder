@@ -182,7 +182,8 @@ test('L1099 m2: a stale or missing owner\'s answer holds starts and tells Joe on
       change(m.rec, 'fact', ACCOUNT_FACT, doc);
       return doc;
     };
-    const HELD = /^nothing new starts but undo cards: the signed-in account is not known$/;
+    // L1152: the hold names the cause the Sensors wrote, the age and the log; a changing age is still one cause.
+    const HELD = /^nothing new starts but undo cards: the signed-in account is not known: the owner's answer is /;
     const held = () => m.told.filter((t) => HELD.test(t)).length;
     const first = await sense(0);
     assert.equal(first.account, null, kind);
@@ -190,6 +191,9 @@ test('L1099 m2: a stale or missing owner\'s answer holds starts and tells Joe on
     await m.at(0);
     assert.deepEqual(m.launched, [], `${kind}: nothing starts`);
     assert.equal(held(), 1, `${kind}, told at once: ${m.told.join(' | ')}`);
+    assert.ok(m.told.includes(`nothing new starts but undo cards: the signed-in account is not known: ${kind === 'stale'
+      ? 'the owner\'s answer is 11 min old (the owner\'s job may be failing to write; see its log)'
+      : 'the owner\'s answer is missing (is the owner\'s job running?)'}`), `${kind}, Joe hears why: ${m.told.join(' | ')}`);
     for (const min of [1, 2, 60, 23 * 60]) { await sense(min); await m.at(min); }
     assert.equal(held(), 1, `${kind}, not again within the day: ${m.told.join(' | ')}`);
     await sense(24 * 60 + 1); await m.at(24 * 60 + 1);
