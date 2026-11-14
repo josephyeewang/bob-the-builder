@@ -201,6 +201,7 @@ const NOT_REPO_PATHS = new Map([
   ['modules/M6-merge-gate/checker-entry.mjs', 'the rules file path, ASCII, after M10 pathProblem'],
   ['modules/M10-rules/repair-plain.mjs', 'a word in a repair file\'s text, not a path'],
   ['modules/M6-merge-gate/github-checker.mjs', 'generated from M10 and M6 (build-checker.mjs)'],
+  ['wiring/claude-folder-name.mjs', "a Mac folder put in NFC as Claude Code 2.1.316 does to name its conversation folder (L1141), not a repo path key"],
 ]);
 // A case change, or a Unicode normalization (not posix.normalize, which only tidies slashes and dots).
 const FOLD = /\.(toLowerCase|toUpperCase|toLocaleLowerCase|toLocaleUpperCase)\(|\.normalize\(\s*['"]NF/;

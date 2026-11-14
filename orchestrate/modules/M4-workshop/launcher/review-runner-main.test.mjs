@@ -542,10 +542,10 @@ test('L65: the config names every path as a full path', () => {
   // L913 (a): machineWide is claude's fixed file only, refused at load rather than review by review at check 10.
   for (const machineWide of NEAR_MISSES) {
     writeFileSync(join(d, 'c.json'), JSON.stringify({ ...good, machineWide }));
-    assert.throws(() => readConfig(join(d, 'c.json'), OPEN_WALLS), new RegExp(`config: machineWide must be ${esc(FIXED)}: claude 2\\.1\\.322 reads only that file$`), JSON.stringify(machineWide));
+    assert.throws(() => readConfig(join(d, 'c.json'), OPEN_WALLS), new RegExp(`config: machineWide must be ${esc(FIXED)}: claude 2\\.1\\.316 reads only that file$`), JSON.stringify(machineWide));
   }
   writeFileSync(join(d, 'c.json'), JSON.stringify({ ...good, machineWide: '/etc/claude/managed-settings.json' }));
-  assert.throws(() => readConfig(join(d, 'c.json'), OPEN_WALLS), /config: machineWide must be \/Library\/Application Support\/ClaudeCode\/managed-settings\.json: claude 2\.1\.322 reads only that file$/);
+  assert.throws(() => readConfig(join(d, 'c.json'), OPEN_WALLS), /config: machineWide must be \/Library\/Application Support\/ClaudeCode\/managed-settings\.json: claude 2\.1\.316 reads only that file$/);
 });
 
 test('L68 planted: the runner\'s folder and review\'s outbox are two walls: one inside the other, or the same, is refused', () => {

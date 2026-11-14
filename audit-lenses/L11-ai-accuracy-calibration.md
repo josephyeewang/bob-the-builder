@@ -71,6 +71,8 @@ This lens orchestrates established eval frameworks (TruLens, RAGAS, Phoenix, Lan
    - **Thin** — 1-2 eval cases.
    - **Untested** — no eval cases reference this call site.
 
+**Applicability before scoring:** use the applicability and retained-value block in `templates/eval-set.md`. A curated task score cannot certify a broader workload. Verify answer-key isolation, ordinary mixed inputs, complete-input controls, and useful output alongside refusals. Recheck output-bound qualitative grades when the output changes.
+
 3. **Run the existing evals.** Execute `evals/behavioral-core.yaml` (or equivalent) via promptfoo. Capture pass rate per case. For RAG call sites, additionally compute the TruLens triad (context_relevance, groundedness, answer_relevance) on a sample of 20-50 real prompts.
 
 4. **Compute calibration if the model expresses confidence.** For any AI output that includes a confidence score (numeric, or categorical like "high/medium/low"), bin observed accuracy by confidence bucket and compute ECE. Example: if outputs marked "high confidence" are right 85% of the time, that's well-calibrated. If they're right 60%, ECE is high and the product is over-trusting model self-reports.

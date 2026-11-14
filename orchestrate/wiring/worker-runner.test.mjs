@@ -661,18 +661,25 @@ test('#456 runLocked self-review M1: a save still on after portMs is held, answe
   assert.deepEqual(w.read().answers[`saveWork-S-1-${n3}`], { ok: false, reason: 'the save failed (boom)' });
 });
 
-test('#463 r1 m1: every save of a pass is started before any is waited for, and all are waited for once', async () => {
+// Its own time cap (#530 r1 m5): node:test has no default timeout, so a regression that leaves S-1 waiting fails by name
+// here, never as a hung run. Generous: it bounds a hang, it does not time the pass.
+test('#463 r1 m1: every save of a pass is started before any is waited for, and all are waited for once', { timeout: 30_000 }, async () => {
   const w = world();
   await w.pass([launchReq('S-1'), launchReq('S-2')]);
   const ev = [];
-  w.ports.saveWork = async (s) => { ev.push(`start ${s.id}`); await new Promise((r) => setTimeout(r, 30)); ev.push(`end ${s.id}`); return { ok: true }; };
+  // Waits on events, not the clock (L1109): S-1 ends only once S-2 has started, so had the pass waited for S-1 before
+  // starting S-2, S-1 would never end and the order below would fail. No timer, so a loaded Mac can't make it late.
+  let openGate; const secondStarted = new Promise((r) => { openGate = r; });
+  w.ports.saveWork = async (s) => {
+    ev.push(`start ${s.id}`);
+    if (s.id === 'S-2') openGate(); else await secondStarted;
+    ev.push(`end ${s.id}`); return { ok: true };
+  };
   const ask = (id, n) => ({ name: `saveWork-${id}-${n}.json`, body: { saveWork: { id }, asked_at: new Date(w.now).toISOString() } });
-  const t = Date.now();
   await w.pass([ask('S-1', N1), ask('S-2', N2)]);
   assert.deepEqual(ev.slice(0, 2), ['start S-1', 'start S-2'], 'the second starts before the first is waited for');
   assert.deepEqual(w.read().answers[`saveWork-S-1-${N1}`], { ok: true });
   assert.deepEqual(w.read().answers[`saveWork-S-2-${N2}`], { ok: true }, 'both answered in their own pass');
-  assert.ok(Date.now() - t < 1000);
   // Two that outlast the one wait are both held and noted, and both answered by the next pass.
   const ends = [];
   w.ports.saveWork = () => new Promise((r) => ends.push(r));
@@ -904,4 +911,33 @@ test('L976: an undo launch hands its reversed commit to the start; a missing or 
   assert.deepEqual(z.started, [], 'nothing started');
   const s = z.read();
   bad.forEach(([more, why], i) => { const id = `S-${i + 1}`; assert.equal(s.requests[id].state, 'refused', id); assert.match(s.answers[`launch-${id}`].reason, why, JSON.stringify(more)); });
+});
+
+test('R-0b-175a: with a hook store, each pass applies its new lines and every status carries its held list, read back by the Dispatcher', async () => {
+  const w = world();
+  const H = { sessionId: 'lead-1', role: 'lead', product: 'p1', reason: 'no first signal within 120 s of its start', since: new Date(T0).toISOString(), launchId: 'L1' };
+  let ticks = 0; let held = [H];
+  const hooks = { tick: () => { ticks += 1; }, held: () => held };
+  await w.pass([], { hooks });
+  assert.equal(ticks, 1);
+  assert.deepEqual(w.read().held, [H]);
+  assert.deepEqual(w.sync().interactiveHolds(), [H]);
+  // A held list that can't be had, or is not the store's shape, is one entry naming no session: never "nothing held".
+  for (const h of [() => { throw new Error('gone'); }, () => [{ ...H, role: 'worker' }], () => 'x']) {
+    held = null; hooks.held = h;
+    await w.pass([], { hooks });
+    const [e] = w.read().held;
+    assert.equal(e.sessionId, null); assert.match(e.reason, /^the hook store gave/);
+  }
+  // A tick that throws is noted, and the status is still written.
+  hooks.tick = () => { throw new Error('disk full'); }; hooks.held = () => [];
+  await w.pass([], { hooks });
+  assert.match(w.notes.join('\n'), /hook store's new lines could not all be applied \(disk full\)/);
+  assert.deepEqual(w.read().held, []);
+  // No store: no held list in the status, and the reader gives none.
+  const z = world(); await z.pass();
+  assert.equal('held' in z.status, false); assert.deepEqual(z.read().held, []);
+  // A held list not of the runner's shape makes the whole status not known.
+  z.status = { ...z.status, held: [{ ...H, extra: 1 }] };
+  assert.throws(() => z.read(), /held list is not what the runner writes/);
 });

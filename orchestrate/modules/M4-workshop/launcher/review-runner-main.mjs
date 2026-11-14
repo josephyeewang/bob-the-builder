@@ -92,6 +92,12 @@ import { removeProtected, restoreMainCopies } from './worker-copy.mjs';
 import { writeSnapshot } from '../hooks/snapshot.mjs';
 import { changeReaders, finalize } from '../../M5-review-audit/findings.mjs';
 import { KEYS, minutes, need } from '../../M11-dispatcher/keys.mjs';
+
+// The four ports M11's budget module (M11-dispatcher/budget.mjs budget()) gives launch check 12, checked by both runners
+// (this one and wiring/runner-main.mjs) before any start: one home (I7, L1121 c2).
+export const BUDGET_PORTS = Object.freeze(['rules', 'rec', 'bandsNow', 'runningNow']);
+export const budgetShapeOk = (budget) => BUDGET_PORTS.every((k) => budget[k]);
+export const NO_BUDGET_PORTS = 'the budget module gave no rules, rec, bandsNow and runningNow';
 import { TOOLS_CHECKED } from '../../M10-rules/roles.mjs';
 import { CLAUDE_FILE, MANAGED_SOURCES_CHECKED_ON } from './env-check.mjs';
 
@@ -609,7 +615,7 @@ export async function main(argv, { log = (s) => process.stderr.write(`${s}\n`), 
   if (c.budget) {
     // The running count reads this runner's own status file too (wiring/worker-ports.mjs sessionsNow, L994).
     try { budget = await (await import(pathToFileURL(c.budget).href)).budget({ ...c, reviewStatusFile: typeof c.root === 'string' ? join(c.root, FOLDERS.status) : undefined, reviewUid: c.uids?.reviewer }); } catch (e) { log(`review runner: the budget module could not be loaded (${e.message}); no review starts`); }
-    if (budget && !['rules', 'rec', 'bandsNow', 'runningNow'].every((k) => budget[k])) { log('review runner: the budget module gave no rules, rec, bandsNow and runningNow; no review starts'); budget = null; }
+    if (budget && !budgetShapeOk(budget)) { log(`review runner: ${NO_BUDGET_PORTS}; no review starts`); budget = null; }
   }
   const r = await pass(realPorts(c, wiring, { budget, log }));
   for (const s of r.started) log(`started ${s.role} ${s.session_id} for ${s.card} at ${s.head.slice(0, 7)}`);

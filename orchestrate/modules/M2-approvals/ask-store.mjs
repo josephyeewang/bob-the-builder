@@ -31,6 +31,9 @@ import { realpathSync } from 'node:fs';
 import { dirname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+/** The refusal when the Record won't take an owner's answer (decision, schedule, owner-command): one text (I7). */
+export const recordRefused = (reason) => `the record refused the answer: ${reason}`;
+
 const ACTOR = 'approvals';
 const HERE = fileURLToPath(import.meta.url);
 const real = (p) => { try { return realpathSync.native(p); } catch { return null; } };

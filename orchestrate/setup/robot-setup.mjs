@@ -21,6 +21,9 @@
 //                           as <base>/keys/<ROBOT_KEY_FILE> (token.mjs's name, imported): orchestrate's own plain 0600 file
 //                           of a key's size, no access list (watch-setup.mjs keyFileItems). place and load refuse without
 //                           it, check FAILs; without root it is NOT CHECKED (a dry run) or NEEDS ROOT (check), never a pass.
+//   the push (#536 r1)      robot.json may name the outside check, four keys, all or none (the wiring's own
+//                           outsideKeysProblem, m5), and hostLockUid, the owner's Mac user id, which must be the configured
+//                           owner's (m3). The push refuses until it has both (wiring/robot-push.mjs).
 //
 // Off unless the config says `"robot": true`. Nothing here names a product or a person.
 
@@ -28,9 +31,10 @@ import { dirname, isAbsolute, join, posix } from 'node:path';
 import { loginJobPlist } from '../modules/M11-dispatcher/login-job.mjs';
 import { NODE, aclProblem, chainProblem, installProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { CONFIG_KEYS as ROBOT_KEYS, appProblem } from '../wiring/robot-wiring.mjs';
+import { outsideKeysProblem } from '../wiring/robot-push.mjs';
 // The robot App's key file name: token.mjs owns it (L1471) and mints from it when the wiring names no keyFile (it names none).
 import { ROBOT_KEY_FILE } from '../modules/M6-merge-gate/token.mjs';
-import { homeOf, keysPath } from './layout.mjs';
+import { JOB_PATH as PATH, homeOf, keysPath } from './layout.mjs';
 import { installPaths } from './install.mjs';
 import { readUser } from './users-folders.mjs';
 import { keyFileItems } from './watch-setup.mjs';
@@ -63,7 +67,6 @@ export function lockFolderProblem(io, file, owners) {
   const acl = aclProblem([io.at(dir)]);
   return acl ? `its folder: ${acl}` : null;
 }
-const PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
 /** Said wherever the config turns the robot on but its extras carry no robot.json. */
 export const ROBOT_NO_CONFIG = `config: "robot": true needs the robot's config among the extras, as a file named ${ROBOT_CONFIG} (the install carries it into the copy, and every update keeps it)`;
 
@@ -112,12 +115,15 @@ function robotConfigRead(io, cfg) {
   return { problem, config: problem === null ? config : null };
 }
 
+/** Why config `name` in the installed copy is not root's alone (`bad`): one text for every config in the copy (I7). */
+export function inCopyNotRootsAlone(name, bad) { return `${name} in the copy is not root's alone: ${bad}`; }
+
 function robotConfigCheck(io, cfg, seen) {
   const P = installPaths(cfg); const root = io.at(P.installRoot); const file = join(root, ROBOT_CONFIG);
   let here = true; try { io.lstatReal(file); } catch { here = false; }
   if (!here) return `${join(P.installRoot, ROBOT_CONFIG)} is not in the copy (it comes in as one of the install's extras)`;
   const bad = installProblem(root, [file], { owner: io.rootUid, top: io.prefix || '/' });
-  if (bad) return `${ROBOT_CONFIG} in the copy is not root's alone: ${bad}`;
+  if (bad) return inCopyNotRootsAlone(ROBOT_CONFIG, bad);
   let c; try { c = JSON.parse(io.readText(join(P.installRoot, ROBOT_CONFIG))); } catch { return `${ROBOT_CONFIG} in the copy is not JSON`; }   // never the parser's words: they quote the file
   if (!c || typeof c !== 'object' || Array.isArray(c)) return `${ROBOT_CONFIG} in the copy is not a JSON object`;
   seen(c);
@@ -129,6 +135,13 @@ function robotConfigCheck(io, cfg, seen) {
   for (const [k, v] of Object.entries(want)) if (c[k] !== v) why.push(`${k} must be ${v}`);
   if (!orch.exists) why.push(`the ${ROBOT_USER} user does not exist (run users-folders first)`);
   else if (c.ownerUid !== orch.uid) why.push(`ownerUid must be ${orch.uid}, ${ROBOT_USER}'s (the Record's owner; the job refuses to run as anyone else)`);
+  // #536 r1 m3: hostLockUid, when named, is the owner's Mac user id (as in the Dispatcher's config): the push holds the
+  // builder user apart from it and gives it to push.mjs as the owner a proposals bundle must have.
+  if (c.hostLockUid !== undefined) {
+    const owner = readUser(io, cfg.owner);
+    if (!owner.exists) why.push(`hostLockUid can't be checked: the owner ${cfg.owner} is not a user on this Mac`);
+    else if (c.hostLockUid !== owner.uid) why.push(`hostLockUid must be ${owner.uid}, the owner ${cfg.owner}'s Mac user id`);
+  }
   const plain = {};
   for (const k of ['lockFile', 'dispatcherLockFile']) {
     if (typeof c[k] !== 'string' || !isAbsolute(c[k])) why.push(`${k} must be a full path`);
@@ -148,5 +161,7 @@ function robotConfigCheck(io, cfg, seen) {
   // L727: the robot App's four keys (appId, appInstallation, alertRepo, alertOwner) go together, all or none; the wiring's
   // own rule, so setup and the job can't disagree. None is allowed: the deliver pass then refuses as not wired.
   const app = appProblem(c); if (app) why.push(app);
+  // #536 r1 m5: the push pass's four outside-check keys, all or none and well formed (the wiring's own rule, as for the App).
+  const outside = outsideKeysProblem(c); if (outside) why.push(outside);
   return why.length ? `${ROBOT_CONFIG} in the copy does not match this setup: ${why.join('; ')}` : null;
 }

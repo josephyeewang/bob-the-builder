@@ -58,6 +58,14 @@
 // Capability note (Principle 9): where Claude Code keeps a conversation (<config dir>/projects/<the working folder with
 // each character but a letter or digit made "-">/<session id>.jsonl) is CHECKED AGAINST NOTHING YET, as transcript.mjs's
 // line shapes are; void at the next pin. TRANSCRIPT_PLACE_CHECKED_AGAINST names the version once the live proof runs.
+// Read in 2.1.316's own code, 13 Nov 2026: that is its rule, applied to the working folder's real path put in NFC, and
+// a folder name over 200 characters is cut and given a hash suffix. projectFolderName (claude-folder-name.mjs, which
+// sets the rule out step by step) does the NFC step and the cut as read there; the real-path step it leaves to runner-main.mjs, which refuses to start unless copiesRoot is its own real
+// path (L1134, L1141; checked: claude-code 2.1.316). Not yet proved on a live session: the constant stays null until
+// the live proof (setup/live-proofs/transcript-place.mjs) finds every case's transcript where this code says.
+// 2.1.316 takes the folder from CLAUDE_CODE_PROJECT_DIR_NAME instead when CLAUDE_CONFIG_DIR is set; the environment
+// allow-list (env-check.mjs ROLE_ENV_ALLOWED, R-0b-156) keeps that name out of every session. Read (checked: claude-code 2.1.316), not yet proved live
+// (L1139). transcript.mjs's line shapes are a separate note.
 
 import { fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeSync, closeSync, constants } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -72,12 +80,13 @@ import { SESSION_ID } from '../shared/record.mjs';
 import { CARD_ID } from '../modules/M9-record/outbox.mjs';
 import { leaderStart } from './runner-loop.mjs';
 import { readTranscriptFile } from '../modules/M11-dispatcher/transcript.mjs';
+import { folderNameAsGiven, projectFolderName } from './claude-folder-name.mjs';
 import { launch } from '../modules/M4-workshop/launcher/launch.mjs';
 import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.mjs';
 import { prepareWorkerCopy } from '../modules/M4-workshop/launcher/worker-copy.mjs';
 import { sessionArgs, spawnClaude } from '../modules/M4-workshop/launcher/review-launch.mjs';
-import { accountInUse } from '../modules/M4-workshop/launcher/accounts.mjs';
-import { roleEnv } from '../modules/M4-workshop/launcher/env-check.mjs';
+import { accountDir, accountEnv, accountInUse, isSetUp, readAccountFile } from '../modules/M4-workshop/launcher/accounts.mjs';
+import { startEnv } from '../modules/M4-workshop/launcher/env-check.mjs';
 import { readCardFile } from '../modules/M4-workshop/launcher/review-runner-main.mjs';
 import { createSaveWork } from '../modules/M4-workshop/git/save-work.mjs';
 import { cardBranch } from '../modules/M4-workshop/git/branch.mjs';
@@ -85,14 +94,14 @@ import { git } from '../modules/M4-workshop/git/safe-git.mjs';
 import { PUSH_FACT, bundleName } from '../modules/M4-workshop/git/push.mjs';
 import { PRODUCT_OUTBOX_ROLES } from '../shared/product-paths.mjs';
 import { workerPrompt } from '../modules/M5-review-audit/worker-prompt.mjs';
+import { SHA256 } from '../shared/plan-fingerprint.mjs';
 
-export const TRANSCRIPT_PLACE_CHECKED_AGAINST = null;
+export const TRANSCRIPT_PLACE_CHECKED_AGAINST = null;   // read, not yet proved live (L1139): read in 2.1.316's code (see the note above); set to the version only after Joe's live run (L1134, L1137)
 const refuse = (reason) => ({ ok: false, reason });
 const notWired = (what) => refuse(`not wired: ${what}`);
 const SHA = /^[0-9a-f]{40}$/;
 
-/** Claude Code's folder for a working folder's conversations (unchecked: see the capability note above). */
-export const projectFolderName = (cwd) => String(cwd).replace(/[^A-Za-z0-9]/g, '-');
+export { folderNameAsGiven, projectFolderName };
 export const transcriptPath = ({ configDir, copy, sessionId }) => join(configDir, 'projects', projectFolderName(copy), `${sessionId}.jsonl`);
 
 /** size(session) → { size, lastWriteAt }, or a throw (the pass then lists no size). */
@@ -135,7 +144,6 @@ const WAITING_DONE_FOR = new Set(PRODUCT_OUTBOX_ROLES);
 const doneFor = (s, state) => INTAKE_DONE.has(state) && (state !== 'waiting' || WAITING_DONE_FOR.has(s.role));
 const noFactReader = () => ({ ok: false, reason: 'no Record fact reader is wired' });
 const noSessionReader = () => ({ ok: false, reason: 'no Record session reader is wired' });
-const SHA256 = /^[0-9a-f]{64}$/;
 // Not drained, and why (L896): a DRAIN_CAUSES name, so the runner can tell it once it lasts.
 const held = (cause) => {
   if (!DRAIN_CAUSES.includes(cause)) throw new Error(`no drain cause ${cause}`);
@@ -155,7 +163,8 @@ function nameCause(id, name) {
 }
 // The bundle taken by its push (L898): the attempt from the session's own doc, its push fact pushed with these bytes.
 // → null when taken, else its cause.
-function bundleHeld(s, path, { readFact, readSession, hashOf }) {
+// Exported (lane N, I7): the robot's push pass asks this same rule whether a bundle is already taken, so the two can't drift.
+export function bundleHeld(s, path, { readFact, readSession, hashOf }) {
   let sd; try { sd = readSession(s.id); } catch { return 'record-unreadable'; }
   if (sd?.ok !== true) return sd?.missing === true ? 'bundle-no-attempt' : 'record-unreadable';
   const doc = sd.doc;
@@ -169,7 +178,7 @@ function bundleHeld(s, path, { readFact, readSession, hashOf }) {
   let hash; try { hash = hashOf(path); } catch (e) { return hashCause(e); }
   return hash === d.bundle_sha256 ? null : 'bundle-changed';
 }
-function fileSha256(p) {
+export function fileSha256(p) {
   const fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try { if (!fstatSync(fd).isFile()) throw new Error('not a plain file'); return createHash('sha256').update(readFileSync(fd)).digest('hex'); } finally { closeSync(fd); }
 }
@@ -224,8 +233,8 @@ export function saveWorkPort({ mirrorOf, runLocked, settingsDir, make = createSa
         if (st.uid !== uid) throw new Error('the copy\'s .git is not the runner\'s own');
         let cwd; try { cwd = realpath(git); } catch (e) { throw new Error(`the copy's .git can't be read (${e?.code ?? e?.message})`); }
         return runLocked({ ...j, sessionId: s.id, role: RUNNER_ROLE_OF[s.kind], settingsFile: typeof settingsDir === 'string' ? join(settingsDir, saveSettingsName(s.id)) : undefined,
-          // cwd .git: see runner-locked.mjs's capability note (read in claude 2.1.322, which denies <cwd>/.git/config and
-          // hooks; not yet checked on the pin, 2.1.316: Mini proof 9).
+          // cwd .git: see runner-locked.mjs's capability note (read in claude 2.1.322 and the pin, 2.1.316, which deny
+          // <cwd>/.git/config and hooks; checked: claude-code 2.1.316; Mini proof 9 runs it).
           settingsSha: s.save_settings_sha, cwd, ...(typeof onGroup === 'function' ? { onGroup } : {}) });
       }
       : undefined;
@@ -233,8 +242,11 @@ export function saveWorkPort({ mirrorOf, runLocked, settingsDir, make = createSa
   };
 }
 
-/** The session's environment (#463 r1 m6): the one form, for the start and the lock-down runner. */
-export const sessionEnv = (c, who, base = process.env) => roleEnv(base, { path: c.path, extra: { ...who.env, HOME: c.home } });
+/**
+ * The session's environment (#463 r1 m6): the one form, for the start and the lock-down runner, built by the launcher's
+ * one check (R-0b-156 startEnv: the allow-list). → { ok: true, env } | { ok: false, reason }.
+ */
+export const sessionEnv = (c, who, base = process.env) => startEnv(base, { path: c.path, extra: { ...who.env, HOME: c.home } });
 
 /** pauseLead({ product }): not wired (see the top of this file). */
 export const pauseLeadPort = () => async () => notWired('the Lead\'s wrap-up needs the activity tracker\'s feed, which the runner does not have yet');
@@ -400,11 +412,26 @@ export function liveWallProblem(live, product, places, read) {
 /** The start's default prompt (L970): the worker prompt's text, or null (and the start is refused) when it gives none. */
 export const workerPromptText = (x) => { const p = workerPrompt(x); return p.ok ? p.text : { ok: false, reason: p.reason }; };
 
+/**
+ * The account a worker session signs in with (L1079). The runner runs as the builder user, so its own home's account file
+ * is not the owner's choice: with `accountCopy` (root's copy of the owner's choice, setup's, as the review runner reads it,
+ * review-runner-main.mjs) the choice is read there, and the sign-in folder is the builder's own for that account. A copy
+ * named but not readable is refused, never read as account a: a wrong account spends the other budget. Without
+ * `accountCopy`, the builder home's own file (accountInUse). → accountInUse's shape: { account, dir, env } or { account: null, reason }.
+ */
+export function workerAccount(c, { readCopy = readAccountFile, inUse = accountInUse, setUp = isSetUp } = {}) {
+  if (c.accountCopy === undefined) return inUse({ home: c.home });
+  const r = readCopy({ file: c.accountCopy, uid: 0 });
+  if (!r?.ok) return { account: null, reason: `the owner's account choice could not be read (${r?.reason ?? 'no answer'})` };
+  if (!setUp(c.home, r.account)) return { account: null, reason: `account ${r.account} (the owner's choice) is not set up in ${c.home}` };
+  return { account: r.account, dir: accountDir(c.home, r.account), env: accountEnv(c.home, r.account) };
+}
+
 export function startPort(c, deps = {}) {
   const {
     readCard = (card) => readCardFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, card }),
     startCommit = cardStartCommit, prepare = prepareWorkerCopy, checksFor = () => ({}), promptFor = workerPromptText,
-    names = {}, account = () => accountInUse({ home: c.home }), spawn = childSpawn, pidStartOf = leaderStart, kill, there, launchFn = launch,
+    names = {}, account = () => workerAccount(c), spawn = childSpawn, pidStartOf = leaderStart, kill, there, launchFn = launch,
     walled = walledLaunchSettings, ownUid = () => process.getuid(), stopped = () => false, beforeStart, mainOf = mirrorMain,
     readSettings = sessionSettingsOf(c.settingsDir), undoCheck = undoCommitProblem,
   } = deps;
@@ -503,7 +530,9 @@ export function startPort(c, deps = {}) {
     const saveText = `${JSON.stringify(ws.settings, null, 2)}\n`;
     try { fs.writeNew(saveFile, saveText); ours.push(saveFile); } catch (e) { return undo(`the save's settings file can't be written (${e?.code ?? e?.message})`); }
     const saveSha = createHash('sha256').update(saveText).digest('hex');
-    const env = sessionEnv(c, who);
+    const built = sessionEnv(c, who);
+    if (!built?.ok) return undo(`the session's environment: ${built?.reason ?? 'no answer'}`);
+    const { env } = built;
     // A throwaway copy of the same commit for the baseline (#369 r1 M1), with settings that allow writes there and in its
     // own outbox only, and deny the session's copy and outbox; done() removes it. The session's own settings deny it.
     const throwaway = async () => {

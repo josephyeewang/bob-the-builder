@@ -8,6 +8,7 @@
 // unchanged since read": read the rev, write with it, and retry once if another pass wrote in between.
 
 import { makeMasker } from './mask.mjs';
+import { FUTURE_SKEW_MS } from '../../shared/still-waiting.mjs';
 import { shapeFact } from './fact-shapes.mjs';
 
 /** Who reports the Record refusing alert writes. Each has its own alert (M13 alerts.mjs reportTrouble), so a caller using
@@ -19,7 +20,7 @@ import { shapeFact } from './fact-shapes.mjs';
  * (wiring/heartbeat-probes.mjs, M13 heartbeat.mjs). Kept here, beside the writer of readings, so each of those can import
  * it; a reading one counts is then never "check the clock" or "stale" on another.
  */
-export const READING_FUTURE_MS = 60_000;
+export const READING_FUTURE_MS = FUTURE_SKEW_MS;
 
 export const TROUBLE_SOURCES = Object.freeze({ CHANNEL: 'alert-channel', HEARTBEAT: 'heartbeat', WATCHER: 'prod-watcher' });
 

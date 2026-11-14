@@ -206,7 +206,7 @@ test('L130: a start failure whose alert was not queued is told on the next pass,
   assert.equal(w.rec.read('fact', RESTART_FACT(SID)).doc.start_failed_told, undefined, 'not marked told');
   await w.step(midTurn(261_000), 3, { startFails: true });
   assert.equal(w.calls.alerts.length, 1);
-  assert.equal(w.rec.read('fact', RESTART_FACT(SID)).doc.start_failed_told, true);
+  assert.equal(w.rec.read('fact', RESTART_FACT(SID)).doc.start_failed_told?.told_at, iso(T0 + 3 * MIN), 'the mark is the time it was told (I3)');
   await w.step(midTurn(261_000), 4, { startFails: true });
   assert.equal(w.calls.alerts.length, 1, 'told once');
 });
@@ -569,4 +569,68 @@ test('L863 c1: an outbox file is used only in a USED_STATES state; applying, or 
   const ask = (state) => leadInFlight({ rec: at(state), sessionId: SID, outboxNames: ['wish-1.md'], questionOpen: false });
   for (const state of USED_STATES) assert.equal(ask(state), null, state);
   for (const state of ['applying', 'started', 'Applied', '', undefined]) assert.match(ask(state) ?? '', /wish-1\.md not used yet/, String(state));
+});
+
+// I3 (L1157): each of the Lead's holds is told at once, quiet for the rest of the day, and told again a day on while it
+// still lasts (shared stillWaiting). A mark from before L1157 (`true`) is told once more, then daily.
+const DAY = 24 * 60;
+const count = (w, re) => w.calls.alerts.filter((a) => re.test(a)).length;
+
+test('I3: a Lead past the hard line is told at once, quiet within the day, and told again a day on', async () => {
+  const w = world();
+  await w.step(midTurn(460_000), 1);
+  assert.equal(count(w, /compaction did not happen/), 1);
+  await w.step(midTurn(460_000), 1 + DAY - 1);
+  assert.equal(count(w, /compaction did not happen/), 1, 'quiet within the day');
+  await w.step(midTurn(460_000), 1 + DAY);
+  assert.equal(count(w, /compaction did not happen/), 2, 'told again a day on');
+});
+
+test('I3: a give-up is told at once, quiet within the day, and told again a day on while it waits on a person', async () => {
+  const w = world();
+  await w.step(ended(260_000, 0), 1);
+  await w.step(ended(261_000, 2), 3);
+  assert.equal(await w.step(ended(262_000, 5), 5), 'gave up; the old Lead keeps running');
+  assert.equal(count(w, /a restart now needs a person/), 1);
+  await w.step(ended(262_000, 5), 5 + DAY - 1);
+  assert.equal(count(w, /a restart now needs a person/), 1, 'quiet within the day');
+  await w.step(ended(262_000, 5), 5 + DAY);
+  assert.equal(count(w, /a restart now needs a person/), 2, 'told again a day on');
+});
+
+test('I3: a new Lead that keeps failing to start is told at once, quiet within the day, and told again a day on', async () => {
+  const w = world();
+  await w.step(ended(260_000), 1);
+  w.handIn(1000);
+  await w.intake();
+  assert.equal(await w.step(ended(261_000, 2), 2, { startFails: true }), 'stopped; new Lead failed to start');
+  assert.equal(count(w, /the new Lead did not start/), 1);
+  await w.step(midTurn(261_000), 2 + DAY - 1, { startFails: true });
+  assert.equal(count(w, /the new Lead did not start/), 1, 'quiet within the day');
+  assert.equal(await w.step(midTurn(261_000), 2 + DAY, { startFails: true }), 'new Lead still not started; tried again next pass');
+  assert.equal(count(w, /the new Lead did not start/), 2, 'told again a day on');
+});
+
+test('I3: an old Lead that cannot be stopped is told at once, quiet within the day, and told again a day on', async () => {
+  const w = world();
+  assert.equal(await w.step(ended(260_000), 1), 'WRAP sent');
+  w.handIn(1_000);
+  await w.intake();
+  assert.equal(await w.step(ended(265_000, 3), 3, { stopFails: true }), 'old Lead not stopped; tried again next pass');
+  assert.equal(count(w, /could not be stopped/), 1);
+  await w.step(ended(265_000, 3), 3 + DAY - 1, { stopFails: true });
+  assert.equal(count(w, /could not be stopped/), 1, 'quiet within the day');
+  assert.equal(await w.step(ended(265_000, 3), 3 + DAY, { stopFails: true }), 'old Lead not stopped; tried again next pass');
+  assert.equal(count(w, /could not be stopped/), 2, 'told again a day on');
+  assert.equal(w.calls.starts.length, 0, 'two Leads never run at once');
+});
+
+test('I3: a once-mark from before L1157 (true) is told once more, then quiet within the day', async () => {
+  const w = world();
+  await w.step(midTurn(460_000), 1);
+  change(w.rec, 'fact', RESTART_FACT(SID), { hard_told: true });
+  await w.step(midTurn(460_000), 2);
+  assert.equal(count(w, /compaction did not happen/), 2, 'an old mark has no time, so it is told');
+  await w.step(midTurn(460_000), 3);
+  assert.equal(count(w, /compaction did not happen/), 2, 'then quiet');
 });

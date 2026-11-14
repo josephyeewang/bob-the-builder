@@ -589,15 +589,16 @@ test('wired: every UNWIRED name is a unit that exists and names its row', () => 
 // too (lower the count), so the list stays true while staying short. Fixtures and fakes are left out by name.
 export const UNWIRED_FILES = Object.freeze({
   'modules/M1-front-door/': { files: 3, why: 'R-0b-162 D: the Front Door ports (frontDoorAlive, restartFrontDoor, sendFrontDoor); no job runs M1 yet' },
-  'modules/M2-approvals/': { files: 3, why: 'R-0b-140 undo-flag, L135 transcript-copy, L86 required-keys: lead to place' },
+  'modules/M2-approvals/': { files: 2, why: 'R-0b-140 undo-flag, L135 transcript-copy (required-keys is reached by setup approve-rules and the slice dry run through first-cutover, L1127)' },
   'modules/M3-lead/': { files: 2, why: 'R-0b-162 C: the Lead ports (leads, startLead) start the Lead that uses these (R-0b-143); L443: plan-go reaches the plan-review wording and its files' },
-  'modules/M4-workshop/': { files: 5, why: 'R-0b-162 C/D: agent-seam (launch), send-safe (sendFrontDoor); save-work is reached by the worker runner since #378 (L874); R-0b-147 review-walls-proof; L601 required-keys, lead to place' },
-  'modules/M6-merge-gate/': { files: 4, why: 'L236: gatePass in the robot job, once the robot App exists (R-0b-02); token.mjs is now reached by watch-run (L624)' },
-  'modules/M9-record/': { files: 1, why: 'L86: required-keys, lead to place' },
-  'modules/M10-rules/': { files: 4, why: 'R-0b-106 first-cutover fit check and known-gaps, L104 from-text, the hook rules snapshot: lead to place' },
-  'modules/M11-dispatcher/': { files: 2, why: 'R-0b-162 C: account-ports, headless-result (worker exit); login-job is reached by the robot job since #352 (L834)' },
-  'modules/M12-sensors/': { files: 15, why: 'R-0b-169: the Sensors job wiring and its probes' },
-  'modules/M13-ledger/': { files: 1, why: 'R-0b-77 waiting (alert-channel.mjs reached through the robot job since #288, L730; alerts.mjs since #184, L428)' },
+  'modules/M4-workshop/': { files: 3, why: 'R-0b-162 C/D: agent-seam (launch), send-safe guard (sendFrontDoor; the runner reaches activity and claude-signals through the R-0b-175a hook store); save-work is reached by the worker runner since #378 (L874); R-0b-147 review-walls-proof; L601 required-keys is reached by setup approve-rules and the slice dry run through first-cutover (L1127)' },
+  'modules/M6-merge-gate/': { files: 2, why: 'L236: gatePass in the robot job, once the robot App exists (R-0b-02); token.mjs is now reached by watch-run (L624); required-keys by setup approve-rules and the slice dry run (L1127); workflow-rule.mjs by the robot push pass (gate-ports, L1115)' },
+  'modules/M10-rules/': { files: 2, why: 'L104 from-text, the hook rules snapshot: lead to place (first-cutover and known-gaps are reached by setup approve-rules and the slice dry run, L1127)' },
+  'modules/M11-dispatcher/': { files: 3, why: 'R-0b-162 C: account-ports, headless-result (worker exit); R-0b-175a interactive-holds (the relay, unwired until the status reader is a Dispatcher port, as drainHolds); login-job is reached by the robot job since #352 (L834)' },
+  'modules/M12-sensors/screen/': { files: 3, why: 'R-0b-153a: sendSafe asks waiting(), which reaches match and the Claude rules (lane 7, L1064)' },
+  'modules/M12-sensors/': { files: 12, why: 'R-0b-169: the Sensors files no job starts yet (L1049 reached two; the robot push pass reaches outside-watch.mjs through gate-ports, L1115)' },
+  'shared/': { files: 1, why: 'R-0b-179 (b): credential-args, the no-credential-as-argument scan; its whole-tree test runs it, and the wiring PR (L1154) decides whether a gate runs it too' },
+  'modules/M13-ledger/': { files: 3, why: 'R-0b-77 waiting, R-1-29 digest, R-1-31 Ledger handoff copy (alert-channel.mjs reached through the robot job since #288, L730; alerts.mjs since #184, L428)' },
 });
 const isFixture = (f) => /(?:^|[/-])(?:fixtures?|fakes?|png-fixture|test-tmp)\.mjs$/.test(f);
 const unreachedFiles = () => {

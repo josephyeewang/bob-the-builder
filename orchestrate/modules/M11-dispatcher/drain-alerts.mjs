@@ -19,7 +19,7 @@
 
 import { HOLD_FACT, clearHold } from './pass.mjs';
 import { idHash } from './intake-facts.mjs';
-import { plain, queuedMarks, tellThen } from './alerts.mjs';
+import { plain, queuedMarks, tellThen, unqueuedText } from './alerts.mjs';
 import { stillWaiting } from '../../shared/still-waiting.mjs';
 
 /** Why an ended session's outbox is not drained: the runner's one list (L896). */
@@ -77,7 +77,7 @@ export function relayDrainHolds({ rec, held, error, alert, now, report }) {
       clear: () => clearHold(rec, fact, now, report),
     });
     if (w.did === 'told') n += 1;
-    if (w.did === 'unsent') report(`the ${what} alert could not be queued; it is tried again next pass`, fact);
+    if (w.did === 'unsent') report(unqueuedText(what), fact);
   };
   // The status reader refuses any other shape, so a bad entry is the reader's contract broken: read as unknown.
   const bad = (h) => !h || typeof h.session !== 'string' || !h.session || !DRAIN_CAUSES.includes(h.cause);

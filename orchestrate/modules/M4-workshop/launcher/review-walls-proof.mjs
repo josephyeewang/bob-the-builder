@@ -195,7 +195,7 @@ export async function runProof({ attempts, control, node, run, read, write, remo
 
 // ---- the leave-sandbox setting's own proof (L91 (1)) ----
 //
-// CAPABILITY NOTE (Principle 9): checked on Claude Code 2.1.316, on this Mac, 1 Nov 2026. With
+// CAPABILITY NOTE (Principle 9): checked on Claude Code 2.1.316, on this Mac, 1 Nov 2026 (checked: claude-code 2.1.316). With
 // `sandbox.allowUnsandboxedCommands: false`, a Bash call with `dangerouslyDisableSandbox: true` writing outside the
 // working folder was refused ("operation not permitted"), and no file was made; with the setting `true` (the control),
 // the same call wrote the file. VOID at the next Claude Code version: review-walls-proof.test.mjs's escape test fails

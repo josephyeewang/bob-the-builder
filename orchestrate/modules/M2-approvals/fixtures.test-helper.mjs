@@ -1,7 +1,8 @@
 // fixtures.test-helper.mjs — set-up for M2's tests: a real M9 record (every write through the writer), the owner's
 // settings, a rules fake whose count_approval follows M10's answer, and a conversation log written the way Claude Code
 // 2.1.312 writes one (checked 30 Oct 2026: the box is a tool_use with input {questions}; the tap is a user entry with a
-// tool_result and toolUseResult {questions, answers: {question: label}, annotations}).
+// tool_result and toolUseResult {questions, answers: {question: label}, annotations}; checked: claude-code 2.1.312, open
+// until 2027-01-20 (R-0b-84), binding.mjs's typed-vs-tapped note).
 
 import { appendFileSync } from 'node:fs';
 import { join } from 'node:path';

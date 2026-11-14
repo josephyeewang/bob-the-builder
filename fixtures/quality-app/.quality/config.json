@@ -1,0 +1,16 @@
+{
+  "_doc": "Bob's quality checks for the test product (templates/quality/README.md).",
+  "start": {
+    "build": "node -e \"console.log('nothing to build')\"",
+    "command": "node server.mjs",
+    "url": "http://127.0.0.1:4173",
+    "readyTimeoutSeconds": 30,
+    "testDataFile": ".quality/test-data"
+  },
+  "pages": [
+    { "name": "home", "path": "/", "speedBudgetMs": 1000 },
+    { "name": "form", "path": "/form" }
+  ],
+  "routes": [{ "path": "/api/health" }],
+  "speed": { "runs": 3 }
+}

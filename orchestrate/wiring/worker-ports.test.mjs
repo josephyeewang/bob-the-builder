@@ -15,7 +15,7 @@ import { mirrorTree } from '../modules/M11-dispatcher/cleanup.mjs';
 import { ENDED_FOLDER } from '../modules/M9-record/outbox.mjs';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { MIRROR_CONFIG_TEMPLATE } from '../modules/M4-workshop/git/safe-git.mjs';
-import { CLEANUP_GIT, HOST_LOCK_MAX, REVIEW_KIND_OF, REVIEW_STATE_CORRUPT, cleanupPorts, hostLockPort, mirrorProblem, recordHolds, requestsAclProblem, requestsFolderProblem, reviewEndedPort, reviewSessions, runnerAsyncPorts, runnerSyncPorts, workerPorts } from './worker-ports.mjs';
+import { CLEANUP_GIT, HOST_LOCK_MAX, HOST_LOCK_STAMP_MAX_MS, hostLockStampProblem, REVIEW_KIND_OF, REVIEW_STATE_CORRUPT, cleanupPorts, hostLockPort, mirrorProblem, recordHolds, requestsAclProblem, requestsFolderProblem, reviewEndedPort, reviewSessions, runnerAsyncPorts, runnerSyncPorts, workerPorts } from './worker-ports.mjs';
 import { runnerTick } from './runner-loop.mjs';
 import { pauseLeadPort, saveWorkPort, startPort } from './runner-ports.mjs';
 import { NO_COPY_KINDS } from './owner-asks.mjs';
@@ -23,6 +23,8 @@ import { writeNewReadable } from './owner-status.mjs';
 import { mirrorFilesOf } from './review-ports.mjs';
 import { CLOCK_SKEW_MS } from './owner-status.mjs';
 import { STOP_STAMP_SKEW_MS } from '../modules/M4-workshop/launcher/review-runner.mjs';
+import { READING_FUTURE_MS } from '../modules/M12-sensors/facts.mjs';
+import { HOST_COPY_FAIL } from '../modules/M11-dispatcher/pass.mjs';
 
 const ME = process.getuid();
 const run = limitedSync(spawnSync);
@@ -62,8 +64,8 @@ function mirrorWorld() {
   // host.lock's owner (hostLockUid) is never the Dispatcher's own user: the test user is the Dispatcher here.
   // The TOP outboxes and worker-copies folders (L887), as setup makes them.
   for (const f of ['outboxes', 'worker-copies', 'worker-runner/requests', 'worker-runner/runner']) mkdirSync(join(base, f), { recursive: true, mode: 0o755 });
-  // The worker runner runs as the owner: host.lock's user (L896).
-  const config = { product: P, mirror, sealRoot: join(base, 'seals'), outboxRoot: join(base, 'outboxes'), copiesRoot: join(base, 'worker-copies'), reviewRoot: join(base, 'review-runner'), reviewUid: ME, hostLockPath: join(base, 'host.lock'), hostLockUid: ME + 2,
+  // The worker runner runs as the builder (L1079): its own user, never host.lock's (the owner's).
+  const config = { product: P, mirror, sealRoot: join(base, 'seals'), outboxRoot: join(base, 'outboxes'), copiesRoot: join(base, 'worker-copies'), reviewRoot: join(base, 'review-runner'), reviewUid: ME, hostLockPath: join(base, 'host.lock'), hostLockUid: ME + 3,
     workerRequestsDir: join(base, 'worker-runner', 'requests'), workerStatusFile: join(base, 'worker-runner', 'runner', 'status.json'), workerUid: ME + 2 };
   mkdirSync(join(config.reviewRoot, 'launches'), { recursive: true, mode: 0o755 }); chmodSync(config.reviewRoot, 0o755);
   return { base, mirror, first, second, empty, config, ctx: { config, selfUid: ME, limitedSync: run } };
@@ -109,7 +111,7 @@ test('C (L739): the mirror is checked at start: missing, a link, another user\'s
   assert.throws(start({ mirror: join(w.base, 'nope') }), /the product's mirror \(mirror\) .*nope can't be read \(ENOENT\)/);
   symlinkSync(w.mirror, join(w.base, 'link'));
   assert.throws(start({ mirror: join(w.base, 'link') }), /is not a plain folder/);
-  assert.throws(() => workerPorts({ ...w.ctx, config: { ...w.config, hostLockUid: ME + 5, workerUid: ME + 5 }, selfUid: ME + 1 }), /belongs to uid \d+, not to this job's uid/);
+  assert.throws(() => workerPorts({ ...w.ctx, config: { ...w.config, hostLockUid: ME + 5 }, selfUid: ME + 1 }), /belongs to uid \d+, not to this job's uid/);
   chmodSync(w.mirror, 0o775);
   assert.throws(start({}), /can be written by others \(mode 775\)/);
   chmodSync(w.mirror, 0o755);
@@ -284,6 +286,87 @@ test('C (L739, self-review M1, L763): hostLock reads only a file of the owner\'s
   // A hard link to a file only the Dispatcher can read: lstat shows a plain file, so the name alone can't tell.
   linkSync(own, path);
   assert.throws(() => hostLockPort({ path, run, ownerUid: ME, selfUid: ME + 1 })(), /has another name too \(a hard link\)/);
+});
+
+// ---- host.lock under the owner's copier (L1040, L1041) ----
+
+const T_STAMP = Date.parse('2026-11-12T10:00:00.000Z');
+const stampAt = (file, at) => writeFileSync(file, `${JSON.stringify({ at: new Date(at).toISOString(), source: 'present' })}\n`);
+
+test('L1041: the copier\'s stamp is good only when the owner\'s, within HOST_LOCK_STAMP_MAX_MS, and not ahead of the clock', () => {
+  assert.equal(HOST_LOCK_STAMP_MAX_MS, 5 * 60_000, 'the one limit: five missed 60 s runs');
+  const base = tempDir('orch-stamp-');
+  const stamp = join(base, 'host.lock.copied');
+  const at = (now, ownerUid = ME) => hostLockStampProblem(stamp, { now, ownerUid });
+  assert.match(at(T_STAMP), /has never finished a run .*is not there.*restart the owner's host\.lock copier/, 'missing');
+  stampAt(stamp, T_STAMP);
+  assert.equal(at(T_STAMP), null, 'fresh');
+  assert.equal(at(T_STAMP + HOST_LOCK_STAMP_MAX_MS), null, 'at the limit');
+  assert.match(at(T_STAMP + HOST_LOCK_STAMP_MAX_MS + 1), /last ran well at 2026-11-12T10:00:00\.000Z, 5 minutes ago \(the limit is 5\), so the copy of host\.lock may be old: restart/, 'stale');
+  assert.match(at(T_STAMP + 60 * 60_000), /60 minutes ago/, 'the age is named');
+  assert.equal(at(T_STAMP - READING_FUTURE_MS), null, 'ahead by the allowance');
+  assert.match(at(T_STAMP - READING_FUTURE_MS - 1), /ahead of this Mac's clock/, 'ahead past the allowance');
+  assert.match(at(T_STAMP, ME + 1), /is not the owner's \(its owner is uid \d+, not \d+\)/, 'another user\'s');
+  for (const bad of ['', 'not json', '{"at":"yesterday"}', '{"at":12}', '{}', 'null']) {
+    writeFileSync(stamp, bad);
+    assert.match(at(T_STAMP), /can't be read as the copier's stamp/, JSON.stringify(bad));
+  }
+  writeFileSync(stamp, 'x'.repeat(4097));
+  assert.match(at(T_STAMP), /is over 4096 bytes/);
+  rmSync(stamp);
+  stampAt(join(base, 'real'), T_STAMP);
+  symlinkSync(join(base, 'real'), stamp);
+  assert.match(at(T_STAMP), /is a link, not the copier's own file/, 'a link is never followed');
+  rmSync(stamp);
+  mkdirSync(stamp);
+  assert.match(at(T_STAMP), /is not a plain file/);
+  rmSync(stamp, { recursive: true });
+  stampAt(stamp, T_STAMP);
+  chmodSync(stamp, 0o000);
+  try { assert.match(at(T_STAMP), /can't be read \(EACCES\)/); } finally { chmodSync(stamp, 0o644); }
+  // A read that fails part way is an answer, never a throw.
+  assert.match(hostLockStampProblem(stamp, { now: T_STAMP, ownerUid: ME }, { read: () => { throw Object.assign(new Error('x'), { code: 'EIO' }); } }), /can't be read \(EIO\)/);
+});
+
+test('L1041: with a stamp, hostLock throws HOST_COPY_FAIL for a stale, missing, future or not-the-owner\'s stamp and for a copy it can\'t read; without one, nothing changes', () => {
+  const w = mirrorWorld();
+  const path = w.config.hostLockPath;
+  const stamp = join(w.base, 'host.lock.copied');
+  let now = T_STAMP;
+  const port = (o = {}) => hostLockPort({ path, run, ownerUid: ME, selfUid: ME + 1, stamp, now: () => now, ...o });
+  const failsClosed = (f, re, what) => {
+    let err; try { f(); } catch (e) { err = e; }
+    assert.ok(err, `${what}: no throw`);
+    assert.equal(err.code, HOST_COPY_FAIL, `${what}: ${err.message}`);
+    assert.match(err.message, re, what);
+  };
+  writeFileSync(path, 'mini\n');
+  failsClosed(() => port()(), /has never finished a run/, 'missing stamp');
+  stampAt(stamp, T_STAMP);
+  assert.equal(port()(), 'mini\n', 'a fresh stamp: the copy is read as before');
+  rmSync(path);
+  assert.equal(port()(), null, 'a fresh stamp and no copy: no host claimed, as the copier mirrors a missing host.lock');
+  writeFileSync(path, 'mini\n');
+  now = T_STAMP + HOST_LOCK_STAMP_MAX_MS + 1;
+  failsClosed(() => port()(), /may be old/, 'stale stamp');
+  now = T_STAMP - READING_FUTURE_MS - 1;
+  failsClosed(() => port()(), /ahead of this Mac's clock/, 'future stamp');
+  now = T_STAMP;
+  failsClosed(() => port({ ownerUid: ME, stampIo: { fstat: () => ({ isFile: () => true, uid: ME + 1 }) } })(), /is not the owner's/, 'not the owner\'s stamp');
+  chmodSync(path, 0o000);
+  try { failsClosed(() => port()(), /the copy of host\.lock can't be read: host\.lock .* can't be read \(EACCES\)/, 'unreadable copy'); } finally { chmodSync(path, 0o644); }
+  failsClosed(() => port({ run: () => ({ ok: false, why: 'timed out after 10000 ms' }) })(), /timed out/, 'a read held past its limit');
+  // Without the key: a stale stamp beside the copy changes nothing, and a refused read is not marked.
+  now = T_STAMP + 60 * 60_000;
+  assert.equal(hostLockPort({ path, run, ownerUid: ME, selfUid: ME + 1, now: () => now })(), 'mini\n');
+  chmodSync(path, 0o000);
+  try {
+    let err; try { hostLockPort({ path, run, ownerUid: ME, selfUid: ME + 1 })(); } catch (e) { err = e; }
+    assert.ok(err); assert.notEqual(err.code, HOST_COPY_FAIL);
+  } finally { chmodSync(path, 0o644); }
+  // Through workerPorts: config hostLockStamp reaches the port (here host.lock is not the owner's, so it fails closed).
+  assert.notEqual((() => { try { workerPorts(w.ctx).hostLock(); } catch (e) { return e.code; } })(), HOST_COPY_FAIL, 'no key: not marked');
+  assert.equal((() => { try { workerPorts({ ...w.ctx, config: { ...w.config, hostLockStamp: stamp } }).hostLock(); } catch (e) { return e.code; } })(), HOST_COPY_FAIL, 'the key: marked');
 });
 
 // A file this user can read but doesn't own, which a hard link can name (macOS lets a user hard-link a file it doesn't own).
@@ -482,7 +565,7 @@ test('L925: stopSession writes its stop request into the runner\'s requests fold
   assert.deepEqual(used.writes, []);
   assert.equal(used.ports.stopSession('S-1'), false);
   assert.deepEqual(used.writes, [[join(used.c.workerRequestsDir, 'stop-S-1.json'), '{"stop":"S-1"}\n']]);
-  for (const [folder, re] of [[fakeSt({ dir: true, uid: ME }), /is not the owner's \(workerUid\)/], [fakeSt({ dir: true, link: true }), /is not a plain folder/], [fakeSt(), /is not a plain folder/]]) {
+  for (const [folder, re] of [[fakeSt({ dir: true, uid: ME }), /is not the worker runner's user's \(workerUid\)/], [fakeSt({ dir: true, link: true }), /is not a plain folder/], [fakeSt(), /is not a plain folder/]]) {
     const w = syncWorld({ folder });
     assert.throws(() => w.ports.stopSession('S-1'), re);
     assert.deepEqual(w.writes, [], 'nothing written');
@@ -542,16 +625,18 @@ test('L943 m4: on this Mac, a real folder with another user\'s writing entry is 
   assert.match(requestsFolderProblem(dir, process.getuid()), /can be written by group or others \(mode 770\)/);
 });
 
-test('L925, L896: the worker runner is the owner\'s user and its requests folder is there, or the start is refused; the ports are wired', () => {
+test('L925, L1079 (I1): the worker runner is the builder\'s user, never the owner, root, the Dispatcher or review, and its requests folder is there, or the start is refused; the ports are wired', () => {
   const w = mirrorWorld();
-  assert.throws(() => workerPorts({ ...w.ctx, config: { ...w.config, workerUid: ME + 9 } }), /workerUid must be the owner's Mac user id, hostLockUid's/);
-  assert.throws(() => workerPorts({ ...w.ctx, config: { ...w.config, workerUid: undefined } }), /workerUid must be/);
+  assert.throws(() => workerPorts({ ...w.ctx, config: { ...w.config, workerUid: w.config.hostLockUid } }), /workerUid is the owner's Mac user id \(hostLockUid\); the worker runner runs as the builder user, never as the owner/);
+  assert.throws(() => workerPorts({ ...w.ctx, config: { ...w.config, workerUid: ME } }), /workerUid is the Dispatcher's own user/);
+  assert.throws(() => workerPorts({ ...w.ctx, config: { ...w.config, reviewUid: ME + 6, workerUid: ME + 6 }, selfUid: ME + 1 }), /workerUid is the review user/);
+  for (const u of [0, -1, undefined, '601', 1.5]) assert.throws(() => workerPorts({ ...w.ctx, config: { ...w.config, workerUid: u } }), /workerUid must be the builder user's Mac user id/, String(u));
   assert.throws(() => workerPorts({ ...w.ctx, config: { ...w.config, workerRequestsDir: join(w.base, 'nope') } }), /requests folder \(workerRequestsDir\) .*nope can't be read \(ENOENT\)/);
   const ports = workerPorts(w.ctx);
   assert.equal(ports.product, P, 'the stop step\'s product is the config\'s (L927)');
   for (const k of ['sessions', 'board', 'outboxSessions', 'probe', 'stopSession', 'launch', 'stopGroup', 'saveWork', 'pauseLead']) assert.equal(typeof ports[k], 'function', k);
-  // The real reads: this test's runner folder is this user's, not the owner's, so the status is never trusted.
-  assert.throws(() => ports.sessions(), /the worker runner's folder is not owned by the owner's user/);
+  // The real reads: this test's runner folder is this user's, not the builder's, so the status is never trusted.
+  assert.throws(() => ports.sessions(), /the worker runner's folder is not owned by the worker runner's user \(workerUid\)/);
 });
 
 // ---- C (L963): the four asks, wired, end to end ----

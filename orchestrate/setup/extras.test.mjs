@@ -185,7 +185,21 @@ test('PLANT a product proposals folder readable by others (0755) → check-propo
   const w = world(); assert.equal(w.run(['proposals']).code, 0);
   chmodSync(w.mac.at(`${PARENT}/alpha`), 0o755);
   const bad = failing(checkProposals(w.mac, w.cfg)).map((r) => `${r.what} | ${r.why}`).join('\n');
-  assert.match(bad, /alpha .*mode is 755, want 700/); assert.match(bad, /as review, reading .*alpha fails \| review CAN read it/);
+  assert.match(bad, /alpha .*mode is 755, want 700/); assert.match(bad, /as review, reading .*alpha fails \| review CAN read it, and must not/);
+});
+
+test('#528 r2 m9 PLANT: a "fails" line passes only on the one no; a sudo error, or ls refused for another reason, FAILs', () => {
+  const w = world(); assert.equal(w.run(['proposals']).code, 0);
+  const runReal = w.mac.run.bind(w.mac);
+  // review's sudo breaks (exit 1, sudo's own words): before, any nonzero exit passed.
+  w.mac.run = (cmd, args) => (cmd === '/usr/bin/sudo' && args.includes('review') ? { status: 1, stdout: '', stderr: 'sudo: unknown user review' } : runReal(cmd, args));
+  let bad = failing(checkProposals(w.mac, w.cfg)).map((r) => `${r.what} | ${r.why}`).join('\n');
+  assert.match(bad, /as review, reading .*alpha fails \| it failed, but not with the Mac's own "Permission denied"/);
+  // orchestrate's test killed (128 + 9): not a no.
+  w.mac.run = (cmd, args) => (cmd === '/usr/bin/sudo' && args.includes('orchestrate') && args.includes('-w') ? { status: 137, stdout: '', stderr: '' } : runReal(cmd, args));
+  bad = failing(checkProposals(w.mac, w.cfg)).map((r) => `${r.what} | ${r.why}`).join('\n');
+  assert.match(bad, /as orchestrate, writing .*alpha fails \| test did not answer a plain no \(exit 137\)/);
+  w.mac.run = runReal; assert.deepEqual(failing(checkProposals(w.mac, w.cfg)), []);
 });
 
 test('PLANT a group-style loosening (0770) on a product folder → FAIL on mode; and the run puts it back to 0700', () => {

@@ -24,7 +24,7 @@
 //   recordRecheck(ctx, { cardId, mainCommit, planSha256, files }) → { ok, newGo }   unchanged plan → rechecked (m3-3)
 // ctx = { record, rules, product, now, alert } (+ gh, owner, repo for a Tier-1 go's decision pull request)
 
-import { canonicalJson, planFingerprint } from '../../shared/plan-fingerprint.mjs';
+import { canonicalJson, planFingerprint, unfingerprinted } from '../../shared/plan-fingerprint.mjs';
 import { activeKind } from '../../shared/asks.mjs';
 import { askStore, writeDoc } from './ask-store.mjs';
 import { createAsk, releaseBoxes } from './binding.mjs';
@@ -127,7 +127,7 @@ export function goFingerprint(ctx, cardId) {
   if (!c || c.corrupt || !c.doc) return fail(`no card ${cardId}`);
   if (c.doc.product !== ctx.product) return fail(`card ${cardId} belongs to product ${c.doc.product}`);
   const fp = fingerprintOf(ctx.product, cardId, c.doc);
-  if (!fp.ok) return fail(`the plan can't be fingerprinted: ${fp.reason}`);
+  if (!fp.ok) return fail(unfingerprinted(fp.reason));
   return { ok: true, card: cardId, fingerprint: fp.sha256, plan_sha256: fp.inputs.plan_sha256, inputs: fp.inputs };
 }
 
@@ -141,7 +141,7 @@ export async function raiseGo(ctx, { cardId, rows, view, mainSha, planCheck } = 
   const bad = checkRows(rows, d);
   if (bad) return fail(bad);
   const fp = fingerprintOf(ctx.product, cardId, d);
-  if (!fp.ok) return fail(`the plan can't be fingerprinted: ${fp.reason}`);
+  if (!fp.ok) return fail(unfingerprinted(fp.reason));
   if (d.tier === 1) { const no = planCheckProblem(planCheck, { fingerprint: fp.sha256, card: cardId, planSha256: fp.inputs.plan_sha256 }); if (no) return fail(no); }
   // Tier 1 checks folders at the plan's main commit; Tier 2 at main as it is now.
   const folder = await folderIn(view, d.tier === 1 ? d.main_commit : mainSha, fp.inputs.files);
@@ -230,7 +230,7 @@ export async function goCheck({ go, card, changed, headRows, tier, view, mainSha
     const root = card.root ?? card.id;
     if (go.card_id !== root) reasons.push(`the go is for ${go.card_id}, not ${root}`);
     const fp = fingerprintOf(d.product, root, d);
-    if (!fp.ok) reasons.push(`the plan can't be fingerprinted: ${fp.reason}`);
+    if (!fp.ok) reasons.push(unfingerprinted(fp.reason));
     else if (fp.sha256 !== go.plan_fingerprint) reasons.push('the card\'s plan is not the one the go was given for');
     const goRows = go.rows && typeof go.rows === 'object' ? go.rows : {};
     const rowsHead = headRows && typeof headRows === 'object' ? headRows : {};

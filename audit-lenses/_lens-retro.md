@@ -13,6 +13,10 @@ There are two completely different things you can learn from an audit, and confl
 
 The retro is **not** the findings. It is a critique of how well the lenses *did their job*. A retro that just restates the findings teaches Bob nothing — findings are project-specific. A retro that says *"L08-F003 was a false positive because the silent action is intentional, and L08's check question Q4 is ambiguous about it"* is gold: it improves the lens for every future project.
 
+## From a retro to prevention
+
+Use `reference/field-learning.md` to connect the retro to the existing project audit ledger and the next builder brief. A proposal filed is not a control adopted: keep prevention and adoption evidence, and compare first-pass outcomes separately from follow-up rounds. Historical findings and raw project reports stay private; only generic method changes enter Bob.
+
 ## Two halves of the loop
 
 - **A — Auto-emit (every audit, no opt-in).** At the end of every audit pass (A7.4), Bob automatically writes `audit-artifacts/audit-retro-{YYYY-MM-DD}.{md,json}` — a first-pass self-assessment of each lens that ran. The user does not have to ask. This is the raw material.

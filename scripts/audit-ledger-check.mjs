@@ -28,6 +28,8 @@
 //         date · 2 = file missing or not JSON, or a --since value that is not a date.
 
 import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 const DEMOTION_THRESHOLD = 5;
 const OLD_FIELDS = ["material", "material_findings"];
@@ -139,6 +141,17 @@ function main() {
   });
   console.log(`audit ledger: ${path} — ${ledger.entries.length} entr${ledger.entries.length === 1 ? "y" : "ies"}, ${bad.length} with problems`);
   for (const b of bad) console.log(`  ✗ ${b}`);
+  // Learning is additive: never silently validate only the old half of the ledger.
+  if (Object.hasOwn(ledger, "learning")) {
+    const learning = spawnSync(process.execPath, [fileURLToPath(new URL("./learning-check.mjs", import.meta.url)), path,
+      "--stage", since ? "close" : "plan"], { encoding: "utf8" });
+    process.stdout.write(learning.stdout ?? "");
+    process.stderr.write(learning.stderr ?? "");
+    if (learning.error || learning.status !== 0) {
+      console.error("audit-ledger-check: learning evidence did not pass; no closure claim is available");
+      process.exit(learning.status === 2 ? 2 : 1);
+    }
+  }
   if (args.includes("--streaks")) {
     console.log(`clean Tier-1 streaks (newest first; ${DEMOTION_THRESHOLD} in a row → propose Tier 2, never applied automatically):`);
     for (const s of computeStreaks(ledger)) {

@@ -332,6 +332,7 @@ export async function gatePass(ctx) {
     // The owner's Approve is missing: say so on the card, so M2 asks for it (refusal 8).
     const card = fresh('card', m.doc.card);
     if (v.refusals.some((x) => x.n === 8) && facts.approve?.needed && card && card.doc.needs_joe !== true) write('card', card, { needs_joe: true });
+    if (nc.not_clean) nc.not_clean_card_rev = fresh('card', m.doc.card)?.rev ?? null;
     if (move(m, 'refused', { reasons, tell_owner: true, tell_note: FINAL_NOTE, ...nc })) { tellRefused(fresh('merge', m.id)); if (nc.not_clean) settleNotClean(fresh('merge', m.id)); }
   }
 
@@ -339,7 +340,9 @@ export async function gatePass(ctx) {
   // changed since, or one not back as it was): what it found, kept on the refused merge. A read that failed is a hold
   // (refusals.mjs), never this; and the first cutover's "not a merge the gate made" is an undo not allowed, not an
   // unclean one, so it has none.
-  // The card's head it was found on goes with it, so a card pushed again since is never failed on the old finding.
+  // The card's head it was found on goes with it, and the card's revision it stands for (#466 r2 m2): set by the caller,
+  // the card as it is once this refusal's own card writes are done. Any other card write since (pushed away and back to
+  // the same head, verified again, approved) ends the finding, so a card is never failed on an old judgement.
   function notCleanOf(v, facts) {
     const r = v.refusals.find((x) => x.n === 9 && Array.isArray(x.not_clean) && x.not_clean.length);
     // #466 r1 m1, belt and braces: gather already makes such an undo wait (its answer unread) until GitHub has worked
@@ -361,6 +364,11 @@ export async function gatePass(ctx) {
     // #466 r1 M2: the finding is for the card only while the card is verified or approved at the head it was found on;
     // pushed again or moved on since, the next review judges it anew. The guard compares the finding with the card.
     if (card.doc.head !== at || !['verified', 'approved'].includes(card.doc.state)) return;
+    // #466 r2 m2: only at the card revision the finding stands for (an A-B-A push, or a fresh verify or approve at the
+    // same head, is a card write: the next review judges it anew); and m-3: only the card's newest merge, since a later
+    // request is judged on its own.
+    if (!Number.isSafeInteger(m.doc.not_clean_card_rev) || card.rev !== m.doc.not_clean_card_rev) return;
+    if (merges().some((x) => x.id !== m.id && x.doc.card === card.id && String(x.doc.requested_at ?? '') > String(m.doc.requested_at ?? ''))) return;
     const fid = REVERSE_FACT(card.id);
     const f = record.read('fact', fid);
     const why = m.doc.not_clean.map(String).join('; ').slice(0, 1000);
@@ -385,7 +393,7 @@ export async function gatePass(ctx) {
       step(m, 'undo_not_clean', { fact: fid, again: true });
     }
     const c = fresh('card', card.id);
-    if (!['verified', 'approved'].includes(c?.doc?.state) || c.doc.head !== at || fresh('fact', fid)?.doc?.head !== at) return;
+    if (!['verified', 'approved'].includes(c?.doc?.state) || c.doc.head !== at || c.rev !== m.doc.not_clean_card_rev || fresh('fact', fid)?.doc?.head !== at) return;
     const r = write('card', c, { state: 'failed' });
     if (!r.ok) alert({ type: 'merge_gate_write_refused', card: card.id, to: 'failed', reason: r.reason });
     else step(m, 'undo_failed', { card: card.id });
@@ -507,6 +515,9 @@ export async function gatePass(ctx) {
     if (v.decision !== 'merge' || head !== m.doc.judged_head) {
       const reasons = v.decision === 'merge' ? ['the head moved while the merge was being checked'] : v.refusals.map((x) => `${x.n}: ${x.reason}`);
       const nc = v.decision === 'refuse' ? notCleanOf(v, facts) : {};
+      // The card is in merging here, at the revision gathered under the lock; putBack below is its one write (merging →
+      // verified), so the finding stands for the revision after it.
+      if (nc.not_clean) nc.not_clean_card_rev = Number.isSafeInteger(facts.card?.rev) && facts.card.doc?.state === 'merging' ? facts.card.rev + 1 : null;
       const left = v.decision === 'hold' ? hold(m, v, passUnreadable(facts).unreadable) : move(m, 'refused', { reasons, ...nc });
       if (!left) cutShort(m, reasons);
       putBack(m, 'verified');

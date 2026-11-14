@@ -90,6 +90,9 @@ test('L614: an old answer and one dated ahead are refused; a small clock drift i
     assert.deepEqual(await at(-60_000), ['a', null], 'one minute of drift');
     const [ahead, why2] = await at(-3 * 60_000);
     assert.equal(ahead, null); assert.match(why2, /future/);
+    // L1099 I4: one clock. pastTime's 60 s is the allowance, so a minute and one ms ahead is refused (the old 2 min was not).
+    const [justOver, why3] = await at(-60_001);
+    assert.equal(justOver, null); assert.match(why3, /the owner's answer is dated in the future/);
   } finally { w.done(); }
 });
 

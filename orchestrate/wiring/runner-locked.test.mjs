@@ -44,7 +44,7 @@ const runner = (more = {}) => lockedRunner({ claudeBin: '/x/claude', envOf: () =
 const bashWait = (ms) => ({ BASH_DEFAULT_TIMEOUT_MS: String(ms), BASH_MAX_TIMEOUT_MS: String(ms) });
 // The words before the job itself: its shell's record and the wait for the runner's go-ahead (#463 r2 M1).
 const recordOf = (args) => args.at(-1).slice(ASK.length).split(' && { ')[0];
-// claude as its Bash tool runs a command (#463 r2 M1, claude 2.1.322): detached, in a process group of its own, so
+// claude as its Bash tool runs a command (#463 r2 M1, claude 2.1.322; checked: claude-code 2.1.316): detached, in a process group of its own, so
 // claude's group is not the job's. `leave`: claude ends at once, leaving its command running (as a Bash tool that moved
 // a command to the background would).
 const detachedClaude = (calls = [], { leave = false } = {}) => (bin, args, opts) => {

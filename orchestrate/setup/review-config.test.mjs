@@ -24,13 +24,14 @@ const esc = (t) => t.replace(/[.*+?^${}()|[\]\\\/]/g, '\\$&');
 const PIN = TOOLS_CHECKED.claude_code;
 const me = process.getuid();
 const OWNER_UID = me + 1;   // a different number, so the uid map shows which role got which user
+const BUILDER_UID = me + 3;   // the worker runner's user (L1079)
 
 function world() {
   const top = realpathSync(tempDir('orch-review-config-'));
   const base = join(top, 'orchestrate');
   for (const d of ['', 'review', 'outboxes', 'review-copies', 'worker-copies', 'bob', 'keys', 'private', 'out']) mkdirSync(join(base, d), { recursive: true, mode: 0o755 });
   const cfg = parseConfig({ base, owner: 'joe', products: ['acme', 'beta'] });
-  const users = { review: { exists: true, uid: me, home: join(base, 'home/review') }, orchestrate: { exists: true, uid: me + 2, home: join(base, 'home/orchestrate') }, joe: { exists: true, uid: OWNER_UID, home: '/Users/joe' } };
+  const users = { review: { exists: true, uid: me, home: join(base, 'home/review') }, orchestrate: { exists: true, uid: me + 2, home: join(base, 'home/orchestrate') }, joe: { exists: true, uid: OWNER_UID, home: '/Users/joe' }, builder: { exists: true, uid: BUILDER_UID, home: join(base, 'home/builder') } };
   const userOf = (n) => users[n] ?? { exists: false };
   // The runner's own readConfig, with its ports pointed at this folder (the walls stop at `top`; no access lists here).
   const check = (f) => readConfig(f, { top: base, acl: () => null });
@@ -93,12 +94,13 @@ test('the file written is the one the runner\'s own readConfig takes, with setup
     assert.deepEqual(c.deny, [join(B, 'keys'), join(B, 'private'), '/Users/joe']);
     assert.equal(c.pin, PIN);
     assert.deepEqual(Object.keys(c.uids).sort(), Object.keys(DESIGN_PROFILES).sort());
-    for (const [role, uid] of Object.entries(c.uids)) assert.equal(uid, RUNNER_ROLES.includes(role) ? me : OWNER_UID, role);
+    // L1079: the runner's roles write as review, the worker runner's (worker, script) as the builder, the rest as the owner.
+    for (const [role, uid] of Object.entries(c.uids)) assert.equal(uid, RUNNER_ROLES.includes(role) ? me : ['worker', 'script'].includes(role) ? BUILDER_UID : OWNER_UID, role);
     // Launch check 12 (L1001): M11's budget module in the copy, the product's rules snapshot, the worker runner's status file and user.
     assert.equal(c.budget, join(B, 'install/orchestrate/modules/M11-dispatcher/budget.mjs'));
     assert.equal(c.dispatcherRules, join(B, 'products/acme/rules/dispatcher-rules.json'));
     assert.equal(c.workerStatusFile, join(B, 'worker-runner/runner/status.json'));
-    assert.equal(c.workerUid, OWNER_UID);
+    assert.equal(c.workerUid, BUILDER_UID, 'the worker runner\'s user is the builder, never the owner (L1079)');
     assert.equal(c.bobManifest, undefined);
     assert.equal(r.text.includes('2.1.316') && !/"bobManifest"/.test(r.text), true);
   } finally { w.done(); }
@@ -137,8 +139,8 @@ test('the input file may not set a field setup or the pin gives, nor any field t
       ['product not in the setup config', (i) => { i.product = 'other'; }, /product must be one of .*acme, beta/],
       ['relative machineWide', (i) => { i.machineWide = 'settings.json'; }, /machineWide must be the full path/],
       // L909: any file but claude's fixed one, whose guard would never apply.
-      ['another machineWide', (i) => { i.machineWide = '/etc/claude/managed-settings.json'; }, /the input file's machineWide must be \/Library\/Application Support\/ClaudeCode\/managed-settings\.json: claude 2\.1\.322 reads only that file/],
-      ...NEAR_MISSES.map((m) => [`machineWide near miss ${JSON.stringify(m)}`, (i) => { i.machineWide = m; }, new RegExp(`the input file's machineWide must be ${esc(FIXED)}: claude 2\\.1\\.322 reads only that file`)]),
+      ['another machineWide', (i) => { i.machineWide = '/etc/claude/managed-settings.json'; }, /the input file's machineWide must be \/Library\/Application Support\/ClaudeCode\/managed-settings\.json: claude 2\.1\.316 reads only that file/],
+      ...NEAR_MISSES.map((m) => [`machineWide near miss ${JSON.stringify(m)}`, (i) => { i.machineWide = m; }, new RegExp(`the input file's machineWide must be ${esc(FIXED)}: claude 2\\.1\\.316 reads only that file`)]),
       ['a rules list that is not a list', (i) => { i.rules.production.hosts = 'api'; }, /rules\.production\.hosts must be a list/],
       ['an unknown rules part', (i) => { i.rules.extra = {}; }, /rules hold "extra"/],
       ['an unknown rules list', (i) => { i.rules.secrets.more = []; }, /rules\.secrets holds "more"/],
