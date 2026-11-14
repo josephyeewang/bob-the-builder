@@ -34,8 +34,8 @@ test('L719: a Vercel project the start gate refuses is a go/no-go problem, and o
     assert.match(gate(bad).reason, /rules name no Vercel project/, String(bad));
     assert.deepEqual(policyProblems(rulesWith(bad), P), [VERCEL_PROJECT_LINE], JSON.stringify(bad));
   }
-  for (const good of ['prj_1', 'sample-app']) {
-    assert.doesNotMatch(gate(good).reason, /rules name no Vercel project/, good);
+  for (const good of ['prj_1', 'sample-app', 'none']) {
+    assert.doesNotMatch(gate(good).reason ?? '', /rules name no Vercel project/, good);
     assert.deepEqual(policyProblems(rulesWith(good), P), [], good);
   }
   assert.deepEqual(policyProblems({ get: () => { throw new Error('no rules'); } }, P), [VERCEL_PROJECT_LINE]);
