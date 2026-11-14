@@ -23,7 +23,8 @@
 //   { rec, ports: { whoIsSignedIn, readUsage?, probes: { network, reachable, minibase }, github?: { gh, owner, repo } } }
 // (`rec` the real record; the probes from ./probes/, built from the wiring's own config, so no machine, product or
 // account name lives here; `github` the robot's client M6 uses). Exit 0 when the pass ran, 1 when the config or wiring
-// could not be loaded, 2 when the pass ran past RUN_DEADLINE_MS (the script then ends outright so the next start runs).
+// could not be loaded, 2 when the wiring and the pass together ran past RUN_DEADLINE_MS (the script then ends outright so the
+// next start runs). The real wiring is wiring/sensors-wiring.mjs; setup's sensors-setup.mjs writes its config and job.
 
 import { realpathSync } from 'node:fs';
 import { readJobConfig } from '../../shared/job-config.mjs';
@@ -156,22 +157,26 @@ const SELF = realOf(fileURLToPath(import.meta.url));
 
 // `self`: this script's real path, checked as one of the installed copy's code files (audit #144 m4).
 export async function main(argv, { now = () => new Date(), log = (s) => process.stderr.write(`${s}\n`), runDeadlineMs = RUN_DEADLINE_MS, self = SELF } = {}) {
-  let wired;
-  try {
-    if (!argv[0]) throw new Error('usage: loop.mjs <config.json>');
-    const config = readConfig(argv[0], { self });
-    const mod = await import(pathToFileURL(config.wiring).href);
-    if (typeof mod.wire !== 'function') throw new Error('the wiring module has no wire()');
-    wired = await mod.wire(config);
-    if (!wired?.rec || !wired?.ports?.probes || typeof wired.ports.whoIsSignedIn !== 'function') throw new Error('wire() must return { rec, ports: { whoIsSignedIn, probes } }');
-  } catch (e) { log(`sensors: not started: ${e.message}`); return 1; }
+  // One time limit for the whole run, the wiring included: the real wiring opens the Record and reads the rules from GitHub
+  // (sensors-wiring.mjs), and a read that never answers must not hold the job (launchd starts no second copy) for ever (L1049).
   let timer;
   const late = new Promise((ok) => { timer = setTimeout(() => ok({ late: true }), runDeadlineMs); });
-  let r;
-  try { r = await Promise.race([sensorsPass({ ...wired, now }), late]); } finally { clearTimeout(timer); }
-  if (r.late) { log(`sensors: the pass did not finish within ${runDeadlineMs} ms; exiting so the next start can run`); return 2; }
-  for (const p of r.problems) log(`sensors: ${p}`);
-  return 0;
+  try {
+    let wired;
+    try {
+      if (!argv[0]) throw new Error('usage: loop.mjs <config.json>');
+      const config = readConfig(argv[0], { self });
+      const mod = await import(pathToFileURL(config.wiring).href);
+      if (typeof mod.wire !== 'function') throw new Error('the wiring module has no wire()');
+      wired = await Promise.race([mod.wire(config), late]);
+      if (wired?.late) { log(`sensors: the wiring did not finish within ${runDeadlineMs} ms; exiting so the next start can run`); return 2; }
+      if (!wired?.rec || !wired?.ports?.probes || typeof wired.ports.whoIsSignedIn !== 'function') throw new Error('wire() must return { rec, ports: { whoIsSignedIn, probes } }');
+    } catch (e) { log(`sensors: not started: ${e.message}`); return 1; }
+    const r = await Promise.race([sensorsPass({ ...wired, now }), late]);
+    if (r.late) { log(`sensors: the pass did not finish within ${runDeadlineMs} ms; exiting so the next start can run`); return 2; }
+    for (const p of r.problems) log(`sensors: ${p}`);
+    return 0;
+  } finally { clearTimeout(timer); }
 }
 
 if (SELF && process.argv[1] && SELF === realOf(process.argv[1])) {
