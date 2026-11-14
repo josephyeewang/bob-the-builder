@@ -54,6 +54,10 @@ async function undoWorld() {
   // The undo pull request: main with the docs change put back.
   const head = g.commit([merged], { [DOC]: 'one' }, { from: merged });
   g.openPull({ number: 8, head, files: { [DOC]: 'one' } });
+  // The Workshop records the branch's head on the card before it is verified; the gate judges an undo only at the
+  // card's own head (L980, #466 r2 m3), so the card carries it here as in the real flow.
+  const c = env.record.read('card', id);
+  env.store.transaction((tx) => tx.commit([{ entity: 'card', id, doc: { ...c.doc, head } }], { actor: 'test', kind: 'seed' }));
   const ctx = { record: env.record, rules, product: PRODUCT, gh: g.gh, owner: OWNER, repo: REPO, view: makeGitView({ gh: g.gh, owner: OWNER, repo: REPO }),
     now: () => env.clock.t, alert: fakeAlert(), readFact: () => null };
   return { env, rules, ctx, id };

@@ -67,6 +67,10 @@ export const NOT_CHECKED = Object.freeze({
   // review-account (L1211 ruling): it starts nothing that carries a secret today. If it ever gains a start whose command
   // line could carry a secret, it must load the guard, move to PROVED_JOBS and be checked like the rest.
   'review-account': 'it loads no guard: it copies the owner\'s account file and starts only claude\'s status check, with no secret on the line',
+  // builder-wall-check (L1223 ruling), this exact label only: root's by design. builder-wall.mjs reads no secret and starts
+  // only fixed programs (pfctl, launchctl). If it ever reads a secret or starts a program with one, it must load the guard
+  // and be proved here under a root exemption by its exact label, like review-updater.
+  'builder-wall-check': 'it loads no guard: root\'s by design, it reads no secret and starts only pfctl and launchctl, with no secret on the line',
 });
 /** A job whose script writes or connects when it is only loaded is never loaded here: NOT TRIED, with the reason. None today. */
 export const LOAD_WRITES = Object.freeze({});

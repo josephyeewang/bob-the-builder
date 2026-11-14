@@ -124,9 +124,16 @@ deletes anything. Steps, on the Mini, in a new Terminal app window, with your ba
    *Moves the old work out of the base into your home, where `builder` can't read it.*
 4. Paste the same command without `--dry-run`: `sudo /usr/local/bin/node setup.mjs users-folders`.
    *Makes `builder` and hands it the worker folders; it ends with `check`.*
-5. Sign `builder` in to Claude Code once per account it will use: paste `sudo -H -u builder /usr/local/bin/claude` (with
-   `CLAUDE_CONFIG_DIR=<builder's home>/.claude-b` before `/usr/local/bin/claude` for account b), then type `/login` and
-   finish in the browser. *The sign-in lives in `builder`'s home; it is never copied from yours.*
+5. Sign `builder` in to Claude Code once per account it will use, **after Part 2's `add-to-install`** (step 6 doesn't
+   need it, so go on and come back). The program `builder` signs in with is the pinned one in the installed copy, which
+   `add-to-install` puts there (root's, 0755): `<base>/install/orchestrate/claude-code/<pin>/claude`, with `<pin>` the
+   version given to `--pin`. Not a `claude` in your own home (`builder` can't read it), and not `/usr/local/bin/claude`,
+   which setup never makes. With the base `/Library/orchestrate`, in a new Terminal app window, paste
+   `sudo -H -u builder /Library/orchestrate/install/orchestrate/claude-code/<pin>/claude`, then type `/login` and finish in
+   the browser. For account b, paste
+   `sudo -H -u builder env CLAUDE_CONFIG_DIR=/Library/orchestrate/home/builder/.claude-b /Library/orchestrate/install/orchestrate/claude-code/<pin>/claude`
+   and do the same (`env` sets the folder for the program itself, whatever sudo's own rules on such names).
+   *The sign-in lives in `builder`'s home (`<base>/home/builder`); it is never copied from yours.*
 6. Paste `sudo /usr/local/bin/node setup.mjs proofs`. *Must end "all N proofs PASS: containment is proven on this Mac";
    a FAIL or NOT TRIED line says what to fix.*
 
@@ -136,8 +143,8 @@ status file can't be read, is a link, is not a plain file, or lists an entry tha
 with `sudo launchctl bootout system/<label>.worker-runner`), then run `users-folders` again. `daemons check` also FAILs
 while a job file in your own `~/Library/LaunchAgents` starts the worker runner's script, whatever its name (step 1; #528 r2 m7).
 
-Not yet in setup (recorded in the PR): placing the worker runner's job and building its config; until then the job file
-comes from `wiring/runner-job.mjs` by hand.
+The worker runner's config and job are setup's own since #537: `worker-config` writes its `worker-runner.json` and
+`daemons place` its job (Part 6's table, with the `workerRunner` entry).
 
 ## Part 2: the install and the background jobs
 
@@ -420,3 +427,92 @@ too, so it is a code change, never a config edit.
 |---|---|---|
 | `sudo /usr/local/bin/node setup.mjs scanner --from <full path> [--dry-run]` | reads the named program once, refuses it unless its bytes hash to the pin (`ba52fb1bfabbcde42f032afad3d6e0b19dff8ed105229a16e7caa338bbc0e84f`, the program inside the checked tarball), and writes those same bytes as `<base>/scanner/gitleaks` (root:wheel 0755). Beside it, the push step's own rules (`DO_PLANE_TOML`, copied from the code, never retyped) as `gitleaks.toml` and an empty `gitleaksignore`, both root:wheel 0644. A file already exactly right is left; one that drifted (bytes, mode, owner, a second name, an access list) is written again. A scanner folder that is not root's 0755, or has an access list, is refused, never taken over; an empty one of root's (a run cut off before it was secured) is secured again. Then the file rows of `check-scanner` | yes |
 | `node setup.mjs check-scanner` | read only, **without sudo** (it runs the downloaded program, which never runs as root; with sudo it refuses). The folder root:wheel 0755; each file root:wheel, its mode, one name, its hash; no access list on any. Only when all of that passes, the push step's own check (`checkScanner`, which the push runs before every scan): the program's hash, owner, mode and one name (a link is not followed), the rules byte for byte, the ignore file empty, and the program run once with `version`, which must say 8.30.1. Anything else FAILs (exit 1) | no |
+
+## Part 8 — the builder wall (R-0b-179; L1149, L1150, L1193, L1215)
+
+**What it changes.** As root, it turns on the Mac's packet filter (pf) with three rules of its own. Then the `builder`
+user, which runs the worker runner and every worker session, can reach only its **own** listeners on this Mac. It can't
+reach the owner's dev servers, databases or Claude ports, or root's local services, on 127.0.0.1, ::1 or the Mac's own
+address. Everyone else's traffic is untouched, except that other users can't reach a listener of `builder`'s either,
+which is intended (L1154). macOS's own `/etc/pf.conf` is never edited: the rules go into an anchor under the
+`com.apple/*` one it already has. What it places, all root's:
+- the rules file `/private/etc/pf.anchors/orchestrate.builder` (0644);
+- `<base>/builder-wall/` (0700), which keeps the pf on-switch's reference number (`pf-token`);
+- the job `/Library/LaunchDaemons/<label>.builder-wall.plist` (0644). At load, at boot and every 5 minutes, it loads the
+  rules and keeps pf on.
+
+The code, with its known limits, is `builder-wall.mjs` (its header).
+
+**Why it matters for the worker runner.** Before every session start, the worker runner reads the wall's status file
+`<base>/builder-wall-status/status.json` (`wiring/wall-gate.mjs`). It holds every start unless that file says ok, for
+`builder`'s uid and for this copy's rules, and is at most 10 minutes old (two of the check job's 5-minute beats).
+`place` writes that file first. After that, setup's `builder-wall-check` job (`daemons.mjs`, on exactly when the
+config's `workerRunner` entry is) rewrites it at load and every 5 minutes. **Until `place` has run, the status never
+says ok, and the worker runner starts nothing.**
+
+**When.** Run it after the install and `add-to-install` (Part 2), with the `builder` user made (Part 1, L1079), and
+before `daemons load` loads the worker runner. Always run the **installed copy's** script, as below: the status names
+the rules of the script that wrote it, and the worker runner compares them with the copy's.
+
+1. **The dry run, without sudo.** `/usr/local/bin/node <base>/install/orchestrate/setup/builder-wall.mjs place --dry-run`
+   prints a `would:` line for each step, changing nothing: the folder check, the rules file (for `builder`'s uid), the
+   token folder, the job file, and the job's load. A `refused:` line says why it won't run; with one, nothing would change.
+2. **The real run.** `sudo /usr/local/bin/node <base>/install/orchestrate/setup/builder-wall.mjs place`. It prints a
+   `doing:` line per step, then waits up to 15 seconds for the job's first run. Then it reads the wall back, one line per
+   row, and writes the status. **Check:** the exit is 0, and the last row line is `all 46 PASS` (`all 39 PASS` on a Mac
+   with no address but loopback; one row then says only 127.0.0.1 and ::1 were probed). The rows, in order, `<uid>`
+   being `builder`'s:
+   - `PASS  the job <label>.builder-wall ran once and finished well (within 15 seconds of loading)`
+   - `PASS  /private/etc/pf.anchors/orchestrate.builder is the wall's rules for uid <uid>, root's 0644`
+   - `PASS  pf is on (iii)`
+   - `PASS  the pf token in <base>/builder-wall/pf-token is held (iii): pf stays on while the job holds it`
+   - `PASS  the main ruleset reaches com.apple/* (iv)`
+   - `PASS  com.apple/100.orchestrate.builder holds exactly the wall's rules (iv)`
+   - then, for TCP and for UDP, and for each of `IPv4 (127.0.0.1)`, `IPv6 (::1)`, `IPv4 (127.0.0.1, listening on 0.0.0.0)`,
+     `IPv6 (::1, listening on ::)` and `this Mac's own address (<address>)`, four rows (`<where>` is e.g. `TCP IPv4 (127.0.0.1)`):
+     `PASS  builder reaches its own listener on <where> (v; the proxy path)`,
+     `PASS  the owner reaches its own listener on <where> (ii)`,
+     `PASS  the owner still reaches its own listener on <where> after (i) (ii)` and
+     `PASS  builder can NOT reach the owner's listener on <where> (i)`.
+
+   Any `FAIL` row means the wall did not hold, or blocked the owner or `builder`'s own proxy. `place` then takes the wall
+   out again by itself and says what it undid. Its `done:` lines list each step, and a `NOT done:` line names a step to do
+   by hand (the way out, below). It writes the status as not ok and exits 1. Nothing stays half on.
+3. **The check afterwards.** Once `daemons load` has loaded the `builder-wall-check` job with the worker runner:
+   `sudo /usr/local/bin/node setup.mjs daemons check --only builder-wall-check` must print every line PASS. Then, as the owner, without sudo,
+   read the status file with the worker runner's own judgment (the same function its gate runs, from the copy, with
+   `<base>` filled in twice):
+   ```
+   C=<base>/install/orchestrate S=<base>/builder-wall-status/status.json U="$(id -u builder)" /usr/local/bin/node --input-type=module -e '
+   const { C, S, U } = process.env;
+   const { readFileSync } = await import("node:fs");
+   const g = await import(C + "/wiring/wall-gate.mjs");
+   const w = await import(C + "/setup/builder-wall.mjs");
+   const k = await import(C + "/modules/M4-workshop/launcher/install-check.mjs");
+   const why = g.wallProblem({ file: S, wall: g.wallFrom(w), uid: Number(U), chain: (p) => k.chainProblem(p, { owner: 0 }), readRoot: (p) => readFileSync(p, "utf8"), now: Date.now });
+   console.log(why ? "FAIL  " + why : "PASS  the builder wall status is ok, for builder (uid " + U + ") and the rules of this copy, at most 10 minutes old"); process.exit(why ? 1 : 0);'
+   ```
+   **Check:** one `PASS` line, exit 0: the file is root's all the way up, ok, for `builder`'s uid, for this copy's rules,
+   and at most 10 minutes old. A `FAIL` line gives the reason the worker runner would hold a start. The status `place`
+   wrote passes for 10 minutes on its own, so run this after `daemons load` to see the check job's own status. To recheck
+   the wall at any time, run `sudo /usr/local/bin/node <base>/install/orchestrate/setup/builder-wall.mjs check`. It runs
+   the same read-back (`all 45 PASS`, or `all 38 PASS` with no address but loopback), changes no rule, and writes the status.
+4. **The way out** (also printed after every run). With `<label>` and `<base>` from the setup config:
+   ```
+   sudo launchctl bootout system/<label>.builder-wall
+   sudo rm /Library/LaunchDaemons/<label>.builder-wall.plist
+   sudo /sbin/pfctl -a com.apple/100.orchestrate.builder -F rules
+   sudo /sbin/pfctl -X "$(sudo cat <base>/builder-wall/pf-token)"
+   ```
+   These unload the job (so it doesn't come back at boot), empty the wall's rules, and release the wall's hold on pf
+   (pf stays on only if something else holds it). If `<base>/builder-wall/pf-enable-unread` is there, the job once got no
+   readable token from `pfctl -E`. Find that hold with `sudo pfctl -s References` and release it with `sudo pfctl -X <number>`.
+   **The worker runner then holds every start** (the check job keeps writing ok false), until the wall is placed again
+   or both jobs are unloaded: `sudo /usr/local/bin/node setup.mjs daemons unload --only worker-runner`, then
+   `sudo /usr/local/bin/node setup.mjs daemons unload --only builder-wall-check`.
+
+| Command | What it does | Root? |
+|---|---|---|
+| `/usr/local/bin/node <base>/install/orchestrate/setup/builder-wall.mjs place --dry-run` | prints each step `place` would take; changes nothing | no |
+| `sudo /usr/local/bin/node <base>/install/orchestrate/setup/builder-wall.mjs place` | puts the rules, the token folder and the job in place, loads the job (which turns pf on and holds it), waits for its first run, reads the wall back and writes the status. Any FAIL takes the wall out again. Safe to run again: what is already right is left, and the job is reloaded | yes |
+| `sudo /usr/local/bin/node <base>/install/orchestrate/setup/builder-wall.mjs check` | the read-back alone, and the status. The `builder-wall-check` job runs this every 5 minutes | yes |

@@ -11,6 +11,7 @@ import { tempDir } from '../../shared/test-tmp.mjs';
 import { chainProblem, currentCopy } from '../../modules/M4-workshop/launcher/install-check.mjs';
 import { INSTALL_MARK, REFUSED_CODE } from '../../shared/secret-guard.mjs';
 import { ALL_JOBS, DAEMON_DIR, plistTexts } from '../daemons.mjs';
+import { WALL_CHECK_JOB } from '../builder-wall.mjs';
 import { ROOT_CONFIG_PATH } from '../layout.mjs';
 import { parseInstallConfig } from '../install.mjs';
 import { main as setupMain } from '../setup.mjs';
@@ -347,4 +348,6 @@ test('r1 m4: a temp folder, a thread, a datagram, a name lookup or a listener at
 
 test('r1 m5: every job daemons.mjs knows is either proved or left out with its reason, and no other', () => {
   assert.deepEqual([...Object.keys(PROVED_JOBS), ...Object.keys(NOT_CHECKED)].sort(), [...ALL_JOBS].sort());
+  assert.equal(Object.keys(PROVED_JOBS).length + Object.keys(NOT_CHECKED).length, 9, 'eight jobs and the wall check');
+  assert.ok(Object.hasOwn(NOT_CHECKED, WALL_CHECK_JOB), 'the wall check is left out by its exact label (L1223)');
 });
