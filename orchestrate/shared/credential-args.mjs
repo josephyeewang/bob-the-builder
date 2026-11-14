@@ -43,8 +43,8 @@
 //                                  index into an environment (`env[k]`, `childEnv[k]`, with what is put into it by index
 //                                  or Object.assign) does not pass on its name (r6 3); one element of a list of tokens
 //                                  (`tokens[0].value`, `const [t] = tokens`, `for (const t of tokens)`) is read as one (r6 5);
-//                                - a parameter is read at each caller (r3 M2), its property `o.v` too, with the caller's
-//                                  object read for its values;
+//                                - a parameter is read at each caller (r3 M2), and its default (r8), its property `o.v`
+//                                  too, with the caller's object read for its values;
 //                                - any other name through every value this module gives it (`const t =
 //                                  process.env.GH_TOKEN` makes t one, r3 m3; destructured and loop names too), and a
 //                                  property set on it under a credential's name (`u.password = t`) is a finding;
@@ -59,7 +59,11 @@
 //                                  `values(x)` read x's values, so a name like `env` does not pass there.
 //                                Destructuring is read with its brackets balanced (`const { env = {} } = X`, r7 M1), and
 //                                process under any spelling (required or imported from node:process, its default import,
-//                                `(process)`, `globalThis.process`) is process (r7 M2, M3, M5).
+//                                `(process)`, `globalThis.process`) is process (r7 M2, M3, M5), and so is its `.default`
+//                                (r8 M2). A value is read with the chain's tail (#556 r8): `p.env.X` where p is given
+//                                process, by a name, a pattern's path or default, a caller, or a parameter's default, and
+//                                `(a ? b : c).env.X`, `(a || b).env.X`, `(await p).env.X` for each value. process itself
+//                                as a value, where no tail is carried, is listed.
 //                                Anything else (a program's answer, a file's text, an `await` of an object's method, a
 //                                name given no value here) is listed.
 //   everything else              listed as `unread`: a list or word from a helper exported or called as a method (its
@@ -280,34 +284,64 @@ function firstArray(call) {
   return null;
 }
 
-/** The top-level arguments of a call's parentheses, as text. */
 /**
- * Every destructuring declaration (`const { a, b: c = {} } = X`, `let [d] = X`) found in `code` (the source with its
- * strings blanked), its pattern read with brackets balanced, so a default that is itself an object or list (`{ env = {} }`,
- * `{ env: e = {} }`) does not end it (#556 r7 M1): { at, end, open, parts: [{ key, name, rest }], rhs }. `rhs` is where the
- * value starts. A part that is itself a pattern has no name (nested destructuring is listed, not read).
+ * Every destructuring pattern given a value: a declaration (`const { a, b: c = d } = X`, `let [e] = X`) or a statement that
+ * is an assignment (`({ env = {} } = process);`, #556 r8 M6). The pattern is found with its brackets balanced on `code`
+ * (the source with its strings blanked, so a `}` in a string or regular expression does not end it, r7 M1) and its parts
+ * are read on `src`. Each name it binds comes with its path into the value (`.b`, `[0]` for an element, `.b.c` for a
+ * nested pattern, r8 c2) and its default when it has one: a default is one more value the name may take (r8 M1).
+ * { at, start, end, rhs, names: [{ name, path, rest, dflt }] }; `rhs` is where the value starts.
  */
-function destructuresIn(code) {
+function destructuresIn(code, src) {
   const out = [];
-  for (const m of code.matchAll(/(?<![\w$.])(?:const|let|var)\s*(?=[{[])/g)) {
-    const open = m.index + m[0].length;
+  const opens = [
+    ...[...code.matchAll(/(?<![\w$.])(?:const|let|var)\s*(?=[{[])/g)].map((m) => [m.index, m.index + m[0].length]),
+    ...[...code.matchAll(/(?:^|[;{}])\s*\(\s*(?=[{[])/g)].map((m) => [m.index, m.index + m[0].length]),
+  ];
+  for (const [at, open] of opens) {
     const pat = balanced(code, open);
     if (!pat) continue;
     const eq = /^\s*=(?![=>])\s*/.exec(code.slice(open + pat.length));
     if (!eq) continue;
-    const parts = callArgs(pat).map((part, i) => {
-      const rest = part.startsWith('...');
-      const body = rest ? part.slice(3).trim() : part;
-      if (pat[0] === '[') { const x = /^([A-Za-z_$][\w$]*)\s*(?:=[\s\S]*)?$/.exec(body); return { key: String(i), name: x?.[1] ?? null, rest }; }
-      const x = /^([A-Za-z_$][\w$]*)\s*(?::\s*([\s\S]*))?$/.exec(body.replace(/^([A-Za-z_$][\w$]*)\s*=[\s\S]*$/, '$1'));
-      if (!x) return { key: null, name: null, rest };
-      if (x[2] === undefined) return { key: x[1], name: x[1], rest };
-      const t = /^([A-Za-z_$][\w$]*)\s*(?:=[\s\S]*)?$/.exec(x[2].trim());
-      return { key: x[1], name: t?.[1] ?? null, rest };
-    });
-    out.push({ at: m.index, start: open, end: open + pat.length, open: pat[0], parts, rhs: open + pat.length + eq[0].length });
+    const names = [];
+    bindPattern(src.slice(open, open + pat.length), '', names);
+    out.push({ at, start: open, end: open + pat.length, rhs: open + pat.length + eq[0].length, names });
   }
   return out;
+}
+/** A target and its default (`e = {}` gives ['e', '{}']): the first `=` outside brackets that is not `==`, `=>`, `<=`, `>=`, `!=`. */
+function splitDefault(t) {
+  let depth = 0;
+  for (let i = 0; i < t.length; i++) {
+    const c = t[i];
+    if (c === "'" || c === '"') { const q = c; i++; while (i < t.length && t[i] !== q) { if (t[i] === '\\') i++; i++; } continue; }
+    if (c === '`') { const e = templateEnd(t, i); if (e < 0) break; i = e; continue; }
+    if ('([{'.includes(c)) depth++;
+    else if (')]}'.includes(c)) depth--;
+    else if (!depth && c === '=' && t[i + 1] !== '=' && t[i + 1] !== '>' && !'=!<>'.includes(t[i - 1])) return [t.slice(0, i).trim(), t.slice(i + 1).trim()];
+  }
+  return [t.trim(), null];
+}
+/** The names a pattern binds, each with its path into the value, under `path`. */
+function bindPattern(pat, path, out) {
+  const arr = pat[0] === '[';
+  for (const part of callArgs(pat)) {
+    const rest = part.startsWith('...'); const body = rest ? part.slice(3).trim() : part;
+    let target = body; let key = '[0]';
+    if (!arr) {
+      // A key written as a name, a string, or a string in brackets (`['env']`, r8) is that key; any other computed key is
+      // read as an index (a stated limit: which key it is is not known here).
+      const k = /^(?:([A-Za-z_$][\w$]*)|(['"])([^'"]*)\2|\[\s*(['"])([^'"]*)\4\s*\]|\[[^\]]*\])\s*(:)?/.exec(body);
+      if (!k) continue;
+      const name = k[1] ?? k[3] ?? k[5];
+      key = name !== undefined ? `.${name}` : '[0]';
+      if (k[6]) target = body.slice(k[0].length).trim();
+    }
+    const [t, dflt] = splitDefault(target);
+    const sub = rest ? path : `${path}${key}`;
+    if (/^[{[]/.test(t)) bindPattern(t, sub, out);
+    else if (/^[A-Za-z_$][\w$]*$/.test(t)) out.push({ name: t, path: sub, rest, dflt });
+  }
 }
 
 /**
@@ -317,7 +351,7 @@ function destructuresIn(code) {
  */
 export function plainProcess(expr) {
   let x = String(expr).replace(/\s+/g, '')
-    .replace(/(?:await)?(?:require|import)\((['"])(?:node:)?process\1\)/g, 'process')
+    .replace(/(?:await)?(?:require|import)\((['"`])(?:node:)?process\1(?:,[^()]*)?\)/g, 'process')
     .replace(/(?<![\w$.])globalThis\.process(?![\w$])/g, 'process');
   for (let i = 0; i < 8; i++) {
     const y = x.replace(/\(([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\)/g, (all, inner, at) => (at > 0 && /[\w$\])]/.test(x[at - 1]) ? all : inner));
@@ -327,6 +361,7 @@ export function plainProcess(expr) {
   return x;
 }
 
+/** The top-level arguments of a call's parentheses, as text. */
 function callArgs(call) {
   const args = []; let depth = 0; let start = 1;
   for (let i = 1; i < call.length - 1; i++) {
@@ -387,6 +422,8 @@ const escape = (s) => s.replace(/[$]/g, '\\$');
 const NAME_RE = /^[A-Za-z_$][\w$]*$/;
 /** A plain name chain, `a` or `a.b.c`. */
 const CHAIN_RE = /^[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*$/;
+/** A tail of properties and indexes only (`.env.X`, `[0].value`), with no call in it. */
+const TAIL_RE = /^(?:\s*\??\.\s*[A-Za-z_$][\w$]*|\s*\[[^\]\n]*\])+\s*$/;
 /** Environment variables that hold a place, a name or a setting, never a credential: process.env.X passes only for these. */
 const SAFE_ENV = /^(?:HOME|PATH|TMPDIR|USER|LOGNAME|SUDO_USER|SUDO_UID|SUDO_GID|SHELL|PWD|LANG|LC_ALL|LC_CTYPE|TERM|TZ|NODE_ENV|CI|XDG_[A-Z_]+_HOME)$/;
 
@@ -415,9 +452,9 @@ function exprEnd(src, b) {
   return src.length;
 }
 
-/** A parameter list's names, in order: { name, rest }; a destructured one has no name. */
+/** A parameter list's names, in order: { name, rest, dflt }; a destructured one has no name. `dflt` is its default. */
 function paramsOf(text) {
-  return callArgs(`(${text})`).map((p) => { const m = /^(\.\.\.)?\s*([A-Za-z_$][\w$]*)\s*(?:=|$)/.exec(p); return m ? { name: m[2], rest: Boolean(m[1]) } : { name: null, rest: false }; });
+  return callArgs(`(${text})`).map((p) => { const m = /^(\.\.\.)?\s*([A-Za-z_$][\w$]*)\s*(?:=([\s\S]*)|$)/.exec(p); return m ? { name: m[2], rest: Boolean(m[1]), dflt: m[3]?.trim() || '' } : { name: null, rest: false, dflt: '' }; });
 }
 
 /**
@@ -527,7 +564,12 @@ const safeCall = (f) => (SAFE_END.test(f) && !/(?:env|vars?|files?|source)$/i.te
  * a lowercase letter, or by the end: so `reader` and `category` are not verbs, and `READTokenPath` is.
  */
 export const READ_VERBS = Object.freeze(['read', 'load', 'get', 'fetch', 'cat', 'decrypt', 'retrieve', 'unseal', 'open']);
-const READ_START = new RegExp(`^[_$]*(?:${READ_VERBS.map((v) => [...v].map((ch) => `[${ch.toUpperCase()}${ch}]`).join('')).join('|')})(?![a-z])`);
+const READ_ANYCASE = READ_VERBS.map((v) => [...v].map((ch) => `[${ch.toUpperCase()}${ch}]`).join('')).join('|');
+const READ_CAP = READ_VERBS.map((v) => `${v[0].toUpperCase()}${v.slice(1)}`).join('|');
+// At the start in any case, or later in the name as its own word (`tryReadTokenPath`, `doLoadPath`, `x_read_path`), and
+// with -s or -es (`readsPath`, `fetchesKey`, #556 r8 m4). A name all in lower case (`readtokenpath`) can't be split into
+// words, so it is a stated limit; the runtime guard still refuses its value on a command line.
+const READ_START = new RegExp(`(?:^[_$]*(?:${READ_ANYCASE})|(?<=[a-z\\d])(?:${READ_CAP})|_(?:${READ_ANYCASE}))(?:e?s)?(?![a-z])`);
 /** Methods that take nothing and answer with a place, a time, an id or a number. */
 const NOARG_SAFE = /^(?:tmpdir|homedir|cwd|now|hostname|platform|arch|getuid|getgid|geteuid|getegid|randomUUID|uptime|toISOString|getTime|toJSON)$/;
 /** Global functions that reshape their argument. */
@@ -690,7 +732,7 @@ export function credentialArgFindings(text) {
     .sort((a, b) => (a.end - a.start) - (b.end - b.start))[0] ?? null;
   /** Every value a name is given in this module (`const X = …`, `X = …`), with where: { at, expr }. */
   const assignCache = new Map();
-  const patterns = destructuresIn(code);
+  const patterns = destructuresIn(code, src);
   const assigns = (n) => {
     if (!assignCache.has(n)) {
       // A default inside a pattern (`const { env = {} } = X`) is not a value given to the name here (#556 r7 M1).
@@ -699,14 +741,13 @@ export function credentialArgFindings(text) {
         .map((m) => { const s = m.index + m[0].length; return { at: m.index, expr: src.slice(s, exprEnd(src, s)).trim() }; }).filter((x) => x.expr));
       // `const { a, b: n = d } = X` gives n X.b; `const [n] = X` and `for (const n of X)` give n what X holds (read as X).
       for (const p of patterns) {
-        for (const part of p.parts) {
-          if (part.name !== n) continue;
+        for (const b of p.names) {
+          if (b.name !== n) continue;
           const rhs = src.slice(p.rhs, exprEnd(src, p.rhs)).trim();
-          // A plain chain keeps its parts (`const { env } = process` gives env process.env, r6 1); `const [n] = X` is X[0] (r6 5).
-          const chain = CHAIN_RE.test(rhs);
-          const expr = p.open === '{' ? (part.rest ? rhs : chain ? `${rhs}.${part.key}` : `(${rhs}).${part.key}`)
-            : (!part.rest && chain ? `${rhs}[0]` : rhs);
-          if (rhs) assignCache.get(n).push({ at: p.at, expr });
+          // The value at the name's path (`const { env } = process` gives env process.env, r6 1; `const [n] = X` is X[0],
+          // r6 5), and its default, one more value it may take (r8 M1).
+          if (rhs) assignCache.get(n).push({ at: p.at, expr: !b.path || (b.path === '[0]' && !CHAIN_RE.test(rhs)) ? rhs : CHAIN_RE.test(rhs) ? `${rhs}${b.path}` : `(${rhs})${b.path}` });
+          if (b.dflt) assignCache.get(n).push({ at: p.at, expr: b.dflt });
         }
       }
       for (const m of src.matchAll(new RegExp(`for\\s*(?:await\\s*)?\\(\\s*(?:const|let|var)\\s*(?:${escape(n)}|\\[[^\\]]*\\b${escape(n)}\\b[^\\]]*\\]|\\{[^}]*\\b${escape(n)}\\b[^}]*\\})\\s+of\\s+`, 'g'))) {
@@ -785,8 +826,21 @@ export function credentialArgFindings(text) {
   // that says it is a credential is a finding; a parameter is followed to its callers; a name this module gives a value
   // is read through that value (`const t = process.env.GH_TOKEN` makes t one); a name that says what it is (a path, a
   // count, a switch) passes. A list or a command string that can not be read to its end is listed `unread`, never passed.
-  const forwards = new Map(); const queue = []; const seenLists = new Set();
-  const forward = (d, k, mode, at, label, level, n) => {
+  const forwards = new Map(); const queue = []; const seenLists = new Set(); const tailJobs = new Set();
+  const forward = (d, k, mode, at, label, level, n, tail = '') => {
+    // A parameter's default is one more value it may take (`function f(p = process)`, #556 r8): read like a caller's.
+    const dflt = mode === 'word' ? d.params[k].dflt : '';
+    if (dflt && level < HELPER_DEPTH) {
+      if (tail) { quiet++; try { leaf(`(${dflt})${tail}`, d.at, level + 1, label, null, new Set()); } finally { quiet--; } }
+      if (!quiet) word(dflt, d.at, level + 1, label, null, new Set());
+    }
+    // A parameter used with a tail (`p.env.X`) has each caller's argument read with that tail too, for credentials only
+    // (#556 r8, the tailed read across a helper): `f(process)` for `p.env.X` is process.env.X.
+    if (tail && mode === 'word' && d.name && !d.method && !d.params[k].rest && level < HELPER_DEPTH) {
+      const key = `${d.start} ${k} ${tail}`;
+      if (!tailJobs.has(key)) { tailJobs.add(key); queue.push({ d, k, mode, rest: false, label, level: level + 1, tail }); }
+    }
+    if (quiet) return undefined;   // a tailed read (looking for credentials only) lists nothing and starts no other reading
     if (level >= HELPER_DEPTH) return push(at, 'unread', `${label}: passed on through more than ${HELPER_DEPTH} helpers`, n);
     // Called from other modules (exported, or a method): covered only when the name is itself a start call, read at every
     // call in the tree. Listed at each place its parameter reaches, as the list or a word in it (#556 r4 M-C).
@@ -805,17 +859,22 @@ export function credentialArgFindings(text) {
     ...[...src.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:require|await\s+import)\s*\(/g)].map((m) => m[1]),
   ]);
   const imported = (n) => importedNames.has(n);
+  // A name given a module's value by a require or a dynamic import, such as a JSON file's data, is followed to that
+  // value when it is used as one, so its data is not passed as code another module wrote (#556 r8 m1).
+  const loadedNames = new Set([...code.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*=\s*(?:await\s+)?(?:require|import)\s*\(/g)].map((m) => m[1]));
   // Names for process and process.env (r6 1, 2): imported from node:process, required, or given process or a part of it.
   const PROC_FROM = `['"](?:node:)?process['"]`;
   const procNames = new Map();
-  // `import { default as p }` is process itself (r7 M3); `import proc, { env } from` gives both names (r7 c3).
+  // `import { default as p }` is process.default, which is process (r7 M3, processChain); a quoted name is its name
+  // (`{ 'env' as E }`, r8 M5); `import proc, { env } from` gives both names (r7 c3).
   for (const m of src.matchAll(new RegExp(`import\\s*(?:[A-Za-z_$][\\w$]*\\s*,\\s*)?\\{([^}]*)\\}\\s*from\\s*${PROC_FROM}`, 'g'))) {
-    for (const x of m[1].split(',')) { const [a, b] = x.trim().split(/\s+as\s+/); if (a) procNames.set(b ?? a, a === 'default' ? 'process' : `process.${a}`); }
+    for (const x of m[1].split(',')) { const [q, b] = x.trim().split(/\s+as\s+/); const a = q?.replace(/^(['"])(.*)\1$/, '$2'); if (a) procNames.set(b ?? a, `process.${a}`); }
   }
   for (const m of src.matchAll(new RegExp(`import\\s+(?:\\*\\s*as\\s+)?([A-Za-z_$][\\w$]*)\\s*(?:,\\s*\\{[^}]*\\}\\s*)?from\\s*${PROC_FROM}`, 'g'))) procNames.set(m[1], 'process');
   // A name given process by a require (and `.env` after it) is read through its value by plainProcess (r7 M2).
   const processChain = (c, at, depth = 0) => {
     if (c[0] === 'globalThis' && c[1] === 'process') return processChain(c.slice(1), at, depth + 1);
+    if (c[0] === 'process' && c[1] === 'default') return processChain([c[0], ...c.slice(2)], at, depth + 1);   // r8 M2
     if (c[0] === 'process' || depth > 4) return c;
     if (procNames.has(c[0])) return processChain([...procNames.get(c[0]).split('.'), ...c.slice(1)], at, depth + 1);
     if (declaring(at, c[0])) return c;
@@ -825,7 +884,7 @@ export function credentialArgFindings(text) {
     // Only a name for process or process.env itself: `const t = process.env.X` is read through its value as before.
     for (const x of named) {
       const r = processChain(x.split('.'), at, depth + 1);
-      if (r[0] === 'process' && (r.length === 1 || (r.length === 2 && r[1] === 'env'))) return [...r, ...c.slice(1)];
+      if (r[0] === 'process' && (r.length === 1 || (r.length === 2 && r[1] === 'env'))) return processChain([...r, ...c.slice(1)], at, depth + 1);
     }
     return c;
   };
@@ -834,12 +893,32 @@ export function credentialArgFindings(text) {
   /** A word leaf followed to its end (#556 r4 M-A): this module's helper is read through its returns (its parameters bound
    * to the call's arguments); a call that only reshapes its inputs (TRANSFORM) is read through them; anything else is
    * listed. `what` names the leaf in the listing. */
-  const unreadLeaf = (at, label, what, text) => push(at, 'unread', `${label}: ${what}`, text);
+  // While `quiet` is above 0 a read only looks for credentials: nothing is listed (the tailed read of a value, below).
+  let quiet = 0;
+  const unreadLeaf = (at, label, what, text) => (quiet ? undefined : push(at, 'unread', `${label}: ${what}`, text));
   const leaf = (expr, at, level, label, env, seen) => {
     let e = expr.trim().replace(/^\.\.\.\s*/, '');
     if (!e || isFunction(e)) return undefined;
-    // A require or awaited dynamic import of process, then `.env.X`, is process.env.X (r7 M2, c3).
-    if (/(?:require|import)\s*\(\s*['"](?:node:)?process['"]\s*\)/.test(e) && CHAIN_RE.test(plainProcess(e))) e = plainProcess(e);
+    // A bracketed start keeps its tail (#556 r8 M3): `(X).a.b` is read as X.a.b for each value X may take, each branch of
+    // a ternary and each operand of || ?? &&, and X after an await. One that is not a single value is read as before.
+    const lead = e.startsWith('(') ? balanced(e, 0) : null;
+    if (lead && lead.length < e.length && TAIL_RE.test(e.slice(lead.length))) {
+      const tail = e.slice(lead.length).trim(); const inner0 = lead.slice(1, -1).trim();
+      const t = ternary(inner0);
+      if (t) return t.forEach((x) => leaf(`(${x})${tail}`, at, level, label, env, seen));
+      const top0 = operators(inner0);
+      if (top0?.logic.length) return cut(inner0, top0.logic).forEach((x) => leaf(`(${x.trim()})${tail}`, at, level, label, env, seen));
+      const inner = inner0.replace(/^await\b\s*/, '');
+      const top1 = operators(inner);
+      if (top1 && !top1.logic.length && !top1.compare && !top1.plus.length && !top1.arith && postfix(inner)) return leaf(`${inner}${tail}`, at, level, label, env, seen);
+    }
+    // A require or dynamic import of process or node:process, in any quotes, is process (r7 M2, r8 M4); its `.default` is
+    // process too, read where every chain is (processChain, r8 M2).
+    const load = /^(?:require|import)\s*\(/.exec(e);
+    if (load) {
+      const b = balanced(e, load[0].length - 1);
+      if (b && /^(['"`])(?:node:)?process\1$/.test(callArgs(b)[0] ?? '')) e = `process${e.slice(load[0].length - 1 + b.length)}`;
+    }
     if (e.startsWith('(') && balanced(e, 0)?.length === e.length) return leaf(e.slice(1, -1), at, level, label, env, seen);
     const t = ternary(e);
     if (t) { leaf(t[0], at, level, label, env, seen); return leaf(t[1], at, level, label, env, seen); }
@@ -865,6 +944,11 @@ export function credentialArgFindings(text) {
         // One element of a list named tokens (`tokens[0]`) is a token (r5 m-b); `tokens[0].value` is a finding in nameChain (r6 5).
         if (indexed && /tokens$/i.test(c.at(-1))) return unreadLeaf(at, label, `${short(e)} is one of a list of tokens`, e);
         return nameChain(c, at, level, label, env, seen, false, indexed);
+      }
+      // An element of a written-out list keeps its tail (`[process][0].env.X`, r8 M3).
+      if (p.root.type === 'arr' && p.ops[0]?.type === 'index' && p.ops.length > 1) {
+        const tail = e.slice(p.ops[0].end);
+        return callArgs(`(${p.root.text.slice(1, -1)})`).forEach((x) => leaf(x.startsWith('...') ? x.slice(3) : `(${x})${tail}`, at, level, label, env, seen));
       }
       return rootLeaves(p.root, at, level, label, env, seen);
     }
@@ -899,6 +983,12 @@ export function credentialArgFindings(text) {
       }
       // One of a list of tokens picked by a method (`tokens.at(0)`, `tokens.find(…)`, r7 c1).
       if (/^(?:at|find|findLast|filter)$/.test(last.name) && /tokens$/i.test(recv.trim())) return unreadLeaf(at, label, `${short(callText)} is one of a list of tokens`, callText);
+      // What an element picker or a list method answers keeps the tail after the call (`[process].find(f).env.X`, r8 m3).
+      const after = callAt >= 0 ? e.slice(p.ops[callAt].end) : '';
+      if (after.trim() && TAIL_RE.test(after) && /^(?:find|findLast|at|pop|shift|filter|slice|sort|reverse|flat|concat)$/.test(last.name) && !isNew) {
+        leaf(`(${recv})${/^(?:find|findLast|at|pop|shift)$/.test(last.name) ? '[0]' : ''}${after.trim()}`, at, level, label, env, seen);
+        return argLeaves(CALLBACK_OK.test(last.name));
+      }
       if (TRANSFORM.test(last.name) && !isNew) { leaf(recv, at, level, label, env, seen); return argLeaves(CALLBACK_OK.test(last.name)); }
       if (NOARG_SAFE.test(last.name) && !args.length) return undefined;
       if (DIGEST.test(last.name) || safeCall(last.name)) return undefined;
@@ -918,6 +1008,9 @@ export function credentialArgFindings(text) {
     // 'node:process'`, r6 1, 2) is read as what it names.
     const c = processChain(c0, at);
     const n = c[0];
+    // process itself as a value (handed to a helper, returned, put in an object or a list) is listed: its environment
+    // is in reach by any tail the scan may not carry (#556 r8, failing closed past the tailed read).
+    if (n === 'process' && c.length === 1) return unreadLeaf(at, label, 'process as a value: its environment can be reached from it', n);
     // process.env (#556 r5 M1): a variable is a finding unless its name is one of the plain ones; the whole environment
     // as a value (spread, Object.entries, JSON.stringify, an index `env[k]`) is listed.
     if (n === 'process' && c[1] === 'env') {
@@ -928,7 +1021,7 @@ export function credentialArgFindings(text) {
     // An indexed chain's credential name is not in the list's text as one chain (`tokens[0].value`), so it is a finding here (r6 5).
     if (credName(c) && indexed) return push(at, 'value', c.join('.'), c.join('.'));
     if (QUIET.test(n) || credName(c) || local.has(n)) return undefined;
-    if (imported(n)) return values || indexed ? unreadLeaf(at, label, `${n}'s values become words, and ${n} comes from another module`, n) : undefined;
+    if (imported(n) && !loadedNames.has(n)) return values || indexed ? unreadLeaf(at, label, `${n}'s values become words, and ${n} comes from another module`, n) : undefined;
     // A plain name that says what it is passes; `env.X` or `cfg.value` is read by its last part, not its first (r5 M3).
     // An index into an environment (`env[k]`, `gitEnv[0]`, `childEnv[k]`) is one of its values, so that name does not
     // pass on what it says (r6 3); one element of a list of files is still a file.
@@ -937,9 +1030,12 @@ export function credentialArgFindings(text) {
     if (c.length > 1 && !/(?:env|vars?)$/i.test(c.at(-1)) && (SAFE_END.test(c.at(-1)) || SAFE_START.test(c.at(-1)))) return undefined;
     if (seen.has(n)) return undefined;
     seen.add(n);
-    if (env?.has(n)) { const b = env.get(n); return leaf(b.expr, b.at, level, label, b.env, seen); }
+    // A value is read with the chain's tail (`p.env.X` with p given process is process.env.X, #556 r8): never the name alone.
+    // The value is also read as it was, for what it lists, so a value met at several properties is listed once.
+    const tailed = (x, xat, xenv) => { if (c.length < 2) return; quiet++; try { leaf(`(${x})${c.slice(1).map((k) => `.${k}`).join('')}`, xat, level, label, xenv, new Set(seen)); } finally { quiet--; } };
+    if (env?.has(n)) { const b = env.get(n); tailed(b.expr, b.at, b.env); return leaf(b.expr, b.at, level, label, b.env, seen); }
     const d = declaring(at, n); const k = d ? d.params.findIndex((p) => p.name === n) : -1;
-    if (k >= 0) return forward(d, k, 'word', at, label, level, n);
+    if (k >= 0) return forward(d, k, 'word', at, label, level, n, c.slice(1).map((x) => `.${x}`).join(''));
     const as = assigns(n).filter((a) => !isFunction(a.expr));
     const sets = c.length > 1 ? [...code.matchAll(new RegExp(`(?<![\\w$.])${escape(n)}\\s*\\.\\s*([A-Za-z_$][\\w$]*)\\s*=(?![=>])\\s*`, 'g'))] : [];
     // What is put into it by index or Object.assign (`childEnv[k] = process.env[k]`, r6 3) is read when it is indexed or
@@ -951,6 +1047,7 @@ export function credentialArgFindings(text) {
       }),
     ] : [];
     if (!as.length && !sets.length && !fills.length) return unreadLeaf(at, label, `${n} is given no value here that is read`, n);
+    for (const a of as) tailed(a.expr, a.at, null);
     for (const a of [...as, ...fills]) word(a.expr, a.at, level, label, null, seen);
     for (const m of sets) {
       // A credential set on it under its own name (`u.password = t`) is one, whatever t says it is.
@@ -962,9 +1059,10 @@ export function credentialArgFindings(text) {
   /** Each word of `expr`, read to its leaves: what it says (flags, names) and what each leaf holds. */
   // A value of this module (no parameters bound) is read once, at the shallowest depth it is met: a list is listed once,
   // where it is, under the first start call it reaches.
-  const wordDone = new Map();
+  const wordDone = new Map(); const quietDone = new Map();
   const word = (expr, at, level, label, env = null, seen = new Set()) => {
-    if (!env) { const k = `${at} ${expr}`; if (wordDone.get(k) <= level) return; wordDone.set(k, level); }
+    // A tailed read (quiet) leaves the once-only record alone, so the value's own read still lists what it lists.
+    if (!env) { const k = `${at} ${expr}`; const done = quiet ? quietDone : wordDone; if (done.get(k) <= level) return; done.set(k, level); }
     add(at, `[${expr}]`); leaf(expr, at, level, label, env, seen);
   };
   const resolve = (expr, at, label, level, env = null) => {
@@ -1055,18 +1153,19 @@ export function credentialArgFindings(text) {
   }
   // The helpers that pass a list, or a word, on: each is read at its callers here, up to HELPER_DEPTH deep.
   while (queue.length) {
-    const { d, k, mode, rest, label, level } = queue.shift();
+    const { d, k, mode, rest, label, level, tail } = queue.shift();
     if (d.method) continue;
     const by = [d.name, ...aliasesOf(d.name)].map(escape).join('|');
     const callers = [...src.matchAll(new RegExp(`(?<![\\w$.])(?:${by})\\s*\\(`, 'g'))]
       .filter((m) => !/function\s*\*?\s*$/.test(src.slice(Math.max(0, m.index - 12), m.index)) && !(m.index >= d.at && m.index < d.start));
-    if (!callers.length && !exported(d.name)) { push(d.at, 'unread', `${d.name} passes its ${mode === 'list' ? 'list' : 'words'} on, and is not called here (it may be handed on as a value)`, src.slice(d.at, d.at + 80)); continue; }
+    if (!callers.length && !exported(d.name)) { if (!tail) push(d.at, 'unread', `${d.name} passes its ${mode === 'list' ? 'list' : 'words'} on, and is not called here (it may be handed on as a value)`, src.slice(d.at, d.at + 80)); continue; }
     for (const m of callers) {
       const call = balanced(src, m.index + m[0].length - 1); if (!call) continue;
       const args = callArgs(call);
       const items = rest ? args.slice(k) : args.slice(k, k + 1);
       for (const x of items) {
         const lab = `${d.name}(…, ${short(x)})`;
+        if (tail) { quiet++; try { leaf(`(${x})${tail}`, m.index, level, lab, null, new Set()); } finally { quiet--; } continue; }
         // An object handed where a word is taken from it (`f({ v: token })` for `o.v`) is read for its values.
         if (OTHER.test(x) && !(mode === 'word' && x.startsWith('{'))) continue;
         if (mode === 'word' || (rest && !x.startsWith('...'))) word(x.replace(/^\.\.\./, ''), m.index, level, lab);
@@ -1109,7 +1208,7 @@ export function credentialArgFindings(text) {
     ...[...top.matchAll(/(?<![\w$.])(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=(?![=>])\s*/g)]
       .filter((m) => !patterns.some((p) => p.start <= m.index && m.index < p.end))
       .map((m) => ({ names: [m[1]], start: m.index, end: exprEnd(src, m.index + m[0].length) })),
-    ...topPatterns.map((p) => ({ names: p.parts.map((x) => x.name).filter(Boolean), start: p.at, end: exprEnd(src, p.rhs) })),
+    ...topPatterns.map((p) => ({ names: p.names.map((x) => x.name), start: p.at, end: exprEnd(src, p.rhs) })),
   ].filter((r) => readsCredential(src.slice(r.start, r.end)));
   const readNames = topReads.flatMap((r) => r.names);
   const usesRead = (t) => readNames.some((n) => new RegExp(`(?<![\\w$.])${escape(n)}(?![\\w$])`).test(t));

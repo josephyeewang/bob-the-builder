@@ -209,6 +209,8 @@ const REVIEWED = {
   "setup/users-folders.mjs unread planFolders's io reaches aclOp(…, io), and planFolders is called from other modules @1120115e #2": SETUP_IO,
   "setup/users-folders.mjs unread plan's io reaches planFolders(…, io), and plan is called from other modules @9377316d": SETUP_IO,
   "setup/users-folders.mjs unread planFolders(…, folderTable(cfg)): folderTable(cfg) is a call whose answer is not read @b608e97c": "rows are folderTable(cfg): paths, owners and modes",
+  // r8: planFolders' rows default is read as one more value rows may take.
+  "setup/users-folders.mjs unread aclOp(…, row): folderTable(cfg) is a call whose answer is not read @e8c01960": "rows are folderTable(cfg): paths, owners and modes",
   "setup/users-folders.mjs unread check's io reaches folderChecks(…, io), and check is called from other modules @9b76c848": SETUP_IO,
   "setup/users-folders.mjs unread folderChecks's io reaches aclEntries(…, io), and folderChecks is called from other modules @1e11095f": SETUP_IO,
   "setup/watch-setup.mjs unread watchPlist's cfg reaches arr(…, [join(P.installRoot, NODE), join(P.installRoot, WATCH_RUN), ), and watchPlist is called from other modules @57f96ecb": SETUP_CFG,
@@ -518,8 +520,6 @@ test('R-0b-179 (b, #556 r7): destructuring with defaults, process from require a
     `const { env } = require('node:${P}');\nspawnSync('/bin/x', [env.HOME]);`,
     "import { readerPath, categoryPath, openingPath } from './k.mjs';\nspawnSync('/bin/x', [readerPath(), categoryPath(), openingPath()]);",
     "const { a = {}, b: { c } = {} } = JSON.parse('{}');\nspawnSync('/bin/x', ['--', 'y']);",
-    // A default inside a pattern is not a value the name is given, so it is not read as one (r7 M1).
-    "const { dest = pick() } = JSON.parse('{}');\nspawnSync('/bin/x', [dest]);",
   ]) assert.deepEqual(said(H + quiet), [], quiet);
 });
 
@@ -621,4 +621,63 @@ test('R-0b-179 (b, #556 r4): a word passes only when each part of it is read: ca
     "const dirs = ['/a', '/b'];\nspawnSync('/bin/ls', dirs.map((d) => `${d}/x`));",
     "spawnSync('/bin/x', [randomUUID(), new Date().toISOString(), process.pid > 1 ? 'a' : 'b']);",
   ]) assert.deepEqual(said(H + I + src), [], src);
+});
+
+/**
+ * #556 r8 (L1186) done rule: every plant any audit round has made, in one corpus (credential-args.plants.json, keyed
+ * "r<round> <name>"; r0 is the first planted-credential test, r8 the r8 auditor's 136, r8L the lane's own r8 plants,
+ * copied from the test below). Each entry is [strength, source]: what the plant is said as at its strongest, a finding
+ * (flag, value or text), a reader site, or a listing (unread). No plant may be said more weakly than its entry: a
+ * finding that becomes a listing is a regression, even though the listing still fails closed. One said more strongly
+ * fails too, so the entry is moved up when a fix lands. A plant left silent is a stated limit, named in LIMITS with its
+ * ruling. When made (#556 r8) no plant was weaker than on the r7 scan, and 60 were stronger.
+ */
+const LIMITS = {
+  // L1186 m4: a read verb is told from the rest of a name by case or _ (readTokenPath, READ_TOKEN_PATH, read_token).
+  // All lowercase has no edge to find; reading every name holding "read" would list ordinary names (thread, already).
+  // The runtime guard refuses a registered token on any command line whatever the name of what read it.
+  'r8 lower readtokenpath': 'a read verb in an all-lowercase name',
+};
+test('R-0b-179 (b, #556 r8): every plant from every audit round is a finding, listed, or a reader site, as strongly as recorded, but the stated limits', () => {
+  const corpus = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'credential-args.plants.json'), 'utf8'));
+  assert.ok(Object.keys(corpus).length >= 315, 'the corpus lost plants');
+  const strength = (src) => {
+    const kinds = credentialArgFindings(src).map((x) => x.kind);
+    return kinds.some((x) => /^(?:flag|value|text)$/.test(x)) ? 'finding' : kinds.includes('reader') ? 'reader' : kinds.length ? 'listed' : 'silent';
+  };
+  const silent = Object.entries(corpus).filter(([, [, src]]) => strength(src) === 'silent').map(([k]) => k);
+  assert.deepEqual(silent, Object.keys(LIMITS), 'a plant passed in silence (fix the cause, or name it a stated limit with its ruling)');
+  const moved = Object.entries(corpus).map(([k, [want, src]]) => [k, want, strength(src)]).filter(([, want, now]) => want !== now);
+  assert.deepEqual(moved, [], 'a plant is said more weakly than recorded (a regression), or more strongly (move its entry up)');
+});
+
+test('R-0b-179 (b, #556 r8): a tail is carried across a helper and into a default; process itself as a value is listed', () => {
+  const H = "import { spawnSync } from 'node:child_process';\n";
+  const P = 'pro' + 'cess';
+  const V = `value:${P}.env.GH_PAT`;
+  // Each is read to the credential: a finding, not only a listing.
+  const found = {
+    'a helper given process': `function f(p) { spawnSync('x', ['--', p.env.GH_PAT]); }\nf(${P});`,
+    'two helpers deep': `function f(p) { spawnSync('x', ['--', p.env.GH_PAT]); }\nfunction g(q) { f(q); }\ng(${P});`,
+    'a helper that copies its parameter': `function f(p) { const q = p; spawnSync('x', ['--', q.env.GH_PAT]); }\nf(${P});`,
+    'a helper returning a list with p.env.X': `function mk(p) { return ['--', p.env.GH_PAT]; }\nspawnSync('x', mk(${P}));`,
+    'a default that is a credential': `function f(t = ${P}.env.GH_PAT) { spawnSync('x', ['--', t]); }\nf();`,
+    'an arrow default': `const f = (t = ${P}.env.GH_PAT) => spawnSync('x', ['--', t]);\nf();`,
+    'a default of process': `function f(p = ${P}) { spawnSync('x', ['--', p.env.GH_PAT]); }\nf();`,
+    'require(`process`) in place': `spawnSync('x', ['--', require(\`${P}\`).env.GH_PAT]);`,
+    'import(`process`) awaited in place': `spawnSync('x', ['--', (await import(\`${P}\`)).env.GH_PAT]);`,
+  };
+  for (const [what, src] of Object.entries(found)) assert.ok(said(H + src).includes(V), `${what}: ${JSON.stringify(said(H + src))}`);
+  // Where the tail is not carried, process as a value is listed, never passed (failing closed).
+  const listed = {
+    'a helper returning process': `function g() { return ${P}; }\nspawnSync('x', ['--', g().env.GH_PAT]);`,
+    'process in an object': `const o = { p: ${P} };\nspawnSync('x', ['--', o.p.env.GH_PAT]);`,
+    'a loop over [process]': `for (const p of [${P}]) spawnSync('x', ['--', p.env.GH_PAT]);`,
+  };
+  for (const [what, src] of Object.entries(listed)) assert.ok(said(H + src).some((x) => x.includes('process as a value')), `${what}: ${JSON.stringify(said(H + src))}`);
+  // Still quiet: process's plain parts, a default that is a plain value.
+  for (const quiet of [
+    `spawnSync('/bin/x', [String(${P}.pid), ${P}.platform, ${P}.cwd()]);`,
+    "function f(dir = '/tmp') { spawnSync('/bin/ls', [dir]); }\nf();",
+  ]) assert.deepEqual(said(H + quiet), [], quiet);
 });
