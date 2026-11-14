@@ -2308,3 +2308,25 @@ test('L570: no Vercel project in the rules is said as that, for a fact naming no
   assert.match(call(at(doc(null, false)), 'prj_1').reason, /for another project/);
   assert.equal(call(at(doc('prj_1', true)), 'prj_1').ok, true);
 });
+
+test('#536 r1 m1: the whole secret scan has one time limit; a scan of many commits refuses at it, never runs one limit per run', async () => {
+  const s = makeFakeScanner(tmp());
+  s.setMode('slow');
+  const w = await pushWorld({ root: tmp() });
+  const sha = (await gitOk(['rev-parse', 'refs/heads/main'], { gitDir: w.mirror })).trim();
+  const messages = Array.from({ length: 6 }, (_, i) => [sha, `message ${i}`]);
+  // Control: with room, every run is made and the scan is clean.
+  const all = await scanSecrets({ setup: s.setup, mirror: w.mirror, shas: [sha], messages, privateDir: tmp(), budgetMs: 60_000 });
+  assert.deepEqual(all, { ok: true, binaries: [] });
+  // Each run takes 400 ms: a 1.2 s limit is spent after a few, and the scan says so instead of going on.
+  const t0 = Date.now();
+  const r = await scanSecrets({ setup: s.setup, mirror: w.mirror, shas: [sha], messages, privateDir: tmp(), budgetMs: 1_200 });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /the secret scan ran past its 1 s limit/);
+  assert.ok(Date.now() - t0 < 1_200 + 2_000, 'stopped near its limit');
+  // A limit spent before the first run starts none.
+  const before = s.calls().split('\n').filter(Boolean).length;
+  const none = await scanSecrets({ setup: s.setup, mirror: w.mirror, shas: [sha], messages, privateDir: tmp(), budgetMs: 0 });
+  assert.match(none.reason, /ran past its 0 s limit/);
+  assert.equal(s.calls().split('\n').filter(Boolean).length, before, 'no scan run once the limit is spent');
+});

@@ -18,23 +18,30 @@
 //      waits a round, untold;
 //   3. the bundle already taken by its push is asked of the drain's own rule (runner-ports.mjs bundleHeld, I7): taken,
 //      the session's holds are cleared and nothing is pushed;
-//   4. the attempt's last answer (its push fact) says whether to try now. A final refusal of these same bytes (the bundle
-//      not changed since it, by pastTime, I4) is not tried again: it stays told, on the hold cadence. A refusal that may
-//      pass by itself (retry) is tried again once RETRY_MS has passed since it, told on the hold cadence meanwhile;
-//   5. pushCard(sessionId). Its answer: pushed clears both holds; `retry` is the wait hold; any other refusal is the
-//      refused hold. Each hold is holdAlert's: told at once, then once a day while it lasts (I3), marked told only once
-//      delivered. A hold the queue refused is said in `untold`, so robot-main's failed-pass tell carries it (I5).
+//   4. the attempt's last answer (its push fact) says whether to try now. Its last try is the later of its time and its
+//      last refusal's (a push already made keeps its fact and gains `last_refusal`, push.mjs settle). A final refusal of
+//      these same bytes (the bundle not changed since it, by pastTime, I4) is not tried again: it stays told, on the hold
+//      cadence. Any other try of these same bytes, refused for now or pushed but not taken (head_refused: the card's head
+//      could not be noted), is tried again once RETRY_MS has passed since it, told on the hold cadence meanwhile
+//      (#536 r1 M1: never every round);
+//   5. pushCard(sessionId). Its answer: pushed clears the holds, unless its fact says the card's head could not be noted:
+//      that is told on its own cause, PUSH_HEAD_CAUSE; `retry` is the wait hold; any other refusal is the refused hold.
+//      Each hold is holdAlert's: told at once, then once a day while it lasts (I3), marked told only once delivered. A hold
+//      the queue refused is said in `untold`, so robot-main's failed-pass tell carries it (I5).
 //   6. pull requests a push left unopened (pr-writer.mjs pending facts) are asked for again every RETRY_MS; each is told
 //      on its branch's cause until it opens, then cleared (L1082 Q6).
-// At most `maxPushes` pushCard calls a round (oldest launch first): a push fetches from GitHub and runs the secret scan,
-// and the pass has robot-main's 120 s. The rest wait a minute for the next round; nothing is skipped for ever, since a
-// session pushed (or refused) leaves the front of the line.
+// At most `maxPushes` pushCard calls a round: a push fetches from GitHub and runs the secret scan, and the pass has its
+// own limit (robot-push.mjs PUSH_DEADLINE_MS). The line (#536 r1 M1): the session tried longest ago first, never tried
+// before all, and among equals the oldest launch. A session tried is spaced RETRY_MS and goes to the back, so one that
+// can never be taken does not hold the slot: the rest are each reached in turn as the slot comes free.
 //
 // FAIL CLOSED (I1). A Record whose session list can't be read throws: the pass fails, and robot-main tells it. A fact or
-// session that can't be read, or a bundle that can't be hashed, is told for that session and the next one still runs.
+// session that can't be read, or a bundle that can't be hashed, is told for that session and the next one still runs. A
+// bundle stamped in the future is told (#536 r1 m6), never left to settle for ever.
 // Known limit: the Record's list leaves out a document it can't read (M9 store list), so a damaged session doc is not
-// seen here. It is not silent: the worker runner keeps that outbox open, and its drain tells the cause (record-unreadable
-// or bundle-no-attempt).
+// seen here, and nothing tells it yet: the worker runner's drain would tell it (record-unreadable or bundle-no-attempt),
+// but its tells are not wired (tick.mjs gives the drain no drainHolds port; drain-alerts.mjs), so that backstop waits
+// for them (#536 r1 M1).
 
 import { lstatSync } from 'node:fs';
 import { join } from 'node:path';
@@ -54,6 +61,8 @@ export const MAX_PUSHES = 1;
 export const PUSH_WAIT_CAUSE = (card, att) => `push-wait-${card}-${att}`;
 export const PUSH_REFUSED_CAUSE = (card, att) => `push-refused-${card}-${att}`;
 export const PUSH_TROUBLE_CAUSE = (session) => `push-trouble-${session}`;
+// Pushed, but the card's head could not be noted, so the push is not taken and is made again (#536 r1 M1).
+export const PUSH_HEAD_CAUSE = (card, att) => `push-head-${card}-${att}`;
 // A branch pushed with no pull request yet, per branch (a card's branch outlives its attempts); one cause for a retry
 // that can't run at all.
 export const PR_WAIT_CAUSE = (branch) => `push-pr-${String(branch).replace(/[^a-z0-9-]/g, '-')}`;
@@ -62,6 +71,21 @@ const CARD_OK = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
 const short = (s) => String(s ?? '').slice(0, 300);
 
 const gone = (problem) => /ENOENT/.test(problem);
+
+/**
+ * The attempt's last try, from its push fact doc (#536 r1 M1): { at, refusal }, `at` the later of the fact's time and
+ * its last refusal's (pastTime; null when neither can be read), `refusal` the last answer when it was a refusal
+ * ({ reason, retry }), else null.
+ */
+export function lastTry(d, t) {
+  if (!d || typeof d !== 'object') return { at: null, refusal: null };
+  const own = pastTime(d.at, t);
+  if (d.result === 'refused') return { at: own, refusal: own === null ? null : { reason: d.reason, retry: d.retry === true } };
+  const lr = d.result === 'pushed' && d.last_refusal && typeof d.last_refusal === 'object' ? d.last_refusal : null;
+  const lrAt = lr ? pastTime(lr.at, t) : null;
+  if (lrAt !== null && (own === null || lrAt >= own)) return { at: lrAt, refusal: { reason: lr.reason, retry: lr.retry === true } };
+  return { at: own, refusal: null };
+}
 
 /** The Record's fact as the drain reads one: { ok: true, doc } | { ok: false, missing?, reason }. */
 function factReader(rec) {
@@ -98,9 +122,19 @@ export async function pushPass({ rec, product, outboxRoot, pushCard, alert, now,
   };
   const clear = (...causes) => { for (const c of causes) { try { drop(rec, HOLD_FACT(c)); } catch { /* a stale queued copy is told at most once more */ } } };
 
+  // The line (#536 r1 M1): tried longest ago first (never tried, or a try whose time can't be read, before all), then the
+  // oldest launch (pastTime: a bad time sorts first, never last). So no session waits behind another for ever.
+  const triedAt = (s) => {
+    const { card, attempt } = s.doc;
+    if (typeof card !== 'string' || !CARD_OK.test(card) || typeof attempt !== 'string' || !attempt) return -Infinity;
+    let f; try { f = rec.read('fact', PUSH_FACT(card, attempt)); } catch { return -Infinity; }
+    return lastTry(f?.corrupt ? null : f?.doc, t).at ?? -Infinity;
+  };
+  const order = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
   const mine = all.filter((s) => s?.doc?.product === product && PRODUCT_OUTBOX_ROLES.includes(s.doc.role))
-    // Oldest launch first, so no session waits behind newer ones for ever (pastTime: a bad time sorts first, never last).
-    .sort((a, b) => (pastTime(a.doc.launched_at, t) ?? -Infinity) - (pastTime(b.doc.launched_at, t) ?? -Infinity));
+    .map((s) => ({ s, tried: triedAt(s), launched: pastTime(s.doc.launched_at, t) ?? -Infinity }))
+    .sort((a, b) => order(a.tried, b.tried) || order(a.launched, b.launched))
+    .map((x) => x.s);
   let calls = 0;
   for (const s of mine) {
     const id = s.id;
@@ -120,10 +154,13 @@ export async function pushPass({ rec, product, outboxRoot, pushCard, alert, now,
       tell(PUSH_TROUBLE_CAUSE(id), say(`its bundle could not be looked at (${e?.code ?? 'unknown error'})`));
       continue;
     }
-    // Not a plain file: pushCard refuses it with the reason, recorded and told below.
-    if (st.isFile() && t - st.mtimeMs < SETTLE_MS) { out.waiting.push([card, 'the bundle changed a moment ago']); continue; }
+    // Not a plain file: pushCard refuses it with the reason, recorded and told below. A bundle stamped ahead of this
+    // clock would never settle: it is told, and waits until the clock passes it (#536 r1 m6).
+    const age = t - st.mtimeMs;
+    if (st.isFile() && age < 0) { tell(PUSH_TROUBLE_CAUSE(id), say(`its bundle is stamped ${Math.ceil(-age / 1000)} s in the future, so it waits until this Mac's clock passes it`)); out.waiting.push([card, 'the bundle is stamped in the future']); continue; }
+    if (st.isFile() && age < SETTLE_MS) { out.waiting.push([card, 'the bundle changed a moment ago']); continue; }
     const why = bundleHeld({ id, card, role: s.doc.role }, path, { readFact: factReader(rec), readSession: sessionReader(rec), hashOf });
-    if (why === null) { clear(PUSH_WAIT_CAUSE(card, att), PUSH_REFUSED_CAUSE(card, att), PUSH_TROUBLE_CAUSE(id)); continue; }
+    if (why === null) { clear(PUSH_WAIT_CAUSE(card, att), PUSH_REFUSED_CAUSE(card, att), PUSH_HEAD_CAUSE(card, att), PUSH_TROUBLE_CAUSE(id)); continue; }
     if (why === 'record-unreadable' || why === 'bundle-no-attempt' || why === 'file-unreadable') {
       tell(PUSH_TROUBLE_CAUSE(id), say(`whether its bundle was pushed can't be told (${why}), so it is not pushed`));
       continue;
@@ -133,18 +170,36 @@ export async function pushPass({ rec, product, outboxRoot, pushCard, alert, now,
     // A backstop: bundleHeld reads this same fact and answers record-unreadable first (plant: removing it fails nothing).
     if (last?.corrupt) { tell(PUSH_TROUBLE_CAUSE(id), say('its push record can\'t be read, so it is not pushed')); continue; }
     const d = last?.doc;
-    const lastAt = d ? pastTime(d.at, t) : null;
-    if (d?.result === 'refused' && lastAt !== null) {
-      // The same bytes as at the refusal: its mtime not after it. New bytes from the worker are a new try.
-      const same = !st.isFile() || st.mtimeMs <= lastAt;
-      if (same && !d.retry) { tell(PUSH_REFUSED_CAUSE(card, att), say(`its push was refused: ${short(d.reason)}. It is not tried again until the work changes`)); out.refused.push([card, d.reason]); continue; }
-      if (same && t - lastAt < RETRY_MS) { tell(PUSH_WAIT_CAUSE(card, att), say(`its push waits: ${short(d.reason)}. It is tried again every ${RETRY_MS / 60_000} minutes`)); out.waiting.push([card, d.reason]); continue; }
+    const tried = lastTry(d, t);
+    // The same bytes as at the last try: its mtime not after it, and not other bytes than those pushed (bundle-changed).
+    // New bytes from the worker are a new try.
+    const same = why !== 'bundle-changed' && tried.at !== null && (!st.isFile() || st.mtimeMs <= tried.at);
+    if (same && tried.refusal && !tried.refusal.retry) { tell(PUSH_REFUSED_CAUSE(card, att), say(`its push was refused: ${short(tried.refusal.reason)}. It is not tried again until the work changes`)); out.refused.push([card, tried.refusal.reason]); continue; }
+    // Any other try of these same bytes is spaced (#536 r1 M1): a wait, or a push made but not taken (its head).
+    if (same && t - tried.at < RETRY_MS) {
+      const head = d?.result === 'pushed' && Boolean(d.head_refused);
+      if (head) tellHead(card, att, d, say);
+      const reason = tried.refusal?.reason ?? (head ? 'the card\'s head could not be noted' : 'its push was made but not taken');
+      if (tried.refusal || !head) tell(PUSH_WAIT_CAUSE(card, att), say(`its push waits: ${short(reason)}. It is tried again every ${RETRY_MS / 60_000} minutes`));
+      out.waiting.push([card, reason]); continue;
     }
     if (calls >= maxPushes) { out.waiting.push([card, 'its turn is a later round']); continue; }
     calls += 1;
     let r;
     try { r = await pushCard(id); } catch (e) { r = { ok: false, retry: true, reason: `the push script failed: ${short(e?.message ?? e)}` }; }
-    if (r?.ok === true) {
+    // The fact as the push left it: a push made whose head could not be noted is not taken, and is tried again in RETRY_MS
+    // (step 4), so it is told on its own cause, never as done (#536 r1 M1).
+    let after = null;
+    try { const f = rec.read('fact', PUSH_FACT(card, att)); after = f?.corrupt ? null : f?.doc ?? null; } catch { after = null; }
+    const headStuck = after?.result === 'pushed' && Boolean(after.head_refused);
+    // A final refusal is told as refused below (not tried again until the work changes), never as a head tried again.
+    if (headStuck && (r?.ok === true || r?.retry)) tellHead(card, att, after, say); else clear(PUSH_HEAD_CAUSE(card, att));
+    if (r?.ok === true && headStuck) {
+      out.waiting.push([card, 'the card\'s head could not be noted']);
+      clear(PUSH_WAIT_CAUSE(card, att), PUSH_REFUSED_CAUSE(card, att), PUSH_TROUBLE_CAUSE(id));
+      if (!r.pr) tell(PR_WAIT_CAUSE(r.branch), say(`its branch ${r.branch} was pushed, but no pull request was opened for it yet. It is asked for again every ${RETRY_MS / 60_000} minutes`));
+      else clear(PR_WAIT_CAUSE(r.branch));
+    } else if (r?.ok === true) {
       out.pushed.push(card);
       clear(PUSH_WAIT_CAUSE(card, att), PUSH_REFUSED_CAUSE(card, att), PUSH_TROUBLE_CAUSE(id));
       // Pushed with no pull request: Joe would never hear of the work (GitHub tells him of a pull request, not a branch).
@@ -159,6 +214,10 @@ export async function pushPass({ rec, product, outboxRoot, pushCard, alert, now,
       clear(PUSH_WAIT_CAUSE(card, att));
       tell(PUSH_REFUSED_CAUSE(card, att), say(`its push was refused: ${short(r?.reason ?? 'no reason given')}. It is not tried again until the work changes`));
     }
+  }
+
+  function tellHead(card, att, doc, say) {
+    tell(PUSH_HEAD_CAUSE(card, att), say(`its branch ${short(doc.branch)} was pushed, but the card's head could not be noted (${short(doc.head_refused)}), so the push is not taken and is made again every ${RETRY_MS / 60_000} minutes`));
   }
 
   // Pull requests a push left unopened (L1082 Q6): asked for again, each told until it opens (I3, I5).

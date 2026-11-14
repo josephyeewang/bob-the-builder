@@ -50,6 +50,7 @@ const at = (f) => a[a.indexOf(f) + 1];
 if (at('--config') !== ${JSON.stringify(join(dir, 'do-plane.toml'))} || at('--gitleaks-ignore-path') !== ${JSON.stringify(join(dir, 'empty-ignore'))} || !a.includes('--ignore-gitleaks-allow')) process.exit(7);
 if (Object.keys(process.env).some((k) => k.startsWith('GITLEAKS'))) process.exit(8);
 fs.appendFileSync(${JSON.stringify(join(dir, 'calls'))}, a[0] + '\\n');
+if (mode === 'slow') Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 400);
 if (mode === 'crash') process.exit(2);
 if (mode === 'noreport') process.exit(0);
 if (mode === 'stdinquit' && a[0] === 'stdin') process.exit(3);

@@ -8,8 +8,12 @@
 // is a later human step; tests use a locally made key pair and a fake GitHub.
 //
 //   makeAppJwt({ appId, privateKeyPem, now }) → string   (RS256; iat = now − 60 s, exp = now + 9 min; now in ms)
-//   await mintInstallationToken({ keyDir, keyFile?, appId, installationId, http, uid?, scriptsUid, now? })
+//   await mintInstallationToken({ keyDir, keyFile?, appId, installationId, http, uid?, scriptsUid, now?, scope? })
 //     → { ok: true, token, expires_at, login, login_reason? } | { ok: false, reason }
+// `scope` ({ repositories: [repo name], permissions: { name: 'read' | 'write' } }) narrows the token to those
+// repositories and permissions (GitHub's own token request body), so a token for one job can't touch another
+// repository or do more than it needs (#536 r1 m4: the push's token). A bad scope, or a token GitHub gives with more
+// permissions or other repositories than asked, is no token. With no scope the token is the installation's.
 // `login` is the robot's own name on GitHub, "<slug>[bot]", read with the same signed request (GET /app) because an
 // installation token can't ask who it is, and the alert channel needs it to tell the robot's issues from another app's
 // (L399). A login that can't be read doesn't stop the mint: login is null and login_reason says why.
@@ -25,6 +29,19 @@ const APP_ID = /^[A-Za-z0-9.]{1,64}$/;           // a numeric App id or an App's
 const INSTALL_ID = /^[1-9][0-9]{0,19}$/;
 const KEY_FILE = /^[A-Za-z0-9._-]{1,128}$/;       // a bare name inside the key folder, never a path
 const SLUG = /^[a-z0-9](?:[a-z0-9-]{0,99})$/i;     // an App's name in its URL
+const REPO_NAME = /^[A-Za-z0-9_.-]{1,100}$/;        // a repository's name, without its owner
+const PERMISSION = /^[a-z_]{1,64}$/;
+
+/** Why a token scope can't be asked for, or null. */
+export function scopeProblem(scope) {
+  if (!scope || typeof scope !== 'object' || Array.isArray(scope)) return 'the token scope must be an object';
+  const { repositories: repos, permissions: perms } = scope;
+  if (!Array.isArray(repos) || !repos.length || repos.some((r) => typeof r !== 'string' || !REPO_NAME.test(r) || r === '.' || r === '..')) return 'the token scope must name one or more repositories, by name';
+  if (!perms || typeof perms !== 'object' || Array.isArray(perms) || !Object.keys(perms).length) return 'the token scope must name its permissions';
+  if (Object.entries(perms).some(([k, v]) => !PERMISSION.test(k) || (v !== 'read' && v !== 'write'))) return 'each token scope permission must be read or write';
+  if (Object.keys(scope).some((k) => k !== 'repositories' && k !== 'permissions')) return 'the token scope takes only repositories and permissions';
+  return null;
+}
 const b64url = (x) => Buffer.from(x).toString('base64url');
 
 export function makeAppJwt({ appId, privateKeyPem, now }) {
@@ -42,7 +59,7 @@ export function makeAppJwt({ appId, privateKeyPem, now }) {
 /** The robot's key file's default name in the key folder (L734): tests name it from here, and token.test pins its value. */
 export const ROBOT_KEY_FILE = 'robot-app.pem';
 
-export async function mintInstallationToken({ keyDir, keyFile = ROBOT_KEY_FILE, appId, installationId, http, uid = process.getuid?.(), scriptsUid, now = Date.now } = {}) {
+export async function mintInstallationToken({ keyDir, keyFile = ROBOT_KEY_FILE, appId, installationId, http, uid = process.getuid?.(), scriptsUid, now = Date.now, scope } = {}) {
   const secrets = [];   // every secret text seen, scrubbed from any reason
   const no = (reason) => ({ ok: false, reason: scrub(reason, secrets) });
   try {
@@ -55,6 +72,7 @@ export async function mintInstallationToken({ keyDir, keyFile = ROBOT_KEY_FILE, 
     if (!INSTALL_ID.test(String(installationId ?? ''))) return no('no installation id');
     if (!http || typeof http.post !== 'function') return no('no GitHub client');
     if (typeof now !== 'function') return no('no clock');
+    if (scope !== undefined) { const bad = scopeProblem(scope); if (bad) return no(bad); }
 
     const file = join(keyDir, keyFile);
     let st;
@@ -69,11 +87,13 @@ export async function mintInstallationToken({ keyDir, keyFile = ROBOT_KEY_FILE, 
     const jwt = makeAppJwt({ appId, privateKeyPem: pem, now: now() });
     secrets.push(jwt);
     const signed = { Authorization: `Bearer ${jwt}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' };
-    const r = await http.post(`/app/installations/${installationId}/access_tokens`, {}, signed);
+    const body = scope === undefined ? {} : { repositories: [...scope.repositories], permissions: { ...scope.permissions } };
+    const r = await http.post(`/app/installations/${installationId}/access_tokens`, body, signed);
     const token = r?.json?.token;
     if (typeof token === 'string') secrets.push(token);
     if (r?.status !== 201) return no(`GitHub refused the token request (${r?.status})`);
     if (typeof token !== 'string' || !/^[A-Za-z0-9_.-]{20,512}$/.test(token)) return no('GitHub gave no usable token');
+    if (scope !== undefined) { const wider = widerThanAsked(r.json, scope); if (wider) return no(wider); }
     const expires_at = typeof r.json.expires_at === 'string' ? r.json.expires_at : null;
     const who = await robotLogin(http, signed);
     return { ok: true, token, expires_at, login: who.login, ...(who.login ? {} : { login_reason: scrub(who.reason, secrets) }) };
@@ -104,4 +124,19 @@ function scrub(text, secrets) {
   return s.replace(/-----BEGIN[\s\S]*?(-----END[^-]*-----|$)/g, '[hidden]')
     .replace(/\bgh[a-z]_[A-Za-z0-9_]+/g, '[hidden]')
     .replace(/\beyJ[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]*)*/g, '[hidden]');
+}
+
+// A narrowed token GitHub answered with more than was asked: its permissions and repositories are in the answer
+// (GitHub's token response), and one that says other or wider ones is not used.
+function widerThanAsked(json, scope) {
+  const got = json?.permissions;
+  if (!got || typeof got !== 'object') return 'GitHub did not say the token\'s permissions';
+  for (const [k, v] of Object.entries(got)) {
+    const want = scope.permissions[k];
+    if (want === undefined || (want === 'read' && v !== 'read')) return `GitHub gave the token more than was asked (${String(k).slice(0, 64)})`;
+  }
+  const repos = json?.repositories;
+  if (!Array.isArray(repos)) return 'GitHub did not say the token\'s repositories';
+  if (repos.some((r) => !scope.repositories.includes(r?.name))) return 'GitHub gave the token other repositories than were asked';
+  return null;
 }

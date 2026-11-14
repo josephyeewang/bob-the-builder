@@ -1255,6 +1255,11 @@ const ROBOT_PLANTS = [
   ['a bad alert repository', (c) => ({ ...c, ...ROBOT_APP, alertRepo: 'not a repo' }), /alertRepo/],
   ['a bad alert owner', (c) => ({ ...c, ...ROBOT_APP, alertOwner: '-bad-' }), /alertOwner must be a GitHub login/],
   ['a bad installation number', (c) => ({ ...c, ...ROBOT_APP, appInstallation: 'x' }), /appInstallation must be the installation's number/],
+  // #536 r1 m5: the push pass's outside-check keys, all or none and well formed, refused here as the wiring refuses them.
+  ['only some of the outside-check keys', (c) => ({ ...c, outsideRepo: 'owner-x/outside' }), /outside check keys go together, all four or none: outsideWorkflow, outsideSlot, outsideTag missing/],
+  ['a bad outside-check repository', (c) => ({ ...c, outsideRepo: 'no-slash', outsideWorkflow: '.github/workflows/outside-check.yml', outsideSlot: 'product 1', outsideTag: 'abcd1234' }), /outsideRepo/],
+  // #536 r1 m3: hostLockUid, when named, must be the owner's Mac user id, not orchestrate's (the config's ownerUid).
+  ['hostLockUid that is orchestrate\'s, not the owner\'s', (c) => ({ ...c, hostLockUid: c.ownerUid }), /hostLockUid must be \d+, the owner \S+'s Mac user id/],
   // #305 r1 m1: good App keys, but the config fails elsewhere: still no key line (the loop's doesNotMatch).
   ['good App keys with a bad wiring', (c) => ({ ...c, ...ROBOT_APP, wiring: `${c.installRoot}/wiring/dispatcher-wiring.mjs` }), /wiring must be/],
 ];
@@ -1268,6 +1273,12 @@ for (const [what, edit, re] of ROBOT_PLANTS) {
     assert.doesNotMatch(ck.text, /the robot App's key/, 'a robot.json that fails its check asks for no key file');
   });
 }
+
+test('#536 r1 m3: robot.json naming the owner\'s own Mac user id as hostLockUid passes the check', async () => {
+  const w = await robotWorld((c, { mac }) => ({ ...c, hostLockUid: Number(mac.users.get('sam').UniqueID) }));
+  const ck = w.run(['daemons', 'check', '--only', 'robot']); assert.doesNotMatch(ck.text, /hostLockUid/, ck.text);
+  assert.match(ck.text, /the robot job's config in the copy \(robot\.json\) matches this setup/);
+});
 
 test('L727: the robot App named in robot.json → its key (token.mjs\'s default name) must be orchestrate\'s 0600 key in the keys folder: missing or open → place and load refuse (L807 M1), check FAILs; in place → all pass', async () => {
   const w = await robotWorld((c) => ({ ...c, ...ROBOT_APP }));

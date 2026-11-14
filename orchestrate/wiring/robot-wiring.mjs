@@ -75,7 +75,7 @@ import { OUTSIDE_KEYS, PUSH_DEADLINE_MS, PUSH_NOT_WIRED, outsideKeysProblem, pus
 // The robot App and where its alerts go (L600): all four or none.
 export const APP_KEYS = Object.freeze(['appId', 'appInstallation', 'alertRepo', 'alertOwner']);
 export const CONFIG_KEYS = Object.freeze([...DISPATCHER_KEYS.filter((k) => k !== 'approvalsStateDir' && k !== 'rulesSnapshotFile' && !REVIEW_CONFIG_KEYS.includes(k) && !WORKER_CONFIG_KEYS.includes(k)), 'keyDir', 'dispatcherLockFile',
-  ...APP_KEYS, ...OUTSIDE_KEYS]);
+  ...APP_KEYS, ...OUTSIDE_KEYS, 'hostLockUid']);
 const PATHS = Object.freeze(['recordRoot', 'productsFile', 'rulesStateDir', 'tokenFile', 'keyDir', 'dispatcherLockFile']);
 // The longest a live Dispatcher pass may hold its lock: M11's run deadline, its watchdog's margin, and a minute (audit
 // #137 M6). Past this, a live holder is stuck, and the Dispatcher counts as late. It uses M11's default deadline. A
@@ -157,10 +157,10 @@ export function appProblem(c, { none = null } = {}) {
  * a refused mint is not retried until the next round. A round is far shorter than the token's hour (robot-main.mjs
  * RUN_DEADLINE_MS). Never throws or rejects: a throw becomes { ok: false, reason }. The token stays in memory (R-0b-86).
  */
-export function robotToken(c, { fetchFn = globalThis.fetch, uid = process.getuid?.(), now = Date.now, mint = mintInstallationToken } = {}) {
+export function robotToken(c, { fetchFn = globalThis.fetch, uid = process.getuid?.(), now = Date.now, mint = mintInstallationToken, scope } = {}) {
   let p = null;
   return () => (p ??= Promise.resolve()
-    .then(() => mint({ keyDir: c.keyDir, appId: c.appId, installationId: c.appInstallation, http: appMintClient({ fetchFn }), uid, scriptsUid: c.ownerUid, now }))
+    .then(() => mint({ keyDir: c.keyDir, appId: c.appId, installationId: c.appInstallation, http: appMintClient({ fetchFn }), uid, scriptsUid: c.ownerUid, now, ...(scope ? { scope } : {}) }))
     // A thrown message is masked before it is kept (#288 r1 m1): the reason reaches the job log and the alert queue, and
     // token.mjs's own scrub only covers the mint that ships, not one swapped in. Masked first, then cut.
     .catch((e) => ({ ok: false, reason: `token mint failed: ${makeMasker().maskSecrets(String(e?.message ?? e)).text.slice(0, 200)}` })));
@@ -342,7 +342,9 @@ export async function wire(config, { log = (s) => process.stderr.write(`${s}\n`)
     passes.deliver = () => send({ rec, now });
   }
   // push: robot-push.mjs, refusing until every part is there (I1). `push` holds a test's ports (scannerAt, userOf, testRemote).
-  passes.push = pushWiring(c, { rec, rules, entry, token, fetchFn, now, uid, hold, ...push });
+  // The push mints its own token, narrowed to the product's repository (#536 r1 m4), so the alerts' token is not its.
+  const tokenFor = token ? (scope) => robotToken(c, { fetchFn, uid, now, mint, scope }) : null;
+  passes.push = pushWiring(c, { rec, rules, entry, tokenFor, fetchFn, now, uid, hold, ...push });
   let beat = null;
   let sweepRound = null;
   if (token) {

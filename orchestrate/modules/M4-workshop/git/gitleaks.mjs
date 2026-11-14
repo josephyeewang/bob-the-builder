@@ -42,8 +42,12 @@ export const DO_PLANE_SHA256 = 'b6dbe4e0be74fdcba5453b8ea0353ef6175bee578d292f63
 const sha256 = (t) => createHash('sha256').update(t).digest('hex');
 const refuse = (reason) => ({ ok: false, reason });
 
-// How long one scan may run. One value: the robot's push pass limit is sized from it (wiring/robot-push.mjs, L1115).
+// How long one scanner run may take (the version check is one).
 export const SCAN_TIMEOUT_MS = 300_000;
+// How long one scanSecrets call may take in all, after the scanner check: every scanner run (the commits, the files, one
+// per commit's text) and every git read of a file share it, each given only what is left (#536 r1 m1). Past it the scan
+// refuses. With SCAN_TIMEOUT_MS for the check, it sizes the robot's push pass limit (wiring/robot-push.mjs, L1115).
+export const SCAN_BUDGET_MS = 300_000;
 
 function run(bin, args, { env, input, timeoutMs = SCAN_TIMEOUT_MS }) {
   return new Promise((resolve) => {
@@ -122,16 +126,22 @@ const repoPath = (blobs) => (file) => {
  * header line, the message) and the names of the files it touches. Clean is { ok: true, binaries }:
  * the allowed non-text files, for the read-back.
  */
-export async function scanSecrets({ setup, mirror, shas, blobs = [], messages, privateDir, allowedBinaries = [], maxFileBytes = MAX_FILE_BYTES, maxTotalBytes = MAX_TOTAL_BYTES }) {
+export async function scanSecrets({ setup, mirror, shas, blobs = [], messages, privateDir, allowedBinaries = [], maxFileBytes = MAX_FILE_BYTES, maxTotalBytes = MAX_TOTAL_BYTES, budgetMs = SCAN_BUDGET_MS, clock = Date.now }) {
   const c = await checkScanner(setup);
   if (!c.ok) return c;
+  // One budget for the whole scan (#536 r1 m1): each step gets what is left, and none starts once it is spent.
+  const end = clock() + budgetMs;
+  const left = () => Math.min(SCAN_TIMEOUT_MS, end - clock());
+  const spent = () => refuse(`the secret scan ran past its ${Math.round(budgetMs / 1000)} s limit, so the work is not pushed`);
   const dir = mkdtempSync(join(privateDir, 'scan-'));
   const binaries = [];
   try {
     const env = safeGitEnv({ gitDir: mirror });
     const report = join(dir, 'git.json');
     const logOpts = `--no-walk=unsorted ${shas.join(' ')}`;
-    const r = await run(setup.bin, ['git', mirror, '--log-opts', logOpts, ...common(setup, report)], { env });
+    if (left() <= 0) return spent();
+    const r = await run(setup.bin, ['git', mirror, '--log-opts', logOpts, ...common(setup, report)], { env, timeoutMs: left() });
+    if (left() <= 0) return spent();
     const v = verdict(r, report);
     if (!v.ok) return v;
     if (blobs.length) {
@@ -142,13 +152,15 @@ export async function scanSecrets({ setup, mirror, shas, blobs = [], messages, p
       for (const [i, b] of blobs.entries()) {
         const name = String(b.path).slice(0, 80); // masked with every reason, once, in push.mjs
         if (!/^[0-9a-f]{40}$/.test(String(b.id))) return refuse('a new file has no readable id');
-        const size = await git(['cat-file', '-s', b.id], { gitDir: mirror, purpose: 'push-scan-files' });
+        if (left() <= 0) return spent();
+        const size = await git(['cat-file', '-s', b.id], { gitDir: mirror, purpose: 'push-scan-files', timeoutMs: left() });
         const n = Number(String(size.stdout).trim());
         if (size.code !== 0 || !Number.isSafeInteger(n)) return refuse(`could not read the new file ${name}`);
         total += n;
         if (n > maxFileBytes) return refuse(`the new file ${name} is larger than ${maxFileBytes} bytes, too large to scan`);
         if (total > maxTotalBytes) return refuse(`the new files come to more than ${maxTotalBytes} bytes, too much to scan`);
-        const cat = await git(['cat-file', 'blob', b.id], { gitDir: mirror, purpose: 'push-scan-files' });
+        if (left() <= 0) return spent();
+        const cat = await git(['cat-file', 'blob', b.id], { gitDir: mirror, purpose: 'push-scan-files', timeoutMs: left() });
         if (cat.code !== 0 || cat.stdout.length !== n) return refuse(`could not read the new file ${name}`);
         const kind = checkFile(String(b.path), cat.stdout, allowedBinaries);
         if (!kind.ok) return refuse(kind.reason);
@@ -162,13 +174,17 @@ export async function scanSecrets({ setup, mirror, shas, blobs = [], messages, p
         }
       }
       const fr = join(dir, 'files.json');
-      const f = await run(setup.bin, ['dir', files, '--max-archive-depth', '2', ...common(setup, fr)], { env });
+      if (left() <= 0) return spent();
+      const f = await run(setup.bin, ['dir', files, '--max-archive-depth', '2', ...common(setup, fr)], { env, timeoutMs: left() });
+      if (left() <= 0) return spent();
       const fv = verdict(f, fr, repoPath(blobs));
       if (!fv.ok) return refuse(`the file scan: ${fv.reason}`);
     }
     for (const [sha, text] of messages) {
       const rep = join(dir, `msg-${sha}.json`);
-      const m = await run(setup.bin, ['stdin', ...common(setup, rep)], { env, input: text });
+      if (left() <= 0) return spent();
+      const m = await run(setup.bin, ['stdin', ...common(setup, rep)], { env, input: text, timeoutMs: left() });
+      if (left() <= 0) return spent();
       const mv = verdict(m, rep);
       if (!mv.ok) return refuse(`commit ${sha.slice(0, 12)} message, header lines or file names: ${mv.reason}`);
     }

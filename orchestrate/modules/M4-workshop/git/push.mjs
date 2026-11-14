@@ -580,7 +580,7 @@ export function createPushScript(deps) {
     const cur = record.read('fact', id);
     let doc = res.ok ? { result: 'pushed', branch: res.branch, tip: res.tip, binaries: res.binaries ?? [], at: new Date(now()).toISOString() } : { result: 'refused', reason: res.reason, ...(res.retry ? { retry: true } : {}), at: new Date(now()).toISOString() };
     // A refusal never erases a recorded push of the same attempt (#170 r1): it is added to it as the last refusal.
-    if (!res.ok && cur?.doc?.result === 'pushed' && !cur.corrupt) doc = { ...cur.doc, last_refusal: { reason: res.reason, at: doc.at } };
+    if (!res.ok && cur?.doc?.result === 'pushed' && !cur.corrupt) doc = { ...cur.doc, last_refusal: { reason: res.reason, ...(res.retry ? { retry: true } : {}), at: doc.at } };
     if (headRefused) doc.head_refused = headRefused;
     // A worker's pushed bundle, by the bytes staged and pushed (L898): the runner's drain counts the bundle taken by it.
     if (res.ok && !from && typeof res.bundle_sha256 === 'string') doc.bundle_sha256 = res.bundle_sha256;

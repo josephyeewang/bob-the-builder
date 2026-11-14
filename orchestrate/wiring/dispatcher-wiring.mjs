@@ -141,7 +141,8 @@ export function checkConfig(c, { keys = CONFIG_KEYS, paths = PATHS, optional = k
   if (!Number.isSafeInteger(c.ownerUid) || c.ownerUid < 0) throw new Error('config: ownerUid must be a Mac user id');
   // host.lock's owner, with the rest of the config: before wire() makes any folder or opens the Record (L805 m1). The
   // Dispatcher's own user is this process's; workerPorts checks it again with the start's selfUid.
-  if (keys.includes('hostLockUid')) { const bad = hostLockOwnerProblem(c.hostLockUid, selfUid, c.reviewUid); if (bad) throw new Error(`config: ${bad}`); }
+  // The robot's config may leave it out (its push pass then refuses as not wired, #536 r1 m3); the Dispatcher's must name it.
+  if (keys.includes('hostLockUid') && (keys === CONFIG_KEYS || c.hostLockUid !== undefined)) { const bad = hostLockOwnerProblem(c.hostLockUid, selfUid, c.reviewUid); if (bad) throw new Error(`config: ${bad}`); }
   // The worker runner's user, the builder user and never the owner (L1079), before wire() makes a folder (L943 m3).
   if (keys.includes('workerUid')) { const bad = workerUidProblem(c, selfUid); if (bad) throw new Error(`config: ${bad}`); }
   return c;

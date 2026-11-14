@@ -23,6 +23,7 @@ import { HOLD_FACT, holdAlert as holdAlertReal } from '../modules/M11-dispatcher
 import { LAST_PASS_FACT } from '../modules/M11-dispatcher/tick.mjs';
 import { USAGE_FACT } from '../modules/M11-dispatcher/usage.mjs';
 import { wire as wireOwn, checkUser, lastReturn, dispatcherLate, dropLateAlerts, lockHolder, LIVE_PASS_MAX_MS, NOT_WIRED_PASSES, ROBOT_PASSES, APP_KEYS, robotToken, robotChannel, markToldByBeat, SENSORS_CAUSE, dropSensorsAlerts, SWEEP_CAUSES, SWEEP_MARGIN_MS, LATE_CAUSE } from './robot-wiring.mjs';
+import { PUSH_NOT_WIRED } from './robot-push.mjs';
 import { generateKeyPairSync } from 'node:crypto';
 import { pidDead, takePassLock } from '../modules/M11-dispatcher/pass-lock.mjs';
 import { tick } from '../modules/M11-dispatcher/tick.mjs';
@@ -900,8 +901,17 @@ test('L1115: the push pass refuses until every part is there; some outside check
   const none = world();
   const a = await wire(none.config, { fetchFn: fakeGitHubFetch(none.fake), log: () => {} });
   assert.throws(() => a.passes.push(), (e) => e.message === notWiredText(NOT_WIRED_PASSES.push));
-  // The App and the outside check named: the next missing part is the scanner's paths (lane 4, #525), still refusing.
-  const both = world({ extra: { ...APP, ...OUTSIDE } });
+  // The App and the outside check named, no owner's Mac user id: the push says so (#536 r1 m3).
+  const noOwner = world({ extra: { ...APP, ...OUTSIDE } });
+  const n = await wire(noOwner.config, { fetchFn: fakeGitHubFetch(noOwner.fake), log: () => {} });
+  assert.throws(() => n.passes.push(), (e) => e.message === notWiredText(PUSH_NOT_WIRED.owner));
+  // A hostLockUid that is root's or this job's own user: the job does not start (the Dispatcher's own check).
+  for (const uid of [0, process.getuid()]) {
+    const w = world({ extra: { ...APP, ...OUTSIDE, hostLockUid: uid } });
+    await assert.rejects(wire(w.config, { fetchFn: fakeGitHubFetch(w.fake), log: () => {} }), /config: hostLockUid is/);
+  }
+  // With it too: the next missing part is the scanner's paths (lane 4, #525), still refusing.
+  const both = world({ extra: { ...APP, ...OUTSIDE, hostLockUid: process.getuid() + 2 } });
   const b = await wire(both.config, { fetchFn: fakeGitHubFetch(both.fake), log: () => {} });
   assert.throws(() => b.passes.push(), /not wired yet: robot\.push: the secret scanner's paths are not wired/);
   // Some but not all, or a bad value: the job does not start.

@@ -9,24 +9,27 @@ import { join } from 'node:path';
 import { pushWorld, PRODUCT } from '../modules/M4-workshop/git/push-world.test-helper.mjs';
 import { createPushScript } from '../modules/M4-workshop/git/push.mjs';
 import { gitOk, initMirror, GIT_TIMEOUT_MS } from '../modules/M4-workshop/git/safe-git.mjs';
-import { SCAN_TIMEOUT_MS } from '../modules/M4-workshop/git/gitleaks.mjs';
+import { SCAN_BUDGET_MS, SCAN_TIMEOUT_MS } from '../modules/M4-workshop/git/gitleaks.mjs';
+import { WATCHDOG_MARGIN_MS } from '../modules/M11-dispatcher/main.mjs';
 import { ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
 import { memoryRecord } from '../shared/record.mjs';
 import { BUILDER, keysPath, mirrorPath, outboxRootPath, privatePath } from '../setup/layout.mjs';
 import { isRefusing, notWiredText } from './not-wired.mjs';
 import { OWNER_FILE } from '../modules/M12-sensors/outside-watch.mjs';
 import { GUARD_STEP } from './gate-ports.mjs';
-import { OUTSIDE_KEYS, PUSH_DEADLINE_MS, PUSH_NOT_WIRED, SCANNER_AT, baseOf, builderUid, outsideKeysProblem, pushWiring } from './robot-push.mjs';
+import { OUTSIDE_KEYS, PUSH_DEADLINE_MS, PUSH_NOT_WIRED, PUSH_SCOPE, SCANNER_AT, baseOf, builderUid, outsideKeysProblem, pushWiring } from './robot-push.mjs';
 import { PASS_LIMITS_MS, ROBOT_PASSES } from './robot-wiring.mjs';
 import { PASS_DEADLINE_MS, RUN_DEADLINE_MS, passLimit, runPasses } from './robot-main.mjs';
 
 const ME = process.getuid();
-const BUILDER_UID = ME + 7;   // tests can't chown: the bundle is made to look the builder's through testFstat
+const BUILDER_UID = ME + 7;
+const OWNER_UID = ME + 2;   // Joe's Mac user (hostLockUid); ownerUid (ME + 1) is the Record's owner, orchestrate (#536 r1 m3)   // tests can't chown: the bundle is made to look the builder's through testFstat
 const OUTSIDE = Object.freeze({ outsideRepo: 'owner-x/outside', outsideWorkflow: '.github/workflows/outside-check.yml', outsideSlot: 'product 1', outsideTag: 'abcd1234' });
 const GOOD_CI = 'on: push\npermissions: read-all\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n';
 const AUDIT = { path: '.github/workflows/audit.yml', permissions: { contents: 'read' } };
 const ENTRY = Object.freeze({ product: PRODUCT, owner: 'owner', repo: 'test-repo' });
 const okToken = () => async () => ({ ok: true, token: 'fake-robot-token-for-tests' });
+const okTokenFor = (asked = []) => (scope) => { asked.push(scope); return okToken(); };
 const builder = () => ({ exists: true, uid: BUILDER_UID });
 const thrown = (f) => { try { f(); } catch (e) { return e.message; } return null; };
 
@@ -39,9 +42,9 @@ async function layoutBase() {
   mkdirSync(outboxRootPath({ base }));
   return base;
 }
-const cfg = (base, over = {}) => ({ product: PRODUCT, keyDir: keysPath({ base }), ownerUid: ME + 1, ...OUTSIDE, ...over });
+const cfg = (base, over = {}) => ({ product: PRODUCT, keyDir: keysPath({ base }), ownerUid: ME + 1, hostLockUid: OWNER_UID, ...OUTSIDE, ...over });
 const fakeScanner = () => ({ bin: '/x/gitleaks', version: '8.30.1', config: '/x/gitleaks.toml', ignoreFile: '/x/gitleaksignore' });
-const wiring = (base, { c = {}, ...over } = {}) => pushWiring(cfg(base, c), { rec: memoryRecord(), rules: { get: () => undefined }, entry: ENTRY, token: okToken(), scannerAt: fakeScanner, userOf: builder, uid: ME, ...over });
+const wiring = (base, { c = {}, ...over } = {}) => pushWiring(cfg(base, c), { rec: memoryRecord(), rules: { get: () => undefined }, entry: ENTRY, tokenFor: okTokenFor(), scannerAt: fakeScanner, userOf: builder, uid: ME, ...over });
 
 test('L1115: each part the push needs refuses by name when missing, and the pass then fails as not wired (I1)', async () => {
   const base = await layoutBase();
@@ -51,7 +54,7 @@ test('L1115: each part the push needs refuses by name when missing, and the pass
     assert.equal(typeof pass, 'function');
     assert.equal(isRefusing(pass), false);
     const refusal = (over) => { const p = wiring(base, over); assert.ok(isRefusing(p), JSON.stringify(Object.keys(over))); return thrown(p); };
-    assert.equal(refusal({ token: null }), notWiredText(PUSH_NOT_WIRED.app));
+    assert.equal(refusal({ tokenFor: null }), notWiredText(PUSH_NOT_WIRED.app));
     assert.equal(refusal({ c: Object.fromEntries(OUTSIDE_KEYS.map((k) => [k, undefined])) }), notWiredText(PUSH_NOT_WIRED.outside));
     // The scanner port's default is null until lane 4's paths land (#525): no paths, no push.
     assert.equal(SCANNER_AT, null);
@@ -64,7 +67,11 @@ test('L1115: each part the push needs refuses by name when missing, and the pass
     assert.match(refusal({ userOf: () => ({ exists: false }) }), new RegExp(`the ${BUILDER} user is not on this Mac`));
     assert.match(refusal({ userOf: () => { throw new Error('dscl failed'); } }), /could not be read on this Mac \(dscl failed\)/);
     assert.match(refusal({ userOf: () => ({ exists: true, uid: 0 }) }), /never root's/);
-    assert.match(refusal({ userOf: () => ({ exists: true, uid: ME + 1 }) }), /is the owner's/);
+    assert.match(refusal({ userOf: () => ({ exists: true, uid: OWNER_UID }) }), /is the owner's/);
+    // #536 r1 m3: the owner is Joe's Mac user (hostLockUid), never the config's ownerUid (the Record's owner): with no
+    // hostLockUid the pass refuses, and a builder that is Joe's user is refused though it differs from ownerUid.
+    assert.equal(refusal({ c: { hostLockUid: undefined } }), notWiredText(PUSH_NOT_WIRED.owner));
+    assert.match(refusal({ c: { hostLockUid: BUILDER_UID } }), /is the owner's/);
     assert.match(refusal({ userOf: () => ({ exists: true, uid: ME }) }), /this job's own/);
     // The products list must name where the product lives.
     assert.match(refusal({ entry: { product: PRODUCT } }), /names no owner and repo/);
@@ -101,9 +108,12 @@ test('L1115: the outside check keys go together, and a bad one is named; the bas
   assert.deepEqual(builderUid({ userOf: builder, ownerUid: 1, selfUid: 2 }), { uid: BUILDER_UID });
 });
 
-test('L1115: the push has a limit of its own, sized to one git stall and one scan; every other pass keeps 120 s; push is last', () => {
-  assert.equal(PUSH_DEADLINE_MS, GIT_TIMEOUT_MS + SCAN_TIMEOUT_MS + 60_000);
-  assert.ok(PUSH_DEADLINE_MS > SCAN_TIMEOUT_MS, 'a scan that runs its full time is not cut off');
+test('L1115, #536 r1 m1: the push has a limit of its own, sized to one git stall, the scanner check and the whole scan\'s budget; every other pass keeps 120 s; push is last', () => {
+  assert.equal(PUSH_DEADLINE_MS, GIT_TIMEOUT_MS + SCAN_TIMEOUT_MS + SCAN_BUDGET_MS + 60_000);
+  assert.equal(PUSH_DEADLINE_MS, 780_000, '13 minutes, as the header says');
+  assert.ok(PUSH_DEADLINE_MS > SCAN_TIMEOUT_MS + SCAN_BUDGET_MS, 'a scan that runs its full budget is not cut off');
+  // #536 r1 m2: the stated lock risk is the real one: the round's limit and the watchdog's margin, about 23.6 minutes.
+  assert.equal(Math.round((RUN_DEADLINE_MS + WATCHDOG_MARGIN_MS) / 6_000) / 10, 23.6);
   assert.deepEqual(PASS_LIMITS_MS, { push: PUSH_DEADLINE_MS });
   assert.equal(passLimit('push'), PUSH_DEADLINE_MS);
   for (const p of ROBOT_PASSES.filter((x) => x !== 'push')) assert.equal(passLimit(p), PASS_DEADLINE_MS, p);
@@ -160,8 +170,8 @@ async function wiredWorld({ hangPr = null } = {}) {
   };
   // The builder's bundle: tests can't chown, so its handle is made to look the builder's (createPushScript testFstat).
   const asBuilder = (fd) => { const st = fstatSync(fd); return Object.assign(Object.create(Object.getPrototypeOf(st)), st, { uid: BUILDER_UID }); };
-  const pass = () => pushWiring({ product: PRODUCT, keyDir: keysPath({ base: root }), ownerUid: ME + 1, ...OUTSIDE }, {
-    rec: w.record, rules: w.ports.rules, entry: ENTRY, token: okToken(), fetchFn, now: () => Date.now() + 10_000, uid: ME,
+  const pass = () => pushWiring({ product: PRODUCT, keyDir: keysPath({ base: root }), ownerUid: ME + 1, hostLockUid: OWNER_UID, ...OUTSIDE }, {
+    rec: w.record, rules: w.ports.rules, entry: ENTRY, tokenFor: okTokenFor(), fetchFn, now: () => Date.now() + 10_000, uid: ME,
     scannerAt: () => w.fake.setup, userOf: builder, testRemote: () => w.gh,
     makePush: (deps) => createPushScript({ ...deps, testFstat: asBuilder }),
   });
@@ -251,11 +261,55 @@ test('L1115: a hold the queue refused fails the pass, so robot-main\'s own tell 
     await w.commit('the work', (dir) => writeFileSync(join(dir, 'app.txt'), 'changed\n'));
     await w.bundle();
     w.values['product_profile.audit_workflow'] = undefined;
-    const p = pushWiring({ product: PRODUCT, keyDir: keysPath({ base: w.root }), ownerUid: ME + 1, ...OUTSIDE }, {
-      rec: w.record, rules: w.ports.rules, entry: ENTRY, token: okToken(), now: () => Date.now() + 10_000, uid: ME, fetchFn: async () => ({ status: 500, json: async () => ({}) }),
+    const p = pushWiring({ product: PRODUCT, keyDir: keysPath({ base: w.root }), ownerUid: ME + 1, hostLockUid: OWNER_UID, ...OUTSIDE }, {
+      rec: w.record, rules: w.ports.rules, entry: ENTRY, tokenFor: okTokenFor(), now: () => Date.now() + 10_000, uid: ME, fetchFn: async () => ({ status: 500, json: async () => ({}) }),
       scannerAt: () => w.fake.setup, userOf: builder, testRemote: () => w.gh, hold: () => false,
       makePush: (deps) => createPushScript({ ...deps, testFstat: (fd) => Object.assign(Object.create(Object.getPrototypeOf(fstatSync(fd))), fstatSync(fd), { uid: BUILDER_UID }) }),
     });
     await assert.rejects(p(), (e) => /the push pass's alerts could not be queued: push-wait-C-1-a1/.test(e.message) && /untold/.test(e.tell));
   } finally { rmSync(w.root, { recursive: true, force: true }); }
+});
+
+// The ports pushWiring builds for push.mjs, caught as makePush is given them.
+function caughtPorts(base, over = {}) {
+  let deps = null;
+  const p = wiring(base, { makePush: (d) => { deps = d; return async () => ({ ok: false, reason: 'not used' }); }, ...over });
+  assert.equal(typeof p, 'function'); assert.equal(isRefusing(p), false);
+  return deps;
+}
+
+test('#536 r1 m4: the push mints its own token, narrowed to the product\'s repository with contents and pull_requests only', async () => {
+  const base = await layoutBase();
+  try {
+    const asked = [];
+    caughtPorts(base, { tokenFor: okTokenFor(asked) });
+    assert.deepEqual(asked, [PUSH_SCOPE(ENTRY.repo)]);
+    assert.deepEqual(PUSH_SCOPE('test-repo'), { repositories: ['test-repo'], permissions: { contents: 'write', pull_requests: 'write' } });
+    // A factory that gives no getter: refused as no App.
+    assert.equal(thrown(wiring(base, { tokenFor: () => null })), notWiredText(PUSH_NOT_WIRED.app));
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test('#536 r1 P21: the push\'s token getter gives only a minted token; a refused mint throws its reason, never a stand-in', async () => {
+  const base = await layoutBase();
+  try {
+    const good = caughtPorts(base);
+    assert.equal(await good.getRobotToken(), 'fake-robot-token-for-tests');
+    for (const answer of [{ ok: false, reason: 'GitHub refused the token request (401)' }, { ok: false, token: 'stale-token-text', reason: 'refused' }, { ok: true, token: '' }, null]) {
+      const d = caughtPorts(base, { tokenFor: () => async () => answer });
+      await assert.rejects(d.getRobotToken(), (e) => (answer?.reason ? e.message === answer.reason : /no robot token/.test(e.message)), JSON.stringify(answer));
+    }
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test('#536 r1 P19: the start gate\'s alert throws only when the queue refused it (false); told or not due today is fine', async () => {
+  const base = await layoutBase();
+  try {
+    for (const [answer, throws] of [[false, true], [null, false], [true, false]]) {
+      const d = caughtPorts(base, { hold: () => answer });
+      const up = d.issues.upsert({ key: 'gate-shut-x', title: 'the start gate is shut', body: 'why' });
+      if (throws) await assert.rejects(up, /the start gate's alert gate-shut-x could not be queued/);
+      else await up;
+    }
+  } finally { rmSync(base, { recursive: true, force: true }); }
 });
