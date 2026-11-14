@@ -45,7 +45,7 @@ A card's `attempts` holds counts kept across moves: `reviewer_starts` and `revie
 
 ## Why our own store, not Claude Code's task list
 
-Claude Code has a native task list. We checked whether it could hold the claims: tests 3 (a claim on a stale read is refused), 4 (eight processes race, one wins) and 9 (a dead owner's claim is broken) cannot be expressed in it, so they were not run against it. Checked on Claude Code 2.1.312 (the version installed that day; the pin was then 2.1.300), 29 Oct 2026. Not re-checked on 2.1.316, the pin since 5 Nov (L572), so it is void until someone does; nothing reads it at run time. Until it can, the claims stay in this store.
+Claude Code has a native task list. We checked whether it could hold the claims: tests 3 (a claim on a stale read is refused), 4 (eight processes race, one wins) and 9 (a dead owner's claim is broken) cannot be expressed in it, so they were not run against it. Checked on Claude Code 2.1.312 (the version installed that day; the pin was then 2.1.300), 29 Oct 2026. Re-checked on 2.1.316, the pin since 5 Nov (L572), on 13 Nov 2026 from its tool types: TaskUpdate takes no expected version and no owner check, so tests 3, 4 and 9 still can't be expressed (checked: claude-code 2.1.316); nothing reads it at run time. Until it can, the claims stay in this store.
 
 ## What the tests cover, and what they don't
 

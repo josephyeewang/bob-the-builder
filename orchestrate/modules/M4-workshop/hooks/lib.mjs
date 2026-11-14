@@ -20,8 +20,30 @@ export const pass = () => ({ block: false });
 // name with no dash, so it can never be read as a kind's file (`<kind>-<id>.<ext>`) and stays one shell word.
 export const OUTBOX_FILE = /^[a-z]+\.(md|json|txt)$/;
 
-/** --role R --outbox O --snapshot S [--copy C] [--kinds a,b] [--files f.txt] [--kind K] [--event E] */
-export function parseArgs(argv) {
+// The machine-wide settings file claude reads for every Mac user (L909; launcher env-check.mjs CLAUDE_FILE is this one).
+export const MANAGED_FILE = '/Library/Application Support/ClaudeCode/managed-settings.json';
+// The way out when the machine-wide guard itself can't run (L1031 guard b): every session on the Mac is blocked, Claude
+// included, so the owner removes the file by hand, as root, from a Terminal window (not from a Claude session).
+export const MACHINE_WIDE_WAY_OUT = `this is the machine-wide guard (${MANAGED_FILE}), so every Claude session on this Mac is blocked until it is put right. `
+  + `To switch it off, open the Terminal app (not Claude) and run: sudo rm "${MANAGED_FILE}" (then start Claude again); setup.mjs managed-settings puts it back`;
+
+/**
+ * The machine-wide form (L1031): exactly `--machine-wide --snapshot S`, S absolute. → { machineWide: true, snapshot }.
+ * Only a hook that opts in (`machineWide: true`; the production-write guard) takes it; for any other it is a bad argument.
+ */
+export function parseMachineWideArgs(argv) {
+  if (!(argv.length === 3 && argv[0] === '--machine-wide' && argv[1] === '--snapshot')) throw new Error('the machine-wide form is exactly --machine-wide --snapshot <file>');
+  if (typeof argv[2] !== 'string' || !isAbsolute(argv[2]) || argv[2].includes('\0')) throw new Error('paths must be absolute');
+  return { machineWide: true, snapshot: argv[2] };
+}
+
+/** --role R --outbox O --snapshot S [--copy C] [--kinds a,b] [--files f.txt] [--kind K] [--event E]; or, for a hook that
+ * takes it, the machine-wide form above. */
+export function parseArgs(argv, { machineWide = false } = {}) {
+  if (argv[0] === '--machine-wide') {
+    if (!machineWide) throw new Error('bad argument --machine-wide (this hook has no machine-wide form)');
+    return parseMachineWideArgs(argv);
+  }
   const out = {};
   for (let i = 0; i < argv.length; i += 2) {
     const k = argv[i];
@@ -59,23 +81,25 @@ export function isMain(moduleUrl, argv1 = process.argv[1]) {
 
 /**
  * Runs one hook body: `decide(input, args)` returns pass() or block(reason). Exits 0 or 2.
- * `io` is for tests: { argv, stdin, exit, stderr, stdout }.
+ * `io` is for tests: { argv, stdin, exit, stderr, stdout }. `machineWide: true` lets the hook take the machine-wide form.
  */
-export async function runHook(decide, io = {}) {
+export async function runHook(decide, io = {}, { machineWide = false } = {}) {
   const argv = io.argv ?? process.argv.slice(2);
+  // Decided before anything can throw, so even a hook error in the machine-wide form names the way out (L1031 guard b).
+  const wide = machineWide && argv[0] === '--machine-wide';
   const stdin = io.stdin ?? process.stdin;
   const exit = io.exit ?? ((c) => process.exit(c));
   const stderr = io.stderr ?? ((t) => process.stderr.write(t));
   let r;
   try {
-    const args = parseArgs(argv);
+    const args = parseArgs(argv, { machineWide });
     const text = await readStdin(stdin);
     const input = JSON.parse(text);
     if (!input || typeof input !== 'object') throw new Error('hook input is not an object');
     r = await decide(input, args, io);
     if (!r || typeof r.block !== 'boolean') throw new Error('hook gave no decision');
   } catch (e) {
-    r = block(`hook error, refusing: ${e?.message ?? e}`);
+    r = block(`hook error, refusing: ${e?.message ?? e}${wide ? `; ${MACHINE_WIDE_WAY_OUT}` : ''}`);
   }
   if (r.block) { stderr(`[orchestrate] blocked: ${r.reason}\n`); return exit(BLOCK); }
   return exit(0);
@@ -148,7 +172,7 @@ export const joinLines = (cmd) => String(cmd ?? '').replace(/\\\n/g, '');
  * and so is a line holding a space the shells read as a letter (a no-break or other Unicode space). Read
  * from the raw line: a backslash and line break inside a quoted body stay as written.
  */
-export function heredocs(cmd) {
+export function heredocs(cmd, { openBodies = false } = {}) {
   const s = String(cmd ?? '');
   let out = '';
   const bodies = [];
@@ -224,13 +248,18 @@ export function heredocs(cmd) {
       i += 1;
       for (const h of pending) {
         const lines = [];
+        const from = i;
+        let ended = false;
         while (i < s.length) {
           const end = s.indexOf('\n', i);
           const line = s.slice(i, end < 0 ? s.length : end);
           i = end < 0 ? s.length : end + 1;
-          if ((h.dash ? line.replace(/^\t+/, '') : line) === h.delim) break;
+          if ((h.dash ? line.replace(/^\t+/, '') : line) === h.delim) { ended = true; break; }
           lines.push(line);
         }
+        // `openBodies` (shellCommands): a body no end line closes is read as commands, so a line whose bodies were
+        // already taken out (`cat <<'A'` then the next command) is read on past it (#487 r4 M1, L1075).
+        if (!ended && openBodies) { i = from; break; }
         // With a quoted end word the shell joins no body lines, so the end is where the guard reads it (round 4 Minor).
         if (!h.quoted && lines.some((l) => l.endsWith('\\'))) return refuse('a here-document line ending in a backslash (quote the end word: <<\'EOF\')');
         bodies.push({ text: lines.join('\n'), quoted: h.quoted });
@@ -292,15 +321,18 @@ export const bothWords = (cmd) => [...new Set([...shellWords(cmd), ...shellWords
 // it lets through (WRAPPERS below).
 const STRIPPED_WRAPPERS = ['env', 'command', 'exec', 'nohup', 'time', 'sudo', 'xargs', 'nice', 'builtin'];
 
-/** The command line split into its commands (at ; && || | and newlines), each a word list. */
-export function shellCommands(cmd, { raw = false } = {}) {
+/** The command line split into its commands (at ; && || | and newlines), each a word list. `bodiesTaken`: `cmd` is text
+ *  whose here-document bodies were already taken out (heredocs().text, as `unreadable` reads it), so they are not looked
+ *  for again: a second look would read a stray line equal to an end word as the end of a body that is no longer there,
+ *  and hide the commands after it (#487 r5 m2). */
+export function shellCommands(cmd, { raw = false, bodiesTaken = false } = {}) {
   const cmds = [];
   let cur = [];
   // The word after `<` or `>` is a file, not a command: it stays out of the command list (the
   // guards still see it among the words).
   let redirect = false;
   // A here-document's body is text fed to a program, not commands (L46).
-  for (const w of shellWords(joinLines(heredocs(cmd).text).replace(/\n/g, ' ; '))) {
+  for (const w of shellWords(joinLines(bodiesTaken ? cmd : heredocs(cmd, { openBodies: true }).text).replace(/\n/g, ' ; '))) {
     if (w === '<' || w === '>') { redirect = true; continue; }
     if (redirect && w === '&') continue;
     if ([';', '&', '|', '(', ')', '`', '$'].includes(w)) { redirect = false; if (cur.length) cmds.push(cur); cur = []; continue; }
@@ -338,8 +370,8 @@ const SHELLS = ['sh', 'bash', 'zsh', 'dash', 'ksh', 'fish', 'csh', 'tcsh'];
 const INLINE = { node: /^(-e|-p|--eval|--print)$/, deno: /^eval$/, bun: /^(-e|--eval)$/, perl: /^-\w*e/, ruby: /^-\w*e/, php: /^-r$/, osascript: /^-e$/ };
 
 /** A wrapper that runs a string as a command: sh -c, eval, source, `.`; with `inline`, node -e and kin too. */
-export function wrapperOf(cmd, { inline = false } = {}) {
-  for (const c of shellCommands(cmd)) {
+export function wrapperOf(cmd, { inline = false, bodiesTaken = false } = {}) {
+  for (const c of shellCommands(cmd, { bodiesTaken })) {
     const prog = programOf(c);
     if (SHELLS.includes(prog) && c.slice(1).some((w) => /^-[A-Za-z]*c[A-Za-z]*$/.test(w))) return `${prog} -c`;
     if (['eval', 'source', '.'].includes(prog)) return prog;
@@ -541,7 +573,7 @@ export function unreadable(cmd) {
   if (/<\d*-\d*>/.test(bare)) return 'a zsh number range (<1-9>)';
   if (/\*\*\*/.test(bare)) return 'a *** pattern (it follows links into any folder)';
   if (SETS_SAFE_VAR.some((re) => re.test(bare))) return 'a line that sets HOME, PWD, TMPDIR or USER, which the guards read as fixed';
-  for (const raw of shellCommands(c, { raw: true })) {
+  for (const raw of shellCommands(c, { raw: true, bodiesTaken: true })) {
     let i = 0;
     while (i < raw.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(raw[i]) || KEYWORDS.includes(raw[i]))) i += 1;
     while (i < raw.length) {
@@ -553,11 +585,11 @@ export function unreadable(cmd) {
       return `"${prog}" runs another program the guard can't read; run it directly`;
     }
   }
-  const wrap = wrapperOf(c, { inline: true });
+  const wrap = wrapperOf(c, { inline: true, bodiesTaken: true });
   if (wrap) return `"${wrap}" runs code the guard can't check`;
   if (/\|[ \t\n]*([^ \t\n]*\/)?(python[0-9.]*|node|perl|ruby|php|deno|bun|osascript|lua|tclsh)([ \t\n]+-[^ \t\n]+)*[ \t\n]*($|[;&|)])/.test(c)
     || /(^|[;&|(][ \t\n]*)([^ \t\n]*\/)?(python[0-9.]*|node|perl|ruby|php|deno|bun|osascript|lua|tclsh)([ \t\n]+-[^ \t\n]+)*[ \t\n]*<(?!\()/.test(c)) return 'an interpreter fed code on its input';
-  for (const words of shellCommands(c)) {
+  for (const words of shellCommands(c, { bodiesTaken: true })) {
     const prog = programOf(words);
     const word0 = words[0];
     if (SHELLS.includes(prog)) return `"${prog}" runs commands the guard can't see`;
