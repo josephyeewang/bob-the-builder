@@ -3,8 +3,8 @@
 // off after GitHub took it is finished by the next round, never pushed twice or forced; the pass's own limit.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, fstatSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, fstatSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { tempDir } from '../shared/test-tmp.mjs';
 import { join } from 'node:path';
 import { pushWorld, PRODUCT } from '../modules/M4-workshop/git/push-world.test-helper.mjs';
 import { createPushScript } from '../modules/M4-workshop/git/push.mjs';
@@ -32,7 +32,7 @@ const thrown = (f) => { try { f(); } catch (e) { return e.message; } return null
 
 /** A base laid out as setup's layout.mjs puts it, with only the folders the push reads. */
 async function layoutBase() {
-  const base = mkdtempSync(join(tmpdir(), 'orch-robot-push-'));
+  const base = tempDir('orch-robot-push-');
   mkdirSync(keysPath({ base }), { mode: 0o700 });
   await initMirror(mirrorPath({ base }));
   mkdirSync(privatePath({ base }), { mode: 0o700 });
@@ -131,7 +131,7 @@ test('L1115: runPasses gives each pass its own limit: a slow push is cut at its 
 // The whole push through the wiring: a world laid out as setup's layout (outboxes, private, mirror under one base), the
 // outside check and GitHub's pull request API faked at fetch, and a local bare repo for GitHub's git.
 async function wiredWorld({ hangPr = null } = {}) {
-  const root = mkdtempSync(join(tmpdir(), 'orch-robot-push-w-'));
+  const root = tempDir('orch-robot-push-w-');
   const w = await pushWorld({ root, ciText: GOOD_CI });
   // layout.mjs's names: the world's mirror moves to <base>/mirror; outboxes and private are already there.
   renameSync(w.mirror, mirrorPath({ base: root }));
