@@ -124,9 +124,16 @@ deletes anything. Steps, on the Mini, in a new Terminal app window, with your ba
    *Moves the old work out of the base into your home, where `builder` can't read it.*
 4. Paste the same command without `--dry-run`: `sudo /usr/local/bin/node setup.mjs users-folders`.
    *Makes `builder` and hands it the worker folders; it ends with `check`.*
-5. Sign `builder` in to Claude Code once per account it will use: paste `sudo -H -u builder /usr/local/bin/claude` (with
-   `CLAUDE_CONFIG_DIR=<builder's home>/.claude-b` before `/usr/local/bin/claude` for account b), then type `/login` and
-   finish in the browser. *The sign-in lives in `builder`'s home; it is never copied from yours.*
+5. Sign `builder` in to Claude Code once per account it will use, **after Part 2's `add-to-install`** (step 6 doesn't
+   need it, so go on and come back). The program `builder` signs in with is the pinned one in the installed copy, which
+   `add-to-install` puts there (root's, 0755): `<base>/install/orchestrate/claude-code/<pin>/claude`, with `<pin>` the
+   version given to `--pin`. Not a `claude` in your own home (`builder` can't read it), and not `/usr/local/bin/claude`,
+   which setup never makes. With the base `/Library/orchestrate`, in a new Terminal app window, paste
+   `sudo -H -u builder /Library/orchestrate/install/orchestrate/claude-code/<pin>/claude`, then type `/login` and finish in
+   the browser. For account b, paste
+   `sudo -H -u builder env CLAUDE_CONFIG_DIR=/Library/orchestrate/home/builder/.claude-b /Library/orchestrate/install/orchestrate/claude-code/<pin>/claude`
+   and do the same (`env` sets the folder for the program itself, whatever sudo's own rules on such names).
+   *The sign-in lives in `builder`'s home (`<base>/home/builder`); it is never copied from yours.*
 6. Paste `sudo /usr/local/bin/node setup.mjs proofs`. *Must end "all N proofs PASS: containment is proven on this Mac";
    a FAIL or NOT TRIED line says what to fix.*
 
@@ -136,8 +143,8 @@ status file can't be read, is a link, is not a plain file, or lists an entry tha
 with `sudo launchctl bootout system/<label>.worker-runner`), then run `users-folders` again. `daemons check` also FAILs
 while a job file in your own `~/Library/LaunchAgents` starts the worker runner's script, whatever its name (step 1; #528 r2 m7).
 
-Not yet in setup (recorded in the PR): placing the worker runner's job and building its config; until then the job file
-comes from `wiring/runner-job.mjs` by hand.
+The worker runner's config and job are setup's own since #537: `worker-config` writes its `worker-runner.json` and
+`daemons place` its job (Part 6's table, with the `workerRunner` entry).
 
 ## Part 2: the install and the background jobs
 
