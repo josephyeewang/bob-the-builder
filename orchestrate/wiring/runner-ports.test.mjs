@@ -34,7 +34,7 @@ test('step 5: size reads the session\'s conversation file and its last write; a 
     assert.equal(projectFolderName(at200), '-' + 'a'.repeat(199), 'exactly 200: kept whole');
     assert.equal(projectFolderName(at200 + 'b'), '-' + 'a'.repeat(199) + '-' + 'b6ymvk');   // b6ymvk: worked in Python from the rule, not by this code
     assert.notEqual(projectFolderName('/' + 'x'.repeat(250)), projectFolderName('/' + 'x'.repeat(251)), 'two long paths sharing 200 characters still differ');
-    assert.equal(TRANSCRIPT_PLACE_CHECKED_AGAINST, '2.1.316');
+    assert.equal(TRANSCRIPT_PLACE_CHECKED_AGAINST, null, 'read, not yet proved live (L1139): only a live run sets it');
     const f = transcriptPath({ configDir: s.config_dir, copy: s.copy, sessionId: SID });
     assert.equal(f, join(d, 'cfg', 'projects', '-copies-C-1', `${SID}.jsonl`));
     const size = sizePort();

@@ -89,7 +89,7 @@ import { PUSH_FACT, bundleName } from '../modules/M4-workshop/git/push.mjs';
 import { PRODUCT_OUTBOX_ROLES } from '../shared/product-paths.mjs';
 import { workerPrompt } from '../modules/M5-review-audit/worker-prompt.mjs';
 
-export const TRANSCRIPT_PLACE_CHECKED_AGAINST = '2.1.316';   // read from its code, not a live run (see the note above)
+export const TRANSCRIPT_PLACE_CHECKED_AGAINST = null;   // read, not yet proved live (L1139): read in 2.1.316's code (see the note above); set to the version only after Joe's live run (L1134, L1137)
 const refuse = (reason) => ({ ok: false, reason });
 const notWired = (what) => refuse(`not wired: ${what}`);
 const SHA = /^[0-9a-f]{40}$/;
