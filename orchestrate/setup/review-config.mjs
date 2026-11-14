@@ -63,6 +63,8 @@ export const INSTALL_LATER = Object.freeze(['claudeBin', 'hooksDir']);
 // The wiring, beside the runner in the copy (review-runner-main.mjs: the copy's own .mjs file, never a copy item).
 const WIRING = posix.join(posix.dirname(SCRIPTS.runner), 'review-wiring.mjs');
 // M11's budget module (launch check 12), the copy's own code file the runner imports (RUNNER_MODULES).
+/** The builder's role, as each setup step names it when its Mac user is missing (I7: one text). */
+export const BUILDER_ROLE = 'the worker runner\'s user, L1079';
 export const BUDGET_MODULE = 'modules/M11-dispatcher/budget.mjs';
 const RULE_LISTS = Object.freeze({ production: ['env_files', 'programs', 'hosts'], secrets: ['paths'] });
 const plainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -77,7 +79,7 @@ export function setupFields(cfg, { pin, userOf }) {
     return u;
   };
   const review = uid('review', 'the review runner\'s user'); const orch = uid('orchestrate', 'the Record\'s owner'); const owner = uid(cfg.owner, 'the owner');
-  const builder = uid(BUILDER, 'the worker runner\'s user, L1079');
+  const builder = uid(BUILDER, BUILDER_ROLE);
   if (owner && !absPath(owner.home)) problems.push(`the owner's Mac user ${cfg.owner} has no home folder set`);
   if (problems.length) return { fields: null, problems };
   // Every role of the design table has a Mac user (m-1), the one whose outbox folders it owns (layout.mjs folderTable):
