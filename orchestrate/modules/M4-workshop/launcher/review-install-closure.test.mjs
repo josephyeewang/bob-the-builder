@@ -176,6 +176,9 @@ function pinnedReaderProblems(text, imports, builders = []) {
   const out = [];
   if (/<key>/.test(text)) out.push('it holds a <key>, so it could write a start command');
   if (/\brequire\s*\(/.test(text)) out.push('it has a require');
+  // #591 r2 m-1: a module comes in by a named dynamic import or a re-export too, never by a pinned line.
+  if (/\bimport\s*\(\s*['"`]/.test(text)) out.push('it has an import() of a named module');
+  if (/^\s*export\b.*\bfrom\b/m.test(text)) out.push('it re-exports from another module');
   const lines = text.split('\n').filter((l) => /^\s*import\b/.test(l)).map((l) => l.trim());
   if (JSON.stringify(lines) !== JSON.stringify(imports)) out.push(`its import lines are not the pinned ones: ${JSON.stringify(lines)}`);
   for (const l of imports) if (/plist/i.test(l) && !builders.includes(l)) out.push(`it imports a job-file builder: ${l}`);
@@ -789,6 +792,10 @@ test('L1216 plant: a pinned job-file reader with one more import, a <key>, a req
     'an import dropped': text.replace(`${first}\n`, ''),
     'a <key>': `${text}\n// <key>ProgramArguments</key>\n`,
     'a require': `${text}\nconst x = require('node:fs');\n`,
+    'an import() of a named module (r2 m-1)': `${text}\nconst d = await import('../daemons.mjs');\n`,
+    'an import() with a backtick name (r2 m-1)': `${text}\nconst d = await import(\`../daemons.mjs\`);\n`,
+    'a re-export (r2 m-1)': `${text}\nexport { placeSteps } from '../daemons.mjs';\n`,
+    'a re-export of everything (r2 m-1)': `${text}\nexport * from '../daemons.mjs';\n`,
   };
   for (const [name, planted] of Object.entries(plants)) {
     assert.notEqual(planted, text, name);

@@ -68,9 +68,9 @@ export const NOT_CHECKED = Object.freeze({
   // line could carry a secret, it must load the guard, move to PROVED_JOBS and be checked like the rest.
   'review-account': 'it loads no guard: it copies the owner\'s account file and starts only claude\'s status check, with no secret on the line',
   // builder-wall-check (L1223 ruling), this exact label only: root's by design. builder-wall.mjs reads no secret and starts
-  // only fixed programs (pfctl, launchctl). If it ever reads a secret or starts a program with one, it must load the guard
+  // only pfctl, launchctl and its own network probes (sudo -u <user> node -e <fixed code> <protocol> <host> [port]). If it ever reads a secret or starts a program with one, it must load the guard
   // and be proved here under a root exemption by its exact label, like review-updater.
-  'builder-wall-check': 'it loads no guard: root\'s by design, it reads no secret and starts only pfctl and launchctl, with no secret on the line',
+  'builder-wall-check': 'it loads no guard: root\'s by design, it reads no secret and starts only pfctl, launchctl and its own sudo/node network probes (builder-wall.mjs:501, 522), with no secret on any line',
 });
 /** A job whose script writes or connects when it is only loaded is never loaded here: NOT TRIED, with the reason. None today. */
 export const LOAD_WRITES = Object.freeze({});
@@ -199,6 +199,13 @@ export function judgeJob(job, { cfg, io, ownerUid, loadWrites = LOAD_WRITES }) {
   if (args[0] !== node) return row(job, 'FAIL', `it starts ${args[0]}, not the copy's node ${node}`);
   if (args[1] !== script) return row(job, 'FAIL', `it runs ${args[1]}, not its script ${script}; not loaded`);
   if (p.Label !== `${cfg.label}.${job}`) return row(job, 'FAIL', `its job file's Label is ${JSON.stringify(p.Label)}, not ${cfg.label}.${job}; not loaded`);
+  // r2 (the lead's probe): the same names with other values would still start something else (a PATH that finds another
+  // program first, another HOME, more arguments after the script, logs elsewhere). So every value must be the one the
+  // installer writes, and every key it writes must be there: the job file is the installer's, exactly.
+  for (const k of Object.keys(want)) {
+    if (!Object.hasOwn(p, k)) return row(job, 'FAIL', `its job file has no ${k}, which the installer writes for it; not loaded`);
+    if (!sameValue(p[k], want[k])) return row(job, 'FAIL', `its job file's ${k} is not what the installer writes for it (${JSON.stringify(p[k]).slice(0, 200)}); not loaded`);
+  }
   if (Object.hasOwn(loadWrites, job)) return row(job, 'NOT TRIED', `its script is not loaded here: ${loadWrites[job]}`);
   // The user: a job file with no UserName runs as root.
   const user = p.UserName === undefined ? 'root' : p.UserName;
@@ -226,6 +233,15 @@ export function judgeJob(job, { cfg, io, ownerUid, loadWrites = LOAD_WRITES }) {
   const input = { entry: rscript, guard: rguard, nonce, mark: INSTALL_MARK.description, code: REFUSED_CODE };
   const r = io.runChild({ node: rnode, uid: ids.uid, gid: ids.gid, cwd: '/var/empty', env: { PATH: '/usr/bin:/bin', HOME: '/var/empty', [IN]: JSON.stringify(input) } });
   return row(job, ...readAnswer(r, nonce, user, ids));
+}
+
+/** Two plist values (as plutil's JSON gives them) are the same: same type, same items in order, same keys and values. */
+export function sameValue(a, b) {
+  if (a === b) return true;
+  if (Array.isArray(a) || Array.isArray(b)) return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((x, i) => sameValue(x, b[i]));
+  if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false;
+  const ka = Object.keys(a); const kb = Object.keys(b);
+  return ka.length === kb.length && ka.every((k) => Object.hasOwn(b, k) && sameValue(a[k], b[k]));
 }
 
 /**

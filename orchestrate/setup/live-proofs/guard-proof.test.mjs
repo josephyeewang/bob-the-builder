@@ -47,11 +47,13 @@ const noUser = (plist) => { const { UserName, ...rest } = plist; return rest; };
 
 /** The proof's io for a stand-in: the job files from a table, users from a table, each check run as this user. */
 const BUILT = { Label: 'x', ProgramArguments: [], UserName: 'x', EnvironmentVariables: { PATH: '/usr/bin:/bin', HOME: '/x' } };
-function testIo({ base, plists = {}, users = { robot: { uid: ME, gid: MY_GID }, joe: { uid: 99_999, gid: 20 } }, chain, myUid = ME, child, built = () => BUILT, links = [] } = {}) {
+function testIo({ base, plists = {}, users = { robot: { uid: ME, gid: MY_GID }, joe: { uid: 99_999, gid: 20 } }, chain, myUid = ME, child, built, links = [] } = {}) {
   return {
     exists: (f) => Object.hasOwn(plists, f),
     isLink: (f) => links.includes(f),
-    built,
+    // By default the installer's file is the placed one, so each test reaches the check it is about; the r2 value test
+    // and the M2 key tests give their own.
+    built: built ?? ((job) => plists[plistFile(job)]),
     currentCopy: (root) => currentCopy(root, { owner: ME }),
     readPlist: (f) => plists[f],
     realpath: (p) => realpathSync.native(p),
@@ -287,7 +289,7 @@ test('r1 M2: a job file may hold only the keys and environment names the install
   ];
   const never = () => { throw new Error('the child must not start'); };
   for (const [plist, why] of cases) {
-    const r = judge(s, { plist, child: never });
+    const r = judge(s, { plist, child: never, built: () => ({ ...BUILT, ...base }) });
     assert.deepEqual([r.result, r.why], ['FAIL', why]);
   }
   // Program counts even when the installer's job file somehow has it: launchd would obey it over ProgramArguments.
@@ -298,10 +300,11 @@ test('r1 M2: a job file may hold only the keys and environment names the install
   assert.equal(pathOnly.why, "its job file sets environment names the installer doesn't write for it: HOME; not loaded");
   const noBuild = judge(s, { built: () => { throw new Error('no such user'); }, child: never });
   assert.equal(noBuild.why, "the installer's job file for it can't be built here (no such user); not loaded");
-  const linked = judge(s, { links: [plistFile('robot')], child: never });
+  const linked = judge(s, { links: [plistFile('robot')], child: never, built: () => base });
   assert.deepEqual([linked.result, linked.why], ['FAIL', `its job file ${plistFile('robot')} is a link; not loaded`]);
   // The installer's environment names pass.
-  assert.equal(judge(s, { plist: { ...base, EnvironmentVariables: { PATH: '/usr/bin:/bin', HOME: '/x' } } }).result, 'PASS');
+  const withEnv = { ...base, EnvironmentVariables: { PATH: '/usr/bin:/bin', HOME: '/x' } };
+  assert.equal(judge(s, { plist: withEnv, built: () => withEnv }).result, 'PASS');
 });
 
 test('r1 M2: the installer\'s own job file for each proved job passes the key checks it is the measure for', () => {
@@ -350,4 +353,40 @@ test('r1 m5: every job daemons.mjs knows is either proved or left out with its r
   assert.deepEqual([...Object.keys(PROVED_JOBS), ...Object.keys(NOT_CHECKED)].sort(), [...ALL_JOBS].sort());
   assert.equal(Object.keys(PROVED_JOBS).length + Object.keys(NOT_CHECKED).length, 9, 'eight jobs and the wall check');
   assert.ok(Object.hasOwn(NOT_CHECKED, WALL_CHECK_JOB), 'the wall check is left out by its exact label (L1223)');
+});
+
+test('r2: the job file is the installer\'s exactly: the same names with other values, or a key it writes left out, is a FAIL', () => {
+  const s = standIn();
+  const want = { ...jobFile(s.root, 'robot'), EnvironmentVariables: { PATH: '/usr/bin:/bin', HOME: '/Users/robot' }, StandardOutPath: '/Library/x/logs/robot.out.log', KeepAlive: true, WorkingDirectory: '/' };
+  const never = () => { throw new Error('the child must not start'); };
+  const [node, script] = want.ProgramArguments;
+  const cases = [
+    [{ ...want, EnvironmentVariables: { PATH: '/tmp/evil:/usr/bin:/bin', HOME: '/Users/robot' } }, /^its job file's EnvironmentVariables is not what the installer writes for it /],
+    [{ ...want, EnvironmentVariables: { PATH: '/usr/bin:/bin', HOME: '/tmp' } }, /^its job file's EnvironmentVariables is not what the installer writes for it /],
+    [{ ...want, EnvironmentVariables: { PATH: '/usr/bin:/bin' } }, /^its job file's EnvironmentVariables is not what the installer writes for it /],
+    [{ ...want, ProgramArguments: [node, script, '--write-templates'] }, /^its job file's ProgramArguments is not what the installer writes for it /],
+    [{ ...want, StandardOutPath: '/tmp/robot.out.log' }, /^its job file's StandardOutPath is not what the installer writes for it /],
+    [(() => { const { StandardOutPath, ...rest } = want; return rest; })(), /^its job file has no StandardOutPath, which the installer writes for it; not loaded$/],
+    [(() => { const { EnvironmentVariables, ...rest } = want; return rest; })(), /^its job file has no EnvironmentVariables, which the installer writes for it; not loaded$/],
+    [noUser(want), /^its job file has no UserName, which the installer writes for it; not loaded$/],
+    [{ ...want, UserName: 'joe' }, /^its job file's UserName is not what the installer writes for it /],
+    // r2 M-A's plants: another non-owner user, a config path and an extra argument, KeepAlive and WorkingDirectory changed.
+    [{ ...want, UserName: 'pages' }, /^its job file's UserName is not what the installer writes for it /],
+    [{ ...want, ProgramArguments: [node, script, '--config', '/tmp/other.json'] }, /^its job file's ProgramArguments is not what the installer writes for it /],
+    [{ ...want, KeepAlive: false }, /^its job file's KeepAlive is not what the installer writes for it /],
+    [{ ...want, WorkingDirectory: '/tmp' }, /^its job file's WorkingDirectory is not what the installer writes for it /],
+  ];
+  for (const [plist, re] of cases) {
+    const r = judge(s, { plist, built: () => want, child: never });
+    assert.equal(r.result, 'FAIL', JSON.stringify(plist)); assert.match(r.why, re);
+  }
+  assert.equal(judge(s, { plist: want, built: () => want }).result, 'PASS');
+});
+
+test('r2: sameValue compares plist values by type, order, keys and value', async () => {
+  const { sameValue } = await import('./guard-proof.mjs');
+  assert.ok(sameValue({ a: [1, 'x', { b: true }] }, { a: [1, 'x', { b: true }] }));
+  for (const [a, b] of [[['x', 'y'], ['y', 'x']], [['x'], ['x', 'y']], [{ a: 1 }, { a: 1, b: 2 }], [{ a: 1 }, { b: 1 }], ['1', 1], [true, 'true'], [{}, []], [null, {}], [{ a: undefined }, {}]]) {
+    assert.equal(sameValue(a, b), false, JSON.stringify([a, b])); assert.equal(sameValue(b, a), false, JSON.stringify([b, a]));
+  }
 });
