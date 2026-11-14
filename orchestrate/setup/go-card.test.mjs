@@ -23,7 +23,7 @@ import { planGoPass } from '../modules/M11-dispatcher/plan-go.mjs';
 import { outbox } from '../modules/M11-dispatcher/alerts.mjs';
 import { AI_ROLES, outboxFolders } from '../shared/record.mjs';
 import { tempDir } from '../shared/test-tmp.mjs';
-import { CARD_FILE_FIELDS, RUN_AS, USAGE, goCard, main, readCardFile, ttyConfirm, whoProblem, withPlannedCard } from './go-card.mjs';
+import { CARD_FILE_FIELDS, RUN_AS, TTY_PATH, USAGE, goCard, main, openTty, readCardFile, ttyConfirm, whoProblem, withPlannedCard } from './go-card.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..');
@@ -126,7 +126,7 @@ test('plants (L1100): refused by the command with nothing written or shown — a
 
 test('plant (L1100): with no terminal (not confirmed) nothing is written — no card, no ask, no go; a later run with a terminal goes through', async () => {
   const w = world();
-  const r = await run(w, { confirm: ({ cardId, text }) => ttyConfirm({ cardId, text, open: () => { throw Object.assign(new Error('Device not configured'), { code: 'ENXIO' }); } }) });
+  const r = await run(w, { confirm: ({ cardId, text }) => ttyConfirm({ cardId, text, stdinIsTty: () => true, open: () => { throw Object.assign(new Error('Device not configured'), { code: 'ENXIO' }); } }) });
   assert.match(r.reason, /no terminal is attached/);
   assert.equal(w.t.record.read('card', 'C-1'), null);
   assert.equal(asks(w).length, 0);
@@ -294,7 +294,7 @@ test('M2 answerByOwnerCommand: only a live Tier-2 go of this product, with no ri
 // ---- L1096 Q11: the retyped id comes from the terminal only ----
 
 test('plant: no terminal (opening /dev/tty fails) is refused', () => {
-  const r = ttyConfirm({ cardId: 'C-1', text: 'x', open: () => { throw Object.assign(new Error('Device not configured'), { code: 'ENXIO' }); } });
+  const r = ttyConfirm({ cardId: 'C-1', text: 'x', stdinIsTty: () => true, open: () => { throw Object.assign(new Error('Device not configured'), { code: 'ENXIO' }); } });
   assert.match(r.reason, /no terminal is attached/);
 });
 
@@ -303,7 +303,7 @@ test('plant: a wrong id at the terminal is refused; the right one is taken (cont
   let n = 0;
   // The prompt goes to `prompts`, so the typed line is read untouched, kept apart as a terminal keeps them.
   const prompts = [];
-  const typeIn = (typed) => { const f = join(dir, `t${++n}`); writeFileSync(f, typed); return ttyConfirm({ cardId: 'C-1', text: 'x', open: () => openSync(f, 'r'), isTty: () => true, show: (_fd, s) => prompts.push(s) }); };
+  const typeIn = (typed) => { const f = join(dir, `t${++n}`); writeFileSync(f, typed); return ttyConfirm({ cardId: 'C-1', text: 'x', open: () => openSync(f, 'r'), isTty: () => true, stdinIsTty: () => true, show: (_fd, s) => prompts.push(s) }); };
   assert.match(typeIn('C-2\n').reason, /the id typed was not C-1/);
   assert.match(typeIn('c-1\n').reason, /not C-1/);
   assert.match(typeIn('\n').reason, /not C-1/);
@@ -317,11 +317,61 @@ test('plant: a wrong id at the terminal is refused; the right one is taken (cont
 test('plant: a file that is not a terminal is refused even with the right id in it', () => {
   const f = join(tempDir('orch-go-card-'), 'answer');
   writeFileSync(f, 'C-1\n');
-  assert.match(ttyConfirm({ cardId: 'C-1', text: 'x', open: () => openSync(f, 'r+') }).reason, /no terminal is attached/);
+  assert.match(ttyConfirm({ cardId: 'C-1', text: 'x', stdinIsTty: () => true, open: () => openSync(f, 'r+') }).reason, /no terminal is attached/);
+});
+
+// A process with no terminal (as a session's shell): `detached` starts the child in its own session, so it has no
+// controlling terminal whatever ran this test; its stdin is a pipe holding the right id. `src` is the child's code.
+async function noTerminal(src) {
+  const child = spawn(process.execPath, ['--input-type=module', '-e', src], { detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
+  child.stdin.end('C-1\nC-1\n');
+  let out = ''; let err = '';
+  child.stdout.on('data', (d) => { out += d; });
+  child.stderr.on('data', (d) => { err += d; });
+  const code = await new Promise((ok) => child.on('close', ok));
+  assert.equal(code, 0, err);
+  return JSON.parse(out);
+}
+const GO_CARD = JSON.stringify(join(HERE, 'go-card.mjs'));
+
+test('L1132: stdin that is not a terminal is refused before the terminal is opened, whatever the terminal holds', () => {
+  let opened = 0;
+  const r = ttyConfirm({ cardId: 'C-1', text: 'x', stdinIsTty: () => false, open: () => { opened += 1; return 99; }, isTty: () => true, show: () => {} });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /piped or redirected, not the Terminal/);
+  assert.equal(opened, 0);
+});
+
+test('L1132: the real port reads /dev/tty, and with no terminal it throws, and ttyConfirm refuses', async () => {
+  assert.equal(TTY_PATH, '/dev/tty');
+  assert.match(openTty.toString(), /openSync\(TTY_PATH, 'r\+'\)/);
+  // ttyConfirm's default open is openTty (its own default, not a copy).
+  assert.match(ttyConfirm.toString().slice(0, 200), /open = openTty/);
+  const r = await noTerminal(`import { openTty, ttyConfirm } from ${GO_CARD};
+    let threw = null; try { openTty(); } catch (e) { threw = e.code ?? String(e); }
+    process.stdout.write(JSON.stringify({ threw, stdinTty: process.stdin.isTTY === true, confirm: ttyConfirm({ cardId: 'C-1', text: 'x', stdinIsTty: () => true }) }));`);
+  assert.ok(r.threw, 'opening /dev/tty with no controlling terminal throws');
+  assert.equal(r.stdinTty, false);
+  assert.equal(r.confirm.ok, false);
+  assert.match(r.confirm.reason, /no terminal is attached/);
+});
+
+test('L1132: every paste block for the go command asks sudo for the password again (sudo -k)', () => {
+  assert.ok(USAGE.startsWith(`sudo -k -u ${RUN_AS} `), USAGE);
+  const src = readFileSync(join(HERE, 'go-card.mjs'), 'utf8');
+  const runs = [...src.matchAll(/sudo [^'\n]*go-card\.mjs/g)].map((m) => m[0]);
+  assert.ok(runs.length >= 2, 'the header and USAGE');
+  for (const r of runs) assert.match(r, /^sudo -k /, r);
 });
 
 test('plant: stdin piped with the right id, in a process with no terminal (as a session\'s shell), is refused', async () => {
-  const src = `import { ttyConfirm } from ${JSON.stringify(join(HERE, 'go-card.mjs'))}; process.stdout.write(JSON.stringify(ttyConfirm({ cardId: 'C-1', text: 'x' })));`;
+  const r = await noTerminal(`import { ttyConfirm } from ${GO_CARD}; process.stdout.write(JSON.stringify(ttyConfirm({ cardId: 'C-1', text: 'x' })));`);
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /piped or redirected, not the Terminal/);
+});
+
+test('plant: stdin taken as a terminal, but no terminal to open, is refused', async () => {
+  const src = `import { ttyConfirm } from ${GO_CARD}; process.stdout.write(JSON.stringify(ttyConfirm({ cardId: 'C-1', text: 'x', stdinIsTty: () => true })));`;
   // detached: the child starts its own session, so it has no controlling terminal whatever ran this test.
   const child = spawn(process.execPath, ['--input-type=module', '-e', src], { detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
   child.stdin.end('C-1\nC-1\n');
@@ -338,11 +388,11 @@ test('plant: stdin piped with the right id, in a process with no terminal (as a 
 test('who may run it: the Dispatcher\'s user, started through sudo by the owner', async () => {
   const { DISPATCHER_USER } = await import('./dispatcher-setup.mjs');
   assert.equal(RUN_AS, DISPATCHER_USER, 'go-card\'s own copy of the Dispatcher\'s user name');
-  assert.ok(USAGE.startsWith(`sudo -u ${RUN_AS} `));
+  assert.ok(USAGE.startsWith(`sudo -k -u ${RUN_AS} `));
   const ok = { uid: 300, sudoUid: String(OWNER), dispatcherUid: 300, ownerUid: OWNER };
   assert.equal(whoProblem(ok), null);
-  assert.match(whoProblem({ ...ok, uid: OWNER }), /sudo -u orchestrate/);
-  assert.match(whoProblem({ ...ok, uid: 0 }), /sudo -u orchestrate/);
+  assert.match(whoProblem({ ...ok, uid: OWNER }), /sudo -k -u orchestrate/);
+  assert.match(whoProblem({ ...ok, uid: 0 }), /sudo -k -u orchestrate/);
   assert.match(whoProblem({ ...ok, sudoUid: undefined }), /not started through sudo/);
   assert.match(whoProblem({ ...ok, sudoUid: '502' }), /by user 502, not by the owner/);
   assert.match(whoProblem({ ...ok, sudoUid: '501x' }), /not started through sudo/);
@@ -354,7 +404,7 @@ test('main: a wrong number of arguments, or a config that is not the installed c
   const lines = [];
   const confirm = () => { throw new Error('asked to confirm'); };
   assert.equal(await main([], { log: (s) => lines.push(s), confirm }), 1);
-  assert.match(lines[0], /^go-card: usage: sudo -u orchestrate/);
+  assert.match(lines[0], /^go-card: usage: sudo -k -u orchestrate/);
   assert.equal(await main([join(tempDir('orch-go-card-'), 'nope.json'), 'C-1'], { log: (s) => lines.push(s), confirm }), 1);
   assert.match(lines[1], /^go-card: /);
   assert.doesNotMatch(lines[1], /asked to confirm/);
