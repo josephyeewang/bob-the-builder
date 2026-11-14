@@ -54,11 +54,15 @@ import { proposalFolder } from '../launcher/proposal-wall.mjs';
 import { plainFd } from '../../M9-record/unsent.mjs';
 import { researchPath, researchFileName, RESEARCH_ID } from '../../M2-approvals/research-ask.mjs';
 import { intakeFactId } from '../../M11-dispatcher/intake-facts.mjs';
+import { SHA256 } from '../../../shared/plan-fingerprint.mjs';
 
 export { BRANCH };
 export const BUNDLE_CAP = 200 * 1024 * 1024;
 // A file changed this recently may still be being written. One value: the proposals intake's too.
 export const SETTLE_MS = 2000;
+/** How long a push (or the pull request it asks for) that did not go waits before it is tried again: research-intake.mjs and
+ * wiring/push-pass.mjs both use it, as RETRY_MS (I7: one home). */
+export const PUSH_RETRY_MS = 15 * 60_000;
 // A research copy refused with this reason is told to the owner at once (M11 researchCopyPass).
 export const REPORT_CHANGED = 'the report\'s bytes are not the ones the intake recorded';
 // The bits a proposals folder may not have: anything looser than 750. One value: the intake's folder check too.
@@ -69,7 +73,6 @@ const CARD = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
 const ATTEMPT = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
 const REPO = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/;
 const SHA = /^[0-9a-f]{40}$/;
-const SHA256 = /^[0-9a-f]{64}$/;
 const isUid = (u) => Number.isSafeInteger(u) && u > 0;
 // An attempt id starting p- or r- is a proposal's or a research copy's (their facts live under it); a worker's never does.
 const DOOR_ATTEMPT = /^[pr]-/;
@@ -301,9 +304,11 @@ async function messages(mirror, shas, names, about) {
  *                           never passes it, so every address is https://github.com/<repo>.git.
  *   testFstat(fd)           tests only, refused outside them: stands in for fstat on the bundle's handle.
  *   testGit                 tests only, refused outside them: { bin, timeouts, failStart } for every git call (gitTest).
+ *   testScannerPin          tests only, refused outside them: { sha, uid } of a stand-in gitleaks, in place of root's
+ *                           real pin (gitleaks.mjs scannerBinProblem; L1123 m5).
  *   afterStage()            tests only: runs right after the private copy is taken, so a test can
  *                           swap the outbox bundle at the earliest moment (review R-0b-47 MAT-4).
- *   uids.worker             the Mac user a worker's bundle must be owned by (`orchestrate`, L65)
+ *   uids.worker             the Mac user a worker's bundle must be owned by (the `builder` user, L1079; robot-push.mjs reads its id from the layout's USERS)
  *   outboxRoot              the TOP outboxes folder (<base>/outboxes), not a product's folder under it: a worker's
  *                           outbox must really be either runner role's folder, <root>/<product>/{worker|script}/<session id>
  *                           (L767, L836; outboxProblemFor, #378 r1 m2, #403 r1 M1)
@@ -312,9 +317,10 @@ async function messages(mirror, shas, names, about) {
  *                           look owned by another user (tests can't chown).
  */
 export function createPushScript(deps) {
-  const { record, rules, productPlace, outsideWorkflow, privateDir, scanner, getRobotToken, readRun, workflowRule, issues, pullRequests, gateCache = {}, testRemote, afterStage, bundleCap = BUNDLE_CAP, now = () => Date.now(), uids, ownerUid, outboxRoot, testFstat: fstat, testGit } = deps;
+  const { record, rules, productPlace, outsideWorkflow, privateDir, scanner, getRobotToken, readRun, workflowRule, issues, pullRequests, gateCache = {}, testRemote, afterStage, bundleCap = BUNDLE_CAP, now = () => Date.now(), uids, ownerUid, outboxRoot, testFstat: fstat, testGit, testScannerPin } = deps;
   if (fstat !== undefined && !process.env.NODE_TEST_CONTEXT) throw new Error('createPushScript: testFstat is for tests only');
   if (testGit !== undefined && !process.env.NODE_TEST_CONTEXT) throw new Error('createPushScript: testGit is for tests only');
+  if (testScannerPin !== undefined && !process.env.NODE_TEST_CONTEXT) throw new Error('createPushScript: testScannerPin is for tests only');
   // Checked once, here: a push script that can't tell a worker's bundle from Joe's is never made.
   // So is one that doesn't know where a product lives, or which outside check to trust (L568).
   if (typeof productPlace !== 'function') throw new Error('createPushScript: productPlace must be a function');
@@ -500,7 +506,7 @@ export function createPushScript(deps) {
       // 5. The secret scan.
       const shas = commits.map(([s]) => s);
       for (const sha of shas) if (await addedAllowComment(mirror, sha, of)) no(`commit ${sha.slice(0, 12)} adds a "gitleaks:allow" comment`);
-      const scan = await scanSecrets({ setup: scanner, mirror, shas, blobs: [...blobs.values()], messages: await messages(mirror, shas, names, of), privateDir: work, allowedBinaries: allowList(rules.get('product.allowed_binaries', { product })) });
+      const scan = await scanSecrets({ setup: scanner, mirror, shas, blobs: [...blobs.values()], messages: await messages(mirror, shas, names, of), privateDir: work, allowedBinaries: allowList(rules.get('product.allowed_binaries', { product })), testPin: testScannerPin });
       if (!scan.ok) no(scan.reason);
 
       // 6. The rules, then the start gate. M10's push_branch reads the card as { id, kind, rows, doc: { lane, files } } and each
@@ -550,6 +556,10 @@ export function createPushScript(deps) {
   // reviewer and to request a merge. Head only, except where M9 asks for more: a new head on a verified or approved
   // card sends it back to in_review. Tried twice, for the Dispatcher writes the card too. -> null, or why it wasn't.
   function writeHead(card, tip) {
+    // A Record that throws is a head not noted, never a throw out of the push (#536 r2 Minor 5): the push was made.
+    try { return headOnce(card, tip); } catch (e) { return `card ${card}'s head could not be written (${String(e?.message ?? e).slice(0, 200)})`; }
+  }
+  function headOnce(card, tip) {
     let why = null;
     for (let i = 0; i < 2; i += 1) {
       const c = record.read('card', card);
@@ -580,15 +590,32 @@ export function createPushScript(deps) {
     const cur = record.read('fact', id);
     let doc = res.ok ? { result: 'pushed', branch: res.branch, tip: res.tip, binaries: res.binaries ?? [], at: new Date(now()).toISOString() } : { result: 'refused', reason: res.reason, ...(res.retry ? { retry: true } : {}), at: new Date(now()).toISOString() };
     // A refusal never erases a recorded push of the same attempt (#170 r1): it is added to it as the last refusal.
-    if (!res.ok && cur?.doc?.result === 'pushed' && !cur.corrupt) doc = { ...cur.doc, last_refusal: { reason: res.reason, at: doc.at } };
+    if (!res.ok && cur?.doc?.result === 'pushed' && !cur.corrupt) doc = { ...cur.doc, last_refusal: { reason: res.reason, ...(res.retry ? { retry: true } : {}), at: doc.at } };
     if (headRefused) doc.head_refused = headRefused;
     // A worker's pushed bundle, by the bytes staged and pushed (L898): the runner's drain counts the bundle taken by it.
     if (res.ok && !from && typeof res.bundle_sha256 === 'string') doc.bundle_sha256 = res.bundle_sha256;
     if (from) doc.from = from;
     // The product pushed for: bytes already pushed answer again only for the same product (#170 r1 m1).
     if (res.ok && from) doc.product = res.product;
-    record.write({ actor: 'workshop', entity: 'fact', id, expectRev: cur?.rev ?? 0, doc, kind: res.ok ? 'push' : 'push_refused' });
+    // A fact that could not be written is no answer (#536 r2 Minor 5): the caller is told to try again, never that it is
+    // done, so the drain doesn't take an unrecorded push; a push made is found on the branch by the rerun (step 4).
+    let w;
+    try { w = record.write({ actor: 'workshop', entity: 'fact', id, expectRev: cur?.rev ?? 0, doc, kind: res.ok ? 'push' : 'push_refused' }); } catch (e) { w = { ok: false, reason: String(e?.message ?? e) }; }
+    // A write refused because the Record already holds this answer (nothing changed), or because another writer moved
+    // this fact since it was read (writer.mjs "changed since read"), leaves a fact: the next read answers from it.
+    if (!w?.ok && (holds(id, res) || /^changed since read\b/.test(String(w?.reason ?? '')))) return res;
+    if (!w?.ok) return { ok: false, retry: true, reason: `${res.ok ? 'the push was made, but' : `${res.reason}; and`} its record could not be written (${String(w?.reason ?? 'no reason given').slice(0, 200)})` };
     return res;
+  }
+
+  // Whether the push fact already says this answer: the same tip pushed, or this refusal (as the fact or its last refusal).
+  function holds(id, res) {
+    let d;
+    try { const f = record.read('fact', id); d = f && !f.corrupt ? f.doc : null; } catch { return false; }
+    if (!d) return false;
+    if (res.ok) return d.result === 'pushed' && d.tip === res.tip;
+    const r = d.result === 'pushed' ? d.last_refusal : d;
+    return (d.result === 'pushed' || d.result === 'refused') && r?.reason === res.reason && (r?.retry === true) === (res.retry === true);
   }
 
   /** Pushes one session's bundle. */

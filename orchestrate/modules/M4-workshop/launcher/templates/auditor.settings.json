@@ -147,7 +147,6 @@
     "DISABLE_UPDATES": "1"
   },
   "disableClaudeAiConnectors": true,
-  "enabledPlugins": {},
   "crossSessionInbound": "refuse",
   "disableSkillShellExecution": true,
   "disableBundledSkills": true

@@ -18,7 +18,7 @@
 
 import { activeKind } from '../../shared/asks.mjs';
 import { answerCounts } from '../../shared/approval.mjs';
-import { askStore, writeDoc } from './ask-store.mjs';
+import { askStore, recordRefused, writeDoc } from './ask-store.mjs';
 import { ownerVerdict, requestReview } from './github-review.mjs';
 import { goMarkdown, goView } from './go-view.mjs';
 import { GO_EMPTY_LINE, LETTER_LINE, lapseAt, outsideTime, readConfig } from './kinds.mjs';
@@ -159,7 +159,7 @@ export async function readDecision(ctx, id) {
   if (!counted.ok) { ctx.alert({ type: 'approval_not_counted', ask: id, reason: counted.reason }); return { ok: true, counted: false }; }
   const next = { ...doc, state: 'answered', answer, [CLOSE_DUE]: true };
   const w = writeDoc(ctx.record, 'ask', a, next);
-  if (!w.ok) return fail(`the record refused the answer: ${w.reason}`);
+  if (!w.ok) return fail(recordRefused(w.reason));
   // After any recorded choice the robot closes the decision pull request unmerged (round 1 M9; audit round 1 m-1).
   // The mark comes off once the close worked or Joe was told; otherwise, or if this write is refused, it stays and the
   // schedule pass retries (L135).

@@ -28,13 +28,49 @@
 // Clean means exit 0 and a report that reads as zero findings; anything else refuses.
 
 import { spawn } from 'node:child_process';
-import { readFileSync, lstatSync, statSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { readFileSync, lstatSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, openSync, fstatSync, closeSync, constants } from 'node:fs';
 import { join, isAbsolute } from 'node:path';
 import { createHash } from 'node:crypto';
 import { git, safeGitEnv } from './safe-git.mjs';
 import { checkFile } from './binary-files.mjs';
 
 export const RULES_VERSION = '8.30.1';
+// The program's pin, beside the rules' version: one home for both (L1123 m5). gitleaks 8.30.1, darwin arm64 (the
+// always-on Mac is Apple silicon), the program inside the tarball whose hash gitleaks publishes (setup/scanner-setup.mjs
+// keeps the tarball's hash, which only setup reads). A new pin takes a new version's rules and both hashes again.
+export const SCANNER_BIN_SHA256 = 'ba52fb1bfabbcde42f032afad3d6e0b19dff8ed105229a16e7caa338bbc0e84f';
+// Far above the program's 21 MB; a file past it is not read.
+export const SCANNER_MAX_BYTES = 64 * 1024 * 1024;
+
+/**
+ * A plain file read through one handle opened without following a link, capped at `max` bytes: what is checked is
+ * what is read. → { st, bytes } (st from that same handle), or throws: a link (ELOOP), not a plain file, too big.
+ */
+export function readPlainFile(path, { max = SCANNER_MAX_BYTES } = {}) {
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) throw Object.assign(new Error(`${path} is not a plain file`), { code: 'ENOTFILE' });
+    if (st.size > max) throw Object.assign(new Error(`${path} is too big to be the pinned file; it was not read`), { code: 'EFBIG' });
+    return { st, bytes: readFileSync(fd) };
+  } finally { closeSync(fd); }
+}
+
+/**
+ * Why the program at `bin` is not the pinned one, or null: a plain file under one name only, not a link (not followed),
+ * owned by `uid`, writable by no one else, and hashing to `sha`. `pin` = { sha, uid } is root's real pin unless a test
+ * names its stand-in's.
+ */
+export function scannerBinProblem(bin, { sha = SCANNER_BIN_SHA256, uid = 0 } = {}) {
+  let got;
+  try { got = readPlainFile(bin); } catch (e) { return e?.code === 'ENOENT' ? 'the secret scanner is missing' : e?.code === 'ELOOP' ? 'the secret scanner is a link, which is not followed' : e?.code === 'ENOTFILE' ? 'the secret scanner is not a plain file' : `the secret scanner can't be read (${e?.code ?? e?.message ?? e})`; }
+  const { st, bytes } = got;
+  if (st.uid !== uid) return `the secret scanner is owned by uid ${st.uid}, not ${uid}`;
+  if (st.mode & 0o022) return `the secret scanner can be changed by others (mode ${(st.mode & 0o7777).toString(8)})`;
+  if (st.nlink !== 1) return `the secret scanner has ${st.nlink} names (a second name could change it)`;
+  const h = sha256(bytes);
+  return h === sha ? null : `the secret scanner hashes to ${h.slice(0, 12)}…, not the pinned ${String(sha).slice(0, 12)}…`;
+}
 export const DO_PLANE_TOML = readFileSync(new URL(`./rules-${RULES_VERSION}.gitleaks.toml`, import.meta.url), 'utf8');
 // The hash catches an accidental change to the rules file. It sits beside the code that reads it, so
 // it is no guard against someone who can edit both; only the Do-plane can edit either.
@@ -42,7 +78,14 @@ export const DO_PLANE_SHA256 = 'b6dbe4e0be74fdcba5453b8ea0353ef6175bee578d292f63
 const sha256 = (t) => createHash('sha256').update(t).digest('hex');
 const refuse = (reason) => ({ ok: false, reason });
 
-function run(bin, args, { env, input, timeoutMs = 300000 }) {
+// How long one scanner run may take (the version check is one).
+export const SCAN_TIMEOUT_MS = 300_000;
+// How long one scanSecrets call may take in all, after the scanner check: every scanner run (the commits, the files, one
+// per commit's text) and every git read of a file share it, each given only what is left (#536 r1 m1). Past it the scan
+// refuses. With SCAN_TIMEOUT_MS for the check, it sizes the robot's push pass limit (wiring/robot-push.mjs, L1115).
+export const SCAN_BUDGET_MS = 300_000;
+
+export function runScanner(bin, args, { env, input, timeoutMs = SCAN_TIMEOUT_MS }) {
   return new Promise((resolve) => {
     const c = spawn(bin, args, { env, stdio: ['pipe', 'pipe', 'pipe'], timeout: timeoutMs, cwd: env.HOME });
     let out = ''; let err = '';
@@ -57,16 +100,19 @@ function run(bin, args, { env, input, timeoutMs = 300000 }) {
 
 /**
  * `setup` = { bin, version, config, ignoreFile }: the pinned binary, its pinned version, the
- * Do-plane config file and the Do-plane's empty ignore file. Checks them all before any scan.
+ * Do-plane config file and the Do-plane's empty ignore file. Checks them all before any scan: the program's hash,
+ * owner, mode and single name without following a link (L1083 Q7, L1123 m5), then its `version`. `pin` is for tests
+ * only (scannerBinProblem); the push passes none, so root's real pin is the one checked.
  */
-export async function checkScanner({ bin, version, config, ignoreFile }) {
+export async function checkScanner({ bin, version, config, ignoreFile }, pin) {
   if (sha256(DO_PLANE_TOML) !== DO_PLANE_SHA256 || /allowlist/i.test(DO_PLANE_TOML.replace(/^#.*$/gm, ''))) return refuse('the vendored scanner rules have changed');
   if (version !== RULES_VERSION) return refuse(`the scanner rules were taken from gitleaks ${RULES_VERSION}; the pin is ${version}`);
   if (typeof bin !== 'string' || !isAbsolute(bin)) return refuse('the secret scanner is not pinned by absolute path');
-  try { if (!statSync(bin).isFile()) return refuse('the secret scanner is missing'); } catch { return refuse('the secret scanner is missing'); }
+  const binBad = scannerBinProblem(bin, pin);
+  if (binBad) return refuse(binBad);
   try { if (readFileSync(config, 'utf8') !== DO_PLANE_TOML) return refuse('the Do-plane scanner config has changed'); } catch { return refuse('the Do-plane scanner config is missing'); }
   try { const st = lstatSync(ignoreFile); if (!st.isFile() || st.size !== 0) return refuse('the Do-plane ignore file is not empty'); } catch { return refuse('the Do-plane ignore file is missing'); }
-  const r = await run(bin, ['version'], { env: safeGitEnv({ gitDir: '/dev/null' }) });
+  const r = await runScanner(bin, ['version'], { env: safeGitEnv({ gitDir: '/dev/null' }) });
   const m = /(\d+\.\d+\.\d+)/.exec(r.out);
   if (r.code !== 0 || !m) return refuse('the secret scanner did not report its version');
   if (m[1] !== version) return refuse(`the secret scanner is ${m[1]}, the pin is ${version}`);
@@ -119,16 +165,22 @@ const repoPath = (blobs) => (file) => {
  * header line, the message) and the names of the files it touches. Clean is { ok: true, binaries }:
  * the allowed non-text files, for the read-back.
  */
-export async function scanSecrets({ setup, mirror, shas, blobs = [], messages, privateDir, allowedBinaries = [], maxFileBytes = MAX_FILE_BYTES, maxTotalBytes = MAX_TOTAL_BYTES }) {
-  const c = await checkScanner(setup);
+export async function scanSecrets({ setup, mirror, shas, blobs = [], messages, privateDir, allowedBinaries = [], maxFileBytes = MAX_FILE_BYTES, maxTotalBytes = MAX_TOTAL_BYTES, budgetMs = SCAN_BUDGET_MS, clock = Date.now, run = runScanner, testPin }) {
+  const c = await checkScanner(setup, testPin);
   if (!c.ok) return c;
+  // One budget for the whole scan (#536 r1 m1): each step gets what is left, and none starts once it is spent.
+  const end = clock() + budgetMs;
+  const left = () => Math.min(SCAN_TIMEOUT_MS, end - clock());
+  const spent = () => refuse(`the secret scan ran past its ${Math.round(budgetMs / 1000)} s limit, so the work is not pushed`);
   const dir = mkdtempSync(join(privateDir, 'scan-'));
   const binaries = [];
   try {
     const env = safeGitEnv({ gitDir: mirror });
     const report = join(dir, 'git.json');
     const logOpts = `--no-walk=unsorted ${shas.join(' ')}`;
-    const r = await run(setup.bin, ['git', mirror, '--log-opts', logOpts, ...common(setup, report)], { env });
+    if (left() <= 0) return spent();
+    const r = await run(setup.bin, ['git', mirror, '--log-opts', logOpts, ...common(setup, report)], { env, timeoutMs: left() });
+    if (left() <= 0) return spent();
     const v = verdict(r, report);
     if (!v.ok) return v;
     if (blobs.length) {
@@ -139,13 +191,15 @@ export async function scanSecrets({ setup, mirror, shas, blobs = [], messages, p
       for (const [i, b] of blobs.entries()) {
         const name = String(b.path).slice(0, 80); // masked with every reason, once, in push.mjs
         if (!/^[0-9a-f]{40}$/.test(String(b.id))) return refuse('a new file has no readable id');
-        const size = await git(['cat-file', '-s', b.id], { gitDir: mirror, purpose: 'push-scan-files' });
+        if (left() <= 0) return spent();
+        const size = await git(['cat-file', '-s', b.id], { gitDir: mirror, purpose: 'push-scan-files', timeoutMs: left() });
         const n = Number(String(size.stdout).trim());
         if (size.code !== 0 || !Number.isSafeInteger(n)) return refuse(`could not read the new file ${name}`);
         total += n;
         if (n > maxFileBytes) return refuse(`the new file ${name} is larger than ${maxFileBytes} bytes, too large to scan`);
         if (total > maxTotalBytes) return refuse(`the new files come to more than ${maxTotalBytes} bytes, too much to scan`);
-        const cat = await git(['cat-file', 'blob', b.id], { gitDir: mirror, purpose: 'push-scan-files' });
+        if (left() <= 0) return spent();
+        const cat = await git(['cat-file', 'blob', b.id], { gitDir: mirror, purpose: 'push-scan-files', timeoutMs: left() });
         if (cat.code !== 0 || cat.stdout.length !== n) return refuse(`could not read the new file ${name}`);
         const kind = checkFile(String(b.path), cat.stdout, allowedBinaries);
         if (!kind.ok) return refuse(kind.reason);
@@ -159,13 +213,17 @@ export async function scanSecrets({ setup, mirror, shas, blobs = [], messages, p
         }
       }
       const fr = join(dir, 'files.json');
-      const f = await run(setup.bin, ['dir', files, '--max-archive-depth', '2', ...common(setup, fr)], { env });
+      if (left() <= 0) return spent();
+      const f = await run(setup.bin, ['dir', files, '--max-archive-depth', '2', ...common(setup, fr)], { env, timeoutMs: left() });
+      if (left() <= 0) return spent();
       const fv = verdict(f, fr, repoPath(blobs));
       if (!fv.ok) return refuse(`the file scan: ${fv.reason}`);
     }
     for (const [sha, text] of messages) {
       const rep = join(dir, `msg-${sha}.json`);
-      const m = await run(setup.bin, ['stdin', ...common(setup, rep)], { env, input: text });
+      if (left() <= 0) return spent();
+      const m = await run(setup.bin, ['stdin', ...common(setup, rep)], { env, input: text, timeoutMs: left() });
+      if (left() <= 0) return spent();
       const mv = verdict(m, rep);
       if (!mv.ok) return refuse(`commit ${sha.slice(0, 12)} message, header lines or file names: ${mv.reason}`);
     }

@@ -6,7 +6,8 @@
 // invalid, a write with no value is a bad call, a record that is not there reads as exit 56; chown needs root; mkdir
 // needs the parent and refuses an existing folder (those two are the real mkdir's own refusals, since it is the real one).
 
-import { renameSync, unlinkSync, chmodSync, cpSync, fchmodSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync } from 'node:fs';
+import { renameSync, unlinkSync, chmodSync, cpSync, fchmodSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync } from 'node:fs';
+import { openRead } from '../wiring/owner-status.mjs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
@@ -50,12 +51,15 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
     nodeProblemText: null,      // a test sets this to make the node program look like one root must not run
     // Access-list names that exist only on the always-on Mac are stood in for by a real user here: orchestrate, and the review
     // user and the owners the tests name, for the rules-in-force folder (L1002).
-    aclPrincipals: { orchestrate: 'daemon', review: 'nobody', sam: '_www', joe: '_ftp' },
+    aclPrincipals: { orchestrate: 'daemon', review: 'nobody', sam: '_www', joe: '_ftp', builder: '_uucp' },
     privacyBlocked: new Set(),  // paths macOS's privacy protection refuses whatever the permissions say (a cloud folder): /bin/cat fails with EPERM
   };
   const at = (p) => join(prefix, p);
   mkdirSync(at('/Library/LaunchDaemons'), { recursive: true });
   for (const p of ['/Library', '/Library/LaunchDaemons']) mac.owners.set(p, { uid: mac.rootUid, gid: 0 });
+  // As on every Mac, /etc is a link to /private/etc (#556 r1 M1): a path through it is a path through a link.
+  mkdirSync(at('/private/etc'), { recursive: true }); symlinkSync('private/etc', at('/etc'));
+  for (const p of ['/private', '/private/etc']) mac.owners.set(p, { uid: mac.rootUid, gid: 0 });
   const dscl = (args) => {
     const [flag, path, ...rest] = args;
     const m = /^\/(Users|Groups)(?:\/([A-Za-z0-9_.-]+))?$/.exec(path ?? '');
@@ -110,15 +114,28 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
       const shown = real('/bin/ls', ['-led', at(p)]).stdout;
       return new RegExp(`^\\s+\\d+: user:${principal} allow .*\\blist\\b`, 'm').test(shown);
     };
-    if (prog === '/bin/test' && rest[0] === '-w') return { status: can(rest[1], true) ? 0 : 1, stdout: '', stderr: '' };
-    if (prog === '/bin/test' && rest[0] === '-r') return { status: can(rest[1], false) ? 0 : 1, stdout: '', stderr: '' };
-    if (prog === '/bin/test' && rest[0] === '-x') return { status: can(rest[1], false, true) ? 0 : 1, stdout: '', stderr: '' };
+    // Every path is reached through its folders: each one above needs search (x), as on the Mac (#528 r1 M1: a folder under
+    // a home the builder can't enter is refused on the way in, by ls and test alike).
+    const reach = (f) => { for (let d = dirname(f); d !== '/'; d = dirname(d)) if (!can(d, false, true)) return false; return true; };
+    if (prog === '/bin/test' && rest[0] === '-w') return { status: reach(rest[1]) && can(rest[1], true) ? 0 : 1, stdout: '', stderr: '' };
+    if (prog === '/bin/test' && rest[0] === '-r') return { status: reach(rest[1]) && can(rest[1], false) ? 0 : 1, stdout: '', stderr: '' };
+    // No `test -O` (#528 r6 M-A, M-B): who owns a place is root's own look in the proofs, never a test run as the user.
+    if (prog === '/bin/test' && rest[0] === '-x') return { status: reach(rest[1]) && can(rest[1], false, true) ? 0 : 1, stdout: '', stderr: '' };
+    // `head -c 1 <file>` (the proofs' read, L1079) is a read as `cat` is: the folder walk, then the file's read bits; a folder it can read answers "Error reading", as macOS's head does.
+    if (prog === '/usr/bin/head' && rest[0] === '-c' && rest[1] === '1') {
+      const f = rest[2];
+      for (let d = dirname(f); d !== '/'; d = dirname(d)) if (!can(d, false, true)) return { status: 1, stdout: '', stderr: `head: ${f}: Permission denied` };
+      if (!can(f, false)) return { status: 1, stdout: '', stderr: `head: ${f}: Permission denied` };
+      // A folder it may read opens, then the read fails: exit 1, but not a permission refusal (macOS's own answer, #528 r1 M1).
+      if (lstatSync(at(f)).isDirectory()) return { status: 1, stdout: '', stderr: `head: Error reading ${f}` };
+      return { status: 0, stdout: readFileSync(at(f), 'utf8').slice(0, 1), stderr: '' };
+    }
     if (prog === '/bin/cat' && mac.privacyBlocked.has(rest[0])) return { status: 1, stdout: '', stderr: `cat: ${rest[0]}: Operation not permitted` };
     // A real open needs search (x) on every folder above the file: the stand-in checks that too, below the stand-in's own
     // '/' (the throwaway prefix folder, private to this test process; the real '/' lets everyone search it).
     if (prog === '/bin/cat') for (let d = dirname(rest[0]); d !== '/'; d = dirname(d)) if (!can(d, false, true)) return { status: 1, stdout: '', stderr: `cat: ${rest[0]}: Permission denied` };
     if (prog === '/bin/cat') return can(rest[0], false) ? { status: 0, stdout: readFileSync(at(rest[0]), 'utf8'), stderr: '' } : { status: 1, stdout: '', stderr: `cat: ${rest[0]}: Permission denied` };
-    if (prog === '/bin/ls') return can(rest[0], false) ? { status: 0, stdout: '', stderr: '' } : { status: 1, stdout: '', stderr: `ls: ${rest[0]}: Permission denied` };
+    if (prog === '/bin/ls') return reach(rest[0]) && can(rest[0], false) ? { status: 0, stdout: '', stderr: '' } : { status: 1, stdout: '', stderr: `ls: ${rest[0]}: Permission denied` };
     if (prog === '/usr/bin/git' && rest[0] === 'config' && rest[1] === '--includes' && rest[2] === '--get-all' && rest[3] === 'safe.directory') {
       // every scope (system, global, included files), as the real git reads them: nothing else is set here
       const all = [...mac.gitSafeOther, ...(mac.gitSafe.get(who) ?? [])];
@@ -149,6 +166,14 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
         const who = args[args.indexOf('-m') + 1];
         return mac.admins.has(who) ? { status: 0, stdout: `yes ${who} is a member of admin\n`, stderr: '' } : { status: 67, stdout: `no ${who} is NOT a member of admin\n`, stderr: '' };
       }
+      // `id -Gn <user>`: its own group's name and the groups every local user is in, unless a test sets mac.groupNames[user]
+      // (a list, or a { status, stderr } answer).
+      if (cmd === '/usr/bin/id' && args[0] === '-Gn') {
+        const who = args[1]; const set = mac.groupNames?.[who];
+        if (set && !Array.isArray(set)) return { stdout: '', ...set };
+        if (!mac.users.get(who)) return { status: 1, stdout: '', stderr: `id: ${who}: no such user` };
+        return { status: 0, stdout: `${(set ?? [who, 'everyone', 'localaccounts', '_lpoperator']).join(' ')}\n`, stderr: '' };
+      }
       if (cmd === '/usr/bin/sudo') {
         if (mac.as !== 0) return { status: 1, stdout: '', stderr: 'sudo: a password is required' };
         if (args.includes('-u')) {
@@ -175,7 +200,10 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
       const st = lstatSync(at(p)); const o = mac.owners.get(p);
       return { isDirectory: () => st.isDirectory(), isFile: () => st.isFile(), isSymbolicLink: () => st.isSymbolicLink(), mode: st.mode, size: st.size, nlink: st.nlink, ino: st.ino, dev: st.dev, uid: o ? o.uid : -1, gid: o ? o.gid : -1 };
     },
-    mkdir(p, mode) { mac.log.push(`mkdir ${p}`); mkdirSync(at(p), { mode }); mac.owners.set(p, { uid: mac.rootUid, gid: 0 }); },
+    stat(p) { const st = statSync(at(p)); return { isDirectory: () => st.isDirectory(), isFile: () => st.isFile(), isSymbolicLink: () => false, mode: st.mode, nlink: st.nlink }; },
+    realpath(p) { const r = realpathSync(at(p)); return r.startsWith(`${prefix}/`) ? r.slice(prefix.length) : r; },
+    openRead: (p) => openRead(at(p)),
+    mkdir(p, mode) { mac.log.push(`mkdir ${p}`); mkdirSync(at(p), { mode }); mac.owners.set(p, mac.as === 0 ? { uid: mac.rootUid, gid: 0 } : { uid: mac.as, gid: 20 }); },
     // The setup's one way to change an owner and mode: the real handle-based change, with chown stood in for (a test is not root).
     secure(p, want) { secureFolder(at(p), want, ports(p)); },
     secureFile(p, want) { (mac.reopened ??= []).push(p); secureFile(at(p), want, ports(p)); },   // reopens the name: a test can see it
@@ -199,7 +227,7 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
     writeOwned(p, text, own) { mac.log.push(`write ${p}`); writeNewFile(at(p), text, own.mode, own, ports(p)); },
     unlink(p) { mac.log.push(`unlink ${p}`); try { unlinkSync(at(p)); } catch (e) { if (e?.code !== 'ENOENT') throw e; } mac.owners.delete(p); },
     rename(from, to) { mac.log.push(`rename ${from} ${to}`); renameSync(at(from), at(to)); const o = mac.owners.get(from); mac.owners.delete(from); if (o) mac.owners.set(to, o); else mac.owners.delete(to); },   // the real call
-    write(p, text, mode) { mac.log.push(`write ${p}`); writeNewFile(at(p), text, mode); mac.owners.set(p, { uid: -2, gid: -2 }); },   // no owner until the code sets one
+    write(p, text, mode) { mac.log.push(`write ${p}`); writeNewFile(at(p), text, mode); mac.owners.set(p, mac.as === 0 ? { uid: -2, gid: -2 } : { uid: mac.as, gid: 20 }); },   // root's: no owner until the code sets one; a user's is that user's
     copyFile(src, p, mode) { mac.log.push(`copy ${p}`); writeNewFile(at(p), readFileSync(src), mode); mac.owners.set(p, { uid: -2, gid: -2 }); },
     copyTree(src, p) { mac.log.push(`copytree ${p}`); cpSync(src, at(p), { recursive: true, dereference: false, errorOnExist: true, force: false }); },
     rm(p) { mac.log.push(`rm ${p}`); rmSync(at(p), { recursive: true, force: true }); for (const k of [...mac.owners.keys()]) if (k === p || k.startsWith(`${p}/`)) mac.owners.delete(k); },
@@ -212,14 +240,48 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
   // job file to be root's and not writable by group or other, and refuses a job already loaded; bootout refuses one that is
   // not loaded; print of one launchd does not know exits 113.
   mac.loaded = new Map();
+  mac.guiLoaded = new Map();   // "<uid>/<label>" → { state, lastExit }
+  mac.guiClosed = new Set();   // uids with no open login session: bootstrap in gui/<uid> fails as the real one does
+  const gui = (args) => {
+    const [verb, a, b] = args;
+    const err = (status, stderr) => ({ status, stdout: '', stderr });
+    const m = /^gui\/(\d+)(?:\/(.+))?$/.exec(a ?? ''); const uid = Number(m[1]);
+    if (verb === 'print') {
+      const key = `${uid}/${m[2]}`; const j = mac.guiLoaded.get(key);
+      if (!m[2]) return err(64, 'Usage: launchctl print <domain-target>');
+      if (!j) return err(113, `Could not find service "${m[2]}" in domain for user gui: ${uid}`);
+      return { status: 0, stdout: `gui/${key} = {\n\tstate = ${j.state}\n\tlast exit code = ${j.lastExit ?? '(never exited)'}\n}\n`, stderr: '' };
+    }
+    if (mac.as !== 0 && mac.as !== uid) return err(1, `${verb === 'bootstrap' ? 'Bootstrap' : 'Boot-out'} failed: 1: Operation not permitted`);
+    mac.log.push(`launchctl ${args.join(' ')}`);
+    if (verb === 'bootstrap') {
+      if (m[2] || !b) return err(64, 'Usage: launchctl bootstrap <domain> <path>');
+      if (mac.guiClosed.has(uid)) return err(125, 'Bootstrap failed: 125: Domain does not support specified action');
+      let st; let text;
+      try { st = lstatSync(b); text = readFileSync(b, 'utf8'); } catch { return err(5, 'Bootstrap failed: 5: Input/output error'); }
+      const logical = b.startsWith(prefix) ? b.slice(prefix.length) : b; const o = mac.owners.get(logical);
+      if (!st.isFile() || ![uid, mac.rootUid].includes(o ? o.uid : -1) || (st.mode & 0o022)) return err(5, 'Bootstrap failed: 5: Input/output error');
+      const label = /<key>Label<\/key>\s*<string>([^<]+)<\/string>/.exec(text)?.[1];
+      if (!label || mac.guiLoaded.has(`${uid}/${label}`)) return err(5, 'Bootstrap failed: 5: Input/output error');
+      mac.guiLoaded.set(`${uid}/${label}`, { state: 'running', text });
+      return { status: 0, stdout: '', stderr: '' };
+    }
+    if (verb === 'bootout') {
+      if (!m[2]) return err(64, 'Usage: launchctl bootout <domain-target>');
+      if (!mac.guiLoaded.delete(`${uid}/${m[2]}`)) return err(3, 'Boot-out failed: 3: No such process');
+      return { status: 0, stdout: '', stderr: '' };
+    }
+    return err(64, 'Usage: launchctl <subcommand>');
+  };
   mac.launchctl = (args) => {
     const [verb, a, b] = args;
     const err = (status, stderr) => ({ status, stdout: '', stderr });
+    if (['print', 'bootstrap', 'bootout'].includes(verb) && /^gui\/\d+(\/|$)/.test(a ?? '')) return gui(args);
     if (verb === 'print') {
       const m = /^system\/(.+)$/.exec(a ?? '');
       if (!m) return err(64, 'Usage: launchctl print <domain-target>');
       if (!mac.loaded.has(m[1])) return err(113, `Could not find service "${m[1]}" in domain for system`);
-      return { status: 0, stdout: `system/${m[1]} = {\n\tstate = ${mac.loaded.get(m[1]).state}\n\tlast exit code = ${mac.loaded.get(m[1]).lastExit ?? '(never exited)'}\n${mac.loaded.get(m[1]).pid ? `\tpid = ${mac.loaded.get(m[1]).pid}\n` : ''}}\n`, stderr: '' };
+      return { status: 0, stdout: `system/${m[1]} = {\n\tstate = ${mac.loaded.get(m[1]).state}\n\tlast exit code = ${mac.loaded.get(m[1]).lastExit ?? '(never exited)'}\n${mac.loaded.get(m[1]).pid ? `\tpid = ${mac.loaded.get(m[1]).pid}\n` : ''}${mac.loaded.get(m[1]).runs !== undefined ? `\truns = ${mac.loaded.get(m[1]).runs}\n` : ''}}\n`, stderr: '' };
     }
     if (verb === 'bootstrap' || verb === 'bootout') {
       if (mac.as !== 0) return err(1, `${verb === 'bootstrap' ? 'Bootstrap' : 'Boot-out'} failed: 1: Operation not permitted`);

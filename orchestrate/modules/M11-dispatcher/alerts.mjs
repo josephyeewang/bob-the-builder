@@ -55,6 +55,8 @@ export function writeFrom(rec, id, base, doc, kind, { force = [] } = {}) {
   }, kind);
 }
 
+/** What a hold relay reports when its alert could not be queued (drain-alerts.mjs, interactive-holds.mjs): one home (I7). */
+export const unqueuedText = (what) => `the ${what} alert could not be queued; it is tried again next pass`;
 export const ALERT_QUEUE_FACT = 'unsent-alerts';
 export const ALERT_QUEUE_MAX = 50;
 // The cap on entries not yet tried (a Minor from the review of the first Dispatcher build): while the port is

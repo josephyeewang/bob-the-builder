@@ -373,6 +373,15 @@ test('MIN-9: no signed-in account, or a stale one, starts nothing; the stops sti
   // the age limit is the rules' usage.stale_after_min
   assert.equal(signedInAccount({ rec: recWith([account(T0 - 20 * MIN)]), rules: rulesWith({ [K.staleAfterMin]: 30 }), now: T0 }).account, ACCT);
   assert.match(signedInAccount({ rec: recWith([account()]), rules: rulesWith({ [K.staleAfterMin]: undefined }), now: T0 }).reason, /stale_after_min/);
+  // L1152: one clock (pastTime, I7). 60 s ahead is a reading; a millisecond further is not.
+  const ahead = (ms) => signedInAccount({ rec: recWith([account(T0 + ms)]), rules: rulesWith({}), now: T0 });
+  assert.equal(ahead(60_000).account, ACCT, '60 s ahead counts');
+  assert.match(ahead(60_001).reason, /the signed-in account reading is stale/, 'a millisecond further does not');
+  // L1152: a not-known account carries the Sensors' reason, and only a string one.
+  const why = (doc) => signedInAccount({ rec: recWith([['fact', ACCOUNT_FACT, doc]]), rules: rulesWith({}), now: T0 }).reason;
+  assert.equal(why({ account: null, reason: 'the owner\'s answer is 12 min old', observed_at: iso(T0) }), 'the signed-in account is not known: the owner\'s answer is 12 min old');
+  assert.equal(why({ account: null, reason: 7, observed_at: iso(T0) }), 'the signed-in account is not known');
+  assert.equal(why({ account: null, observed_at: iso(T0) }), 'the signed-in account is not known');
 });
 
 // The Record has no rerun_safe field (L72 census, a (b) for the lead): no card can be marked safe, so every dead
@@ -1852,7 +1861,9 @@ test('L596 m-a: once the Lead has given up, the daily line says so, and that a r
   const gave = w.calls.alerts.find((a) => a.includes('did not hand in a usable handoff'));
   assert.match(gave, /it keeps running, and a restart now needs a person/);
   await w.pass(24 * 60 + 10);
-  const last = w.calls.alerts.filter((a) => a.includes('could not be checked: the session names')).at(-1);
+  // A day on the give-up is told again (I3, L1157); it names the same cause, so the intake's daily line is picked apart from it.
+  assert.equal(w.calls.alerts.filter((a) => a.includes('did not hand in a usable handoff')).length, 2, 'the give-up told again a day on');
+  const last = w.calls.alerts.filter((a) => a.includes('could not be checked: the session names') && !a.includes('did not hand in a usable handoff')).at(-1);
   assert.match(last, /the Lead has given up on its restart and keeps running, so a restart now needs a person/);
   assert.doesNotMatch(last, /restart waits on it/);
 });

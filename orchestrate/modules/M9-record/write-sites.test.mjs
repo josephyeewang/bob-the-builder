@@ -39,7 +39,7 @@ test('L112: the scan sees the writes the lead counted, so an empty answer is not
   // asks are approvals' alone (lane 2's consumeAsk).
   assert.equal(n('dispatcher', 'handoff'), 0);
   assert.equal(n('dispatcher', 'ask'), 0);
-  assert.equal(n('workshop', 'fact'), 1);
+  assert.equal(n('workshop', 'fact'), 3, 'the push record (M4 push.mjs settle), the pull request still to open (wiring/pr-writer.mjs mark, lane N) and the push called (wiring/push-pass.mjs mark, #536 r2)');
   // 12 on main 5a4fdba (8 of them through move()); lane 2 moved the cancel and merge card writes elsewhere.
   assert.ok(n('dispatcher', 'card') >= 12, 'move() through moves.mjs is followed to its callers');
   assert.ok(scan.sites.filter((s) => s.via === 'move()' && s.entity === 'card').length >= 8, 'each move(rec, \'card\', …) call is a site');
@@ -155,6 +155,8 @@ const SNAPSHOT = {
   card: {
     lead: { create: ['state', 'product', 'module', 'lane', 'kind', 'depends_on', 'what', 'files', 'done_when', 'tier', 'plan_sha256', 'main_commit', 'brief', 'desired', 'merge_requested', 'needs_joe'], update: ['brief', 'desired', 'merge_requested', 'needs_joe'], updateInDraft: ['files', 'done_when', 'tier', 'plan_sha256', 'main_commit'], kinds: ['ordinary', 'lead_daily_card'] },
     dispatcher: { create: ['state', 'product', 'module', 'lane', 'kind', 'depends_on', 'what', 'fix_of', 'source', 'research_ask', 'files', 'done_when', 'tier', 'plan_sha256', 'main_commit', 'brief', 'desired', 'merge_requested', 'needs_joe', 'round'], update: ['claim', 'wait', 'failure', 'summary', 'report_ref', 'needs_joe', 'attempts'], updateInDraft: ['done_when'], draftKinds: ['ordinary'], kinds: ['fix', 'exact_reverse', 'research_copy'] },
+    // L1100: the owner's go command writes one Tier-2 ordinary draft card on the test product (setup/go-card.mjs); no update.
+    owner_command: { create: ['state', 'product', 'module', 'lane', 'kind', 'what', 'files', 'done_when', 'tier', 'brief', 'desired'], kinds: ['ordinary'] },
     worker: { update: ['summary', 'report_ref'] },
     script: { update: ['summary', 'report_ref'] },
     workshop: { update: ['head'] },

@@ -62,7 +62,7 @@ test('step 6, check 2: the copy\'s setup files are main\'s exactly; one changed,
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
 
-// claude as its Bash tool runs a command (#463 r2 M3, claude 2.1.322): detached, in a process group of its own, so claude's
+// claude as its Bash tool runs a command (#463 r2 M3, claude 2.1.322; checked: claude-code 2.1.316): detached, in a process group of its own, so claude's
 // group is not the command's; claude ends when the command does.
 const bashTool = (cmd, opts) => childSpawn(process.execPath, ['-e',
   "const c = require('node:child_process').spawn('/bin/sh', ['-c', process.argv[1]], { detached: true, stdio: 'ignore' }); c.on('exit', (x) => process.exit(x ?? 1));", cmd], opts);
@@ -197,6 +197,10 @@ test('#456 r1 m3: save-work and check 4 are both on or both off: one runLocked f
   const got = envOf({ account: 'a', env: { CLAUDE_CONFIG_DIR: '/cfg' } })();
   assert.deepEqual([got.HOME, got.PATH, got.CLAUDE_CONFIG_DIR], [c.home, c.path, '/cfg']);
   assert.throws(() => envOf({ account: 'a', env: { SOME_API_TOKEN: 't' } })(), /key-like variables/, 'a key-like variable fails check 9 here too');
+  // R-0b-156: a session variable of the runner's own never reaches the job; one handed in by the sign-in refuses.
+  const clean = envOf({ account: 'a', env: {} }, { PATH: '/x', CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 's', CODEX_THREAD_ID: 't' })();
+  assert.deepEqual(Object.keys(clean).sort(), ['HOME', 'PATH']);
+  assert.throws(() => envOf({ account: 'a', env: { CLAUDE_CODE_NEW_THING: '1' } })(), /allow-list.*CLAUDE_CODE_NEW_THING/);
 });
 
 test('step 6, check 11 (#369 M2): the smoke runs first; a worker\'s baseline runs only once it passes, and must exit 0', async () => {
@@ -381,7 +385,7 @@ test('step 6: the runner\'s config feeds the checks (pin, machine-wide file, the
     path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/rec', recordUid: 502, claimMs: 1, products: { p1: { repo: 'o/p', mirror: '/m', render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] } } } } } };
   assert.throws(() => checkRunnerConfig({ ...base, pin: 'latest' }), /pin must be/);
   // #419 r3 c1, m1: any value but the fixed file, a near miss or an unsimple path, is told the fixed file.
-  for (const machineWide of ['mw', '/mw/', '/a/../mw', '//mw', '/m w', ...NEAR_MISSES]) assert.throws(() => checkRunnerConfig({ ...base, machineWide }), new RegExp(`config: machineWide must be ${esc(FIXED)}: claude 2\\.1\\.322 reads only that file$`), JSON.stringify(machineWide));
+  for (const machineWide of ['mw', '/mw/', '/a/../mw', '//mw', '/m w', ...NEAR_MISSES]) assert.throws(() => checkRunnerConfig({ ...base, machineWide }), new RegExp(`config: machineWide must be ${esc(FIXED)}: claude 2\\.1\\.316 reads only that file$`), JSON.stringify(machineWide));
   // L915 (#420 m2): render.paths node, hooksDir, notes and bobFolder, when given, in their simplest form, at load.
   for (const k of ['node', 'hooksDir', 'notes', 'bobFolder']) {
     const at = (v) => ({ ...base, products: { p1: { ...base.products.p1, render: { paths: { ...base.products.p1.render.paths, [k]: v } } } } });
@@ -391,7 +395,7 @@ test('step 6: the runner\'s config feeds the checks (pin, machine-wide file, the
     assert.doesNotThrow(() => checkRunnerConfig(at(`/x/${k}`)), k);
   }
   // L913 (a): any file but claude's fixed one is refused at load, not session by session at check 10.
-  assert.throws(() => checkRunnerConfig({ ...base, machineWide: '/mw.json' }), /machineWide must be \/Library\/Application Support\/ClaudeCode\/managed-settings\.json: claude 2\.1\.322 reads only that file/);
+  assert.throws(() => checkRunnerConfig({ ...base, machineWide: '/mw.json' }), /machineWide must be \/Library\/Application Support\/ClaudeCode\/managed-settings\.json: claude 2\.1\.316 reads only that file/);
   assert.equal(checkRunnerConfig({ ...base, machineWide: '/Library/Application Support/ClaudeCode/managed-settings.json' }).machineWide, '/Library/Application Support/ClaudeCode/managed-settings.json');
   assert.throws(() => checkRunnerConfig({ ...base, products: { p1: { ...base.products.p1, rules: [] } } }), /rules must be/);
   // #369 m4: the rules' production lists, as the review runner requires; one snapshot per product, apart from the runner's folders (L916).
@@ -524,4 +528,13 @@ test('#463 r3 m5: check 4, save-work and checks 12 and 13 all stay wired through
   realRunnerPorts(c, {}, { runLocked, wire: (cc, o) => { got = o; return lockedWiring(cc, o); } });
   assert.deepEqual([got.budget, got.bobManifest, got.runLocked], [null, null, runLocked]);
   assert.deepEqual(Object.keys(lockedWiring(c, { runLocked }).startDeps.checksFor(wx)).map(Number), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+});
+
+test('#528 r4 c2: a worker product\'s rules.secrets.paths, when there, must be a list of text; no rules at all is allowed', () => {
+  const prod = (rules) => ({ repo: 'o/p', mirror: '/m', render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] }, hooksDir: '/h', snapshot: '/snap/s.json' }, product: { commands: { install: 'npm ci', test: 'npm test' } }, registryHosts: [] }, ...(rules === undefined ? {} : { rules }) });
+  const conf = (rules) => () => checkRunnerConfig({ installRoot: '/i', requestsDir: '/r', statusFile: '/o/status.json', orchestrateUid: 501, outboxRoot: '/ob', copiesRoot: '/c', home: '/home',
+    path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/rec', recordUid: 502, claimMs: 1, products: { p1: prod(rules) } });
+  const production = { env_files: [], programs: [], hosts: [] };
+  conf(undefined)(); conf({ production })(); conf({ production, secrets: { paths: ['/a/k'] } })();
+  for (const secrets of [{ paths: '/a/k' }, { paths: [1] }, {}, null]) assert.throws(conf({ production, secrets }), /rules\.secrets\.paths must list/, JSON.stringify(secrets));
 });

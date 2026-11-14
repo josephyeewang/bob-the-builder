@@ -125,7 +125,7 @@ test('step 1: a status that can\'t be trusted is "not known", a throw, never an 
     [world(s1({ ended: 1 })), /ended that is not true or false/],
     [world(s1({ last_write_at: new Date(NOW).toISOString() })), /last_write_at that is not a time/],
     [world(doc({ requests: { s1: { state: 'maybe' } } })), /a request .* is not what the runner writes/],
-    [world(doc(), { fileSt: st({ uid: 0, mode: 0o644 }) }), /status is not owned by the owner's user/],
+    [world(doc(), { fileSt: st({ uid: 0, mode: 0o644 }) }), /status is not owned by the worker runner's user/],
     [world(doc(), { fileSt: st({ mode: 0o666 }) }), /status can be written by others/],
     [world(doc(), { fileSt: st({ mode: 0o664 }) }), /status can be written by others/],
     [world(doc(), { dirSt: st({ dir: true, mode: 0o775 }) }), /folder can be written by others/],

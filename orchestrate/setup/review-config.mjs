@@ -42,7 +42,7 @@ import { CONFIG_FIELDS, readConfig } from '../modules/M4-workshop/launcher/revie
 import { RUNNER_ROLES } from '../shared/review-roles.mjs';
 import { TOOLS_CHECKED } from '../modules/M10-rules/roles.mjs';
 import { CLAUDE_FILE, MANAGED_SOURCES_CHECKED_ON } from '../modules/M4-workshop/launcher/env-check.mjs';
-import { COPY_HOOKS, REVIEW_SNAPSHOT_FILE, WORKER_STATUS_FILE, bobPath, dispatcherRulesPath, homeOf, keysPath, mirrorPath, outboxRootPath, ownerTapsPath, privatePath, reviewCopiesPath, storePath, workerCopiesPath, workerRunnerPaths } from './layout.mjs';
+import { BUILDER, COPY_HOOKS, PRODUCT_OUTBOX_ROLES, REVIEW_SNAPSHOT_FILE, WORKER_STATUS_FILE, bobPath, dispatcherRulesPath, homeOf, keysPath, mirrorPath, outboxRootPath, ownerTapsPath, privatePath, reviewCopiesPath, storePath, workerCopiesPath, workerRunnerPaths } from './layout.mjs';
 import { installPaths } from './install.mjs';
 import { bobManifestPath } from './bob-manifest.mjs';
 
@@ -63,6 +63,8 @@ export const INSTALL_LATER = Object.freeze(['claudeBin', 'hooksDir']);
 // The wiring, beside the runner in the copy (review-runner-main.mjs: the copy's own .mjs file, never a copy item).
 const WIRING = posix.join(posix.dirname(SCRIPTS.runner), 'review-wiring.mjs');
 // M11's budget module (launch check 12), the copy's own code file the runner imports (RUNNER_MODULES).
+/** The builder's role, as each setup step names it when its Mac user is missing (I7: one text). */
+export const BUILDER_ROLE = 'the worker runner\'s user, L1079';
 export const BUDGET_MODULE = 'modules/M11-dispatcher/budget.mjs';
 const RULE_LISTS = Object.freeze({ production: ['env_files', 'programs', 'hosts'], secrets: ['paths'] });
 const plainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -77,24 +79,26 @@ export function setupFields(cfg, { pin, userOf }) {
     return u;
   };
   const review = uid('review', 'the review runner\'s user'); const orch = uid('orchestrate', 'the Record\'s owner'); const owner = uid(cfg.owner, 'the owner');
+  const builder = uid(BUILDER, BUILDER_ROLE);
   if (owner && !absPath(owner.home)) problems.push(`the owner's Mac user ${cfg.owner} has no home folder set`);
   if (problems.length) return { fields: null, problems };
-  // Every role of the design table has a Mac user (m-1): the review roles run as review, every other role as the owner's
-  // own user, whose outbox folders it owns (layout.mjs folderTable).
-  // The runner's roles (L722: the review roles and the plan reviewer) write as review; every other role is the owner's.
-  const uids = Object.fromEntries(Object.keys(DESIGN_PROFILES).map((r) => [r, RUNNER_ROLES.includes(r) ? review.uid : owner.uid]));
+  // Every role of the design table has a Mac user (m-1), the one whose outbox folders it owns (layout.mjs folderTable):
+  // the runner's roles (L722: the review roles and the plan reviewer) write as review; the worker runner's roles
+  // (PRODUCT_OUTBOX_ROLES: worker, script) as the builder user (L1079); every other role (the owner's own sessions) as the owner.
+  const uids = Object.fromEntries(Object.keys(DESIGN_PROFILES).map((r) => [r, RUNNER_ROLES.includes(r) ? review.uid : PRODUCT_OUTBOX_ROLES.includes(r) ? builder.uid : owner.uid]));
   const fields = {
     installRoot: P.installRoot, root: P.reviewRoot, outboxRoot: outboxRootPath(cfg), reviewHome: homeOf(cfg, 'review'),
     uids, recordUid: orch.uid, mirror: mirrorPath(cfg), hooksDir: join(P.installRoot, COPY_HOOKS), accountCopy: P.accountCopy,
     ownerHome: owner.home, ownerUid: owner.uid, ownerTaps: ownerTapsPath(cfg), wiring: join(P.installRoot, WIRING),
     snapshot: join(P.reviewRoot, REVIEW_SNAPSHOT_FILE), bobFolder: bobPath(cfg),
     // What a review session may not read: the robot keys, the private data and the owner's home folder (a Mac home is
-    // readable by the staff group, which review is in). The workers' copies are denied whole by review-settings itself.
+    // readable by its group, staff; review is not in it, so this is the slip-catcher). The workers' copies are denied
+    // whole by review-settings itself.
     deny: [keysPath(cfg), privatePath(cfg), owner.home],
     reviewCopies: reviewCopiesPath(cfg), workerCopies: workerCopiesPath(cfg),
-    // Launch check 12 (L1001): M11's budget module, in the copy, and the worker runner's status file and user (the owner's
-    // own, as the Dispatcher's workerUid), which its running count reads.
-    budget: join(P.installRoot, BUDGET_MODULE), workerStatusFile: join(workerRunnerPaths(cfg).state, WORKER_STATUS_FILE), workerUid: owner.uid,
+    // Launch check 12 (L1001): M11's budget module, in the copy, and the worker runner's status file and user (the builder
+    // user, L1079, as the Dispatcher's workerUid), which its running count reads.
+    budget: join(P.installRoot, BUDGET_MODULE), workerStatusFile: join(workerRunnerPaths(cfg).state, WORKER_STATUS_FILE), workerUid: builder.uid,
   };
   return { fields, problems };
 }
@@ -104,6 +108,27 @@ export const pinFields = (cfg, pin) => ({ pin, claudeBin: pinnedBinary(installPa
 /** Null, or why --pin is refused: the runner's own m-5 rule (readConfig), checked here too so a dry run refuses it alike. */
 export const pinProblem = (pin) => (pin === TOOLS_CHECKED.claude_code ? null
   : `--pin is ${String(pin).slice(0, 20)}, but the role tool lists were checked on Claude Code ${TOOLS_CHECKED.claude_code} (M10 TOOLS_CHECKED); re-check them before the pin moves`);
+
+/**
+ * Why `r` is not the rules the hooks read (production.{env_files, programs, hosts}, secrets.paths: each a list of names, an
+ * empty one saying none; nothing else), or []. `who` names the file in each message. The one shape check for the rules:
+ * review-config's input and managed-settings' copy of review.json both use it.
+ */
+export function rulesProblems(r, who) {
+  const problems = [];
+  if (!plainObject(r)) return [`${who}'s rules must be an object with production and secrets`];
+  for (const k of Object.keys(r)) if (!Object.hasOwn(RULE_LISTS, k)) problems.push(`${who}'s rules hold ${JSON.stringify(k.slice(0, 40))}, which the hooks do not read`);
+  for (const [part, lists] of Object.entries(RULE_LISTS)) {
+    if (!Object.hasOwn(r, part)) { problems.push(`${who} must set rules.${part} (there is no default)`); continue; }
+    if (!plainObject(r[part])) { problems.push(`${who}'s rules.${part} must be an object`); continue; }
+    for (const k of Object.keys(r[part])) if (!lists.includes(k)) problems.push(`${who}'s rules.${part} holds ${JSON.stringify(k.slice(0, 40))}, which the hooks do not read`);
+    for (const k of lists) {
+      if (!Object.hasOwn(r[part], k)) problems.push(`${who} must set rules.${part}.${k} (there is no default; an empty list says none)`);
+      else if (!Array.isArray(r[part][k]) || !r[part][k].every((v) => typeof v === 'string' && v.length > 0)) problems.push(`${who}'s rules.${part}.${k} must be a list of names`);
+    }
+  }
+  return problems;
+}
 
 /** The owner's fields, from their input file's parsed value: every key required, no other key allowed. → { fields, problems } */
 export function ownerFields(cfg, input) {
@@ -121,22 +146,7 @@ export function ownerFields(cfg, input) {
   if (Object.hasOwn(input, 'machineWide') && !absPath(input.machineWide)) problems.push('the input file\'s machineWide must be the full path of the machine-wide Claude Code settings file');
   // L909: claude reads only its fixed managed file, so a guard in any other would never apply (launch check 10 refuses it too).
   else if (Object.hasOwn(input, 'machineWide') && input.machineWide !== CLAUDE_FILE) problems.push(`the input file's machineWide must be ${CLAUDE_FILE}: claude ${MANAGED_SOURCES_CHECKED_ON} reads only that file`);
-  if (Object.hasOwn(input, 'rules')) {
-    const r = input.rules;
-    if (!plainObject(r)) problems.push('the input file\'s rules must be an object with production and secrets');
-    else {
-      for (const k of Object.keys(r)) if (!Object.hasOwn(RULE_LISTS, k)) problems.push(`the input file's rules hold ${JSON.stringify(k.slice(0, 40))}, which the hooks do not read`);
-      for (const [part, lists] of Object.entries(RULE_LISTS)) {
-        if (!Object.hasOwn(r, part)) { problems.push(`the input file must set rules.${part} (there is no default)`); continue; }
-        if (!plainObject(r[part])) { problems.push(`the input file's rules.${part} must be an object`); continue; }
-        for (const k of Object.keys(r[part])) if (!lists.includes(k)) problems.push(`the input file's rules.${part} holds ${JSON.stringify(k.slice(0, 40))}, which the hooks do not read`);
-        for (const k of lists) {
-          if (!Object.hasOwn(r[part], k)) problems.push(`the input file must set rules.${part}.${k} (there is no default; an empty list says none)`);
-          else if (!Array.isArray(r[part][k]) || !r[part][k].every((v) => typeof v === 'string' && v.length > 0)) problems.push(`the input file's rules.${part}.${k} must be a list of names`);
-        }
-      }
-    }
-  }
+  if (Object.hasOwn(input, 'rules')) problems.push(...rulesProblems(input.rules, 'the input file'));
   if (problems.length) return { fields: null, problems };
   const rules = { production: Object.fromEntries(RULE_LISTS.production.map((k) => [k, [...input.rules.production[k]]])), secrets: { paths: [...input.rules.secrets.paths] } };
   return { fields: { recordRoot: storePath(cfg, input.product), dispatcherRules: dispatcherRulesPath(cfg, input.product), machineWide: input.machineWide, rules }, problems };
