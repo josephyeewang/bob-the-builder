@@ -1125,12 +1125,13 @@
    "files": [
     "modules/M11-dispatcher/proposal-route.mjs",
     "modules/M2-approvals/go-view.mjs",
+    "modules/M2-approvals/owner-command.mjs",
     "modules/M4-workshop/git/push.mjs",
     "modules/M6-merge-gate/workflow-route.mjs",
     "shared/plan-review.mjs",
     "wiring/runner-ports.mjs"
    ],
-   "why": "baseline (L1078)"
+   "why": "baseline (L1078); #523 adds a copy at its landing (L1144), lane 1b folds it"
   },
   {
    "kind": "definition",
@@ -1650,12 +1651,22 @@
   },
   {
    "kind": "text",
+   "copy": "the plan can't be fingerprinted: ",
+   "files": [
+    "modules/M2-approvals/go.mjs",
+    "setup/go-card.mjs"
+   ],
+   "why": "#523 landing (L1144): lane 1b folds it into one home or gives its reason"
+  },
+  {
+   "kind": "text",
    "copy": "the record refused the answer: ",
    "files": [
     "modules/M2-approvals/decision.mjs",
+    "modules/M2-approvals/owner-command.mjs",
     "modules/M2-approvals/schedule.mjs"
    ],
-   "why": "baseline (L1078)"
+   "why": "baseline (L1078); #523 adds a copy at its landing (L1144), lane 1b folds it"
   },
   {
    "kind": "text",

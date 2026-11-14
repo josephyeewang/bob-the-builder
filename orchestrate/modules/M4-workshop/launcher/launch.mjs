@@ -7,7 +7,7 @@
 import { readdirSync, readFileSync, lstatSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { sha256 } from './role-profiles.mjs';
-import { SETTINGS as S, unconfirmedNames } from './settings-names.mjs';
+import { SETTINGS as S, unconfirmedNames, NAMES_CHECK_REFUSALS as NCR } from './settings-names.mjs';
 import { hasShell } from './role-profiles.mjs';
 import { checkSettings, bobFolderDeny, bobFolderShell } from './render-settings.mjs';
 import { REVIEW_ROLES, reviewUser } from './review-user.mjs';
@@ -55,11 +55,11 @@ export async function launch({ role, profile, checks, start, names, ctx = {}, ow
     runAs = who.runAs;
   }
   const left = names && typeof names === 'object' && names.settings ? unconfirmedNames(names) : ['(no role file given to the names check)'];
-  if (left.length) return { ok: false, failedAt: 0, reason: `setting names not confirmed on the pinned Claude Code: ${left.join(', ')}`, log };
+  if (left.length) return { ok: false, failedAt: 0, reason: `${NCR.unconfirmed} on the pinned Claude Code: ${left.join(', ')}`, log };
   // The object handed in must itself be a locked-down role file, so an empty or partial one cannot pass
   // check 0 (audit R-0b-44 round 2 MIN-1, round 3 MIN-4).
   const locked = checkSettings(names.settings, { profile });
-  if (!locked.ok) return { ok: false, failedAt: 0, reason: `the role file given to the names check is not locked down: ${locked.reason}`, log };
+  if (!locked.ok) return { ok: false, failedAt: 0, reason: `${NCR.notLocked} is not locked down: ${locked.reason}`, log };
   for (const c of CHECKS) {
     if (!c.applies(role, profile)) { log.push({ n: c.n, skipped: true }); continue; }
     const port = checks?.[c.n];
