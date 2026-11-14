@@ -261,7 +261,8 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, bobGitOf, man
     const p = rootProblem(io); if (p) { err(`refused: ${p}`); return 2; }
     const res = runProofs(io, cfg);
     // NOT TRIED is not a pass (L1079, as L707 c1): containment is proven only when every line is PASS.
-    for (const r of res) out(r.ok ? `PASS  ${r.what}` : r.notTried ? `NOT TRIED  ${r.what} — ${r.why}` : `FAIL  ${r.what} — ${r.why}`);
+    // NOT TRIED is read first (#528 r3 m2): a line marked so prints NOT TRIED and counts as untried whatever else it says.
+    for (const r of res) out(r.notTried ? `NOT TRIED  ${r.what} — ${r.why}` : r.ok ? `PASS  ${r.what}` : `FAIL  ${r.what} — ${r.why}`);
     const failed = res.filter((r) => !r.ok && !r.notTried).length; const untried = res.filter((r) => r.notTried).length;
     out(failed || untried ? `${failed} of ${res.length} proofs FAILED, ${untried} NOT TRIED: containment is not proven` : `all ${res.length} proofs PASS: containment is proven on this Mac`);
     return failed || untried ? 1 : 0;
