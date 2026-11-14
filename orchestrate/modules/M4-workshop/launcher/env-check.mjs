@@ -16,14 +16,14 @@ import { dirname, join } from 'node:path';
 import { REFUSED_ENV, SETTINGS as S, HOOK_FIELDS as H, HOOK_EVENTS as E } from './settings-names.mjs';
 import { checkSettings } from './render-settings.mjs';
 import { MANAGED_FILE } from '../hooks/lib.mjs';
-import { ACCOUNT_NAMES, accountDir } from './accounts.mjs';
+import { ACCOUNT_NAMES, CONFIG_VAR, accountDir } from './accounts.mjs';
 
 const refuse = (reason) => ({ ok: false, reason });
 
 // Plain variables a role may inherit. Everything else is dropped.
 export const PASS_ENV = Object.freeze(['HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'TERM', 'TMPDIR', 'SHELL', 'TZ']);
 // Variables the launcher itself sets for a role (R-0b-156): the second account's sign-in folder (accounts.mjs accountEnv).
-export const LAUNCHER_ENV = Object.freeze(['CLAUDE_CONFIG_DIR']);
+export const LAUNCHER_ENV = Object.freeze([CONFIG_VAR]);   // accounts.mjs's one name for it (I7, #530 r1 m2)
 // The allow-list (R-0b-156, L1060): the only names a role's environment may hold. It is the guard, not a list of refused
 // names: a session variable of whatever started the launcher (CLAUDECODE, CLAUDE_CODE_SESSION_ID, CODEX_THREAD_ID, a
 // name a newer claude adds) is off it, so it never reaches a role. CAPABILITY NOTE: the leaking names were seen on claude
@@ -38,7 +38,8 @@ export function roleEnv(base, { path, extra = {} } = {}) {
   for (const k of PASS_ENV) if (typeof base[k] === 'string') env[k] = base[k];
   for (const [k, v] of Object.entries(extra)) env[k] = v;
   if (path) env.PATH = path;
-  for (const k of REFUSED_ENV) delete env[k];
+  // Nothing is quietly dropped from `extra` (#530 r1 m3): a refused name in it stays, so check 9 refuses the start. The
+  // base gives only PASS_ENV names, none of them refused, so the allow-list is the one gate.
   return env;
 }
 
@@ -58,6 +59,10 @@ export function checkRoleEnv(env) {
  * → { ok: true, env } | { ok: false, reason }. R-0b-155d's resume form and R-0b-174's tmux server call it too.
  */
 export function startEnv(base, opts = {}) {
+  const plain = (o) => o !== null && typeof o === 'object' && !Array.isArray(o);
+  // On purpose, with a reason (#530 r1 cosmetic), never by roleEnv throwing on what it was handed.
+  if (!plain(base)) return refuse('the base environment is not an object, so no environment was built');
+  if (opts.extra !== undefined && !plain(opts.extra)) return refuse('the extra environment is not an object, so no environment was built');
   const env = roleEnv(base, opts);
   const nine = checkRoleEnv(env);
   return nine.ok ? { ok: true, env } : nine;

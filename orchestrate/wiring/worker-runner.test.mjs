@@ -661,7 +661,9 @@ test('#456 runLocked self-review M1: a save still on after portMs is held, answe
   assert.deepEqual(w.read().answers[`saveWork-S-1-${n3}`], { ok: false, reason: 'the save failed (boom)' });
 });
 
-test('#463 r1 m1: every save of a pass is started before any is waited for, and all are waited for once', async () => {
+// Its own time cap (#530 r1 m5): node:test has no default timeout, so a regression that leaves S-1 waiting fails by name
+// here, never as a hung run. Generous: it bounds a hang, it does not time the pass.
+test('#463 r1 m1: every save of a pass is started before any is waited for, and all are waited for once', { timeout: 30_000 }, async () => {
   const w = world();
   await w.pass([launchReq('S-1'), launchReq('S-2')]);
   const ev = [];

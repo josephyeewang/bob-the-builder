@@ -311,8 +311,15 @@ test('check 9: every refused variable is stripped, and a planted one refuses the
   for (const k of [...REFUSED_ENV, 'GH_TOKEN', 'GITHUB_TOKEN', 'GIT_ASKPASS', 'SSH_AUTH_SOCK', 'SOME_API_KEY', 'DB_PASSWORD']) {
     assert.equal(checkRoleEnv({ ...env, [k]: 'x' }).ok, false, k);
   }
-  // Extra variables are stripped too if they are on the list.
-  assert.equal(checkRoleEnv(roleEnv({}, { extra: { [REFUSED_ENV[0]]: 'x' } })).ok, true);
+  // #530 r1 m3: a refused name in `extra` is never quietly dropped: it stays, and check 9 refuses the start.
+  for (const k of REFUSED_ENV) {
+    assert.equal(roleEnv({}, { extra: { [k]: 'x' } })[k], 'x', k);
+    const s = startEnv({}, { extra: { [k]: 'x' } }); assert.equal(s.ok, false, k); assert.match(s.reason, new RegExp(`refused variables .*${k}`));
+  }
+  // #530 r1 cosmetic: a base or extra that is not an object is refused on purpose, with a reason.
+  for (const [base, opts] of [[undefined, {}], [null, {}], ['HOME=/h', {}], [[], {}], [{}, { extra: null }], [{}, { extra: 'x' }], [{}, { extra: [] }]]) {
+    const s = startEnv(base, opts); assert.equal(s.ok, false); assert.match(s.reason, /is not an object, so no environment was built/);
+  }
 });
 
 // R-0b-156 (L1060): the twelve session names seen leaking on 13 Nov (claude 2.1.322), plus Codex's.
