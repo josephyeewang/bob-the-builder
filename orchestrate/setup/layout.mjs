@@ -8,7 +8,8 @@
 //             review runner refuses a wall whose folders sit under a folder anyone else can write (review-runner-main.mjs).
 //   owner     the person's own Mac user (their outboxes and worker copies are theirs).
 //   products  optional; one folder set per product.
-//   hostLockPath  optional until the Dispatcher is set up; the full path of the owner's host.lock, in the owner's home (L739).
+//   hostLockPath  optional until the Dispatcher is set up; the full path of the owner's host.lock, in the owner's home
+//             (L739), or, as the owner's copier's copy, <base>/host-lock/host.lock (L1210).
 
 import { join, posix } from 'node:path';
 import { AI_ROLES } from '../shared/record.mjs';
@@ -101,9 +102,14 @@ export function parseConfig(raw) {
   }
   // The owner's host.lock (L739): a file in the owner's own home, which may hold spaces (a synced folder's name).
   // posix.normalize refuses . and .. segments and doubled slashes: the normal form must be the path as written.
-  if (hostLockPath !== undefined && (typeof hostLockPath !== 'string' || !hostLockPath.startsWith(`/Users/${owner}/`) || posix.normalize(hostLockPath) !== hostLockPath
+  // Or, with the owner's copier only (hostLockSource), exactly the copy in the base's host-lock folder (L1210): the
+  // owner's home may be closed to orchestrate. No other place under the base: what the Dispatcher reads as "which Mac
+  // is home" is in one of these two places only.
+  const atBase = hostLockPath === hostLockCopyOf(b);
+  if (atBase && hostLockSource === undefined) throw new Error(`config: hostLockPath may be ${hostLockCopyOf(b)} only with hostLockSource (it is the copier's copy)`);
+  if (hostLockPath !== undefined && !atBase && (typeof hostLockPath !== 'string' || !hostLockPath.startsWith(`/Users/${owner}/`) || posix.normalize(hostLockPath) !== hostLockPath
     || hostLockPath.endsWith('/') || /[\u0000-\u001f\u007f]/.test(hostLockPath) || hostLockPath.length > 300)) {
-    throw new Error(`config: hostLockPath must be the full path of a file in /Users/${owner}/, with no .. and no control characters`);
+    throw new Error(`config: hostLockPath must be the full path of a file in /Users/${owner}/, or ${hostLockCopyOf(b)}, with no .. and no control characters`);
   }
   // The synced host.lock, when the owner's copier copies it to hostLockPath (L757 fallback, L1029 E; host-lock-copy.mjs): the
   // same rules as hostLockPath, and only with it, since the copy is what the Dispatcher reads.
@@ -154,6 +160,15 @@ export const ownerTapsPath = (cfg) => join(cfg.base, 'owner-taps');
  * group or other write, and orchestrate may list and read it. No access list. The file name is the wiring's, not setup's.
  */
 export const ownerAnswerPath = (cfg) => join(cfg.base, 'owner-answer');
+/**
+ * The owner's host.lock copy (L1210): the owner's copier job (host-lock-copy.mjs, as the owner) writes host.lock and
+ * its stamp in it, 0644; orchestrate's Dispatcher and check-dispatcher only read them. The owner's, 0755, no access
+ * list, as the answer folder. Not a new trust: the same owner's uid wrote the copy in the owner's home and writes it
+ * here; the move is only so orchestrate can reach it when the owner's home is closed to others (macOS's usual 0750).
+ */
+export const hostLockFolderPath = (cfg) => join(cfg.base, 'host-lock');
+/** The one copy path under the base that hostLockPath may name (parseConfig), from the base alone. */
+export const hostLockCopyOf = (base) => join(base, 'host-lock', 'host.lock');
 /** The Do-plane git mirror; the owner's git is told to trust exactly this path (R-0b-05 done_when, safe.directory). */
 export const mirrorPath = (cfg) => join(cfg.base, 'mirror');
 /** Where cleanup seals a copy's bundle it could not prove saved (the Dispatcher config's sealRoot, L739). */
@@ -309,6 +324,7 @@ export function folderTable(cfg) {
     [mirrorPath(cfg), 'orchestrate', 0o755, 'the Do-plane git mirror'],
     [ownerTapsPath(cfg), 'owner', 0o755, 'the owner\'s review-again taps (runner setting ownerTaps): the owner writes, others only read, no access list'],
     [ownerAnswerPath(cfg), 'owner', 0o755, 'the owner\'s answer for the Sensors (owner-answer.json, 0644, L727): the owner\'s job writes, orchestrate only reads, no access list'],
+    [hostLockFolderPath(cfg), 'owner', 0o755, 'the owner\'s host.lock copy (host.lock and its stamp, 0644, L1210): the owner\'s copier writes, orchestrate only reads, no access list'],
     [bobPath(cfg), 'orchestrate', 0o755, 'Bob method copies'],
     [p('global-rules'), 'orchestrate', 0o755, 'plain-text copy of the global rules'],
     [p('claude-code'), 'orchestrate', 0o755, 'the roles\' pinned Claude Code copies'],

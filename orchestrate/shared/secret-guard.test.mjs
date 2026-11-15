@@ -7,7 +7,7 @@ import { chmodSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { tempDir } from './test-tmp.mjs';
-import { registerSecret, holdsSecret, refuseSecretArgs, guardInstalled, MIN_SECRET, partsOf, pinned } from './secret-guard.mjs';
+import { registerSecret, holdsSecret, refuseSecretArgs, guardInstalled, MIN_SECRET, partsOf, pinned, INSTALL_MARK, REFUSED_CODE } from './secret-guard.mjs';
 import { limitedSync } from '../modules/M11-dispatcher/sync-limit.mjs';
 import { safeGitEnv } from '../modules/M4-workshop/git/safe-git.mjs';
 import { tokenConfig } from '../modules/M4-workshop/git/push.mjs';
@@ -269,12 +269,31 @@ test('L1196 Minor 3: base64 wrapped at 64 or 76 columns and hex with spaces betw
 // --- L1206 (the #581 r2 audit) ---------------------------------------------------------------------------------------
 
 test('L1206 m1: a big argument with a % in it is checked in linear time', () => {
+  // L1228: a fixed limit in milliseconds failed on a slow runner (174.7 ms against 150), so the test compares like with
+  // like: one input of 16n characters against 16 inputs of n, the same characters in all. Linear work takes about as
+  // long either way (1-2× measured here), quadratic about 16× longer for the big one. The bar is 5×. The two are timed
+  // in turns, 5 rounds, keeping each one's fastest, so a busy machine slows both alike. (A plain ratio of one big run to
+  // one small run read 146× once under the whole-tree load: a run of under a millisecond is rarely interrupted, a run
+  // of a hundred often.) A 2 s ceiling on the big run stays as a backstop.
   registerSecret(fresh());
-  for (const big of ['%'.repeat(1 << 20), `${'a%2'.repeat(350_000)}`, `${'%41'.repeat(350_000)}`, `${'x'.repeat(1 << 20)}%`]) {
-    const t0 = process.hrtime.bigint();
-    assert.equal(holdsSecret(big), false);
-    const ms = Number(process.hrtime.bigint() - t0) / 1e6;
-    assert.ok(ms < 150, `${big.slice(0, 6)}… took ${ms.toFixed(1)} ms`);
+  const shapes = {
+    '%…': (k) => '%'.repeat(k),
+    'a%2…': (k) => 'a%2'.repeat(Math.round(k / 3)),
+    '%41…': (k) => '%41'.repeat(Math.round(k / 3)),
+    'x…%': (k) => `${'x'.repeat(k)}%`,
+  };
+  const time = (f) => { const t0 = process.hrtime.bigint(); f(); return Number(process.hrtime.bigint() - t0) / 1e6; };
+  const n = 1 << 16; const K = 16;
+  for (const [name, make] of Object.entries(shapes)) {
+    const small = make(n); const big = make(K * n);
+    assert.equal(holdsSecret(small), false); assert.equal(holdsSecret(big), false);
+    let many = Infinity; let one = Infinity;
+    for (let round = 0; round < 5; round += 1) {
+      many = Math.min(many, time(() => { for (let i = 0; i < K; i += 1) holdsSecret(small); }));
+      one = Math.min(one, time(() => holdsSecret(big)));
+    }
+    assert.ok(one < 2000, `${name} at ${K * n} characters took ${one.toFixed(1)} ms`);
+    assert.ok(one < 5 * Math.max(many, 0.5), `${name}: one input of ${K * n} characters took ${one.toFixed(1)} ms, ${K} of ${n} took ${many.toFixed(1)} ms, ${(one / Math.max(many, 0.5)).toFixed(1)}×`);
   }
 });
 
@@ -326,4 +345,21 @@ test('L1206: each layer fails on its own: partsOf reads execArgv, execPath, a sk
   const body = pem.replace(/-----[^-]+-----/g, '').replace(/\s+/g, '');
   assert.equal(holdsSecret(Buffer.from(body).toString('hex')), true, 'the body as text, in hex');
   assert.equal(holdsSecret(Buffer.from(body, 'base64').toString('hex')), true, 'the key bytes, in hex');
+});
+
+// --- L1211 (the guard's live proof) -----------------------------------------------------------------------------------
+
+test('L1211: the refusal carries the guard\'s own code, and the copy that wrapped the starts leaves its install mark, once', async () => {
+  const s = registerSecret(fresh());
+  assert.throws(() => spawnSync('/bin/echo', [s]), (e) => e.code === REFUSED_CODE && refusedWithout(s)(e));
+  assert.throws(() => refuseSecretArgs('x', [s]), { code: REFUSED_CODE });
+  const m = globalThis[INSTALL_MARK];
+  assert.equal(m.url, new URL('./secret-guard.mjs', import.meta.url).href);
+  assert.equal(m.registerSecret, registerSecret);
+  assert.ok(Object.isFrozen(m));
+  assert.throws(() => { 'use strict'; globalThis[INSTALL_MARK] = {}; }, TypeError, 'the mark can\'t be replaced');
+  // A second copy of the module, loaded later, finds the starts wrapped and leaves the mark as it is.
+  const again = await import('./secret-guard.mjs?second-copy');
+  assert.notEqual(again.registerSecret, registerSecret);
+  assert.equal(globalThis[INSTALL_MARK], m);
 });

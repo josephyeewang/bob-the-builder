@@ -64,7 +64,7 @@
 import { realpathSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { ROOT_CONFIG_PATH, parseConfig } from './layout.mjs';
+import { ROOT_CONFIG_PATH, hostLockCopyOf, parseConfig } from './layout.mjs';
 import { checkDispatcherKeys, dispatcherKeysOn } from './dispatcher-check.mjs';
 import { DISPATCHER_JOB, parseDispatcher } from './dispatcher-setup.mjs';
 import { checkDispatcherAndSensors, planDispatcherAndSensors } from './sensors-setup.mjs';
@@ -266,7 +266,7 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, bobGitOf, man
     let text; try { text = copierPlist({ label: cfg.label, installRoot: installPaths(cfg).installRoot, node: NODE, configPath: o.config ?? ROOT_CONFIG_PATH, copy: cfg.hostLockPath, home, copierNode: cfg.hostLockCopierNode }); } catch (e) { err(`PROBLEM  ${e.message}`); return 1; }
     const file = `${home}/Library/LaunchAgents/${cfg.label}.${COPIER_JOB}.plist`;
     out(text);
-    err(`Save the text above as ${file} (owner's own, 0644), make the copy's folder ${dirname(cfg.hostLockPath)} (the owner's, 0755), then: launchctl bootstrap gui/$(id -u) ${file}. Run dispatcher-config again so the Dispatcher's dispatcher.json names the copy too (with the Dispatcher's job in place, unload it first: README, Part 6 step 6). A minute later, sudo node setup.mjs check-dispatcher (README, Part 6 step 5).`);
+    err(`Save the text above as ${file} (owner's own, 0644), ${cfg.hostLockPath === hostLockCopyOf(cfg.base) ? `the copy's folder ${dirname(cfg.hostLockPath)} is users-folders' (the owner's, 0755), so run that first` : `make the copy's folder ${dirname(cfg.hostLockPath)} (the owner's, 0755)`}, then: launchctl bootstrap gui/$(id -u) ${file}. Run dispatcher-config again so the Dispatcher's dispatcher.json names the copy too (with the Dispatcher's job in place, unload it first: README, Part 6 step 6). A minute later, sudo node setup.mjs check-dispatcher (README, Part 6 step 5).`);
     return 0;
   }
   if (o.cmd === 'dispatcher-keys') { let k; try { k = dispatcherKeysOn(io, cfg); } catch (e) { err(`PROBLEM  ${e.message}`); return 1; } out(JSON.stringify(k, null, 2)); return 0; }
