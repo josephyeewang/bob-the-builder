@@ -157,7 +157,8 @@ export function hooksSnapshotOwner(settings) {
       const c = h?.[H.command];
       if (typeof c !== 'string') continue;
       const words = c.match(/--snapshot-owner(?![\w-])/g) ?? [];
-      const w = c.match(/ --snapshot-owner (0|[1-9]\d{0,9})(?= )/);
+      // #610 r2 c2: the uid ends at a space or at the command's end, whatever follows it.
+      const w = c.match(/ --snapshot-owner (0|[1-9]\d{0,9})(?= |$)/);
       if (words.length > 1 || (words.length === 1 && !w)) return null;
       seen.add(w ? Number(w[1]) : undefined);
     }

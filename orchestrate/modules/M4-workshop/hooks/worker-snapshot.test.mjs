@@ -4,7 +4,8 @@
 // worker runner always gives 0). A hook given no --snapshot-owner reads its snapshot as before (the review roles').
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, mkdirSync, chmodSync, linkSync, symlinkSync, realpathSync, lstatSync } from 'node:fs';
+import fs, { writeFileSync, mkdirSync, chmodSync, linkSync, symlinkSync, realpathSync, lstatSync, renameSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -132,12 +133,56 @@ test('#610 r1 m3: the path as written is checked too: a link reached through a f
   const via = join(open, 'to'); symlinkSync(d, via);
   const p = join(via, 'alpha.json');
   assert.equal(realpathSync(dirname(p)), d, 'its real folder is the good one');
-  refused(p, ME, /the folder .*open above the worker sessions' rules snapshot .*is not root's alone/, 'a link inside a group-writable folder');
-  chmodSync(open, 0o755);
-  assert.equal(readHookSnapshot(args(p, ME)).ok, true, 'control: the same link, its folder root\'s alone again');
-  if (ME !== 0) assert.match(rootChainProblem(p, ME + 1), /not root's/, 'a link owned by neither root nor the owner named');
+  // Since r2 m1 the walk meets the link first (it is nearer the file than the open folder) and refuses it as not the Mac's own.
+  refused(p, ME, /the link .*open\/to on the way to the worker sessions' rules snapshot .*is not one of the Mac's own/, 'a link inside a group-writable folder');
   for (const bad of ['alpha.json', `${d}//alpha.json`, `${d}/./alpha.json`, `${d}/x/../alpha.json`]) assert.match(rootChainProblem(bad, ME), /not a full path in its simplest form/, bad);
   assert.equal(readHookSnapshot(args(f, ME)).ok, true, 'control: the plain path');
+});
+
+// #610 r2 m2: the link's own refusal, alone: a link whose every folder passes is refused by the LINK check, word for word.
+const linkMsg = (dir) => `the link ${dir} on the way to ${WORKER_RULES_COPY} is not one of the Mac's own (/var, /tmp or /etc, root's, into /private); name the file by its real folders`;
+test('#610 r2 m2: a link that is not the Mac\'s own, in folders that all pass, is refused by the link check (its exact words)', () => {
+  const { d } = snapAt();
+  const via = join(d, 'to'); symlinkSync(d, via);
+  const p = join(via, 'alpha.json');
+  assert.equal(realpathSync(dirname(p)), d, 'its real folder is the good one');
+  const r = readHookSnapshot(args(p, ME)); assert.equal(r.ok, false); assert.equal(r.reason, linkMsg(via));
+  for (const dec of [guard, secrets]) assert.equal(dec(HARMLESS, args(p, ME)).reason, linkMsg(via), 'through the hooks, every call refused');
+});
+
+test('#610 r2 m1: a chain of two links (g/link → open/l2 → the good folder) is refused at the first link; the Mac\'s own /var link passes', () => {
+  const { d, f } = snapAt();
+  const g = join(d, 'g'); mkdirSync(g); chmodSync(g, 0o755);
+  const open = join(d, 'open'); mkdirSync(open); chmodSync(open, 0o777);
+  const l2 = join(open, 'l2'); symlinkSync(d, l2);
+  const link = join(g, 'link'); symlinkSync(l2, link);
+  const p = join(link, 'alpha.json');
+  assert.equal(realpathSync(dirname(p)), d, 'its real folder is the good one, through two links');
+  assert.equal(rootChainProblem(p, ME, WORKER_RULES_COPY), linkMsg(link));
+  assert.equal(readHookSnapshot(args(p, ME)).reason, linkMsg(link));
+  chmodSync(open, 0o755);
+  assert.equal(readHookSnapshot(args(p, ME)).reason, linkMsg(link), 'still refused with every folder made root\'s alone: no link but the Mac\'s own');
+  // The Mac's own link: the same file named through /var (root's, into /private/var) passes, and the plain path too.
+  if (f.startsWith('/private/var/')) assert.equal(readHookSnapshot(args(f.slice('/private'.length), ME)).ok, true, 'control: through /var');
+  assert.equal(readHookSnapshot(args(f, ME)).ok, true, 'control: the plain path');
+});
+
+test('#610 r2 m3: the file read is the one opened and checked: replaced at its name after the open, the opened one\'s rules are what come back', () => {
+  const { d, f } = snapAt();
+  const OTHER = { ...RULES, production: { ...RULES.production, programs: ['other'] } };
+  const real = fs.readFileSync;
+  let swapped = false;
+  fs.readFileSync = function (...a) {
+    if (!swapped) { swapped = true; renameSync(f, join(d, 'away.json')); writeFileSync(f, makeSnapshot(OTHER)); chmodSync(f, 0o644); }
+    return real.apply(this, a);
+  };
+  syncBuiltinESMExports();
+  try {
+    const r = readHookSnapshot(args(f, ME));
+    assert.equal(swapped, true, 'the swap ran between the open and the read');
+    assert.equal(r.ok, true, r.reason); assert.deepEqual(r.rules, RULES, 'the rules of the file opened, not of the one now at its name');
+  } finally { fs.readFileSync = real; syncBuiltinESMExports(); }
+  assert.deepEqual(readHookSnapshot(args(f, ME)).rules, OTHER, 'control: read again, the new file at the name is the one read');
 });
 
 test('#610 r1 m1 and m4: a key given twice, or one not lower case with dashes, is refused', () => {

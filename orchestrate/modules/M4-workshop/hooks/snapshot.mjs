@@ -10,7 +10,7 @@
 // A run that writes its own snapshot (a test corpus, a fake) and lasts longer than the limit keeps
 // it fresh with `keepSnapshotFresh`, never by raising the limit.
 
-import { readFileSync, writeFileSync, renameSync, unlinkSync, openSync, fstatSync, closeSync, lstatSync, realpathSync, constants as FS } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync, unlinkSync, openSync, fstatSync, closeSync, lstatSync, readlinkSync, realpathSync, constants as FS } from 'node:fs';
 import { dirname, isAbsolute, normalize } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 
@@ -84,16 +84,23 @@ export const readHookSnapshot = (args) => readSnapshot(args.snapshot, args.snaps
  * real folder up to /, must be a folder owned by root (or `ownerUid`, which a test stands in for root) and written by no
  * one else. The real folder is used, so a linked folder on the way (/var on a Mac) is judged where it leads.
  * #610 r1 m3: the path as written is walked too, since a link on it is where the real one is decided: each folder on it
- * is held to the same test, and a link on it must be root's (or `ownerUid`'s), in a folder this walk has also held to it
- * (root's /var link passes). Otherwise whoever could write a folder the path goes through could point a link elsewhere.
+ * is held to the same test. #610 r2 m1: and the only links it may hold are the Mac's own, /var, /tmp and /etc, root's,
+ * each pointing at its twin in /private (SYSTEM_LINKS). Any other link is refused, however deep a chain of them would go:
+ * a link's target can be another link, through a folder neither walk ever sees. The rules copy and the worker snapshots
+ * are named by their real folders under the base (layout.mjs managedRulesPath, workerRulesPath), so none needs one.
  */
+const SYSTEM_LINKS = Object.freeze({ '/var': ['private/var', '/private/var'], '/tmp': ['private/tmp', '/private/tmp'], '/etc': ['private/etc', '/private/etc'] });
+const systemLink = (dir, st) => {
+  if (!Object.hasOwn(SYSTEM_LINKS, dir) || st.uid !== 0) return false;
+  try { return SYSTEM_LINKS[dir].includes(readlinkSync(dir)); } catch { return false; }
+};
 export function rootChainProblem(path, ownerUid = 0, what = MACHINE_WIDE_COPY) {
   if (typeof path !== 'string' || !isAbsolute(path) || normalize(path) !== path) return `the path of ${what} is not a full path in its simplest form`;
   const owner = ownerUid === 0 ? 'root' : `root or uid ${ownerUid}, standing in for root,`;
   const bad = (st) => (st.uid !== 0 && st.uid !== ownerUid) || (st.mode & 0o022);
   for (let dir = dirname(path); ; dir = dirname(dir)) {
     let st; try { st = lstatSync(dir); } catch { return 'rules snapshot is missing or unreadable'; }
-    if (st.isSymbolicLink()) { if (st.uid !== 0 && st.uid !== ownerUid) return `the link ${dir} on the way to ${what} is not root's (it must be owned by ${owner.replace(/,$/, '')})`; }
+    if (st.isSymbolicLink()) { if (!systemLink(dir, st)) return `the link ${dir} on the way to ${what} is not one of the Mac's own (/var, /tmp or /etc, root's, into /private); name the file by its real folders`; }
     else if (!st.isDirectory() || bad(st)) return `the folder ${dir} above ${what} is not root's alone (it must be owned by ${owner} and written by no one else)`;
     if (dirname(dir) === dir) break;
   }

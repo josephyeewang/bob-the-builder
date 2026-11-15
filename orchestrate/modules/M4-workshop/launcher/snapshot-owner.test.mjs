@@ -62,3 +62,11 @@ test('L1226 plant 10: a hook that drops the owner, names it twice, or names anot
   assert.equal(hooksSnapshotOwner(edit((c) => c.replace(' --snapshot-owner 0', ' --snapshot-owner x'))), null, 'not a uid');
   assert.equal(hooksSnapshot(edit((c) => c.replace(' --snapshot-owner 0', ' --snapshot-owner 0 --snapshot /else.json'))), null, 'a second --snapshot is still refused');
 });
+
+test('#610 r2 c2: the owner is read the same whether a space or the command\'s end follows it', () => {
+  const r = render('worker', { ...PATHS, snapshotOwner: 0 }); assert.equal(r.ok, true);
+  const edit = (f) => { const s = structuredClone(r.settings); const list = Object.values(s[S.hooks])[0]; list[0][H.hooks][0][H.command] = f(list[0][H.hooks][0][H.command]); return s; };
+  assert.equal(hooksSnapshotOwner(r.settings), 0, 'control: as rendered');
+  assert.equal(hooksSnapshotOwner(edit((c) => `${c.replace(' --snapshot-owner 0', '')} --snapshot-owner 0`)), 0, 'at the end of one hook\'s command');
+  assert.equal(hooksSnapshotOwner(edit((c) => `${c.replace(' --snapshot-owner 0', '')} --snapshot-owner 01`)), null, 'at the end, not a uid');
+});
