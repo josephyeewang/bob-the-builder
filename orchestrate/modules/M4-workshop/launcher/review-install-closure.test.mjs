@@ -49,6 +49,7 @@ import { copierPlist, COPIER_SCRIPT } from '../../../setup/host-lock-copy.mjs';
 import { sensorsJobPlist } from '../../M12-sensors/sensors-job.mjs';
 import { workerRunnerPlist } from '../../../wiring/runner-job.mjs';
 import { WALL_SCRIPT, wallCheckPlist, wallPlist } from '../../../setup/builder-wall.mjs';
+import { workerRulesPlist, WORKER_RULES_SCRIPT } from '../../../setup/worker-rules.mjs';
 import { copierAgentPlist } from '../../M13-ledger/handoff-copier.mjs';
 import { updateOnce, MAIN } from './review-updater.mjs';
 
@@ -115,6 +116,8 @@ const JOB_BUILDERS = Object.freeze({
   // L1029 E: the owner's host.lock copier, a LaunchAgent built the same way, through loginJobPlist.
   'setup/host-lock-copy.mjs': () => [copierPlist({ label: LABEL, installRoot: SAMPLE_ROOT, node: NODE, configPath: join(SAMPLE_BASE, 'setup.json'),
     copy: join(SAMPLE_BASE, 'owner-home', '.orchestrate', 'host.lock'), home: join(SAMPLE_BASE, 'owner-home') })],
+  // L1226: root's worker-rules job (a LaunchDaemon, no UserName) starts setup/worker-rules.mjs of the copy, so it is here.
+  'setup/worker-rules.mjs': () => [workerRulesPlist({ base: SAMPLE_BASE, label: LABEL })],
   'modules/M13-ledger/handoff-copier.mjs': () => [copierAgentPlist({ label: LABEL, node: join(SAMPLE_ROOT, NODE), script: join(SAMPLE_ROOT, HANDOFF_COPIER),
     from: join(SAMPLE_BASE, 'ledger-handoffs'), to: join(SAMPLE_BASE, 'dropbox-handoffs'), stateDir: join(SAMPLE_BASE, 'copier'), products: ['p1'] })],
   // #604 (lane 2's flag): the wall's check job, root's LaunchDaemon every few minutes, starts the copy's builder-wall.mjs
@@ -157,6 +160,8 @@ const READS_JOB_FILES_PINNED = Object.freeze({
       "import { DISPATCHER_JOB, DISPATCHER_MAIN } from '../dispatcher-setup.mjs';",
       "import { SENSORS_JOB, SENSORS_MAIN } from '../sensors-setup.mjs';",
       "import { WORKER_RUNNER_JOB, WORKER_RUNNER_MAIN } from '../worker-runner-setup.mjs';",
+      // L1243: the worker runner's node options only (a frozen list of names), not its job-file builder.
+      "import { RUNNER_NODE_FLAGS } from '../../wiring/runner-job.mjs';",
       "import { SCRIPTS } from '../../modules/M4-workshop/launcher/review-daemons.mjs';",
       "import { NODE, chainProblem, currentCopy } from '../../modules/M4-workshop/launcher/install-check.mjs';",
       "import { INSTALL_MARK, REFUSED_CODE } from '../../shared/secret-guard.mjs';",
@@ -617,8 +622,8 @@ test('L92 item 4, L106 M-1: every module of the installed copy loads from the co
 // m-c (audit r2 N25): the reader-against-node check, on a module whose computed import node follows and the reader's
 // static imports do not, and on the same module without it.
 test('L136 m1: the programs to start come from every job-file builder of the copy, and a new builder must be listed', () => {
-  // Every launchd job file of today, read from its builder: the three LaunchDaemons, the watch-only week, the Dispatcher, the robot job and the Sensors loop.
-  assert.deepEqual(ENTRY_POINTS, [...new Set([...Object.values(SCRIPTS), DISPATCHER_MAIN, 'modules/M6-merge-gate/watch-run.mjs', ROBOT_MAIN, SENSORS_LOOP, RUNNER_MAIN, OWNER_SCRIPT, COPIER_SCRIPT, HANDOFF_COPIER, WALL_SCRIPT])].sort());
+  // Every launchd job file of today, read from its builder: the three LaunchDaemons, the watch-only week, the Dispatcher, the robot job, the Sensors loop, the wall's check job and root's worker-rules job (L1226).
+  assert.deepEqual(ENTRY_POINTS, [...new Set([...Object.values(SCRIPTS), DISPATCHER_MAIN, 'modules/M6-merge-gate/watch-run.mjs', ROBOT_MAIN, SENSORS_LOOP, RUNNER_MAIN, OWNER_SCRIPT, COPIER_SCRIPT, HANDOFF_COPIER, WALL_SCRIPT, WORKER_RULES_SCRIPT])].sort());
   // The tripwire: a module of the copy (test code aside) that writes a launchd start command is a job-file builder, and
   // each one must be on JOB_BUILDERS, so the script its jobs start is started through the link above. A listed
   // builder that no longer writes one is stale.

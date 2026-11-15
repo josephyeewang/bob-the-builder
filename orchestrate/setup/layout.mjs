@@ -61,6 +61,11 @@ export const baseMarkerPath = (cfg) => join(cfg.base, BASE_MARKER);
 // without loading the wall's module (builder-wall → daemons → worker-runner-setup would be a load loop).
 export const wallStatusDir = (cfg) => join(cfg.base, 'builder-wall-status');
 export const wallStatusPath = (cfg) => join(wallStatusDir(cfg), 'status.json');
+// The worker sessions' rules snapshots (L1225, L1226): root's worker-rules job (worker-rules.mjs) writes one per product, root's
+// 0644 in this folder, root's 0755, so nothing the builder runs can change the rules its sessions' hooks read. Named here for
+// the same reason as the wall's status: the worker runner's setup takes it without loading the job's module.
+export const workerRulesDir = (cfg) => join(cfg.base, 'worker-rules');
+export const workerRulesPath = (cfg, product) => join(workerRulesDir(cfg), `${product}.json`);
 
 const NAME = /^[a-z_][a-z0-9_.-]{0,31}$/;
 const BASE = /^\/[A-Za-z0-9._/-]+$/;

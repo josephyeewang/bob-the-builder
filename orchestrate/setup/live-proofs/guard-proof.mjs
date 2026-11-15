@@ -4,12 +4,14 @@
 // Read-only. Joe runs it on the Mini with sudo after the reinstall (the run sheet's G7). For each job below whose job file
 // is placed under the config's label, it reads the job file (its node, its script and its user) and checks, without
 // starting the job:
-//   - the job starts the copy's node and the job's own script from the copy, and the user it runs as is not root and not
+//   - the job starts the copy's node, with exactly the job's own node options between it and the script (the worker
+//     runner's --disable-sigusr1, L1242; none for every other job, so a stray option is a FAIL), and the job's own script
+//     from the copy, and the user it runs as is not root and not
 //     the owner (the updater is the one job that runs as root by design, and must);
 //   - the node, the script and the copy's shared/secret-guard.mjs are root's all the way up, with no link (a real path that
 //     is not the copy's own guard is a FAIL);
 //   - then, as the job's own user (uid and gid), in /var/empty with a bare environment and a 30 s limit, a fresh node from
-//     the copy loads the job's script exactly as the job does, but with no arguments, so the script's own "am I the
+//     the copy, started with the job's own node options, loads the job's script exactly as the job does, but with no arguments, so the script's own "am I the
 //     program that was started" test is false and its main never runs. In that child: the guard that installed itself must
 //     be the copy's (its install mark names the file, and the copy's guard read back is that same instance), the start
 //     functions must be the wrapped ones, a start whose argument holds a value the child registers must be refused with
@@ -36,6 +38,7 @@ import { ROBOT_JOB, ROBOT_MAIN } from '../robot-setup.mjs';
 import { DISPATCHER_JOB, DISPATCHER_MAIN } from '../dispatcher-setup.mjs';
 import { SENSORS_JOB, SENSORS_MAIN } from '../sensors-setup.mjs';
 import { WORKER_RUNNER_JOB, WORKER_RUNNER_MAIN } from '../worker-runner-setup.mjs';
+import { RUNNER_NODE_FLAGS } from '../../wiring/runner-job.mjs';
 import { SCRIPTS } from '../../modules/M4-workshop/launcher/review-daemons.mjs';
 import { NODE, chainProblem, currentCopy } from '../../modules/M4-workshop/launcher/install-check.mjs';
 import { INSTALL_MARK, REFUSED_CODE } from '../../shared/secret-guard.mjs';
@@ -57,7 +60,9 @@ export const PROVED_JOBS = Object.freeze({
   [DISPATCHER_JOB]: Object.freeze({ script: DISPATCHER_MAIN }),
   [SENSORS_JOB]: Object.freeze({ script: SENSORS_MAIN }),
   [ROBOT_JOB]: Object.freeze({ script: ROBOT_MAIN }),
-  [WORKER_RUNNER_JOB]: Object.freeze({ script: WORKER_RUNNER_MAIN }),
+  // nodeFlags (L1243): the node options the installer puts between node and the script for this job, in order. A job
+  // without the key takes none.
+  [WORKER_RUNNER_JOB]: Object.freeze({ script: WORKER_RUNNER_MAIN, nodeFlags: RUNNER_NODE_FLAGS }),
 });
 /**
  * Jobs left out, and why: listed in the output so a reader sees them. Each exemption covers that one label only: it never
@@ -71,6 +76,11 @@ export const NOT_CHECKED = Object.freeze({
   // only pfctl, launchctl and its own network probes (sudo -u <user> node -e <fixed code> <protocol> <host> [port]). If it ever reads a secret or starts a program with one, it must load the guard
   // and be proved here under a root exemption by its exact label, like review-updater.
   'builder-wall-check': 'it loads no guard: root\'s by design, it reads no secret and starts only pfctl, launchctl and its own sudo/node network probes (builder-wall.mjs:501, 522), with no secret on any line',
+  // worker-rules (L1243 ruling, on the builder-wall-check precedent; the job is #604's, L1226), this exact label only: root's by design, it writes
+  // the rules the worker sessions' hooks read. It reads the setup config and the worker runner's config (no code fields:
+  // readJobConfig code []), and starts only launchctl print system/<label> and ps -o uid=,stat= -p <pid>. If it ever reads
+  // a secret or starts a program with one, it must load the guard and be proved here under a root exemption, like review-updater.
+  'worker-rules': 'it loads no guard: root\'s by design, it reads no secret and starts only launchctl print and ps with a label or a pid (worker-rules.mjs:98, 110), with no secret on any line',
 });
 /** A job whose script writes or connects when it is only loaded is never loaded here: NOT TRIED, with the reason. None today. */
 export const LOAD_WRITES = Object.freeze({});
@@ -168,7 +178,7 @@ const row = (job, result, why) => ({ job, result, why });
  * One job's verdict. io: { exists, isLink(file), readPlist(file) → object, built(job) → the job file the installer writes
  * for it, as an object, builtText(job) → that file's text, readBytes(file) → the placed file's bytes,
  * currentCopy(installRoot) → install-check's answer, realpath, idOf(name) → { uid, gid } | null,
- * chain(path) → problem | null, runChild({ node, uid, gid, env, cwd }) → spawnSync's answer, myUid }.
+ * chain(path) → problem | null, runChild({ node, nodeFlags, uid, gid, env, cwd }) → spawnSync's answer, myUid }.
  */
 export function judgeJob(job, { cfg, io, ownerUid, loadWrites = LOAD_WRITES }) {
   const spec = PROVED_JOBS[job];
@@ -196,9 +206,17 @@ export function judgeJob(job, { cfg, io, ownerUid, loadWrites = LOAD_WRITES }) {
   const { installRoot } = installPaths(cfg);
   const node = join(installRoot, NODE); const script = join(installRoot, spec.script);
   const args = p.ProgramArguments;
+  const flags = spec.nodeFlags ?? [];
   if (!Array.isArray(args) || args.length < 2) return row(job, 'FAIL', 'its job file has no program and script');
   if (args[0] !== node) return row(job, 'FAIL', `it starts ${args[0]}, not the copy's node ${node}`);
-  if (args[1] !== script) return row(job, 'FAIL', `it runs ${args[1]}, not its script ${script}; not loaded`);
+  // L1243: between node and the script, exactly this job's own node options, in order (the worker runner's
+  // --disable-sigusr1; none for the rest). One missing, another in its place, or one more is a FAIL before anything loads.
+  for (let i = 0; i < flags.length; i += 1) {
+    if (args[1 + i] !== flags[i]) return row(job, 'FAIL', `it starts node without its option ${flags[i]} (it has ${JSON.stringify(args[1 + i] ?? null)} there); not loaded`);
+  }
+  const at = 1 + flags.length;
+  if (typeof args[at] === 'string' && args[at].startsWith('-')) return row(job, 'FAIL', `it starts node with the option ${args[at]}, which this job's node never takes; not loaded`);
+  if (args[at] !== script) return row(job, 'FAIL', `it runs ${args[at]}, not its script ${script}; not loaded`);
   if (p.Label !== `${cfg.label}.${job}`) return row(job, 'FAIL', `its job file's Label is ${JSON.stringify(p.Label)}, not ${cfg.label}.${job}; not loaded`);
   // r2 (the lead's probe): the same names with other values would still start something else (a PATH that finds another
   // program first, another HOME, more arguments after the script, logs elsewhere). So every value must be the one the
@@ -237,7 +255,7 @@ export function judgeJob(job, { cfg, io, ownerUid, loadWrites = LOAD_WRITES }) {
   if (io.myUid !== 0 && io.myUid !== ids.uid) return row(job, 'NOT TRIED', `it runs as ${user}: run this with sudo, which starts each check as the job's own user`);
   const nonce = randomBytes(16).toString('hex');
   const input = { entry: rscript, guard: rguard, nonce, mark: INSTALL_MARK.description, code: REFUSED_CODE };
-  const r = io.runChild({ node: rnode, uid: ids.uid, gid: ids.gid, cwd: '/var/empty', env: { PATH: '/usr/bin:/bin', HOME: '/var/empty', [IN]: JSON.stringify(input) } });
+  const r = io.runChild({ node: rnode, nodeFlags: flags, uid: ids.uid, gid: ids.gid, cwd: '/var/empty', env: { PATH: '/usr/bin:/bin', HOME: '/var/empty', [IN]: JSON.stringify(input) } });
   return row(job, ...readAnswer(r, nonce, user, ids));
 }
 
@@ -299,7 +317,8 @@ export const liveIo = (cfg) => ({
     return uid === null || gid === null ? null : { uid, gid };
   },
   chain: (p) => chainProblem(p),
-  runChild: ({ node, uid, gid, env, cwd }) => spawnSync(node, ['--input-type=module', '-e', PROBE], {
+  // The job's own node options first (L1243), so the script loads under the node the job starts.
+  runChild: ({ node, nodeFlags = [], uid, gid, env, cwd }) => spawnSync(node, [...nodeFlags, '--input-type=module', '-e', PROBE], {
     uid, gid, env, cwd, encoding: 'utf8', timeout: CHILD_LIMIT_MS, killSignal: 'SIGKILL', maxBuffer: 4 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
   }),
   myUid: process.getuid(),

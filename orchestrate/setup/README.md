@@ -520,3 +520,40 @@ the rules of the script that wrote it, and the worker runner compares them with 
 | `/usr/local/bin/node <base>/install/orchestrate/setup/builder-wall.mjs place --dry-run` | prints each step `place` would take; changes nothing | no |
 | `sudo /usr/local/bin/node <base>/install/orchestrate/setup/builder-wall.mjs place` | puts the rules, the token folder and the job in place, loads the job (which turns pf on and holds it), waits for its first run, reads the wall back and writes the status. Any FAIL takes the wall out again. Safe to run again: what is already right is left, and the job is reloaded | yes |
 | `sudo /usr/local/bin/node <base>/install/orchestrate/setup/builder-wall.mjs check` | the read-back alone, and the status. The `builder-wall-check` job runs this every 5 minutes | yes |
+
+## Part 9 — the worker sessions' rules, written by root (L1225, L1226, L1227)
+
+**What it changes.** Setup's `worker-rules` job (`worker-rules.mjs`, on exactly when the config's `workerRunner` entry
+is) runs as root at load and every minute. Each run writes every worker product's rules snapshot to
+`<base>/worker-rules/<product>.json`, root's 0644, in that folder, root's 0755, which it makes itself. The rules come
+from the copy's `worker-runner.json`, the same file the worker runner loads, so there is one source. Root writes the
+file, so nothing the `builder` user runs (a session, a product's own install or test command) can change the rules its
+sessions' safety checks read.
+
+**It writes only while the worker runner is running.** Each run asks launchd for the worker runner's job by its exact
+label, takes the pid from that answer, and asks `ps` whose that pid is and what state it is in. It writes only when the
+job is running as `builder` and the process is not stopped (`kill -STOP`), traced or a zombie (L1238). Otherwise, or
+when launchd's or ps's answer can't be read, it writes nothing and says why in `worker-rules.err.log`. Worker sessions
+outlive a runner restart by design, so a stopped runner shows as its sessions' snapshots going stale: after 5 minutes
+their safety checks refuse every call, as they did when the runner wrote the snapshots itself. A run that writes nothing
+only because the runner is not loaded or not running ends with exit 0 (the runner is just off); any other reason ends
+with exit 1, which `daemons check` shows. A product the runner's config gives no rules is skipped (its sessions are
+refused) and said, with exit 1; the other products are still written. **Known limit:** a runner that hangs without
+stopping (its process still asleep or runnable) is not caught, and `builder`, the runner's own user, can cause such a
+hang on purpose (by attaching to the runner or tying up its event loop). It is on the cutover checklist. One way is
+closed: the runner's job starts node with `--disable-sigusr1`, so a signal can't start node's debugger in it (L1242).
+That option needs node 22.14 or later (23.7 or later on 23); an older node refuses it, and the runner does not start.
+
+**What reads it.** Nothing yet. The worker runner's check 8 and the sessions' safety checks move to it in the next
+change (L1226 PR (ii)); until then the job only writes.
+
+| Command | What it does | Root? |
+|---|---|---|
+| `/usr/local/bin/node <base>/install/orchestrate/setup/worker-rules.mjs write --dry-run` | says which files one run would write, or why it would write none; writes nothing | no |
+| `sudo /usr/local/bin/node <base>/install/orchestrate/setup/worker-rules.mjs write` | one run, as the job does it | yes |
+| `sudo /usr/local/bin/node setup.mjs daemons unload --only worker-rules` | takes the job out; the snapshots then go stale within 5 minutes | yes |
+
+**Check afterwards** (L1238), once the worker runner is running:
+1. `sudo /usr/local/bin/node setup.mjs daemons check --only worker-rules` PASSes: the job file is exact, it is loaded, and its last run ended with exit 0.
+2. `stat -f '%Su:%Sg %Lp' <base>/worker-rules/<product>.json` prints `root:wheel 644`.
+3. `cat <base>/worker-rules/<product>.json` shows a `written_at` within the last minute or two (the job writes every minute); run it again a minute later and it has moved on.
