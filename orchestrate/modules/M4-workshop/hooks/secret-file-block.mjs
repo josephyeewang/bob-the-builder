@@ -6,7 +6,7 @@ import { basename, join, sep, isAbsolute, resolve } from 'node:path';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isMain, runHook, block, pass, toolPaths, bothWords, landingPath, realFolder, inside, fold, joinLines, unreadable, expandBraces, oddPath, oddWord, globRe } from './lib.mjs';
-import { readSnapshot } from './snapshot.mjs';
+import { readHookSnapshot } from './snapshot.mjs';
 
 const SECRET_NAME = [
   /^\.env(\..+)?$/, /\.pem$/, /\.key$/, /\.p12$/, /\.pfx$/, /^id_(rsa|dsa|ecdsa|ed25519)(\.pub)?$/, /^\.netrc$/, /^\.npmrc$/,
@@ -79,7 +79,7 @@ function shortName(w, listed) {
 }
 
 export function decide(input, args) {
-  const snap = readSnapshot(args.snapshot);
+  const snap = readHookSnapshot(args);
   if (!snap.ok) return block(snap.reason);
   const listed = snap.rules.secrets?.paths;
   if (!Array.isArray(listed)) return block('the rules snapshot lists no secret paths');

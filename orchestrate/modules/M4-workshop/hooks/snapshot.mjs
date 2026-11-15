@@ -10,12 +10,16 @@
 // A run that writes its own snapshot (a test corpus, a fake) and lasts longer than the limit keeps
 // it fresh with `keepSnapshotFresh`, never by raising the limit.
 
-import { readFileSync, writeFileSync, renameSync, unlinkSync, openSync, fstatSync, closeSync, lstatSync, realpathSync, constants as FS } from 'node:fs';
-import { dirname } from 'node:path';
+import { readFileSync, writeFileSync, renameSync, unlinkSync, openSync, fstatSync, closeSync, lstatSync, readlinkSync, realpathSync, constants as FS } from 'node:fs';
+import { dirname, isAbsolute, normalize } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 
 export const SNAPSHOT_MAX_AGE_MS = 5 * 60 * 1000;
 const refuse = (reason) => ({ ok: false, reason });
+/** What a root-owned read's refusals call the file by default: the machine-wide copy (L1031). */
+const MACHINE_WIDE_COPY = 'the machine-wide rules copy';
+/** What they call the worker sessions' snapshot, which root's worker-rules job writes (L1226). */
+export const WORKER_RULES_COPY = 'the worker sessions\' rules snapshot (root\'s worker-rules job writes it)';
 
 export const snapshotHash = (rules) => createHash('sha256').update(JSON.stringify(rules)).digest('hex');
 
@@ -39,7 +43,10 @@ export function parseSnapshot(text, { now = Date.now(), maxAgeMs = SNAPSHOT_MAX_
   // A copy read with no age limit (the machine-wide one, L1031) is not judged by the clock at all: a clock stepped back after
   // it was written would otherwise block every session on the Mac until it caught up (L1044 m1).
   if (age < -60000 && Number.isFinite(maxAgeMs)) return refuse('rules snapshot is from the future');
-  return { ok: true, rules: s.rules, writtenAt: s.written_at, hash: s.hash };
+  // `product` and `source_sha256` are the worker sessions' snapshot's own (setup/worker-rules.mjs, L1226): the worker
+  // runner's check 8 compares them with its own (source_sha256: the sha256 of the bytes of the worker-runner.json root
+  // read, L1238 m3); other snapshots have neither, and these are then undefined.
+  return { ok: true, rules: s.rules, writtenAt: s.written_at, hash: s.hash, product: s.product, sourceSha256: s.source_sha256 };
 }
 
 /**
@@ -48,10 +55,11 @@ export function parseSnapshot(text, { now = Date.now(), maxAgeMs = SNAPSHOT_MAX_
  * The runner replaces the file by rename, so the snapshot it writes always has one name.
  */
 export function readSnapshot(path, opts = {}) {
-  const { ownerUid, ...parseOpts } = opts;
+  const { ownerUid, what = MACHINE_WIDE_COPY, ...parseOpts } = opts;
   // The machine-wide copy (L1031): written once by root and never refreshed, so whoever could change it or rename it away
-  // could switch the guard off for every session. Every folder above it must be root's and written by no one else.
-  if (ownerUid !== undefined) { const why = rootChainProblem(path, ownerUid); if (why) return refuse(why); }
+  // could switch the guard off for every session. Every folder above it must be root's and written by no one else. The
+  // worker sessions' snapshot (L1226) is read the same way, root's alone, named by `what` in what a refusal says.
+  if (ownerUid !== undefined) { const why = rootChainProblem(path, ownerUid, what); if (why) return refuse(why); }
   // Opened without waiting (O_NONBLOCK), so a pipe planted at the name can't hang a hook; it is then refused as not a file.
   // The machine-wide copy is also opened without following a link (O_NOFOLLOW): its one name is the root-owned file itself.
   let fd; try { fd = openSync(path, FS.O_RDONLY | FS.O_NONBLOCK | (ownerUid !== undefined ? FS.O_NOFOLLOW : 0)); } catch { return refuse('rules snapshot is missing or unreadable'); }
@@ -59,22 +67,47 @@ export function readSnapshot(path, opts = {}) {
     let st; try { st = fstatSync(fd); } catch { return refuse('rules snapshot is missing or unreadable'); }
     if (!st.isFile()) return refuse('rules snapshot is not a plain file');
     if (st.nlink !== 1) return refuse(`rules snapshot has ${st.nlink} names (a hard link); it must have one`);
-    if (ownerUid !== undefined && (st.uid !== ownerUid || (st.mode & 0o022))) return refuse('the machine-wide rules copy is not root\'s alone (it must be owned by root and written by no one else)');
+    if (ownerUid !== undefined && (st.uid !== ownerUid || (st.mode & 0o022))) return refuse(`${what} is not root's alone (it must be owned by ${ownerUid === 0 ? 'root' : `uid ${ownerUid}, standing in for root,`} and written by no one else)`);
     let text; try { text = readFileSync(fd, 'utf8'); } catch { return refuse('rules snapshot is missing or unreadable'); }
     return parseSnapshot(text, parseOpts);
   } finally { try { closeSync(fd); } catch { /* closed */ } }
 }
 
 /**
+ * The snapshot a hook's arguments name (lib.mjs parseArgs): with `--snapshot-owner U`, a worker session's (L1226), it is
+ * taken only when it is U's alone, every folder above it too, as the machine-wide copy is; without it, as before.
+ */
+export const readHookSnapshot = (args) => readSnapshot(args.snapshot, args.snapshotOwner !== undefined ? { ownerUid: args.snapshotOwner, what: WORKER_RULES_COPY } : {});
+
+/**
  * Why a folder above `path` could let someone other than root swap the file, or null (L1031): each one, from the file's
  * real folder up to /, must be a folder owned by root (or `ownerUid`, which a test stands in for root) and written by no
  * one else. The real folder is used, so a linked folder on the way (/var on a Mac) is judged where it leads.
+ * #610 r1 m3: the path as written is walked too, since a link on it is where the real one is decided: each folder on it
+ * is held to the same test. #610 r2 m1: and the only links it may hold are the Mac's own, /var, /tmp and /etc, root's,
+ * each pointing at its twin in /private (SYSTEM_LINKS). Any other link is refused, however deep a chain of them would go:
+ * a link's target can be another link, through a folder neither walk ever sees. The rules copy and the worker snapshots
+ * are named by their real folders under the base (layout.mjs managedRulesPath, workerRulesPath), so none needs one.
  */
-export function rootChainProblem(path, ownerUid = 0) {
+const SYSTEM_LINKS = Object.freeze({ '/var': ['private/var', '/private/var'], '/tmp': ['private/tmp', '/private/tmp'], '/etc': ['private/etc', '/private/etc'] });
+const systemLink = (dir, st) => {
+  if (!Object.hasOwn(SYSTEM_LINKS, dir) || st.uid !== 0) return false;
+  try { return SYSTEM_LINKS[dir].includes(readlinkSync(dir)); } catch { return false; }
+};
+export function rootChainProblem(path, ownerUid = 0, what = MACHINE_WIDE_COPY) {
+  if (typeof path !== 'string' || !isAbsolute(path) || normalize(path) !== path) return `the path of ${what} is not a full path in its simplest form`;
+  const owner = ownerUid === 0 ? 'root' : `root or uid ${ownerUid}, standing in for root,`;
+  const bad = (st) => (st.uid !== 0 && st.uid !== ownerUid) || (st.mode & 0o022);
+  for (let dir = dirname(path); ; dir = dirname(dir)) {
+    let st; try { st = lstatSync(dir); } catch { return 'rules snapshot is missing or unreadable'; }
+    if (st.isSymbolicLink()) { if (!systemLink(dir, st)) return `the link ${dir} on the way to ${what} is not one of the Mac's own (/var, /tmp or /etc, root's, into /private); name the file by its real folders`; }
+    else if (!st.isDirectory() || bad(st)) return `the folder ${dir} above ${what} is not root's alone (it must be owned by ${owner} and written by no one else)`;
+    if (dirname(dir) === dir) break;
+  }
   let dir; try { dir = realpathSync.native(dirname(path)); } catch { return 'rules snapshot is missing or unreadable'; }
   for (;;) {
     let st; try { st = lstatSync(dir); } catch { return 'rules snapshot is missing or unreadable'; }
-    if (!st.isDirectory() || (st.uid !== 0 && st.uid !== ownerUid) || (st.mode & 0o022)) return `the folder ${dir} above the machine-wide rules copy is not root's alone (it must be owned by root and written by no one else)`;
+    if (!st.isDirectory() || bad(st)) return `the folder ${dir} above ${what} is not root's alone (it must be owned by ${owner} and written by no one else)`;
     const up = dirname(dir);
     if (up === dir) return null;
     dir = up;
