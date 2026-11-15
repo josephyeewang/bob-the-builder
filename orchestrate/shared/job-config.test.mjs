@@ -166,6 +166,11 @@ export const LOADERS = {
     ['  const swapped = readConfigFn === readConfig || readByDescriptor(c) ? readChangedProblem(argv[0], c, lstat ? { lstat } : {}) : null;', 1],
     [`  try { wiring = await ${IMPORT}(pathToFileURL(c.wiring).href); } catch (e) {`, 1],
     [`    try { budget = await (await ${IMPORT}(pathToFileURL(c.budget).href)).budget({ ...c, reviewStatusFile: typeof c.root === 'string' ? join(c.root, FOLDERS.status) : undefined, reviewUid: c.uids?.reviewer }); } catch (e) {`, 1]] },
+  // L1211: the guard's live proof is no job and reads no job config: its child loads a job's own script (the path its job
+  // file starts, checked to be the copy's, root's and unlinked) and the copy's guard, to see the guard on.
+  'setup/live-proofs/guard-proof.mjs': { imports: 2, pins: [
+    [`  await ${IMPORT}(pathToFileURL(entry).href);`, 1],
+    [`  const g = await ${IMPORT}(want);`, 1]] },
   // Check 12 (L1042): the worker runner loads the budget module named by its config, read through the checked reader.
   'wiring/runner-main.mjs': { imports: 1, pins: [
     // One reader for the runner and the runLocked proof (L1121 m1): main reads through it, and it through the checked reader.

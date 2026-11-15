@@ -2826,7 +2826,7 @@ const STATES = Object.freeze({
 
 // The Merge Gate's answer on an undo card it judged (L980): `reverse-<undo card>` = { state: 'not_clean', reason, ... }
 // when the change can never be the exact reverse. M6 gate.mjs writes it, M9's writer reads it before the gate may fail
-// the undo card, and M11 undo.mjs (its own REVERSE_FACT, held equal by a test) makes the fix card from it.
+// the undo card, and M11 undo.mjs (which imports this REVERSE_FACT) makes the fix card from it.
 const REVERSE_FACT = (undoCard) => `reverse-${undoCard}`;
 const NOT_CLEAN = 'not_clean';
 });
