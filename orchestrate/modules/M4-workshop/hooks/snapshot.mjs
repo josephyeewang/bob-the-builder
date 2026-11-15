@@ -43,9 +43,10 @@ export function parseSnapshot(text, { now = Date.now(), maxAgeMs = SNAPSHOT_MAX_
   // A copy read with no age limit (the machine-wide one, L1031) is not judged by the clock at all: a clock stepped back after
   // it was written would otherwise block every session on the Mac until it caught up (L1044 m1).
   if (age < -60000 && Number.isFinite(maxAgeMs)) return refuse('rules snapshot is from the future');
-  // `product` and `config_sha256` are the worker sessions' snapshot's own (setup/worker-rules.mjs, L1226): the worker
-  // runner's check 8 compares them with its own; other snapshots have neither, and these are then undefined.
-  return { ok: true, rules: s.rules, writtenAt: s.written_at, hash: s.hash, product: s.product, configSha256: s.config_sha256 };
+  // `product` and `source_sha256` are the worker sessions' snapshot's own (setup/worker-rules.mjs, L1226): the worker
+  // runner's check 8 compares them with its own (source_sha256: the sha256 of the bytes of the worker-runner.json root
+  // read, L1238 m3); other snapshots have neither, and these are then undefined.
+  return { ok: true, rules: s.rules, writtenAt: s.written_at, hash: s.hash, product: s.product, sourceSha256: s.source_sha256 };
 }
 
 /**
