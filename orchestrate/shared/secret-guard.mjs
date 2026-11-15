@@ -15,7 +15,9 @@
 //
 //   registerSecret(value)       → value (unchanged), for `return registerSecret(x)`; a value under MIN_SECRET is ignored
 //   holdsSecret(text)           → true when text holds a registered value
-//   refuseSecretArgs(what, parts) throws when any part holds one (for a runner handed a start function, see sync-limit)
+//   refuseSecretArgs(what, parts) throws when any part holds one (for a runner handed a start function, see sync-limit);
+//                               the error's code is REFUSED_CODE
+//   globalThis[INSTALL_MARK]    { url, registerSecret } of the copy of this module that wrapped the starts (L1211)
 //
 // Limits, said plainly: a start function taken off the module object before this module loaded (a `const { spawn } =
 // require(...)`, or a reference stored at load time) is not wrapped, so the files that start programs with a token
@@ -123,8 +125,13 @@ export function holdsSecret(text) {
   return false;
 }
 
+/** The code on the guard's own refusal, so a check can tell it from any other failed start (guard-proof.mjs, L1211). */
+export const REFUSED_CODE = 'ERR_ORCH_SECRET_ON_COMMAND_LINE';
+
 export function refuseSecretArgs(what, parts) {
-  for (const p of parts) if (holdsSecret(p)) throw new Error(`refused to start ${what}: its command line would hold a secret, which every Mac user can read`);
+  for (const p of parts) {
+    if (holdsSecret(p)) throw Object.assign(new Error(`refused to start ${what}: its command line would hold a secret, which every Mac user can read`), { code: REFUSED_CODE });
+  }
 }
 
 // The parts of one call's command line: the program, each argument, and what the options put on it (argv0, a shell
@@ -170,8 +177,13 @@ function optionParts(opts) {
 const STARTS = ['spawn', 'spawnSync', 'execFile', 'execFileSync', 'exec', 'execSync', 'fork'];
 const WRAPPED = Symbol.for('orchestrate.secret-guard.wrapped');
 const PROMISIFIED = Symbol.for('nodejs.util.promisify.custom');
+// The install mark (L1211): the copy of this module that wrapped the starts leaves its own address and registerSecret on
+// the process, once, so a check can tell that the guard it reads is the one that is installed (a second copy of this file
+// loaded later finds the starts wrapped, wraps nothing, and leaves the mark as it is).
+export const INSTALL_MARK = Symbol.for('orchestrate.secret-guard.installed');
 
 function install() {
+  let wrapped = false;
   for (const name of STARTS) {
     const real = cp[name];
     if (typeof real !== 'function' || real[WRAPPED]) continue;
@@ -184,6 +196,7 @@ function install() {
     if (typeof custom === 'function') guarded[PROMISIFIED] = function (...a) { const b = pinned(a); check(b); return Reflect.apply(custom, this, b); };
     guarded[WRAPPED] = true;
     cp[name] = guarded;
+    wrapped = true;
   }
   // ChildProcess.prototype.spawn: every start above ends here, and code holding a ChildProcess can call it directly.
   // Its one argument is the normalized options: file, then args (argv[0] first), and the shell's line inside args.
@@ -201,8 +214,12 @@ function install() {
     };
     guarded[WRAPPED] = true;
     proto.spawn = guarded;
+    wrapped = true;
   }
   syncBuiltinESMExports();
+  if (wrapped && !Object.hasOwn(globalThis, INSTALL_MARK)) {
+    Object.defineProperty(globalThis, INSTALL_MARK, { value: Object.freeze({ url: import.meta.url, registerSecret }), writable: false, configurable: false, enumerable: false });
+  }
 }
 install();
 
