@@ -44,7 +44,9 @@
 // (the usual state while the runner is off; the reason is still logged). Anything else that writes nothing exits 1.
 //
 // Commands (root only):  write             one beat: check the runner is running, then write every product's snapshot
-//                        write --dry-run   say what one beat would do, writing nothing (root not needed)
+//                        write --dry-run   say what one beat would do, writing nothing (root not needed; it still asks
+//                                          launchctl and ps about the runner, which any user may, and reads the copy's
+//                                          config when it can)
 
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -134,13 +136,14 @@ export function writeRules(io, cfg, product, text) {
 }
 
 /**
- * One beat's plan: → { writes: [{ product, path, text }], problems }. Nothing is written when there is any problem: the
+ * One beat's plan: → { writes: [{ product, path, text }], problems }. A product without rules is skipped, with a problem,
+ * and the others are still written (L1242 m2). Otherwise nothing is written when there is any problem: the
  * runner not running (runnerLive), the builder user missing, the config unreadable or one the runner refuses, or a product
  * in it that the setup config does not list. `off` is true when the only reason is the runner not loaded or not running.
  * `readConfig(file)` → { config, sourceSha256 } (a port for tests; the real one is the runner's own reading, as root, of
  * root's copy, and the sha256 of the bytes that one read took).
  */
-const readSource = (io) => (file) => { const config = readJobConfig(io.at(file), { code: [], optionalCode: ['budget'], ownUid: io.rootUid }); return { config, sourceSha256: readSha256(config) }; };
+export const readSource = (io) => (file) => { const config = readJobConfig(io.at(file), { code: [], optionalCode: ['budget'], ownUid: io.rootUid }); return { config, sourceSha256: readSha256(config) }; };
 export function planBeat(io, cfg, { readConfig = readSource(io), now = new Date() } = {}) {
   const b = readUser(io, BUILDER);
   if (!b.exists || !Number.isSafeInteger(b.uid) || b.uid <= 0) return { writes: [], problems: [`the ${BUILDER} user is not on this Mac${b.error ? ` (${b.error})` : ''}, so whose the runner's pid is can't be told, so no snapshot was written (its sessions' snapshots go stale within 5 minutes)`] };
@@ -154,13 +157,17 @@ export function planBeat(io, cfg, { readConfig = readSource(io), now = new Date(
   } catch (e) { return { writes: [], problems: [`the copy's ${WORKER_RUNNER_CONFIG} can't be used (${e?.message ?? e}), so no snapshot was written`] }; }
   const products = c.products && typeof c.products === 'object' && !Array.isArray(c.products) ? Object.entries(c.products) : [];
   if (!products.length) return { writes: [], problems: [`the copy's ${WORKER_RUNNER_CONFIG} names no product, so no snapshot was written`] };
-  const problems = []; const writes = [];
+  const problems = []; const skipped = []; const writes = [];
   for (const [product, p] of products) {
     if (!cfg.products.includes(product)) { problems.push(`the copy's ${WORKER_RUNNER_CONFIG} names ${JSON.stringify(product.slice(0, 40))}, which the setup config does not list`); continue; }
-    if (!p?.rules || typeof p.rules !== 'object' || Array.isArray(p.rules)) { problems.push(`the copy's ${WORKER_RUNNER_CONFIG} has no rules for ${product}`); continue; }
+    // A product without rules (the runner's config allows it, and holds that product's sessions: runner-main.mjs
+    // keepSnapshots) gets no snapshot, and its sessions are refused; the others are still written (L1242 m2).
+    if (!p?.rules || typeof p.rules !== 'object' || Array.isArray(p.rules)) { skipped.push(`the copy's ${WORKER_RUNNER_CONFIG} has no rules for ${product}, so no snapshot was written for it (its sessions are refused; the other products' are written)`); continue; }
     writes.push({ product, path: workerRulesPath(cfg, product), text: rulesText(product, p.rules, sha, now) });
   }
-  return problems.length ? { writes: [], problems: problems.map((x) => `${x}, so no snapshot was written`) } : { writes, problems: [] };
+  // A product the setup config does not list means the copy's config is not the one setup made: nothing is written.
+  if (problems.length) return { writes: [], problems: problems.map((x) => `${x}, so no snapshot was written`) };
+  return { writes, problems: skipped };
 }
 
 const USAGE = 'usage: node setup/worker-rules.mjs write [--dry-run]   (as root; the worker-rules job runs it every minute)';
@@ -176,13 +183,14 @@ export function main(argv, { io = realIo(), out = (s) => process.stdout.write(`$
   } catch (e) { err(`refused: ${e.message}`); return 2; }
   if (!cfg.workerRunner) { err('refused: the config has no workerRunner entry, so there is no worker runner to write rules for'); return 2; }
   const { writes, problems, off } = planBeat(io, cfg, plan);
-  if (problems.length) { for (const p of problems) err(p); return off ? 0 : 1; }
-  if (dry) { for (const w of writes) out(`would write ${w.path}   (root:wheel 0644)`); return 0; }
+  for (const p of problems) err(p);
+  if (!writes.length) return off ? 0 : 1;
+  if (dry) { for (const w of writes) out(`would write ${w.path}   (root:wheel 0644)`); return problems.length ? 1 : 0; }
   let bad = 0;
   for (const w of writes) {
     try { writeRules(io, cfg, w.product, w.text); } catch (e) { bad += 1; err(`${w.product}'s rules snapshot was not written: ${e?.message ?? e}`); }
   }
-  return bad ? 1 : 0;
+  return bad || problems.length ? 1 : 0;
 }
 
 const self = (() => { try { return pathToFileURL(realpathSync(process.argv[1])).href; } catch { return null; } })();

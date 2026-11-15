@@ -15,7 +15,8 @@ import { readSnapshot, snapshotHash } from '../modules/M4-workshop/hooks/snapsho
 import { OPTIONAL_JOBS, jobsFor, onlyJobs, plistTexts } from './daemons.mjs';
 import { WORKER_RUNNER_JOB } from './worker-runner-setup.mjs';
 import { WALL_CHECK_JOB } from './builder-wall.mjs';
-import { PS, WORKER_RULES_JOB, WORKER_RULES_SCRIPT, WRITE_EVERY_S, main, planBeat, rulesText, runnerLive, workerRulesPlist, writeRules } from './worker-rules.mjs';
+import { PS, WORKER_RULES_JOB, WORKER_RULES_SCRIPT, WRITE_EVERY_S, main, planBeat, readSource, rulesText, runnerLive, workerRulesPlist, writeRules } from './worker-rules.mjs';
+import { installedLayout } from '../shared/job-config.test-helper.mjs';
 
 const BASE = '/Library/orchestrate';
 const LABEL = 'com.example.orch';
@@ -193,6 +194,36 @@ test('L1226 plant 12: a config the job can\'t read, one the runner refuses, or o
   // The real reading refuses a config that isn't there (the runner's own reading of root's copy).
   const w = world(); const p = planBeat(w.mac, w.cfg);
   assert.deepEqual(p.writes, []); assert.match(p.problems.join('\n'), /worker-runner\.json can't be used/);
+});
+
+test('L1242 m2: a product with no rules is skipped, said, and exits 1; the other products are still written', () => {
+  const w = world(); w.cfg.products = ['alpha', 'beta'];
+  const two = runnerConfig({ products: { ...runnerConfig().products, beta: { ...runnerConfig().products.alpha, rules: undefined } } });
+  const p = beat(w, two);
+  assert.deepEqual(p.writes.map((x) => x.product), ['alpha'], 'alpha is still written');
+  assert.match(p.problems.join('\n'), /has no rules for beta, so no snapshot was written for it \(its sessions are refused; the other products' are written\)/);
+  // Through main: alpha written, beta said, exit 1 (not the runner being off).
+  writeFileSync(w.mac.at(ROOT_CONFIG_PATH), JSON.stringify({ base: BASE, owner: 'sam', products: ['alpha', 'beta'], address: 'https://example.invalid/o/r.git', label: LABEL, runnerConfig: '/x/review.json', workerRunner: { product: 'alpha' } }));
+  const err = []; const code = main(['write'], { io: w.mac, out: () => {}, err: (x) => err.push(x), plan: { readConfig: () => source(two), now: new Date('2026-11-14T12:00:00Z') } });
+  assert.equal(code, 1, err.join('\n')); assert.match(err.join('\n'), /no rules for beta/);
+  assert.equal(JSON.parse(written(w)).product, 'alpha');
+  assert.throws(() => w.mac.lstat(workerRulesPath(w.cfg, 'beta')), /ENOENT/);
+  // A product the setup config does not list still stops every write: the copy's config is not the one setup made.
+  w.cfg.products = ['alpha'];
+  assert.deepEqual(beat(w, runnerConfig({ products: { ...runnerConfig().products, gamma: { ...runnerConfig().products.alpha } } })).writes, []);
+});
+
+test('L1242 m3: the job\'s own reading (readSource, through readJobConfig) of a real installed worker-runner.json gives the sha256 of its bytes', () => {
+  const L = installedLayout('orch-wr-');
+  const file = L.write('worker-runner.json', runnerConfig({ installRoot: L.installRoot }));
+  const io = { at: (f) => { assert.equal(f, join(installPaths(world().cfg).installRoot, 'worker-runner.json')); return file; }, rootUid: process.getuid() };
+  const r = readSource(io)(join(installPaths(world().cfg).installRoot, 'worker-runner.json'));
+  assert.notEqual(r.sourceSha256, null);
+  assert.equal(r.sourceSha256, sha256(readFileSync(file)), 'the bytes on disk');
+  assert.equal(r.config.installRoot, L.installRoot);
+  // And through planBeat with that reading: the snapshot carries it.
+  const w = world(); const p = planBeat(w.mac, w.cfg, { readConfig: readSource({ at: () => file, rootUid: process.getuid() }), now: new Date('2026-11-14T12:00:00Z') });
+  assert.deepEqual(p.problems, []); assert.equal(JSON.parse(p.writes[0].text).source_sha256, sha256(readFileSync(file)));
 });
 
 test('L1226: the snapshot follows the config: other rules give another hash, and source_sha256 names the very bytes read', () => {

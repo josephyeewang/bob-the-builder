@@ -5,13 +5,13 @@ import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, readdirSync, rea
 import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { tempDir } from '../shared/test-tmp.mjs';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { writeSnapshot } from '../modules/M4-workshop/hooks/snapshot.mjs';
 import { makeLock } from '../modules/M9-record/lock.mjs';
 import { loginJobPlist } from '../modules/M11-dispatcher/login-job.mjs';
 import { statusOf, statusText } from '../setup/builder-wall.mjs';
 import { DENY_KEYS, personUserProblem, aclWriteEntries, carriedOverProblem, checkRunnerConfig, hookStoreOf, keepSnapshots, launchInputs, readRunnerConfig, snapshotFolderProblem, startDeps, listenStop, main, readRootFile, realRunnerPorts, testProductHeld, testProductProblem } from './runner-main.mjs';
-import { RUNNER_JOB_LOG, RUNNER_JOB_UMASK, RUNNER_JOB_USER, fullPath, workerRunnerPlist } from './runner-job.mjs';
+import { RUNNER_JOB_LOG, RUNNER_JOB_UMASK, RUNNER_JOB_USER, RUNNER_NODE_FLAGS, fullPath, workerRunnerPlist } from './runner-job.mjs';
 import { BUILDER } from '../setup/layout.mjs';
 // The tests run as a person's user; main's own check of that is tested apart (L1079).
 const AS_BUILDER = () => null;
@@ -109,7 +109,27 @@ test('step 5 (L1079): the job file is loginJobPlist\'s, run as the builder user,
   assert.match(t, /<key>UserName<\/key><string>builder<\/string>/, 'a LaunchDaemon run as the builder, never root and never the owner');
   assert.equal(t.match(/<key>UserName<\/key>/g).length, 1);
   assert.ok(t.includes(`/logs/${RUNNER_JOB_LOG}.out.log`) && t.includes(`/logs/${RUNNER_JOB_LOG}.err.log`));
-  assert.match(t, /<array><string>\/usr\/local\/bin\/node<\/string><string>\/i\/wiring\/runner-main.mjs<\/string><string>\/i\/runner.json<\/string><\/array>/);
+  assert.match(t, /<array><string>\/usr\/local\/bin\/node<\/string><string>--disable-sigusr1<\/string><string>\/i\/wiring\/runner-main.mjs<\/string><string>\/i\/runner.json<\/string><\/array>/, 'L1242 m1: no debugger by signal');
+  assert.deepEqual(RUNNER_NODE_FLAGS, ['--disable-sigusr1']);
+});
+
+test('L1242 m1: with --disable-sigusr1 a SIGUSR1 starts no debugger; without it, one starts (the control)', async () => {
+  const debuggerOn = (flags) => new Promise((resolve) => {
+    // --inspect-port=0: a debugger the signal starts takes a free port, so this never collides with another test's.
+    const p = spawn(process.execPath, ['--inspect-port=0', ...flags, '-e', 'process.stdout.write("up\\n"); setInterval(() => {}, 1000)'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let err = ''; let done = false;
+    const finish = (v) => { if (done) return; done = true; clearTimeout(t); p.kill('SIGKILL'); resolve(v); };
+    p.stderr.on('data', (b) => { err += b; if (/Debugger listening/.test(err)) finish(true); });
+    p.stdout.once('data', () => { p.kill('SIGUSR1'); });
+    p.on('exit', () => finish(/Debugger listening/.test(err)));
+    const t = setTimeout(() => finish(/Debugger listening/.test(err)), 3000);
+  });
+  assert.equal(await debuggerOn([]), true, 'the control: a plain node starts its debugger on SIGUSR1');
+  assert.equal(await debuggerOn([...RUNNER_NODE_FLAGS]), false, 'the runner\'s flags: none starts');
+  // The other jobs built by loginJobPlist are unchanged: no node option unless a caller passes one; a bad one is refused.
+  const base = { label: 'org.example.x', node: '/n', script: '/s.mjs', config: '/c.json', path: '/usr/bin', logDir: '/l', workDir: '/w' };
+  assert.match(loginJobPlist(base), /<array><string>\/n<\/string><string>\/s\.mjs<\/string>/);
+  for (const bad of [['--inspect=0.0.0.0:9'], ['-e'], ['--require', '/x.js'], 'x', [1]]) assert.throws(() => loginJobPlist({ ...base, nodeFlags: bad }), /nodeFlags must be/, String(bad));
 });
 
 test('#364 self-review m6: main never makes the runner\'s own folder (setup does, with the access the Dispatcher needs)', async () => {

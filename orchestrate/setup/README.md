@@ -534,8 +534,12 @@ when launchd's or ps's answer can't be read, it writes nothing and says why in `
 outlive a runner restart by design, so a stopped runner shows as its sessions' snapshots going stale: after 5 minutes
 their safety checks refuse every call, as they did when the runner wrote the snapshots itself. A run that writes nothing
 only because the runner is not loaded or not running ends with exit 0 (the runner is just off); any other reason ends
-with exit 1, which `daemons check` shows. **Known limit:** a runner that hangs without stopping (its process still
-asleep or runnable) is not caught; it is on the cutover checklist.
+with exit 1, which `daemons check` shows. A product the runner's config gives no rules is skipped (its sessions are
+refused) and said, with exit 1; the other products are still written. **Known limit:** a runner that hangs without
+stopping (its process still asleep or runnable) is not caught, and `builder`, the runner's own user, can cause such a
+hang on purpose (by attaching to the runner or tying up its event loop). It is on the cutover checklist. One way is
+closed: the runner's job starts node with `--disable-sigusr1`, so a signal can't start node's debugger in it (L1242).
+That option needs node 22.14 or later (23.7 or later on 23); an older node refuses it, and the runner does not start.
 
 **What reads it.** Nothing yet. The worker runner's check 8 and the sessions' safety checks move to it in the next
 change (L1226 PR (ii)); until then the job only writes.
