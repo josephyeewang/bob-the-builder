@@ -105,7 +105,10 @@ function inputs(over = {}) {
   return { d, spare, x: { role: 'worker', profile: DESIGN_PROFILES.worker, kind: 'editing', sessionId: SID, card: 'C-1', cardDoc: { product: 'p1' }, product: 'p1',
     copy, outbox: join(d, 'outbox'), env: { PATH: '/usr/bin:/bin' }, head: 'b'.repeat(40), claudeBin: '/x/claude-code/2.1.300/claude',
     settings: { file: join(d, 'settings.json'), settings: {} }, ownUid: () => process.getuid(), mirror: '/m', pin: '2.1.300', hooksDir: '/h', rules: {},
-    snapshot: join(d, 'rules.json'), sourceSha256: 'a'.repeat(64), machineWide: '/mw', busy: () => [], alert: () => {}, spawn: () => { throw new Error('no'); },
+    // L1226: the runner no longer writes a snapshot; writeSnapshot below is unused, left so this alert stand-in's pinned line
+    // (alert-inventory.json) is unchanged until a lead PR re-pins it.
+    sourceSha256: 'a'.repeat(64),
+    snapshot: join(d, 'rules.json'), writeSnapshot: () => {}, machineWide: '/mw', busy: () => [], alert: () => {}, spawn: () => { throw new Error('no'); },
     home, testCommand: 'npm test', budget: null, bobFolder: null, bobManifest: null, throwaway, ...over } };
 }
 
