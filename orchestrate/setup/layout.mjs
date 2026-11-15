@@ -259,10 +259,14 @@ export const oldFlatOutboxPaths = (cfg) => PRODUCT_OUTBOX_ROLES.map((r) => join(
  *   requests   the Dispatcher's asks (owner-status.mjs requestWriter, exclusive files of orchestrate's); the runner reads
  *              and removes them. The runner's user owns it; orchestrate may only add files (WORKER_REQUESTS_ACL).
  *   runner     the runner's own folder: status.json (which the Dispatcher reads), its memory (0600), settings and lock.
- *   snapshots  one rules snapshot per product, written by the runner and read by its sessions' hooks.
+ * The rules snapshots its sessions' hooks read are root's worker-rules job's (workerRulesDir, L1226), not here: a folder
+ * the runner's user owned (worker-runner/snapshots until L1252) let anything run as the builder rewrite them. A Mac set up
+ * before keeps that folder; setup neither reads nor removes it, and `setup check` FAILs on it (worker-runner/ holds an
+ * entry the setup did not make) until the owner approves removing it: the run-sheet step "remove the leftover
+ * <base>/worker-runner/snapshots folder (sudo rm -r)", Joe's to approve (L1254 m2).
  */
 export const workerRunnerPath = (cfg) => join(cfg.base, 'worker-runner');
-export const WORKER_RUNNER_FOLDERS = Object.freeze({ requests: 'requests', state: 'runner', snapshots: 'snapshots' });
+export const WORKER_RUNNER_FOLDERS = Object.freeze({ requests: 'requests', state: 'runner' });
 /** The worker runner's status file, in its own folder (wiring/runner-main.mjs statusFile; the Dispatcher's workerStatusFile). */
 export const WORKER_STATUS_FILE = 'status.json';
 /** The worker runner's config in the installed copy, as its job names it: the products it runs, each with its rules (proofs.mjs reads their lists). */
@@ -342,7 +346,6 @@ export function folderTable(cfg) {
     [workerRunnerPath(cfg), 'root', 0o755, 'the worker runner\'s folders (L921): root\'s, so none can be renamed away'],
     [workerRunnerPaths(cfg).requests, BUILDER, 0o700, 'the worker runner\'s requests: orchestrate only adds (one access-list entry), the runner reads and removes, no one else sees in', [WORKER_REQUESTS_ACL]],
     [workerRunnerPaths(cfg).state, BUILDER, 0o755, 'the worker runner\'s own folder: its status (orchestrate reads it; owner-status.mjs refuses a folder others can write), memory (0600), settings and lock'],
-    [workerRunnerPaths(cfg).snapshots, BUILDER, 0o755, 'the worker runner\'s rules snapshots, one per product: its sessions\' hooks read them'],
     ...(cfg.products.length ? [[p('products'), 'root', 0o755, 'one folder set per product']] : []),
     // A copies folder and an outbox folder per product (L836): the worker runner denies each session every other
     // product's whole folder. Same owner, mode and access list as the folder above; the product's role folders as the

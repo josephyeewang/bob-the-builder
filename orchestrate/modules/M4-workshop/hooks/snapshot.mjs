@@ -23,14 +23,18 @@ export const WORKER_RULES_COPY = 'the worker sessions\' rules snapshot (root\'s 
 
 export const snapshotHash = (rules) => createHash('sha256').update(JSON.stringify(rules)).digest('hex');
 
-// The worker runner's keepSnapshotFresh call is lane 4's runner (wiring/runner-main.mjs, runner stages s6/s7), not on
-// main yet; the wording is for when it lands (lane 4's #369 r1 note).
+// The worker sessions' snapshot is root's worker-rules job's (setup/worker-rules.mjs, every 60 s while the worker runner
+// runs, L1226); the runner no longer writes one (L1252). keepSnapshotFresh stays for a run that writes its own.
 export function staleReason(ageMs, maxAgeMs = SNAPSHOT_MAX_AGE_MS) {
   return `rules snapshot is stale (${Math.round(ageMs / 1000)} s old, the limit is ${Math.round(maxAgeMs / 1000)} s), `
-    + 'so every call is refused until it is rewritten; the loop rewrites it every pass for its own sessions, and the '
-    + 'worker runner for a worker session it started (keepSnapshotFresh), so a stale one means whichever wrote it has '
-    + 'stopped, or a run that wrote its own snapshot outlasted it (keep it fresh with keepSnapshotFresh)';
+    + 'so every call is refused until it is rewritten; the loop rewrites it every pass for its own sessions, and '
+    + 'root\'s worker-rules job every minute for the worker sessions while the worker runner runs (is it loaded? setup.mjs '
+    + 'daemons check), so a stale one means whichever wrote it has stopped, or a run that wrote its own snapshot outlasted '
+    + 'it (keep it fresh with keepSnapshotFresh)';
 }
+/** A refusal with a stale snapshot's age taken out (L1254 m1): the same refusal a second later reads the same, so whoever
+ * tells a refusal once (runner-main.mjs rootSnapshots) does not tell it again only because the age grew. */
+export const withoutAge = (reason) => String(reason).replace(/\(\d+ s old, the limit is (\d+) s\)/g, '(older than the limit of $1 s)');
 
 export function parseSnapshot(text, { now = Date.now(), maxAgeMs = SNAPSHOT_MAX_AGE_MS } = {}) {
   let s; try { s = JSON.parse(text); } catch { return refuse('rules snapshot is not JSON'); }

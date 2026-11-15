@@ -863,17 +863,16 @@ test('L1035 c4: a .bob-new or .bob-old a cut-off bob run left in the base FAILs 
   assert.match(other.why, /holds an entry the setup did not make: \.bob-new/); assert.doesNotMatch(other.why, /cut-off bob run/);
 });
 
-test('L921: the worker runner\'s requests, own and snapshots folders: each apart, no links, under a root-owned parent, as the runner and the Dispatcher read them', async () => {
+test('L921 (L1226: no snapshots folder; root writes them in worker-rules/): the worker runner\'s requests and own folders: each apart, no links, under a root-owned parent, as the runner and the Dispatcher read them', async () => {
   const { WORKER_REQUESTS_ACL, WORKER_RUNNER_FOLDERS, mirrorPath, outboxRootPath, workerCopiesPath, workerRunnerPath, workerRunnerPaths } = await import('./layout.mjs');
   const { runnerWallDirs } = await import('../modules/M4-workshop/launcher/render-settings.mjs');
   const t = folderTable(cfg); const row = (p) => t.find((r) => r.path === p);
   const w = workerRunnerPaths(cfg);
-  assert.deepEqual(Object.keys(w), ['requests', 'state', 'snapshots']);
+  assert.deepEqual(Object.keys(w), ['requests', 'state']);
   assert.deepEqual(Object.keys(WORKER_RUNNER_FOLDERS), Object.keys(w));
   assert.deepEqual([row(workerRunnerPath(cfg)).owner, row(workerRunnerPath(cfg)).mode, row(workerRunnerPath(cfg)).acl], ['root', 0o755, []]);
   assert.deepEqual([row(w.requests).owner, row(w.requests).mode, row(w.requests).acl, row(w.requests).group], ['builder', 0o700, [WORKER_REQUESTS_ACL], undefined]);   // L1079
   assert.deepEqual([row(w.state).owner, row(w.state).mode, row(w.state).acl], ['builder', 0o755, []]);
-  assert.deepEqual([row(w.snapshots).owner, row(w.snapshots).mode, row(w.snapshots).acl], ['builder', 0o755, []]);
   // orchestrate only goes in and adds a file (owner-status.mjs requestWriter writes exclusively): no list, read, delete or inherit.
   assert.deepEqual([...WORKER_REQUESTS_ACL.perms].sort(), ['add_file', 'search']);
   assert.equal(WORKER_REQUESTS_ACL.who, 'user:orchestrate');
@@ -898,8 +897,8 @@ test('L921: the worker runner\'s requests, own and snapshots folders: each apart
   for (const p of [workerRunnerPath(cfg), ...runner]) assert.ok(mac.lstat(p).isDirectory() && !mac.lstat(p).isSymbolicLink(), p);
   assert.deepEqual(check(mac, cfg).filter((x) => !x.ok), []);
   // A link put in place of one FAILs (its row), and setup does not follow it.
-  rmSync(mac.at(w.snapshots), { recursive: true }); symlinkSync(mac.at(w.state), mac.at(w.snapshots));
-  assert.ok(check(mac, cfg).some((x) => !x.ok && x.what.includes(w.snapshots)), 'a link in place of the snapshots folder FAILs');
+  rmSync(mac.at(w.requests), { recursive: true }); symlinkSync(mac.at(w.state), mac.at(w.requests));
+  assert.ok(check(mac, cfg).some((x) => !x.ok && x.what.includes(w.requests)), 'a link in place of the requests folder FAILs');
   // and the apply does not follow it: it refuses, and the folder the link leads to keeps its owner and mode.
   const before = mac.lstat(w.state);
   const r = run(mac, ['users-folders']); assert.notEqual(r.code, 0, r.text); assert.match(r.text, /is a link; nothing was changed/);
@@ -1235,7 +1234,7 @@ const beforeBuilder = () => { const mac = applied(); const sam = { uid: uidOf(ma
 
 test('L1079: the builder owns what the worker runner writes; each product\'s worker and script outbox folder is builder:orchestrate 0750 with the robot\'s read entry', () => {
   const mac = applied(); const b = uidOf(mac, 'builder'); const orchGid = Number(mac.users.get('orchestrate').PrimaryGroupID);
-  for (const d of ['worker-copies', 'worker-copies/alpha', 'worker-runner/requests', 'worker-runner/runner', 'worker-runner/snapshots']) assert.equal(mac.owners.get(P(d)).uid, b, d);
+  for (const d of ['worker-copies', 'worker-copies/alpha', 'worker-runner/requests', 'worker-runner/runner']) assert.equal(mac.owners.get(P(d)).uid, b, d);
   for (const prod of cfg.products) for (const role of PRODUCT_OUTBOX_ROLES) {
     const d = P(`outboxes/${prod}/${role}`);
     assert.deepEqual(mac.owners.get(d), { uid: b, gid: orchGid }, d);

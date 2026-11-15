@@ -114,7 +114,7 @@ test('worker-config: the config is built from the layout, the Mac, the copy\'s r
           // the Dispatcher's rules-state and approvals folders, and the owner's home.
           deny: { record: `${BASE}/products/alpha/store`, ssh: `${H}/.ssh`, gh: `${H}/.config/gh`, claudeHome: `${H}/.claude`, robotKeys: `${BASE}/keys`,
             secrets: ['/srv/app/keys', '/srv/app/prod.cfg', `${BASE}/private`, DISP.rulesStateDir, DISP.approvalsStateDir, '/Users/sam'] },
-          hooksDir: RC.hooksDir, node: `${R}/${NODE}`, bobFolder: RC.bobFolder, snapshot: `${W}/snapshots/alpha.json`,
+          hooksDir: RC.hooksDir, node: `${R}/${NODE}`, bobFolder: RC.bobFolder, snapshot: `${BASE}/worker-rules/alpha.json`, snapshotOwner: 0,
         },
         // From the rules, never the entry (L1112 (2), I7); every product's proposals folder.
         rulesHosts: ['db.example.invalid'], productionFiles: ['/srv/app/prod.cfg', 'relative/prod.cfg'],

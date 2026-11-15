@@ -31,7 +31,8 @@
 //                           checkSettings passes it
 //   6  read-back            reviewChecks' 6 (readBack)
 //   7  hooks and version    reviewChecks' 7 (checkVersion, checkHooks with the product's rules)
-//   8  rules snapshot       reviewChecks' 8: written afresh from the product's rules, then checkSnapshot
+//   8  rules snapshot       read only (L1226): root's worker-rules job's file, workerSnapshotProblem below, and the
+//                           session's hooks read that file with --snapshot-owner 0. The runner never writes it
 //   9  no stray keys        reviewChecks' 9 (checkRoleEnv on the environment claude gets)
 //   10 machine-wide block   reviewChecks' 10 (checkMachineWide)
 //   11 smoke and baseline   reviewChecks' smoke first, with the owner's home as the place outside the copy it must not
@@ -74,6 +75,33 @@ import { check12 } from '../modules/M11-dispatcher/gate.mjs';
 import { randomBytes } from 'node:crypto';
 import { LOCKED_MS, claudeEnd, exitCodeCommand, groupFile, guardedRun, jobGroupProblem, readNoLink } from './runner-locked.mjs';
 import { foldKey } from '../shared/plan-fingerprint.mjs';
+import { WORKER_RULES_COPY, readSnapshot, snapshotHash } from '../modules/M4-workshop/hooks/snapshot.mjs';
+import { hooksSnapshot, hooksSnapshotOwner } from '../modules/M4-workshop/launcher/render-settings.mjs';
+
+/**
+ * Why a worker session's rules snapshot can't be used, or null (L1226): root's worker-rules job writes it
+ * (setup/worker-rules.mjs), and the runner only reads it. Read as the hooks read it with `--snapshot-owner 0`
+ * (snapshot.mjs readSnapshot with ownerUid: no link at its name, a plain file with one name, root's alone, every folder
+ * above it too, its hash, at most 5 minutes old and at most 60 s ahead), then held to the runner's own: the same
+ * product, the same rules as the config the runner loaded (snapshotHash of p.rules), and written from the very bytes the
+ * runner read that config from (`sourceSha256`, job-config.mjs readSha256), so a config changed under a running runner
+ * holds the product until the two agree. `owner` is 0; a test stands in its own uid, as the hooks' tests do.
+ */
+export function workerSnapshotProblem({ path, product, rules, sourceSha256 }, { owner = 0, read = readSnapshot } = {}) {
+  if (typeof path !== 'string' || !path) return 'no rules snapshot is named';
+  if (!rules || typeof rules !== 'object') return 'the runner has no rules for it';
+  if (typeof sourceSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(sourceSha256)) return 'the runner\'s config was not read from its file through one handle, so the snapshot\'s source can\'t be matched';
+  const s = read(path, { ownerUid: owner, what: WORKER_RULES_COPY });
+  if (!s?.ok) {
+    const why = s?.reason ?? 'the rules snapshot can\'t be read';
+    // L1254 m4: none there is most often root's job not loaded (or not yet beaten since the runner started).
+    return /missing or unreadable/.test(why) ? `${why}: is root's worker-rules job loaded? (setup.mjs daemons check)` : why;
+  }
+  if (s.product !== product) return `the rules snapshot is for ${s.product === undefined ? 'no product' : JSON.stringify(String(s.product).slice(0, 60))}, not ${product}`;
+  if (s.hash !== snapshotHash(rules)) return 'the rules snapshot holds other rules than the runner\'s config (root\'s copy changed since the runner started: restart it)';
+  if (s.sourceSha256 !== sourceSha256) return 'the rules snapshot was written from other bytes of worker-runner.json than the runner read (root\'s copy changed since the runner started: restart it)';
+  return null;
+}
 
 const refuse = (reason) => ({ ok: false, reason });
 // The ports of guardedRun a test may swap in (#463 r2 self-review c1): its reads and waits, never what it runs.
@@ -165,10 +193,10 @@ export const baselineCommand = (test, file) => exitCodeCommand(test, file, 'test
  * The ports for one worker-runner session. x: the start port's { role, profile, kind, sessionId, card, cardDoc, product,
  * copy, outbox, env, head, mainAt, claudeBin, settings: { file, settings }, ownUid, throwaway() → { ok, copy, settingsFile,
  * done() } (the baseline's own copy, #369 r1 M1) } plus the config's { mirror, pin, hooksDir,
- * rules, snapshot, writeSnapshot, machineWide, busy, alert, spawn, home, testCommand, budget, bobFolder, bobManifest,
+ * rules, snapshot, sourceSha256, machineWide, busy, alert, spawn, home, testCommand, budget, bobFolder, bobManifest,
  * probeMs?, baselineMs?, nonce?, jobPorts? (guardedRun's read, info, pidStartOf, jobGone, pollMs, answer, rm: for tests) }. gateOf is M11's check12 (a port for tests). → { [n]: async () => { ok, reason } }, with no entry for a check whose inputs are not there.
  */
-export function workerChecks(x, { gateOf = check12 } = {}) {
+export function workerChecks(x, { gateOf = check12, snapshotOwner = 0 } = {}) {
   const r = reviewChecks({ ...x, reviewHome: x.home });
   // reviewChecks' check 1 says "the review copy"; a worker's is the card's copy (#369 r1 c1).
   const ports = { 1: async () => { const a = await r[1](); return a?.ok ? a : { ...a, reason: String(a?.reason).replaceAll('the review copy', 'the copy') }; }, 5: r[5], 9: r[9] };
@@ -176,7 +204,20 @@ export function workerChecks(x, { gateOf = check12 } = {}) {
   if (typeof x.busy === 'function') ports[3] = r[3];
   if (has(x.pin) && typeof x.spawn === 'function') ports[6] = r[6];
   if (has(x.pin) && has(x.hooksDir) && x.rules) ports[7] = r[7];
-  if (has(x.snapshot) && x.rules && typeof x.writeSnapshot === 'function') ports[8] = r[8];
+  // Check 8, read only (L1226): root's snapshot, held to the runner's own (workerSnapshotProblem), and the session's hooks
+  // read that very file, each only when it is root's alone (`--snapshot-owner 0`; L1250 m2, L1251 m4: undefined, or any
+  // other uid, is refused). Never review's check 8, which writes its own snapshot as the review runner's user.
+  if (has(x.snapshot) && x.rules) {
+    ports[8] = async () => {
+      // The settings first: what the hooks will read is decided there, whatever the file says now.
+      const s = x.settings?.settings;
+      if (hooksSnapshot(s) !== x.snapshot) return refuse('the session\'s hooks do not read root\'s rules snapshot');
+      const o = hooksSnapshotOwner(s);
+      if (o !== snapshotOwner) return refuse(`the session's hooks do not take their rules snapshot only when it is root's alone (they must name --snapshot-owner ${snapshotOwner}; ${o === undefined ? 'none names an owner' : o === null ? 'they differ, or one names it twice or not as a uid' : `they name ${o}`})`);
+      const why = workerSnapshotProblem({ path: x.snapshot, product: x.product, rules: x.rules, sourceSha256: x.sourceSha256 }, { owner: snapshotOwner });
+      return why ? refuse(why) : { ok: true };
+    };
+  }
   if (has(x.machineWide)) ports[10] = r[10];
   if (typeof x.spawn === 'function' && has(x.home) && (x.role !== 'worker' || (has(x.testCommand) && typeof x.throwaway === 'function'))) {
     ports[11] = async () => {
