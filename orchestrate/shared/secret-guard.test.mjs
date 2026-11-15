@@ -269,13 +269,31 @@ test('L1196 Minor 3: base64 wrapped at 64 or 76 columns and hex with spaces betw
 // --- L1206 (the #581 r2 audit) ---------------------------------------------------------------------------------------
 
 test('L1206 m1: a big argument with a % in it is checked in linear time', () => {
+  // L1228: a fixed limit in milliseconds failed on a slow runner (174.7 ms against 150), so the test compares like with
+  // like: one input of 16n characters against 16 inputs of n, the same characters in all. Linear work takes about as
+  // long either way (1-2× measured here), quadratic about 16× longer for the big one. The bar is 5×. The two are timed
+  // in turns, 5 rounds, keeping each one's fastest, so a busy machine slows both alike. (A plain ratio of one big run to
+  // one small run read 146× once under the whole-tree load: a run of under a millisecond is rarely interrupted, a run
+  // of a hundred often.) A 2 s ceiling on the big run stays as a backstop.
   registerSecret(fresh());
-  for (const big of ['%'.repeat(1 << 20), `${'a%2'.repeat(350_000)}`, `${'%41'.repeat(350_000)}`, `${'x'.repeat(1 << 20)}%`]) {
-    const t0 = process.hrtime.bigint();
-    assert.equal(holdsSecret(big), false);
-    const ms = Number(process.hrtime.bigint() - t0) / 1e6;
-    // 1 s: a loaded machine took 200 ms in a whole-tree run; the old per-character slicing took minutes on these.
-    assert.ok(ms < 1000, `${big.slice(0, 6)}… took ${ms.toFixed(1)} ms`);
+  const shapes = {
+    '%…': (k) => '%'.repeat(k),
+    'a%2…': (k) => 'a%2'.repeat(Math.round(k / 3)),
+    '%41…': (k) => '%41'.repeat(Math.round(k / 3)),
+    'x…%': (k) => `${'x'.repeat(k)}%`,
+  };
+  const time = (f) => { const t0 = process.hrtime.bigint(); f(); return Number(process.hrtime.bigint() - t0) / 1e6; };
+  const n = 1 << 16; const K = 16;
+  for (const [name, make] of Object.entries(shapes)) {
+    const small = make(n); const big = make(K * n);
+    assert.equal(holdsSecret(small), false); assert.equal(holdsSecret(big), false);
+    let many = Infinity; let one = Infinity;
+    for (let round = 0; round < 5; round += 1) {
+      many = Math.min(many, time(() => { for (let i = 0; i < K; i += 1) holdsSecret(small); }));
+      one = Math.min(one, time(() => holdsSecret(big)));
+    }
+    assert.ok(one < 2000, `${name} at ${K * n} characters took ${one.toFixed(1)} ms`);
+    assert.ok(one < 5 * Math.max(many, 0.5), `${name}: one input of ${K * n} characters took ${one.toFixed(1)} ms, ${K} of ${n} took ${many.toFixed(1)} ms, ${(one / Math.max(many, 0.5)).toFixed(1)}×`);
   }
 });
 
