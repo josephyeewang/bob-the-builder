@@ -37,8 +37,8 @@ export function parseMachineWideArgs(argv) {
   return { machineWide: true, snapshot: argv[2] };
 }
 
-/** --role R --outbox O --snapshot S [--copy C] [--kinds a,b] [--files f.txt] [--kind K] [--event E]; or, for a hook that
- * takes it, the machine-wide form above. */
+/** --role R --outbox O --snapshot S [--snapshot-owner U] [--copy C] [--kinds a,b] [--files f.txt] [--kind K] [--event E];
+ * or, for a hook that takes it, the machine-wide form above. */
 export function parseArgs(argv, { machineWide = false } = {}) {
   if (argv[0] === '--machine-wide') {
     if (!machineWide) throw new Error('bad argument --machine-wide (this hook has no machine-wide form)');
@@ -59,6 +59,12 @@ export function parseArgs(argv, { machineWide = false } = {}) {
   // lower-case name with no dash, so it can never be a kind's file, and never a path.
   out.files = out.files ? out.files.split(',').filter(Boolean) : [];
   for (const f of out.files) if (!OUTBOX_FILE.test(f)) throw new Error(`bad outbox file name ${f}`);
+  // The snapshot's owner (L1226): a worker session's hooks read a snapshot root writes (setup/worker-rules.mjs), and take
+  // it only when it is that uid's alone (snapshot.mjs readHookSnapshot). The worker runner gives 0; a test, its own uid.
+  if (out['snapshot-owner'] !== undefined) {
+    if (!/^(0|[1-9]\d{0,9})$/.test(out['snapshot-owner'])) throw new Error(`bad --snapshot-owner ${out['snapshot-owner']} (a uid)`);
+    out.snapshotOwner = Number(out['snapshot-owner']);
+  }
   return out;
 }
 

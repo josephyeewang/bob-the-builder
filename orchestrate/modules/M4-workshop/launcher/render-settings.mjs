@@ -136,13 +136,34 @@ export function hooksSnapshot(settings) {
     for (const m of Array.isArray(list) ? list : []) for (const h of m?.[H.hooks] ?? []) {
       const c = h?.[H.command];
       if (typeof c !== 'string') continue;
-      const words = c.match(/--snapshot\b/g) ?? [];
+      const words = c.match(/--snapshot(?![\w-])/g) ?? [];
       const w = c.match(/ --snapshot (\S+)/);
       if (words.length !== 1 || !w) return null;
       seen.add(w[1]);
     }
   }
   return seen.size === 1 ? [...seen][0] : null;
+}
+
+/**
+ * The one owner every hook takes its snapshot from (L1226): ` --snapshot-owner <uid>`, once per hook, the same in every
+ * hook. → the uid; undefined when no hook names one (the review roles', read as before); null when the hooks differ, one
+ * names it twice, or it is not a uid (so a check that wants one owner refuses).
+ */
+export function hooksSnapshotOwner(settings) {
+  const seen = new Set();
+  for (const list of Object.values(settings?.[S.hooks] ?? {})) {
+    for (const m of Array.isArray(list) ? list : []) for (const h of m?.[H.hooks] ?? []) {
+      const c = h?.[H.command];
+      if (typeof c !== 'string') continue;
+      const words = c.match(/--snapshot-owner(?![\w-])/g) ?? [];
+      const w = c.match(/ --snapshot-owner (0|[1-9]\d{0,9})(?= )/);
+      if (words.length > 1 || (words.length === 1 && !w)) return null;
+      seen.add(w ? Number(w[1]) : undefined);
+    }
+  }
+  if (seen.size > 1) return null;
+  return seen.size ? [...seen][0] : undefined;
 }
 
 /**
@@ -230,7 +251,9 @@ export function checkRunnerWall({ settings, workerRunner, paths, realpath = (p) 
 
 /**
  * paths: { copy, outbox, hooksDir, snapshot, node, deny: { secrets: [], claudeHome, ssh, gh, robotKeys, record, otherCopies: [], proposals: [] },
- *          bobFolder?, reviewWalls?, notes?, workerRunner?, ownerTaps? }
+ *          bobFolder?, reviewWalls?, notes?, workerRunner?, ownerTaps?, snapshotOwner? }
+ * snapshotOwner: the uid whose alone the snapshot must be (L1226; the worker runner gives 0): each hook gets
+ * `--snapshot-owner <uid>`. Left out (the review roles): none, read as before.
  * workerRunner { requestsDir, statusFile }: the worker runner's two paths (lane 4's owner-ports.mjs names, L751). The
  * workers run as the runner's own Mac user, so the owner check can't tell the runner's status from one a worker wrote:
  * when given, for every role but a reviewer or auditor, its requests folder and its status file's folder are denied to
@@ -350,6 +373,10 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
   for (const p of [paths.node, paths.hooksDir, paths.outbox, paths.snapshot, paths.copy, paths.notes]) {
     if (p !== undefined && (typeof p !== 'string' || !p.startsWith('/') || /[^A-Za-z0-9._/-]/.test(p))) return refuse(`path "${p}" is not a plain absolute path`);
   }
+  // The snapshot's owner (L1226), when given: every hook reads the snapshot only when it is that uid's alone (hooks lib.mjs
+  // --snapshot-owner). The worker runner gives 0, root's worker-rules job's; the review roles give none and read as before.
+  const ownerArg = paths.snapshotOwner === undefined ? '' : ` --snapshot-owner ${paths.snapshotOwner}`;
+  if (paths.snapshotOwner !== undefined && !(Number.isSafeInteger(paths.snapshotOwner) && paths.snapshotOwner >= 0 && paths.snapshotOwner <= 9_999_999_999)) return refuse('the snapshot\'s owner is not a uid');
   // Where the compaction note goes (L101): the outbox only for a role with a -compact- kind; any other role names its
   // notes folder, apart from the outbox, neither inside the other.
   let notesArg = '';
@@ -411,7 +438,7 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
   const kindsArg = profile.outbox.length ? ` --kinds ${profile.outbox.join(',')}` : '';
   const filesArg = files.length ? ` --files ${files.join(',')}` : '';
   const hookCmd = (name, extra = '') =>
-    `${paths.node} ${join(paths.hooksDir, `${name}.mjs`)} --role ${role} --outbox ${paths.outbox} --snapshot ${paths.snapshot}${kindsArg}${filesArg}${notKinds}${copyArg}${extra}${HOOK_FAILS_CLOSED}`;
+    `${paths.node} ${join(paths.hooksDir, `${name}.mjs`)} --role ${role} --outbox ${paths.outbox} --snapshot ${paths.snapshot}${ownerArg}${kindsArg}${filesArg}${notKinds}${copyArg}${extra}${HOOK_FAILS_CLOSED}`;
   const hooks = { [E.preToolUse]: [] };
   for (const [name, matcher] of Object.entries(POLICY_HOOKS)) {
     hooks[E.preToolUse].push({ [H.matcher]: matcher, [H.hooks]: [{ [H.type]: 'command', [H.command]: hookCmd(name), [H.timeout]: HOOK_TIMEOUT, [H.onFailure]: 'block' }] });
