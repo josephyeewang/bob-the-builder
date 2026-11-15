@@ -48,6 +48,7 @@ import { foldKey } from '../shared/plan-fingerprint.mjs';
 import { loadMemory, processGroupPorts, runRunner } from './runner-loop.mjs';
 import { drainedPort, liveWallProblem, pauseLeadPort, productWallGap, saveSettingsName, saveWorkPort, sessionEnv, sessionSettingsOf, sizePort, startPort, workerAccount } from './runner-ports.mjs';
 import { workerChecks, workerSnapshotProblem } from './runner-checks.mjs';
+import { withoutAge } from '../modules/M4-workshop/hooks/snapshot.mjs';
 import { NO_BUDGET_PORTS, budgetShapeOk, holdersOf, readFactFile, readSessionFile } from '../modules/M4-workshop/launcher/review-runner-main.mjs';
 import { spawn as childSpawn } from 'node:child_process';
 import { RUNNER_JOB_USER as BUILDER, fullPath } from './runner-job.mjs';
@@ -357,7 +358,9 @@ export function rootSnapshots(c, { log = () => {}, problem = workerSnapshotProbl
     let why; try { why = problem({ path: p.render.paths.snapshot, product: name, rules: p.rules, sourceSha256: c.sourceSha256 }); } catch (e) { why = `it can't be checked (${e?.message ?? e})`; }
     const reason = why ? `product ${name}'s rules snapshot: ${why}, so its sessions are not started` : null;
     const tell = reason ?? `product ${name}'s rules snapshot: root's, fresh, matches`;
-    if (said.get(name) !== tell) { said.set(name, tell); log(tell); }
+    // Keyed on the reason without a stale snapshot's age (L1254 m1): one line while it stays stale, not one per start.
+    const key = withoutAge(tell);
+    if (said.get(name) !== key) { said.set(name, key); log(tell); }
     return reason;
   };
   return { held };

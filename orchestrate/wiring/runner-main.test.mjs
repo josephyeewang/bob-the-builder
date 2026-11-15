@@ -236,7 +236,7 @@ test('L1226 (L1252): main holds a product until root\'s snapshot is root\'s, fre
     // A test product (the gate passes): the snapshot's own hold. None written yet: held, and the runner wrote none.
     logs.length = 0;
     assert.equal(await go({ testProduct: TEST_PRODUCT_OK }), 0, logs.join('\n'));
-    assert.equal(r.reason, "product p1's rules snapshot: rules snapshot is missing or unreadable, so its sessions are not started");
+    assert.equal(r.reason, "product p1's rules snapshot: rules snapshot is missing or unreadable: is root's worker-rules job loaded? (setup.mjs daemons check), so its sessions are not started");
     assert.equal(existsSync(snap), false, 'the runner never writes the snapshot (L1226)');
     assert.equal(logs.filter((l) => /p1's rules snapshot: rules snapshot is missing/.test(l)).length, 1, logs.join('\n'));
     // Root's job's file (the test's uid standing in for root): the hold lifts, told once, and the start goes on to the card.

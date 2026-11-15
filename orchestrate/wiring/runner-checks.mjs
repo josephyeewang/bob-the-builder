@@ -92,7 +92,11 @@ export function workerSnapshotProblem({ path, product, rules, sourceSha256 }, { 
   if (!rules || typeof rules !== 'object') return 'the runner has no rules for it';
   if (typeof sourceSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(sourceSha256)) return 'the runner\'s config was not read from its file through one handle, so the snapshot\'s source can\'t be matched';
   const s = read(path, { ownerUid: owner, what: WORKER_RULES_COPY });
-  if (!s?.ok) return s?.reason ?? 'the rules snapshot can\'t be read';
+  if (!s?.ok) {
+    const why = s?.reason ?? 'the rules snapshot can\'t be read';
+    // L1254 m4: none there is most often root's job not loaded (or not yet beaten since the runner started).
+    return /missing or unreadable/.test(why) ? `${why}: is root's worker-rules job loaded? (setup.mjs daemons check)` : why;
+  }
   if (s.product !== product) return `the rules snapshot is for ${s.product === undefined ? 'no product' : JSON.stringify(String(s.product).slice(0, 60))}, not ${product}`;
   if (s.hash !== snapshotHash(rules)) return 'the rules snapshot holds other rules than the runner\'s config (root\'s copy changed since the runner started: restart it)';
   if (s.sourceSha256 !== sourceSha256) return 'the rules snapshot was written from other bytes of worker-runner.json than the runner read (root\'s copy changed since the runner started: restart it)';

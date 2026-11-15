@@ -1,11 +1,12 @@
 // Root's worker-rules job (L1225, L1226, L1227): the rules snapshot each worker session's hooks read, written by root.
 //
 // Why root. The worker runner and its sessions both run as the builder user (L1079). While the runner wrote the snapshot
-// (runner-main.mjs keepSnapshots, before the runner side of L1226), anything that runs as the builder outside the sessions' deny lines (a product's install
-// or test command, a shell form the list misses) could rewrite the rules with a correct hash, and the hooks would take
-// it (L1125). Here root writes it, in a folder only root writes, so the builder can't change it by any route; the readers
-// (the hooks, and the runner at each start and in check 8: runner-checks.mjs workerSnapshotProblem) take it only when it is root's alone (M4 hooks/snapshot.mjs readSnapshot
-// with ownerUid 0: the folder chain, no link, one name, root's, no group or other write).
+// (runner-main.mjs keepSnapshots, before the runner side of L1226), anything that runs as the builder outside the
+// sessions' deny lines (a product's install or test command, a shell form the list misses) could rewrite the rules with
+// a correct hash, and the hooks would take it (L1125). Here root writes it, in a folder only root writes, so the builder
+// can't change it by any route; the readers (the hooks, and the runner at each start and in check 8: runner-checks.mjs
+// workerSnapshotProblem) take it only when it is root's alone (M4 hooks/snapshot.mjs readSnapshot with ownerUid 0: the
+// folder chain, no link, one name, root's, no group or other write).
 //
 //   the job      <label>.worker-rules: node <copy>/setup/worker-rules.mjs write, as root, at load and every WRITE_EVERY_S
 //                (60 s: four beats can be missed inside the snapshot's 5-minute limit). On exactly when the worker runner is

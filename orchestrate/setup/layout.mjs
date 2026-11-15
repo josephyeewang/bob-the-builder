@@ -261,7 +261,9 @@ export const oldFlatOutboxPaths = (cfg) => PRODUCT_OUTBOX_ROLES.map((r) => join(
  *   runner     the runner's own folder: status.json (which the Dispatcher reads), its memory (0600), settings and lock.
  * The rules snapshots its sessions' hooks read are root's worker-rules job's (workerRulesDir, L1226), not here: a folder
  * the runner's user owned (worker-runner/snapshots until L1252) let anything run as the builder rewrite them. A Mac set up
- * before keeps that folder; setup neither reads nor removes it (the owner removes it, a run-sheet item).
+ * before keeps that folder; setup neither reads nor removes it, and `setup check` FAILs on it (worker-runner/ holds an
+ * entry the setup did not make) until the owner approves removing it: the run-sheet step "remove the leftover
+ * <base>/worker-runner/snapshots folder (sudo rm -r)", Joe's to approve (L1254 m2).
  */
 export const workerRunnerPath = (cfg) => join(cfg.base, 'worker-runner');
 export const WORKER_RUNNER_FOLDERS = Object.freeze({ requests: 'requests', state: 'runner' });

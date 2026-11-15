@@ -74,7 +74,9 @@ A config that does not parse is reported as "not valid JSON": the file's own tex
   each request new; the runner reads and removes it), `runner/` (the owner's 0755: the runner's status, which the
   Dispatcher reads and refuses when others can write the folder, its memory, settings and lock). Its sessions' rules
   snapshots are root's, in `worker-rules/` (the `worker-rules` job writes them, L1226); a `worker-runner/snapshots/` left
-  from an earlier setup is no longer read, and the owner removes it by hand. `proofs` checks the owner can NOT write `worker-runner/` itself.
+  from an earlier setup is no longer read, and `check` FAILs on it (`worker-runner/` holds an entry the setup did not
+  make) until the owner approves removing it: the run-sheet step "remove the leftover `<base>/worker-runner/snapshots`
+  folder (`sudo rm -r`)" (L1254 m2). `proofs` checks the owner can NOT write `worker-runner/` itself.
 - Root runs only a node program that is root's alone with every folder above it (the nodejs.org install in
   `/usr/local/bin`; a Homebrew node is refused). The real guard is the absolute path of that program and its owner: the
   program checks itself, and refuses under `sudo` for every command (`check` included). `--root-prefix` is for tests and

@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { workerChecks, workerSnapshotProblem } from './runner-checks.mjs';
+import { readSnapshot } from '../modules/M4-workshop/hooks/snapshot.mjs';
 import { checkRunnerConfig, rootSnapshots, workerCheckInputs } from './runner-main.mjs';
 import { rulesText } from '../setup/worker-rules.mjs';
 import { renderRoleSettings } from '../modules/M4-workshop/launcher/render-settings.mjs';
@@ -154,3 +155,24 @@ test('L1250 m2 / L1251 m4: the config names a snapshot only with snapshotOwner 0
   for (const o of [undefined, 501, -1, '0', 0.5, null]) assert.throws(() => checkRunnerConfig(cfg({ snapshot: '/x/worker-rules/p1.json', ...(o === undefined ? {} : { snapshotOwner: o }) })), /snapshotOwner must be 0/, String(o));
   assert.throws(() => checkRunnerConfig(cfg({ snapshotOwner: 0 })), /snapshotOwner is given with no render\.paths\.snapshot/);
 });
+
+test('L1254 m1: a stale snapshot is told once while it stays stale, though its age grows each start (the real staleReason); told again after fresh', async () => place(async ({ path, put }) => {
+  const T = Date.now();
+  put(rulesText('p1', RULES, SHA, new Date(T - 400_000)));
+  let now = T;
+  const problem = (s) => workerSnapshotProblem(s, { owner: ME, read: (p, o) => readSnapshot(p, { ...o, now }) });
+  const logs = [];
+  const c = { sourceSha256: SHA, products: { p1: { rules: RULES, render: { paths: { snapshot: path } } } } };
+  const { held } = rootSnapshots(c, { log: (l) => logs.push(l), problem });
+  const a = held('p1'); now += 1000; const b = held('p1'); now += 60_000; const d = held('p1');
+  assert.match(a, /rules snapshot is stale \(400 s old, the limit is 300 s\)/); assert.match(b, /\(401 s old/); assert.match(d, /\(461 s old/);
+  assert.equal(logs.length, 1, logs.join('\n')); assert.match(logs[0], /^product p1's rules snapshot: rules snapshot is stale \(400 s old.*root's worker-rules job/);
+  // Fresh again: told; stale again: told again, once.
+  put(rulesText('p1', RULES, SHA, new Date(now))); assert.equal(held('p1'), null);
+  assert.equal(logs.at(-1), "product p1's rules snapshot: root's, fresh, matches");
+  now += 400_000; held('p1'); now += 5000; held('p1');
+  assert.equal(logs.length, 3, logs.join('\n')); assert.match(logs[2], /stale \(400 s old/);
+  // Another reason (gone) is told, with the job named (L1254 m4).
+  rmSync(path); held('p1'); held('p1');
+  assert.equal(logs.length, 4); assert.match(logs[3], /missing or unreadable: is root's worker-rules job loaded\? \(setup\.mjs daemons check\)/);
+}));
