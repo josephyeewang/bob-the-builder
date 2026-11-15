@@ -16,6 +16,8 @@ import { ROOT_CONFIG_PATH } from '../layout.mjs';
 import { parseInstallConfig } from '../install.mjs';
 import { main as setupMain } from '../setup.mjs';
 import { fakeMac } from '../fake-mac.test-helper.mjs';
+import { RUNNER_NODE_FLAGS, workerRunnerPlist } from '../../wiring/runner-job.mjs';
+import { WORKER_RUNNER_JOB } from '../worker-runner-setup.mjs';
 import { GUARD, LOAD_WRITES, NOT_CHECKED, PROBE, PROVED_JOBS, judgeJob, main, plistObject, proofPassed, readAnswer, sameValue } from './guard-proof.mjs';
 
 const ORCH = realpathSync.native(join(dirname(fileURLToPath(import.meta.url)), '..', '..'));
@@ -42,7 +44,7 @@ function standIn(files = {}, { linked = true } = {}) {
   return { base, root, real, cfg: { label: LABEL, base, owner: 'joe' } };
 }
 const plistFile = (job) => join(DAEMON_DIR, `${LABEL}.${job}.plist`);
-const jobFile = (root, job, extra = {}) => ({ Label: `${LABEL}.${job}`, ProgramArguments: [join(root, 'bin/node'), join(root, PROVED_JOBS[job].script)], UserName: 'robot', ...extra });
+const jobFile = (root, job, extra = {}) => ({ Label: `${LABEL}.${job}`, ProgramArguments: [join(root, 'bin/node'), ...(PROVED_JOBS[job].nodeFlags ?? []), join(root, PROVED_JOBS[job].script)], UserName: 'robot', ...extra });
 const noUser = (plist) => { const { UserName, ...rest } = plist; return rest; };
 
 /** The proof's io for a stand-in: the job files from a table, users from a table, each check run as this user. */
@@ -62,7 +64,7 @@ function testIo({ base, plists = {}, users = { robot: { uid: ME, gid: MY_GID }, 
     realpath: (p) => realpathSync.native(p),
     idOf: (n) => users[n] ?? null,
     chain: chain ?? ((p) => chainProblem(p, { owner: ME, top: base, acl: () => null })),
-    runChild: child ?? (({ env }) => spawnSync(process.execPath, ['--input-type=module', '-e', PROBE], { env, cwd: base, encoding: 'utf8', timeout: 30_000, killSignal: 'SIGKILL' })),
+    runChild: child ?? (({ env, nodeFlags = [] }) => spawnSync(process.execPath, [...nodeFlags, '--input-type=module', '-e', PROBE], { env, cwd: base, encoding: 'utf8', timeout: 30_000, killSignal: 'SIGKILL' })),
     myUid,
   };
 }
@@ -358,8 +360,9 @@ test('r1 m4: a temp folder, a thread, a datagram, a name lookup or a listener at
 
 test('r1 m5: every job daemons.mjs knows is either proved or left out with its reason, and no other', () => {
   assert.deepEqual([...Object.keys(PROVED_JOBS), ...Object.keys(NOT_CHECKED)].sort(), [...ALL_JOBS].sort());
-  assert.equal(Object.keys(PROVED_JOBS).length + Object.keys(NOT_CHECKED).length, 9, 'eight jobs and the wall check');
+  assert.equal(Object.keys(PROVED_JOBS).length + Object.keys(NOT_CHECKED).length, 10, 'eight jobs, the wall check and root\'s worker-rules job');
   assert.ok(Object.hasOwn(NOT_CHECKED, WALL_CHECK_JOB), 'the wall check is left out by its exact label (L1223)');
+  assert.ok(Object.hasOwn(NOT_CHECKED, 'worker-rules'), 'root\'s worker-rules job is left out by its exact label (#604)');
 });
 
 test('r2: the job file is the installer\'s exactly: the same names with other values, or a key it writes left out, is a FAIL', () => {
@@ -422,4 +425,35 @@ test('r3 4: a job file whose values read the same but whose text is not the inst
   assert.ok(sameValue(plistObject(binary), wantObj), 'the binary file reads as the same values, so the byte check is what fails it');
   const ok = judgeJob('robot', { cfg: s.cfg, io: testIo({ base: s.base, plists: { [plistFile('robot')]: wantObj }, built: () => wantObj, builtText: () => want, readBytes: () => Buffer.from(want) }), ownerUid: 99_999 });
   assert.equal(ok.result, 'PASS', ok.why);
+});
+
+test('L1243: the worker runner\'s real job file (workerRunnerPlist) passes with its node option; a missing, other or extra option, or a stray one on another job, is a FAIL', MAC_ONLY, () => {
+  const runner = PROVED_JOBS[WORKER_RUNNER_JOB].script;
+  const s = standIn({ [runner]: "import '../shared/secret-guard.mjs';\n" });
+  const node = join(s.root, 'bin/node'); const script = join(s.root, runner);
+  const text = workerRunnerPlist({ label: `${LABEL}.${WORKER_RUNNER_JOB}`, node, script, config: join(s.base, 'worker-runner.json'), path: '/usr/bin:/bin', logDir: join(s.base, 'logs'), workDir: join(s.base, 'work'), home: join(s.base, 'homes', 'builder') });
+  const want = plistObject(text);
+  assert.deepEqual(want.ProgramArguments.slice(0, 3), [node, ...RUNNER_NODE_FLAGS, script], 'the installer puts the option between node and the script');
+  const users = { builder: { uid: ME, gid: MY_GID }, joe: { uid: 99_999, gid: 20 } };
+  let seen = null;
+  const child = ({ env, nodeFlags }) => { seen = nodeFlags; return spawnSync(process.execPath, [...nodeFlags, '--input-type=module', '-e', PROBE], { env, cwd: s.base, encoding: 'utf8', timeout: 30_000, killSignal: 'SIGKILL' }); };
+  const run = (placed, o = {}) => judgeJob(WORKER_RUNNER_JOB, { cfg: s.cfg, io: testIo({ base: s.base, users, plists: { [plistFile(WORKER_RUNNER_JOB)]: placed }, built: () => want, builtText: () => text, readBytes: () => Buffer.from(placed === want ? text : JSON.stringify(placed)), child, ...o }), ownerUid: 99_999 });
+  const ok = run(want);
+  assert.equal(ok.result, 'PASS', ok.why);
+  assert.deepEqual(seen, [...RUNNER_NODE_FLAGS], 'the child loads the script with the job\'s own node options');
+  const never = () => { throw new Error('the child must not start'); };
+  const withArgs = (a) => ({ ...want, ProgramArguments: [...a, ...want.ProgramArguments.slice(3)] });
+  const missing = run(withArgs([node, script]), { child: never });
+  assert.deepEqual([missing.result, missing.why], ['FAIL', `it starts node without its option --disable-sigusr1 (it has ${JSON.stringify(script)} there); not loaded`]);
+  const other = run(withArgs([node, '--inspect', script]), { child: never });
+  assert.deepEqual([other.result, other.why], ['FAIL', 'it starts node without its option --disable-sigusr1 (it has "--inspect" there); not loaded']);
+  const extra = run(withArgs([node, '--disable-sigusr1', '--inspect', script]), { child: never });
+  assert.deepEqual([extra.result, extra.why], ['FAIL', 'it starts node with the option --inspect, which this job\'s node never takes; not loaded']);
+  const short = run({ ...want, ProgramArguments: [node, '--disable-sigusr1'] }, { child: never });
+  assert.equal(short.result, 'FAIL');
+  // Every other job takes none: the same option on the robot's job is a stray one.
+  const robot = judge(s, { plist: { ...jobFile(s.root, 'robot'), ProgramArguments: [join(s.root, 'bin/node'), '--disable-sigusr1', join(s.root, ROBOT)] }, child: never });
+  assert.deepEqual([robot.result, robot.why], ['FAIL', 'it starts node with the option --disable-sigusr1, which this job\'s node never takes; not loaded']);
+  // Only the worker runner names node options.
+  assert.deepEqual(Object.entries(PROVED_JOBS).filter(([, v]) => v.nodeFlags).map(([k]) => k), [WORKER_RUNNER_JOB]);
 });

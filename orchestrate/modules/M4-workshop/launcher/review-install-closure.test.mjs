@@ -160,6 +160,8 @@ const READS_JOB_FILES_PINNED = Object.freeze({
       "import { DISPATCHER_JOB, DISPATCHER_MAIN } from '../dispatcher-setup.mjs';",
       "import { SENSORS_JOB, SENSORS_MAIN } from '../sensors-setup.mjs';",
       "import { WORKER_RUNNER_JOB, WORKER_RUNNER_MAIN } from '../worker-runner-setup.mjs';",
+      // L1243: the worker runner's node options only (a frozen list of names), not its job-file builder.
+      "import { RUNNER_NODE_FLAGS } from '../../wiring/runner-job.mjs';",
       "import { SCRIPTS } from '../../modules/M4-workshop/launcher/review-daemons.mjs';",
       "import { NODE, chainProblem, currentCopy } from '../../modules/M4-workshop/launcher/install-check.mjs';",
       "import { INSTALL_MARK, REFUSED_CODE } from '../../shared/secret-guard.mjs';",
