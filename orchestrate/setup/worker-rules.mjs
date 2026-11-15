@@ -1,10 +1,10 @@
 // Root's worker-rules job (L1225, L1226, L1227): the rules snapshot each worker session's hooks read, written by root.
 //
 // Why root. The worker runner and its sessions both run as the builder user (L1079). While the runner wrote the snapshot
-// (runner-main.mjs keepSnapshots), anything that runs as the builder outside the sessions' deny lines (a product's install
+// (runner-main.mjs keepSnapshots, before the runner side of L1226), anything that runs as the builder outside the sessions' deny lines (a product's install
 // or test command, a shell form the list misses) could rewrite the rules with a correct hash, and the hooks would take
 // it (L1125). Here root writes it, in a folder only root writes, so the builder can't change it by any route; the readers
-// (PR (ii): the hooks and the runner's check 8) take it only when it is root's alone (M4 hooks/snapshot.mjs readSnapshot
+// (the hooks, and the runner at each start and in check 8: runner-checks.mjs workerSnapshotProblem) take it only when it is root's alone (M4 hooks/snapshot.mjs readSnapshot
 // with ownerUid 0: the folder chain, no link, one name, root's, no group or other write).
 //
 //   the job      <label>.worker-rules: node <copy>/setup/worker-rules.mjs write, as root, at load and every WRITE_EVERY_S
@@ -148,7 +148,7 @@ export function planBeat(io, cfg, { readConfig = readSource(io), now = new Date(
   const b = readUser(io, BUILDER);
   if (!b.exists || !Number.isSafeInteger(b.uid) || b.uid <= 0) return { writes: [], problems: [`the ${BUILDER} user is not on this Mac${b.error ? ` (${b.error})` : ''}, so whose the runner's pid is can't be told, so no snapshot was written (its sessions' snapshots go stale within 5 minutes)`] };
   const live = runnerLive(io, cfg, b.uid);
-  if (!live.live) return { writes: [], problems: [`${live.why}, so no snapshot was written (its sessions' snapshots go stale within 5 minutes, as they did when the runner wrote them)`], ...(live.off ? { off: true } : {}) };
+  if (!live.live) return { writes: [], problems: [`${live.why}, so no snapshot was written (its sessions' snapshots go stale within 5 minutes, and the runner holds every start)`], ...(live.off ? { off: true } : {}) };
   const file = join(installPaths(cfg).installRoot, WORKER_RUNNER_CONFIG);
   let c; let sha;
   try {
@@ -160,8 +160,8 @@ export function planBeat(io, cfg, { readConfig = readSource(io), now = new Date(
   const problems = []; const skipped = []; const writes = [];
   for (const [product, p] of products) {
     if (!cfg.products.includes(product)) { problems.push(`the copy's ${WORKER_RUNNER_CONFIG} names ${JSON.stringify(product.slice(0, 40))}, which the setup config does not list`); continue; }
-    // A product without rules (the runner's config allows it, and holds that product's sessions: runner-main.mjs
-    // keepSnapshots) gets no snapshot, and its sessions are refused; the others are still written (L1242 m2).
+    // A product without rules (the runner's config allows it, and launch check 8 then has no port, so that product's
+    // sessions are refused: runner-checks.mjs) gets no snapshot, and its sessions are refused; the others are still written (L1242 m2).
     if (!p?.rules || typeof p.rules !== 'object' || Array.isArray(p.rules)) { skipped.push(`the copy's ${WORKER_RUNNER_CONFIG} has no rules for ${product}, so no snapshot was written for it (its sessions are refused; the other products' are written)`); continue; }
     writes.push({ product, path: workerRulesPath(cfg, product), text: rulesText(product, p.rules, sha, now) });
   }

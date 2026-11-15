@@ -404,7 +404,7 @@ export function liveWallProblem(live, product, places, read) {
  * or the reason claude must not start,
  * walled, fs ({ mkdir, rm, writeNew, list, lstat, chmodTree, rename }), ownUid, stopped (true once the runner is stopping: nothing more is spawned,
  * #364 self-review M1), log (what is told, such as a throwaway that can't be removed), productHeld(product) → null or why
- * the product starts no session (runner-main.mjs keepSnapshots, #369 r2 m2; asked at the start and again before claude),
+ * the product starts no session (runner-main.mjs rootSnapshots, L1226, behind the wall and test-product gates; asked first, before anything is read),
  * readSettings(id) → a live session's settings (#378 r1 M1).
  * The request: { card, kind, product, sessionId, live, undoCommit?, onGroup? } (live: the runner's other live sessions, liveWallProblem;
  * undoCommit: the reversed commit, 40 hex, an undo's only, L976; onGroup: told check 4's install process groups, #463 r3 m1).
@@ -448,7 +448,7 @@ export function startPort(c, deps = {}) {
     const profile = DESIGN_PROFILES[role];
     const p = Object.hasOwn(c.products ?? {}, product) ? c.products[product] : null;
     if (!p || typeof p.repo !== 'string' || typeof p.mirror !== 'string' || !p.render?.paths) return refuse(`product ${product} is not in the runner's config`);
-    // A product whose rules snapshot is not kept fresh starts no session (#369 r2 m2): its hooks would refuse every call. Asked before anything is read.
+    // A product held (the wall, the test-product gate, or its rules snapshot not root's, fresh and its own: L1226) starts no session. Asked before anything is read.
     const held = deps.productHeld?.(product);
     if (held) return refuse(held);
     const cd = readCard(card);

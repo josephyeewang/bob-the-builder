@@ -141,13 +141,13 @@ test('#439 m6: the launch renders with the realpath it checks with, so a snapsho
 test('L916 (#423 M2): a worker launch built from the config\'s real snapshot placement passes the render\'s wall; the old placement is refused at load', () => {
   const d = realpathSync(tempDir('orch-rl-'));
   try {
-    for (const f of ['requests', 'runner', 'snapshots']) mkdirSync(join(d, f));
+    for (const f of ['requests', 'runner', 'worker-rules']) mkdirSync(join(d, f));
     const deny = { record: '/w/record', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/w/keys', secrets: ['/w/secrets'], proposals: ['/w/proposals'], otherCopies: ['/w/copy2'] };
     const cfg = (snapshot) => ({ installRoot: '/i', requestsDir: join(d, 'requests'), statusFile: join(d, 'runner', 'status.json'), orchestrateUid: 501, outboxRoot: '/ob', copiesRoot: '/c',
       home: '/home', path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/w/record', recordUid: 502, claimMs: 1,
-      products: { p1: { repo: 'o/p', mirror: '/w/mirror.git', render: { paths: { ...PATHS, deny, snapshot } } } } });
-    // As runner-main places it: the config is taken, and the launch it renders, through the real renderer and check, passes.
-    const c = checkRunnerConfig(cfg(join(d, 'snapshots', 'rules-p1.json')));
+      products: { p1: { repo: 'o/p', mirror: '/w/mirror.git', render: { paths: { ...PATHS, deny, snapshot, snapshotOwner: 0 } } } } });
+    // As setup places it (root's worker-rules folder, L1226): the config is taken, and the launch it renders, through the real renderer and check, passes.
+    const c = checkRunnerConfig(cfg(join(d, 'worker-rules', 'p1.json')));
     const launchFrom = (conf) => walledLaunchSettings(input('editing', conf.workerRunner, { paths: { ...PATHS, ...conf.products.p1.render.paths } }));
     const r = launchFrom(c);
     assert.equal(r.ok, true, r.reason);

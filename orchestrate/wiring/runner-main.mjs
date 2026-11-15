@@ -29,28 +29,27 @@
 // not /), and list the secrets with the approvals and rules state (#364 r1 M2): a config missing any is refused.
 // The runner's own folder is the status file's folder: it holds the status, the memory (memory.json, 0o600), the
 // sessions' settings files (settings/) and the one-runner lock (M9 makeLock: a second runner stops at once; a dead one's
-// lock is broken). The wall (step 2) denies that folder and the requests folder to every session, so each product's rules
-// snapshot (render.paths.snapshot), which its sessions' hooks read, sits in a folder of its own apart from both (L916),
-// a real folder only the runner can write, under folders no one else can change (L926): checked before the lock, a
-// missing one holding its product until it is made.
+// lock is broken). The wall (step 2) denies that folder and the requests folder to every session. Each product's rules
+// snapshot (render.paths.snapshot), which its sessions' hooks read, is root's worker-rules job's (L1226), never the
+// runner's: the runner only reads it, at each start (rootSnapshots) and in launch check 8, and holds a product whose
+// snapshot is not root's alone, fresh and its own.
 // Exit 0 when launchd stopped it (SIGTERM), 1 when it could not start or stopped on an error (its memory could not be
 // read back, or a start the loop must refuse). It does not start when a copies or outbox root is missing or reached
 // through a link (#378 r1 m4), when a session it carries over may read a product's folders (#378 r1 M1,
 // carriedOverProblem), or when it has no memory but earlier sessions' settings files are there (#378 self-review M3).
 
 import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
-import { dirname, isAbsolute, join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { readJobConfig } from '../shared/job-config.mjs';
+import { readJobConfig, readSha256 } from '../shared/job-config.mjs';
 import { makeLock } from '../modules/M9-record/lock.mjs';
 import { PRODUCT, runnerPlaces } from '../shared/product-paths.mjs';
 import { foldKey } from '../shared/plan-fingerprint.mjs';
 import { loadMemory, processGroupPorts, runRunner } from './runner-loop.mjs';
 import { drainedPort, liveWallProblem, pauseLeadPort, productWallGap, saveSettingsName, saveWorkPort, sessionEnv, sessionSettingsOf, sizePort, startPort, workerAccount } from './runner-ports.mjs';
-import { workerChecks } from './runner-checks.mjs';
+import { workerChecks, workerSnapshotProblem } from './runner-checks.mjs';
 import { NO_BUDGET_PORTS, budgetShapeOk, holdersOf, readFactFile, readSessionFile } from '../modules/M4-workshop/launcher/review-runner-main.mjs';
-import { keepSnapshotFresh, writeSnapshot } from '../modules/M4-workshop/hooks/snapshot.mjs';
-import { spawn as childSpawn, spawnSync } from 'node:child_process';
+import { spawn as childSpawn } from 'node:child_process';
 import { RUNNER_JOB_USER as BUILDER, fullPath } from './runner-job.mjs';
 import { userInfo } from 'node:os';
 import { live as isLiveSession, productRoleClash } from './owner-status.mjs';
@@ -144,18 +143,21 @@ export function checkRunnerConfig(c) {
       if (v !== undefined && (!apart(v, c.requestsDir) || !apart(v, own))) fail(`product ${name}: render.paths.${k} must be apart from the runner's requests folder (${c.requestsDir}) and its own folder (${own}), which worker sessions are walled off from`);
     }
   }
-  // Each product's rules snapshot is the runner's to write, one per product: the sessions' hooks read it. It sits in a
-  // folder of its own, apart from both runner folders (L916, #423 M2): a snapshot in either would refuse every launch.
-  // That also keeps it off the runner's own files there (#369 r1 m4), which check 8 would rename it over. And nowhere a
-  // worker session can write (#369 m4; L916 self-review M1): not in the copies, the outboxes, the sessions' home or a
-  // product's mirror, where a worker could rewrite the rules its own hooks enforce. This list compares spellings only: the
-  // rule that decides is who can write the folder, checked on the disk by main (snapshotFolderProblem, L926).
+  // Each product's rules snapshot is root's worker-rules job's (L1226), one per product: the sessions' hooks read it, and
+  // take it only when it is root's alone, so the snapshot comes with snapshotOwner 0 and only 0 (L1250 m2, L1251 m4),
+  // which render-settings gives every hook as --snapshot-owner 0. It sits in a folder of its own, apart from both runner
+  // folders (L916, #423 M2), and nowhere a worker session can write (#369 m4; L916 self-review M1): not in the copies, the
+  // outboxes, the sessions' home or a product's mirror. This list compares spellings only: the rule that decides is who
+  // owns the file and every folder above it, read on the disk at each start and in check 8 (workerSnapshotProblem).
   const writable = [['the copies', c.copiesRoot], ['the outboxes', c.outboxRoot], ["the sessions' home", c.home],
     ...Object.entries(c.products).map(([n, q]) => [`product ${n}'s mirror`, q.mirror])];
   const snaps = new Set();
   for (const [name, p] of Object.entries(c.products)) {
     const s = p.render.paths.snapshot;
-    if (s === undefined) continue;
+    const o = p.render.paths.snapshotOwner;
+    if (s === undefined && o === undefined) continue;
+    if (s === undefined) fail(`product ${name}: render.paths.snapshotOwner is given with no render.paths.snapshot`);
+    if (o !== 0) fail(`product ${name}: render.paths.snapshotOwner must be 0 (its sessions' hooks take the rules snapshot only when it is root's alone, L1226)`);
     if (!fullPath(s) || dirname(s) === '/' || !apart(s, c.requestsDir) || !apart(s, own)) fail(`product ${name}: render.paths.snapshot must be a file in a folder of its own, apart from the runner's requests folder (${c.requestsDir}) and its own folder (${own}), which worker sessions are walled off from`);
     for (const [what, dir] of writable) if (!apart(s, dir)) fail(`product ${name}: render.paths.snapshot must not sit in ${what} (${dir}), where a worker session can write it`);
     if (snaps.has(foldKey(s))) fail(`product ${name}: render.paths.snapshot is another product's`);
@@ -206,7 +208,7 @@ export function hookStoreOf(c, { uid = process.getuid(), lstat = lstatSync, mkdi
  */
 export function workerCheckInputs(c, x, { log = () => {}, runLocked = null, budget = null, bobManifest = null } = {}) {
   const p = c.products[x.product];
-  return { ...x, runLocked, installCommand: p.render.product?.commands?.install, registryHosts: p.render.registryHosts, mirror: p.mirror, pin: c.pin, hooksDir: p.render.paths.hooksDir, rules: p.rules, snapshot: p.render.paths.snapshot, writeSnapshot,
+  return { ...x, runLocked, installCommand: p.render.product?.commands?.install, registryHosts: p.render.registryHosts, mirror: p.mirror, pin: c.pin, hooksDir: p.render.paths.hooksDir, rules: p.rules, snapshot: p.render.paths.snapshot, sourceSha256: c.sourceSha256,
     machineWide: c.machineWide, busy: holdersOf, alert: (t) => log(`worker runner: ${x.sessionId}: ${t}`), spawn: childSpawn, home: c.home,
     testCommand: p.render.product?.commands?.test, budget, bobFolder: p.render.paths.bobFolder, bobManifest };
 }
@@ -223,11 +225,11 @@ export function testProductProblem(budget, product) {
   let f; try { f = budget.rules.flag('product.test_product', { product }); } catch (e) { return `whether ${product} is a test product can't be read (${e?.message ?? e}); ${not}`; }
   return f === true ? null : `${product}'s rules do not say product.test_product: true; ${not}`;
 }
-/** The start port's productHeld with the test-product gate first: `held` is the snapshots' own (keepSnapshots). */
+/** The start port's productHeld with the test-product gate first: `held` is the snapshots' own (rootSnapshots). */
 export const testProductHeld = (budget, held, problem = testProductProblem) => (product) => problem(budget, product) ?? held(product);
 
 /** The checks run once more just before claude starts (#369 M1, r1 m1 and m2): the copy (its folder and HEAD), its setup
- * files, the outbox, and the rules snapshot written afresh. */
+ * files, the outbox, and root's rules snapshot read again (L1226). */
 export const RECHECK = Object.freeze([1, 2, 3, 8]);
 /** The start port's ports from the config: the stop flag, check 0's pinned version, the worker launch checks, and the
  * RECHECK checks once more just before claude starts. */
@@ -338,153 +340,46 @@ export function realRunnerPorts(c, over = {}, { stopped = () => false, log, prod
 }
 
 /**
- * Who can change a product's rules snapshot's folder (L926, #419 r3 M1), decided on the disk rather than by a list of
- * places. The folder is its own real path (no link on the way, a link into a copy included), a real folder (not a link),
- * owned by the runner's uid with no group or other write bit. The runner's sessions run as that same Mac user
- * (runner-ports.mjs), so owning the folder keeps out other users only: the folder right above it must be root's, with no
- * group or other write bit and no access list write entry (#419 r4 M1, option b), so a session can't rename the folder
- * away or put another in its place. Every folder further up is root's too, with no group or other write bit unless it
- * is sticky (/private/tmp): a session may rename a folder in one it can write, even a folder it can't (L939 self-review
- * M-A: renaming <home>/orch with root's worker-runner/ in it would move the snapshots out from under the deny entries).
- * So a folder in or under claude's per-user sandbox temp folder (/private/tmp/claude-<uid>), the temp folder or the home
- * folder fails this, and so does a copy; setup's <base>/worker-runner/ passes when <base> sits in root's folders. (The
- * home folder itself, its parent /Users being root's, passes; it is no snapshot folder anyone would name.) Writing into
- * the folder itself only the sessions' sandbox and tool walls stop (the snapshot deny, a lane 4 card).
- * No folder on the way carries an access list entry that lets anyone write (L926 self-review M1: a 0755 folder with
- * "everyone allow add_file" is everyone's to write; macOS's own "deny" entries, as on a home folder, are fine).
- * What this can't stop (L942 m4): the folder's owner, the runner's user and so its sessions, may give itself "delete" on
- * the folder in its access list and then rename it away. That fails safe: the snapshot goes missing, and the product is
- * held. So the whole check, the folder's own access list included, runs again at each start (keepSnapshots `recheck`,
- * L942 c5), and a folder that fails it holds the product. A disk image mounted over the folder is not checked here; the
- * L921 snapshot deny is meant to stop a session mounting one, which is not yet shown (a real-sandbox hdiutil attach test
- * is on the Mini list).
- * A missing folder whose parent is there is held to the rule for the folders above it (L942 m2), so a bad place is told
- * as that, not as a folder to make. → null | { missing, reason }. opts (tests): lstat, realpath, uid, aclWrites.
+ * Each product's rules snapshot, root's worker-rules job's (setup/worker-rules.mjs, L1226), checked at each start: the
+ * runner no longer writes it, so nothing it or its sessions run as the builder can change the rules those sessions'
+ * hooks read. A product whose snapshot fails workerSnapshotProblem (runner-checks.mjs, the same test as launch check 8)
+ * starts nothing, failing closed: missing, not root's alone, stale because the job stopped, another product's, other
+ * rules, or written from other bytes of the config. Each reason is told once per product when it first holds that
+ * product, and again whenever the reason changes (L1252 (b)); the first start that passes after a hold, or ever, is told
+ * as "root's, fresh, matches" (the cutover gate reads it in the start log). `problem` is a port for tests.
+ * → { held(product) → reason | null }.
  */
-export function snapshotFolderProblem(dir, { lstat = lstatSync, realpath = (p) => realpathSync.native(p), uid = process.getuid(), aclWrites = aclWriteEntries } = {}) {
-  const no = (why) => ({ missing: false, reason: `its folder ${dir} ${why}` });
-  if (typeof dir !== 'string' || !isAbsolute(dir)) return no('is not a full path');
-  const acl = (a) => { try { return aclWrites(a); } catch (e) { return [`its access list can't be read (${e?.message ?? e})`]; } };
-  // The folder above it: root's alone (#419 r4 M1); every one above that root's, or sticky if others can write it.
-  const above = () => {
-    const parent = dirname(dir);
-    let ps; try { ps = lstat(parent); } catch (e) { return `sits in ${parent}, which can't be read (${e?.code ?? e?.message})`; }
-    if (ps.uid !== 0 || (ps.mode & 0o022)) return `sits in ${parent}, which is not root's alone (its owner is uid ${ps.uid}, mode ${(ps.mode & 0o7777).toString(8).padStart(4, '0')}): the runner's sessions are the runner's own user, so only a folder of root's that no one else can write keeps them from moving this one`;
-    for (let a = parent; ; a = dirname(a)) {
-      let s; try { s = lstat(a); } catch (e) { return `sits in ${a}, which can't be read (${e?.code ?? e?.message})`; }
-      if (s.uid !== 0 || ((s.mode & 0o022) && !(s.mode & 0o1000))) return `sits in ${a}, which others than root can change (its owner is uid ${s.uid}, mode ${(s.mode & 0o7777).toString(8).padStart(4, '0')})`;
-      const up = acl(a);
-      if (up.length) return `sits in ${a}, which has an access list entry that lets others write (${up[0]})`;
-      if (a === '/') return null;
-    }
-  };
-  let st; try { st = lstat(dir); } catch (e) {
-    if (e?.code !== 'ENOENT') return no(`can't be read (${e?.code ?? e?.message})`);
-    // Missing. Where its parent is there, that place is held to the rule first (L942 m2): a folder made there would fail.
-    // Its parent reached through a link (/tmp is /private/tmp) is refused as such, as the folder would be (L942 self-review M1).
-    const parent = dirname(dir);
-    let parentThere = true; try { lstat(parent); } catch (x) {
-      if (x?.code !== 'ENOENT') return no(`sits in ${parent}, which can't be read (${x?.code ?? x?.message})`);
-      parentThere = false;
-    }
-    if (parentThere) {
-      let rp; try { rp = realpath(parent); } catch (x) { return no(`sits in ${parent}, which can't be read (${x?.code ?? x?.message})`); }
-      if (rp !== parent) return no(foldKey(rp) === foldKey(parent) ? `sits in ${parent}, which is spelled otherwise on the disk (it is ${rp})` : `sits in ${parent}, which is reached through a link (it is ${rp})`);
-      const bad = above();
-      if (bad) return no(bad);
-    }
-    return { missing: true, reason: `its folder ${dir} is missing: make it, owned by the runner's user, mode 0755, in a folder of root's that no one else can write (setup does not make it yet)` };
-  }
-  if (st.isSymbolicLink()) return no('is a link');
-  if (!st.isDirectory()) return no('is not a folder');
-  let real; try { real = realpath(dir); } catch (e) { return no(`can't be read (${e?.code ?? e?.message})`); }
-  if (real !== dir) return no(foldKey(real) === foldKey(dir) ? `is spelled otherwise on the disk (it is ${real})` : `is reached through a link (it is ${real})`);
-  if (st.uid !== uid) return no(`is not owned by the runner's user (its owner is uid ${st.uid}, the runner is ${uid})`);
-  if (st.mode & 0o022) return no('can be written by others than the runner (a group or other write bit)');
-  const own = acl(dir);
-  if (own.length) return no(`has an access list entry that lets others write (${own[0]})`);
-  const bad = above();
-  return bad ? no(bad) : null;
-}
-
-// The access list rights that change nothing (macOS chmod(1), "ACL MANIPULATION"): reading, and the inheritance flags.
-// Any other right in an allow entry counts as a write, a name this list doesn't know included.
-const ACL_HARMLESS = new Set(['read', 'list', 'search', 'execute', 'readattr', 'readextattr', 'readsecurity', 'file_inherit', 'directory_inherit', 'limit_inherit', 'only_inherit']);
-// An entry line as ls -le prints it: "<n>: <who> [inherited ]allow|deny <rights>". Who may hold spaces ("group:Domain
-// Users"); the rights, a comma list, are the line's last word.
-const ACL_LINE = /^\d+: .+? (?:inherited )?(allow|deny) ([a-z_]+(?:,[a-z_]+)*)$/;
-/**
- * A folder's access list entries that may let someone write, read with /bin/ls -lde (macOS); none off a Mac. Every
- * non-empty line after the folder's own line counts, unless it is plainly a deny, or an allow whose rights are all
- * harmless (#419 r4 m1: a line this can't parse is a write entry, never skipped; L942 m1: a numbered one or not). The
- * folder's own line runs on one line for each newline in its path, which ls prints as it is.
- */
-export function aclWriteEntries(dir, { run = spawnSync, platform = process.platform } = {}) {
-  if (platform !== 'darwin') return [];
-  const r = run('/bin/ls', ['-lde', dir], { encoding: 'utf8' });
-  if (r.error || r.status !== 0) throw new Error(`/bin/ls -lde failed (${r.error?.code ?? r.status})`);
-  return String(r.stdout).split('\n').slice(1 + (String(dir).match(/\n/g)?.length ?? 0)).map((l) => l.trim()).filter((l) => l !== '')
-    .filter((l) => { const m = ACL_LINE.exec(l); return !m || (m[1] === 'allow' && m[2].split(',').some((p) => !ACL_HARMLESS.has(p))); });
-}
-
-/**
- * Each product's rules snapshot kept fresh for the runner's life (#369 r1 m2): the sessions' hooks refuse every call once
- * it is 5 minutes old. A rewrite that fails stops its refresher (snapshot.mjs), failing safe. Until it is kept fresh again
- * that product starts no session (#369 r2 m2): `held(product)` starts the refresher once more at each start and, while
- * that fails too, answers why (told once with `log`), so the start is refused. Sessions already running are kept fresh
- * again by the next start that succeeds in this. `recheck(path)` (L942 c5) checks the snapshot's folder again at each
- * start, even while it is kept fresh (its owner may have changed its access list since): a folder that fails holds the
- * product. → { held(product) → reason | null, stop() }.
- */
-export function keepSnapshots(c, { fresh = keepSnapshotFresh, log = () => {}, recheck = () => null } = {}) {
-  const kept = new Map(); const failed = new Map(); const told = new Set();
-  const wanted = (name) => { const p = c.products[name]; return typeof p?.render?.paths?.snapshot === 'string' && p.rules ? p : null; };
-  for (const name of Object.keys(c.products)) {
-    const p = wanted(name);
-    if (!p) continue;
-    try { kept.set(name, fresh(p.render.paths.snapshot, p.rules)); } catch (e) { failed.set(name, e); told.add(name); log(`product ${name}'s rules snapshot can't be written (${e?.code ?? e?.message}); its sessions are refused`); }
-  }
-  const folderTold = new Map();
+export function rootSnapshots(c, { log = () => {}, problem = workerSnapshotProblem } = {}) {
+  const said = new Map();
   const held = (name) => {
-    const p = wanted(name);
-    if (!p) return null;
-    const k = kept.get(name);
-    let e; try { e = k ? k.error() : failed.get(name); } catch (x) { e = x; }
-    if (!e) {
-      let why; try { why = recheck(p.render.paths.snapshot); } catch (x) { why = `it can't be checked (${x?.message ?? x})`; }
-      if (!why) { folderTold.delete(name); return null; }
-      const reason = `product ${name}'s rules snapshot: ${why}, so its sessions are not started`;
-      // Told once for each reason: a new one (an entry added, then the folder renamed away) is told too.
-      if (folderTold.get(name) !== why) { folderTold.set(name, why); log(reason); }
-      return reason;
-    }
-    if (k) { try { k.stop(); } catch { /* stopped */ } kept.delete(name); }
-    try { kept.set(name, fresh(p.render.paths.snapshot, p.rules)); failed.delete(name); told.delete(name); log(`product ${name}'s rules snapshot is kept fresh again`); return null; } catch (x) {
-      failed.set(name, x);
-      const reason = `product ${name}'s rules snapshot is not kept fresh (${x?.code ?? x?.message}), so its sessions are not started`;
-      if (!told.has(name)) { told.add(name); log(reason); }
-      return reason;
-    }
+    const p = c.products[name];
+    if (typeof p?.render?.paths?.snapshot !== 'string' || !p.rules) return null;
+    let why; try { why = problem({ path: p.render.paths.snapshot, product: name, rules: p.rules, sourceSha256: c.sourceSha256 }); } catch (e) { why = `it can't be checked (${e?.message ?? e})`; }
+    const reason = why ? `product ${name}'s rules snapshot: ${why}, so its sessions are not started` : null;
+    const tell = reason ?? `product ${name}'s rules snapshot: root's, fresh, matches`;
+    if (said.get(name) !== tell) { said.set(name, tell); log(tell); }
+    return reason;
   };
-  const stop = () => { for (const [name, k] of kept) { try { k.stop(); if (k.error()) log(`product ${name}'s rules snapshot stopped being kept fresh (${k.error()?.code ?? k.error()?.message})`); } catch { /* stopped */ } } };
-  return { held, stop };
+  return { held };
 }
 
 /**
  * argv: [config]. opts (tests only): asUser (personUserProblem), readConfig, lock, ports, run, log, onStop (how a SIGTERM is listened for), realpath,
- * memory (the memory reader), folderProblem (snapshotFolderProblem), loadWall (lane A's builder-wall module), wallPorts
+ * memory (the memory reader), snapshotProblem (workerSnapshotProblem), sourceOf (the config's bytes' sha256: readSha256), loadWall (lane A's builder-wall module), wallPorts
  * ({ chain, readRoot, now, uid } for wall-gate.mjs wallProblem).
  * → the exit code.
  */
 export async function main(argv, { readConfig = (f) => readRunnerConfig(f, selfPath()), lock = (dir) => makeLock({ dir, timeoutMs: 2_000 }),
-  ports = {}, run = runRunner, log = (s) => process.stderr.write(`${new Date().toISOString()} ${s}\n`), onStop = listenStop, fresh = keepSnapshotFresh,
-  realpath = (p) => realpathSync.native(p), memory = loadMemory, asUser = () => personUserProblem(process.getuid(), readGroups(), readName()), folderProblem = (dir) => snapshotFolderProblem(dir),
+  ports = {}, run = runRunner, log = (s) => process.stderr.write(`${new Date().toISOString()} ${s}\n`), onStop = listenStop,
+  realpath = (p) => realpathSync.native(p), memory = loadMemory, asUser = () => personUserProblem(process.getuid(), readGroups(), readName()), snapshotProblem = workerSnapshotProblem, sourceOf = readSha256,
   pinnedProblem, loadBudget, readManifest, portsOf = realRunnerPorts, hooksOf = hookStoreOf, testProduct = testProductProblem,
   loadWall = () => import('../setup/builder-wall.mjs'), wallPorts = {} } = {}) {
   // Who it runs as comes first, before the config is read (L1079): never root, never a person's user.
   { let who; try { who = asUser(); } catch (e) { who = `its user can't be checked (${e?.message ?? e})`; } if (who) { log(`the worker runner did not start: ${who}`); return 1; } }
   let c;
-  try { c = checkRunnerConfig(readConfig(argv[0])); } catch (e) { log(`the worker runner did not start: ${e.message}`); return 1; }
+  // The sha256 of the very bytes the config was read from (job-config.mjs readSha256), taken before the check copies it:
+  // root's worker-rules job stamps the same on each snapshot, so one written from a changed config holds its product.
+  try { const raw = readConfig(argv[0]); c = { ...checkRunnerConfig(raw), sourceSha256: sourceOf(raw) }; } catch (e) { log(`the worker runner did not start: ${e.message}`); return 1; }
   // The roots each deny is spelled from are their real paths (#378 r1 m4): the Mac's sandbox does not apply a deny reached
   // through a link (render-settings.mjs), so a root behind one would leave every product's folders open.
   for (const k of ['copiesRoot', 'outboxRoot']) {
@@ -501,13 +396,6 @@ export async function main(argv, { readConfig = (f) => readRunnerConfig(f, selfP
   let wall = null; let wallWhy;
   try { wall = wallFrom(await loadWall()); } catch (e) { wallWhy = e?.message ?? String(e); log(`worker runner: the builder wall's code can't be loaded (${wallWhy}); every start is held until it can`); }
   const wallGate = () => wallProblem({ file: c.wallStatus, wall, wallWhy, uid: process.getuid(), chain: (p) => chainProblem(p, { owner: 0 }), readRoot: (p) => readRootFile(p), now: Date.now, ...wallPorts });
-  // Each product's rules snapshot's folder, only the runner's to write (L926, #419 r3 M1): one anyone else could write
-  // stops the runner here, before its lock; a missing one holds that product instead (keepSnapshots, below).
-  for (const [name, p] of Object.entries(c.products)) {
-    if (typeof p?.render?.paths?.snapshot !== 'string' || !p.rules) continue;
-    const f = folderProblem(dirname(p.render.paths.snapshot));
-    if (f && !f.missing) { log(`the worker runner did not start: product ${name}'s rules snapshot: ${f.reason}`); return 1; }
-  }
   let l; let held;
   // The runner's own folder is setup's, with the access the Dispatcher's reads need: only settings/ is made here (#364 m6).
   try { try { mkdirSync(c.settingsDir, { mode: 0o700 }); } catch (e) { if (e?.code !== 'EEXIST') throw e; } l = lock(c.ownDir); held = l.acquire(); } catch (e) {
@@ -516,12 +404,8 @@ export async function main(argv, { readConfig = (f) => readRunnerConfig(f, selfP
   if (held.broke) log('the last worker runner\'s lock was left by a runner that is gone; it was broken');
   let stopping = false;
   onStop(() => { stopping = true; });
-  // Each product's rules snapshot is kept fresh for the runner's life (#369 r1 m2, r2 m2: keepSnapshots), in a folder only
-  // the runner can write (L926): one anyone else could write refuses the start; a missing one holds the product, saying
-  // which folder to make, and is checked again, folder and all, at each later try.
-  // Checked again here at each try on purpose (also right after the check above): a missing folder may be made later.
-  const guarded = (path, rules) => { const f = folderProblem(dirname(path)); if (f) throw new Error(f.reason); return fresh(path, rules); };
-  const snaps = keepSnapshots(c, { fresh: guarded, log, recheck: (path) => folderProblem(dirname(path))?.reason ?? null });
+  // Each product's rules snapshot, root's (L1226): checked at each start, a product whose snapshot fails held, failing closed.
+  const snaps = rootSnapshots(c, { log, problem: (s) => snapshotProblem(s) });
   let P;
   try {
     P = portsOf(c, ports, { stopped: () => stopping, log, productHeld: wallHeld(wallGate, testProductHeld(budget, snaps.held, testProduct)), budget, bobManifest });
@@ -538,7 +422,6 @@ export async function main(argv, { readConfig = (f) => readRunnerConfig(f, selfP
       outboxRoot: c.outboxRoot, copiesRoot: c.copiesRoot, claimMs: c.claimMs, ports: P, note: log, stopWhen: () => stopping });
     return 0;
   } catch (e) { log(`the worker runner stopped: ${e?.message ?? e}`); return 1; } finally {
-    snaps.stop();
     try { l.release(held.nonce); } catch { /* gone */ }
   }
 }

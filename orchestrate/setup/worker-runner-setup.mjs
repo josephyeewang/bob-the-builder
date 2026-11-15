@@ -18,7 +18,7 @@ import { FOLDERS as REVIEW_FOLDERS } from '../modules/M4-workshop/launcher/revie
 import { checkProducts } from '../modules/M10-rules/reader.mjs';
 import { checkRunnerConfig } from '../wiring/runner-main.mjs';
 import { fullPath, workerRunnerPlist } from '../wiring/runner-job.mjs';
-import { BUILDER, WORKER_RUNNER_CONFIG, WORKER_STATUS_FILE, homeOf, keysPath, mirrorPath, outboxRootPath, privatePath, proposalsParentOf, storePath, workerCopiesPath, workerRunnerPaths } from './layout.mjs';
+import { BUILDER, WORKER_RUNNER_CONFIG, WORKER_STATUS_FILE, homeOf, keysPath, mirrorPath, outboxRootPath, privatePath, proposalsParentOf, storePath, workerCopiesPath, workerRulesPath, workerRunnerPaths } from './layout.mjs';
 import { installPaths, keepsNotWarning } from './install.mjs';
 import { readUser } from './users-folders.mjs';
 import * as layout from './layout.mjs';
@@ -90,7 +90,8 @@ export function workerRunnerLoadCheck(io, cfg, { built = () => workerRunnerConfi
 // `worker-config` writes <copy>/worker-runner.json, root's 0644, for the entry's one product (L1112 (1)). Every value has
 // one source (I7), none typed into the entry:
 //   the layout     the runner's folders (layout.mjs workerRunnerPaths), the top outbox and copies roots, the builder's home,
-//                  the Record's folder, the robot keys, the private folder, the proposals folders, the snapshot's place
+//                  the Record's folder, the robot keys, the private folder, the proposals folders, and the rules snapshot's
+//                  place, root's worker-rules job's (workerRulesPath, L1226), read by every hook only as root's (snapshotOwner 0)
 //   the Mac        the uids: orchestrate's (the requests' writer and the Record's owner), review's (check 12), the owner's home
 //   review.json    the installed copy's review runner config (review-config.mjs, the owner's input): the rules, the pin and
 //                  the pinned claude, the hooks, the machine-wide file, the Bob folder and list, the account copy, check 12's
@@ -170,7 +171,7 @@ export function workerRunnerConfigFor(io, cfg, { userOf = (n) => readUser(io, n)
         paths: {
           deny: { record: recordRoot, ssh: join(home, '.ssh'), gh: join(home, '.config', 'gh'), claudeHome: join(home, '.claude'), robotKeys: at(keysPath(cfg)), secrets },
           hooksDir: rc.hooksDir, node: join(root, NODE), ...(rc.bobFolder !== undefined ? { bobFolder: rc.bobFolder } : {}),
-          snapshot: at(join(W.snapshots, `${product}.json`)),
+          snapshot: at(workerRulesPath(cfg, product)), snapshotOwner: 0,
         },
         // The rules' lists (L1112 (2)): read from the rules, never repeated. Every product's proposals folder, as setup makes them.
         rulesHosts: [...prodRules.hosts], productionFiles: [...prodRules.env_files],

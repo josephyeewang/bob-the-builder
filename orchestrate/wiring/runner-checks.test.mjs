@@ -14,6 +14,8 @@ import { CHECKS } from '../modules/M4-workshop/launcher/launch.mjs';
 import { BASELINE_MS, WALK_DEPTH, baselineCommand, baselineFile, setupFilesProblem, workerChecks } from './runner-checks.mjs';
 import { LOCKED_MS, groupFile, groupRecordCommand } from './runner-locked.mjs';
 import { RECHECK, checkRunnerConfig, lockedOf, lockedWiring, realRunnerPorts, startDeps, workerCheckInputs } from './runner-main.mjs';
+import { rulesText } from '../setup/worker-rules.mjs';
+import { renderRoleSettings } from '../modules/M4-workshop/launcher/render-settings.mjs';
 
 const FIXED = '/Library/Application Support/ClaudeCode/managed-settings.json';
 // #419 r3 m1: near misses of the fixed file, each refused by this layer's own check.
@@ -103,7 +105,7 @@ function inputs(over = {}) {
   return { d, spare, x: { role: 'worker', profile: DESIGN_PROFILES.worker, kind: 'editing', sessionId: SID, card: 'C-1', cardDoc: { product: 'p1' }, product: 'p1',
     copy, outbox: join(d, 'outbox'), env: { PATH: '/usr/bin:/bin' }, head: 'b'.repeat(40), claudeBin: '/x/claude-code/2.1.300/claude',
     settings: { file: join(d, 'settings.json'), settings: {} }, ownUid: () => process.getuid(), mirror: '/m', pin: '2.1.300', hooksDir: '/h', rules: {},
-    snapshot: join(d, 'rules.json'), writeSnapshot: () => {}, machineWide: '/mw', busy: () => [], alert: () => {}, spawn: () => { throw new Error('no'); },
+    snapshot: join(d, 'rules.json'), sourceSha256: 'a'.repeat(64), machineWide: '/mw', busy: () => [], alert: () => {}, spawn: () => { throw new Error('no'); },
     home, testCommand: 'npm test', budget: null, bobFolder: null, bobManifest: null, throwaway, ...over } };
 }
 
@@ -167,7 +169,7 @@ test('L969, check 4: a port only with runLocked, an install command and both set
 test('#456 r1 m3: save-work and check 4 are both on or both off: one runLocked feeds them', async () => {
   const c = checkRunnerConfig({ installRoot: '/i', requestsDir: '/r', statusFile: '/o/status.json', orchestrateUid: 501, outboxRoot: '/ob', copiesRoot: '/c', home: '/home',
     path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/rec', recordUid: 502, claimMs: 1,
-    products: { p1: { repo: 'o/p', mirror: '/m', render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] }, hooksDir: '/h', snapshot: '/snap/s.json' }, product: { commands: { install: 'npm ci', test: 'npm test' } }, registryHosts: [] } } } });
+    products: { p1: { repo: 'o/p', mirror: '/m', render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] }, hooksDir: '/h', snapshot: '/snap/s.json', snapshotOwner: 0 }, product: { commands: { install: 'npm ci', test: 'npm test' } }, registryHosts: [] } } } });
   const wx = { role: 'worker', profile: DESIGN_PROFILES.worker, kind: 'editing', product: 'p1', sessionId: SID, copy: '/c/C-1', settings: { file: '/f', settings: {} }, renderPhase: () => ({ ok: true, settings: {} }), writeSettings: () => ({ ok: true }) };
   const session = { id: SID, product: 'p1', kind: 'editing', card: 'C-1', copy: '/c/C-1', outbox: '/ob/p1/worker/x', save_settings_sha: 'a'.repeat(64) };
   // Off: no runLocked. Save-work refuses (it runs only in the lock-down) and no worker has check 4.
@@ -362,11 +364,12 @@ const RULES = { production: { env_files: ['.env'], programs: ['psql'], hosts: ['
 test('step 6: the runner\'s config feeds the checks (pin, machine-wide file, the product\'s rules, paths and test command)', async () => {
   const c = checkRunnerConfig({ installRoot: '/i', requestsDir: '/r', statusFile: '/o/status.json', orchestrateUid: 501, outboxRoot: '/ob', copiesRoot: '/c', home: '/home',
     path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/rec', recordUid: 502, claimMs: 1, pin: '2.1.300', machineWide: '/Library/Application Support/ClaudeCode/managed-settings.json',
-    products: { p1: { repo: 'o/p', mirror: '/m', rules: RULES, render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] }, hooksDir: '/h', snapshot: '/snap/s.json', bobFolder: '/b' }, product: { commands: { test: 'npm test' } } } } } });
+    products: { p1: { repo: 'o/p', mirror: '/m', rules: RULES, render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] }, hooksDir: '/h', snapshot: '/snap/s.json', snapshotOwner: 0, bobFolder: '/b' }, product: { commands: { test: 'npm test' } } } } } });
   const i = workerCheckInputs(c, { product: 'p1', sessionId: SID });
   assert.deepEqual([i.mirror, i.pin, i.hooksDir, i.rules, i.snapshot, i.machineWide, i.home, i.testCommand, i.bobFolder, i.budget],
     ['/m', '2.1.300', '/h', RULES, '/snap/s.json', '/Library/Application Support/ClaudeCode/managed-settings.json', '/home', 'npm test', '/b', null]);
-  for (const k of ['busy', 'writeSnapshot', 'spawn', 'alert']) assert.equal(typeof i[k], 'function', k);
+  for (const k of ['busy', 'spawn', 'alert']) assert.equal(typeof i[k], 'function', k);
+  assert.equal('writeSnapshot' in i, false, 'L1226: the runner writes no snapshot');
   // The start port gets these checks and check 0's version.
   const sd = startDeps(c);
   assert.equal(sd.names.version, '2.1.300');
@@ -402,7 +405,7 @@ test('step 6: the runner\'s config feeds the checks (pin, machine-wide file, the
   for (const rules of [{}, { production: { env_files: [], programs: [] } }, { production: { env_files: [1], programs: [], hosts: [] } }]) {
     assert.throws(() => checkRunnerConfig({ ...base, products: { p1: { ...base.products.p1, rules } } }), /rules\.production must list env_files, programs and hosts/, JSON.stringify(rules));
   }
-  const withSnap = (p1, p2) => ({ ...base, products: { p1: { ...base.products.p1, render: { paths: { ...base.products.p1.render.paths, snapshot: p1 } } }, p2: { ...base.products.p1, render: { paths: { ...base.products.p1.render.paths, snapshot: p2 } } } } });
+  const withSnap = (p1, p2) => ({ ...base, products: { p1: { ...base.products.p1, render: { paths: { ...base.products.p1.render.paths, snapshot: p1, snapshotOwner: 0 } } }, p2: { ...base.products.p1, render: { paths: { ...base.products.p1.render.paths, snapshot: p2, snapshotOwner: 0 } } } } });
   assert.doesNotThrow(() => checkRunnerConfig(withSnap('/snap/s1.json', '/snap/s2.json')));
   // L916: the old placement (the runner's own folder, /o), the requests folder (/r), inside either, above either, or not simple.
   const notApart = /p1: render\.paths\.snapshot must be a file in a folder of its own, apart from the runner's requests folder \(\/r\) and its own folder \(\/o\)/;
@@ -426,17 +429,26 @@ test('#369 r1 m1, m2: just before claude starts, the copy, its setup files, the 
   const f = await copyOfMain();
   try {
     const own = join(f.root, 'runner'); mkdirSync(own);
-    const snapDir = join(f.root, 'snapshots'); mkdirSync(snapDir);   // L916: apart from the runner's folders
-    const c = checkRunnerConfig({ installRoot: '/i', requestsDir: '/r', statusFile: join(own, 'status.json'), orchestrateUid: 501, outboxRoot: '/ob', copiesRoot: '/c', home: '/home',
+    const snapDir = join(f.root, 'worker-rules'); mkdirSync(snapDir, { mode: 0o755 }); chmodSync(snapDir, 0o755); chmodSync(f.root, 0o755);   // L916, L1226: root's folder, apart from the runner's
+    const SHA = 'c'.repeat(64);
+    const c0 = checkRunnerConfig({ installRoot: '/i', requestsDir: '/r', statusFile: join(own, 'status.json'), orchestrateUid: 501, outboxRoot: '/ob', copiesRoot: '/c', home: '/home',
       path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/rec', recordUid: 502, claimMs: 1, products: { p1: { repo: REPO, mirror: f.mirror, rules: RULES,
-        render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] }, snapshot: join(snapDir, 'rules.json') } } } } });
+        render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] }, snapshot: join(snapDir, 'rules.json'), snapshotOwner: 0 } } } } });
+    const c = { ...c0, sourceSha256: SHA };
+    // Root's job's file (the test's uid stands in for root, and the settings name it as the hooks would: L1226).
+    writeFileSync(join(snapDir, 'rules.json'), rulesText('p1', RULES, SHA)); chmodSync(join(snapDir, 'rules.json'), 0o644);
+    const ME = process.getuid();
+    const hooks = renderRoleSettings({ productionFiles: [], proposalOutboxes: ['/w/proposals'], role: 'worker', profile: DESIGN_PROFILES.worker, rulesHosts: [], product: { commands: { test: 'npm test' } },
+      paths: { copy: f.copy, outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: join(snapDir, 'rules.json'), snapshotOwner: ME, node: '/w/node', notes: '/w/notes',
+        deny: { proposals: ['/w/proposals'], secrets: ['/w/secrets'], claudeHome: '/h/.claude', ssh: '/h/.ssh', gh: '/h/.config/gh', robotKeys: '/w/keys', record: '/w/record', otherCopies: [] } } });
+    assert.equal(hooks.ok, true, hooks.reason);
     chmodSync(f.copy, 0o700);
     const outbox = join(f.root, 'outbox'); mkdirSync(outbox, { mode: 0o700 });
-    const x = { product: 'p1', sessionId: SID, copy: f.copy, head: f.head, outbox, ownUid: () => process.getuid() };
+    const x = { product: 'p1', sessionId: SID, copy: f.copy, head: f.head, outbox, ownUid: () => process.getuid(), settings: { file: join(f.root, 's.json'), settings: hooks.settings } };
     // What holds the outbox is read with /usr/sbin/lsof, the Mac's (the runner's machine). Off a Mac, where that file is
     // not there, the test stands in for it; on a Mac the real one runs. The real check fails closed without it (below).
     const busy = process.platform === 'darwin' ? undefined : () => [];
-    const checksOf = (y) => workerChecks({ ...workerCheckInputs(c, y), ...(busy ? { busy } : {}) });
+    const checksOf = (y) => workerChecks({ ...workerCheckInputs(c, y), ...(busy ? { busy } : {}) }, { snapshotOwner: ME });
     const again = startDeps(c, { checksOf }).beforeStart;
     assert.equal(await again(x), null);
     // No way to tell what holds the outbox (lsof missing or failing): the start is refused, never passed on a guess.
@@ -445,9 +457,17 @@ test('#369 r1 m1, m2: just before claude starts, the copy, its setup files, the 
     // A check with no port refuses the start, never passes on a guess: here a product with no rules snapshot (check 8).
     const noSnap = { ...c, products: { p1: { ...c.products.p1, render: { paths: { ...c.products.p1.render.paths, snapshot: undefined } } } } };
     assert.equal(await startDeps(noSnap, { checksOf: (y) => workerChecks({ ...workerCheckInputs(noSnap, y), ...(busy ? { busy } : {}) }) }).beforeStart(x), 'check 8 has no port');
-    // Check 8: the snapshot is written afresh.
+    // Check 8 (L1226): root's snapshot is read, never written. Gone: refused, and the runner puts none back.
+    const snapText = readFileSync(join(snapDir, 'rules.json'));
     rmSync(join(snapDir, 'rules.json'));
-    assert.equal(await again(x), null); assert.equal(existsSync(join(snapDir, 'rules.json')), true, 'the snapshot is written again');
+    assert.match(await again(x), /^check 8: .*missing or unreadable/); assert.equal(existsSync(join(snapDir, 'rules.json')), false, 'the runner writes no snapshot');
+    // From another read of the config: refused.
+    writeFileSync(join(snapDir, 'rules.json'), rulesText('p1', RULES, 'd'.repeat(64))); chmodSync(join(snapDir, 'rules.json'), 0o644);
+    assert.match(await again(x), /^check 8: the rules snapshot was written from other bytes of worker-runner\.json/);
+    // The real owner check (root): this test's file is refused as not root's alone.
+    writeFileSync(join(snapDir, 'rules.json'), snapText); chmodSync(join(snapDir, 'rules.json'), 0o644);
+    assert.equal(await again(x), null);
+    assert.match(await startDeps(c, { checksOf: (y) => workerChecks({ ...workerCheckInputs(c, y), ...(busy ? { busy } : {}) }) }).beforeStart(x), /^check 8: the session's hooks do not take their rules snapshot only when it is root's alone \(they must name --snapshot-owner 0; they name \d+\)/);
     // Check 3: a hand-in left in the outbox.
     writeFileSync(join(outbox, 'bundle-C-1.json'), '{}');
     const o3 = await again(x);
@@ -484,7 +504,7 @@ test('L1001: the config\'s budget and Bob file list reach the checks, which then
   const c = checkRunnerConfig({ installRoot: '/i', requestsDir: '/r', statusFile: '/o/status.json', orchestrateUid: 501, outboxRoot: '/ob', copiesRoot: '/c', home: '/home',
     path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/rec', recordUid: 502, claimMs: 1, pin: '2.1.300', machineWide: '/Library/Application Support/ClaudeCode/managed-settings.json',
     budget: '/i/modules/M11-dispatcher/budget.mjs', bobManifest: '/i/bob-manifest.json', dispatcherRules: '/d/rules.json', reviewStatusFile: '/rv/status.json', reviewUid: 503,
-    products: { p1: { repo: 'o/p', mirror: '/m', rules: RULES, render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] }, hooksDir: '/h', snapshot: '/snap/s.json', bobFolder: '/b' } } } } });
+    products: { p1: { repo: 'o/p', mirror: '/m', rules: RULES, render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] }, hooksDir: '/h', snapshot: '/snap/s.json', snapshotOwner: 0, bobFolder: '/b' } } } } });
   const budget = { rules: {}, rec: {}, bandsNow: () => ({}), runningNow: () => [] }; const bobManifest = { 'a.md': 'f'.repeat(64) };
   const i = workerCheckInputs(c, { product: 'p1', sessionId: SID }, { budget, bobManifest });
   assert.equal(i.budget, budget); assert.equal(i.bobManifest, bobManifest);
@@ -501,7 +521,7 @@ test('#463 r3 m5: check 4, save-work and checks 12 and 13 all stay wired through
   const c = checkRunnerConfig({ installRoot: '/i', requestsDir: '/r', statusFile: '/o/status.json', orchestrateUid: 501, outboxRoot: '/ob', copiesRoot: '/c', home: '/home',
     path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/rec', recordUid: 502, claimMs: 1, pin: '2.1.300', machineWide: '/Library/Application Support/ClaudeCode/managed-settings.json',
     budget: '/i/modules/M11-dispatcher/budget.mjs', bobManifest: '/i/bob-manifest.json', dispatcherRules: '/d/rules.json', reviewStatusFile: '/rv/status.json', reviewUid: 503,
-    products: { p1: { repo: 'o/p', mirror: '/m', rules: RULES, render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] }, hooksDir: '/h', snapshot: '/snap/s.json', bobFolder: '/b' }, product: { commands: { install: 'npm ci', test: 'npm test' } }, registryHosts: [] } } } });
+    products: { p1: { repo: 'o/p', mirror: '/m', rules: RULES, render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] }, hooksDir: '/h', snapshot: '/snap/s.json', snapshotOwner: 0, bobFolder: '/b' }, product: { commands: { install: 'npm ci', test: 'npm test' } }, registryHosts: [] } } } });
   const budget = { rules: {}, rec: {}, bandsNow: () => ({}), runningNow: () => [] }; const bobManifest = { 'a.md': 'f'.repeat(64) };
   const seen = []; const jobs = [];
   const runLocked = async (j) => { seen.push(j.job); jobs.push(j); return j.job === 'install' ? { ok: true } : { ok: false, reason: 'stand-in' }; };
@@ -531,7 +551,7 @@ test('#463 r3 m5: check 4, save-work and checks 12 and 13 all stay wired through
 });
 
 test('#528 r4 c2: a worker product\'s rules.secrets.paths, when there, must be a list of text; no rules at all is allowed', () => {
-  const prod = (rules) => ({ repo: 'o/p', mirror: '/m', render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] }, hooksDir: '/h', snapshot: '/snap/s.json' }, product: { commands: { install: 'npm ci', test: 'npm test' } }, registryHosts: [] }, ...(rules === undefined ? {} : { rules }) });
+  const prod = (rules) => ({ repo: 'o/p', mirror: '/m', render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] }, hooksDir: '/h', snapshot: '/snap/s.json', snapshotOwner: 0 }, product: { commands: { install: 'npm ci', test: 'npm test' } }, registryHosts: [] }, ...(rules === undefined ? {} : { rules }) });
   const conf = (rules) => () => checkRunnerConfig({ installRoot: '/i', requestsDir: '/r', statusFile: '/o/status.json', orchestrateUid: 501, outboxRoot: '/ob', copiesRoot: '/c', home: '/home',
     path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/rec', recordUid: 502, claimMs: 1, products: { p1: prod(rules) } });
   const production = { env_files: [], programs: [], hosts: [] };
