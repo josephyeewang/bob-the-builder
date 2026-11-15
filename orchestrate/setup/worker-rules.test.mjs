@@ -2,8 +2,11 @@
 // root's folder, only while launchd shows the worker runner's job running as the builder; anything else writes nothing.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, linkSync, lstatSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { chmodSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { openJobJson, readSha256 } from '../shared/job-config.mjs';
+import { tempDir } from '../shared/test-tmp.mjs';
 import { fakeMac } from './fake-mac.test-helper.mjs';
 import { ROOT_CONFIG_PATH, workerRulesDir, workerRulesPath } from './layout.mjs';
 import { installPaths } from './install.mjs';
@@ -12,7 +15,7 @@ import { readSnapshot, snapshotHash } from '../modules/M4-workshop/hooks/snapsho
 import { OPTIONAL_JOBS, jobsFor, onlyJobs, plistTexts } from './daemons.mjs';
 import { WORKER_RUNNER_JOB } from './worker-runner-setup.mjs';
 import { WALL_CHECK_JOB } from './builder-wall.mjs';
-import { PS, WORKER_RULES_JOB, WORKER_RULES_SCRIPT, WRITE_EVERY_S, configSha256, main, planBeat, rulesText, runnerLive, workerRulesPlist, writeRules } from './worker-rules.mjs';
+import { PS, WORKER_RULES_JOB, WORKER_RULES_SCRIPT, WRITE_EVERY_S, main, planBeat, rulesText, runnerLive, workerRulesPlist, writeRules } from './worker-rules.mjs';
 
 const BASE = '/Library/orchestrate';
 const LABEL = 'com.example.orch';
@@ -28,9 +31,15 @@ const runnerConfig = (over = {}) => ({ installRoot: '/i', requestsDir: '/w/reque
   products: { alpha: { repo: 'o/alpha', mirror: '/w/mirror', rules: RULES, render: { paths: { deny: { record: '/w/record', ssh: '/w/home/.ssh', gh: '/w/home/.config/gh', claudeHome: '/w/home/.claude', robotKeys: '/w/keys', secrets: ['/w/secrets'] } } } } },
   ...over });
 
+/** The bytes a config stands for here (pretty-printed, as setup writes it) and their sha256: what readConfig gives. */
+const sha256 = (b) => createHash('sha256').update(b).digest('hex');
+const shaOf = (config) => sha256(`${JSON.stringify(config, null, 2)}\n`);
+const source = (config) => ({ config, sourceSha256: shaOf(config) });
+
 /**
  * The stand-in Mac with a builder, root's base, and the worker runner's job as launchd would show it. `runner`: undefined
- * (not loaded) or { state, pid, uid } (uid: the user ps gives its pid). `print`: launchctl's answer for it, replaced.
+ * (not loaded) or { state, pid, uid, stat? } (uid and stat: the user and state ps gives its pid; stat 'Ss' unless given).
+ * `print`: launchctl's answer for it, replaced.
  */
 function world({ runner = { state: 'running', pid: 4100, uid: BUILDER_UID }, builder = true, print = null, ps = null } = {}) {
   const mac = fakeMac({ users: builder ? { builder: { UniqueID: String(BUILDER_UID), PrimaryGroupID: '20', UserShell: '/bin/zsh', NFSHomeDirectory: '/Users/builder' } } : {} });
@@ -40,16 +49,16 @@ function world({ runner = { state: 'running', pid: 4100, uid: BUILDER_UID }, bui
   mac.run = (cmd, args) => {
     mac.calls.push([cmd, ...args].join(' '));
     if (cmd === '/bin/launchctl' && args[0] === 'print' && args[1] === `system/${RUNNER}` && print) return print;
-    if (cmd === PS && args[0] === '-o' && args[1] === 'uid=') {
+    if (cmd === PS && args[0] === '-o' && args[1] === 'uid=,stat=') {
       if (ps) return ps;
-      return runner && Number(args[3]) === runner.pid ? { status: 0, stdout: `  ${runner.uid}\n`, stderr: '' } : { status: 1, stdout: '', stderr: '' };
+      return runner && Number(args[3]) === runner.pid ? { status: 0, stdout: `  ${runner.uid} ${runner.stat ?? 'Ss'}\n`, stderr: '' } : { status: 1, stdout: '', stderr: '' };
     }
     return run(cmd, args);
   };
   const cfg = { base: BASE, owner: 'sam', products: ['alpha'], label: LABEL, workerRunner: { product: 'alpha' } };
   return { mac, cfg };
 }
-const beat = (w, config = runnerConfig(), at = new Date('2026-11-14T12:00:00Z')) => planBeat(w.mac, w.cfg, { readConfig: () => config, now: at });
+const beat = (w, config = runnerConfig(), at = new Date('2026-11-14T12:00:00Z')) => planBeat(w.mac, w.cfg, { readConfig: () => source(config), now: at });
 const written = (w) => readFileSync(w.mac.at(workerRulesPath(w.cfg, 'alpha')), 'utf8');
 const doBeat = (w, config) => { const p = beat(w, config); assert.deepEqual(p.problems, []); for (const x of p.writes) writeRules(w.mac, w.cfg, x.product, x.text); return p; };
 
@@ -80,15 +89,15 @@ test('L1226 clean control: with the runner running as the builder, one beat writ
   assert.equal(st.uid, w.mac.rootUid); assert.equal(st.mode & 0o7777, 0o644); assert.equal(st.nlink, 1);
   assert.equal(d.uid, w.mac.rootUid); assert.equal(d.mode & 0o7777, 0o755);
   const s = JSON.parse(written(w));
-  assert.deepEqual(Object.keys(s).sort(), ['config_sha256', 'hash', 'product', 'rules', 'written_at']);
+  assert.deepEqual(Object.keys(s).sort(), ['hash', 'product', 'rules', 'source_sha256', 'written_at']);
   assert.deepEqual(s.rules, RULES); assert.equal(s.hash, snapshotHash(RULES)); assert.equal(s.product, 'alpha');
-  assert.equal(s.config_sha256, configSha256(c)); assert.equal(s.written_at, '2026-11-14T12:00:00.000Z');
+  assert.equal(s.source_sha256, shaOf(c), 'the sha256 of the bytes read'); assert.equal(s.written_at, '2026-11-14T12:00:00.000Z');
   // The reader PR (ii) gives the hooks and the runner: root's alone, every folder above root's (the test's user stands in for root).
   const r = readSnapshot(w.mac.at(f), { ownerUid: w.mac.rootUid, now: Date.parse('2026-11-14T12:01:00Z') });
   assert.equal(r.ok, true, r.reason); assert.deepEqual(r.rules, RULES);
   // The pid was read from launchctl's answer for the exact label, and its user asked of ps by that pid.
   assert.ok(w.mac.calls.includes(`/bin/launchctl print system/${RUNNER}`), w.mac.calls.join('\n'));
-  assert.ok(w.mac.calls.includes(`${PS} -o uid= -p 4100`), w.mac.calls.join('\n'));
+  assert.ok(w.mac.calls.includes(`${PS} -o uid=,stat= -p 4100`), w.mac.calls.join('\n'), 'its user and state in one ps call');
   // A second beat rewrites it (a fresh time, the same one name).
   const p2 = beat(w, c, new Date('2026-11-14T12:01:00Z')); writeRules(w.mac, w.cfg, 'alpha', p2.writes[0].text);
   assert.equal(JSON.parse(written(w)).written_at, '2026-11-14T12:01:00.000Z');
@@ -110,11 +119,39 @@ test('L1227 plant 15: the runner not loaded, not running, or running as anyone b
     assert.match(p.problems.join('\n'), why);
     assert.match(p.problems.join('\n'), /no snapshot was written .*go stale within 5 minutes/);
   }
+  // Only not loaded and not running are the runner being off (main exits 0 for them, L1238 m1); every other reason is not.
+  assert.equal(beat(world({ runner: null })).off, true);
+  assert.equal(beat(world({ runner: { state: 'waiting', pid: 0, uid: BUILDER_UID } })).off, true);
+  for (const opts of [{ runner: { state: 'running', pid: 4100, uid: 0 } }, { ps: { status: 1, stdout: '', stderr: '' } }, { builder: false }]) assert.equal(beat(world(opts)).off, undefined, JSON.stringify(opts));
   // Once the runner stops, nothing is written again: the last one is left to go stale (today's behaviour, L1227).
   const w = world(); doBeat(w); const before = written(w);
   w.mac.loaded.delete(RUNNER);
   assert.deepEqual(beat(w, runnerConfig(), new Date('2026-11-14T12:01:00Z')).writes, []);
   assert.equal(written(w), before);
+});
+
+test('L1238 M1: a runner the builder stopped (kill -STOP: T), one traced (X), a zombie (Z), or in a state ps names but this does not know writes nothing, though launchd says running; asleep, idle or runnable writes', () => {
+  const at = (stat) => world({ runner: { state: 'running', pid: 4100, uid: BUILDER_UID, stat } });
+  for (const [stat, why] of [['T', /pid 4100 is stopped \(ps state T\)/], ['T+', /is stopped/], ['Ts', /is stopped/], ['Z', /pid 4100 is a zombie \(ps state Z\)/], ['Zs', /is a zombie/], ['SX', /is traced \(ps state SX\)/], ['Q', /is in a state that is not a live one/]]) {
+    const w = at(stat); const p = beat(w);
+    assert.deepEqual(p.writes, [], stat); assert.match(p.problems.join('\n'), why, stat);
+    assert.match(p.problems.join('\n'), /no snapshot was written .*go stale within 5 minutes/, stat);
+    assert.equal(p.off, undefined, `${stat}: not the runner being off, so main exits 1`);
+    assert.equal(runnerLive(w.mac, w.cfg, BUILDER_UID).live, false, stat);
+  }
+  // The control: asleep, runnable, idle, uninterruptible, with ps's usual flags.
+  for (const stat of ['S', 'Ss', 'S+', 'R', 'R+', 'I', 'Is', 'U', 'S<s', 'SNs']) {
+    const w = at(stat); assert.deepEqual(beat(w).problems, [], stat);
+    assert.deepEqual(runnerLive(w.mac, w.cfg, BUILDER_UID), { live: true, pid: 4100 }, stat);
+  }
+  // Stopped, then let go again (kill -CONT): written again on the next beat.
+  const runner = { state: 'running', pid: 4100, uid: BUILDER_UID, stat: 'T' }; const w = world({ runner });
+  assert.deepEqual(beat(w).writes, []);
+  runner.stat = 'S'; assert.equal(beat(w).writes.length, 1);
+  // ps's answer that can't be read: no state, a state with other words, an empty answer.
+  for (const stdout of [`  ${BUILDER_UID}\n`, `  ${BUILDER_UID} S x\n`, `\n`, `  ${BUILDER_UID} S1\n`]) {
+    assert.match(beat(world({ ps: { status: 0, stdout, stderr: '' } })).problems.join('\n'), /the user and state .* which can't be read/, JSON.stringify(stdout));
+  }
 });
 
 test('L1227: launchctl\'s answer that can\'t be read writes nothing (fail closed): no state line, two, a pid that is not a number, two pids, a failed print', () => {
@@ -142,10 +179,12 @@ test('L1227: launchctl\'s answer that can\'t be read writes nothing (fail closed
 test('L1226 plant 12: a config the job can\'t read, one the runner refuses, or one naming a product setup does not list writes nothing for any product', () => {
   const cases = [
     [() => { throw new Error('job config /x: can be written by group or others'); }, /can be written by group or others/],
-    [() => runnerConfig({ claimMs: 0 }), /claimMs/],
-    [() => runnerConfig({ products: {} }), /at least one product/],
-    [() => runnerConfig({ products: { ...runnerConfig().products, beta: { ...runnerConfig().products.alpha } } }), /"beta", which the setup config does not list/],
-    [() => runnerConfig({ products: { alpha: { ...runnerConfig().products.alpha, rules: undefined } } }), /no rules for alpha|can't be used/],
+    [() => source(runnerConfig({ claimMs: 0 })), /claimMs/],
+    [() => source(runnerConfig({ products: {} })), /at least one product/],
+    [() => source(runnerConfig({ products: { ...runnerConfig().products, beta: { ...runnerConfig().products.alpha } } })), /"beta", which the setup config does not list/],
+    [() => source(runnerConfig({ products: { alpha: { ...runnerConfig().products.alpha, rules: undefined } } })), /no rules for alpha|can't be used/],
+    [() => ({ config: runnerConfig(), sourceSha256: null }), /the sha256 of the bytes read could not be taken/],
+    [() => ({ config: runnerConfig(), sourceSha256: 'X'.repeat(64) }), /the sha256 of the bytes read could not be taken/],
   ];
   for (const [readConfig, why] of cases) {
     const w = world(); const p = planBeat(w.mac, w.cfg, { readConfig });
@@ -156,14 +195,33 @@ test('L1226 plant 12: a config the job can\'t read, one the runner refuses, or o
   assert.deepEqual(p.writes, []); assert.match(p.problems.join('\n'), /worker-runner\.json can't be used/);
 });
 
-test('L1226: the snapshot follows the config: other rules give another hash, and the fingerprint names the very config read', () => {
+test('L1226: the snapshot follows the config: other rules give another hash, and source_sha256 names the very bytes read', () => {
   const w = world();
   doBeat(w); const a = JSON.parse(written(w));
   doBeat(w, runnerConfig({ products: { alpha: { ...runnerConfig().products.alpha, rules: OTHER_RULES } } })); const b = JSON.parse(written(w));
-  assert.notEqual(a.hash, b.hash); assert.notEqual(a.config_sha256, b.config_sha256); assert.deepEqual(b.rules, OTHER_RULES);
+  assert.notEqual(a.hash, b.hash); assert.notEqual(a.source_sha256, b.source_sha256); assert.deepEqual(b.rules, OTHER_RULES);
   doBeat(w, runnerConfig({ claimMs: 600_001 })); const c = JSON.parse(written(w));
-  assert.equal(c.hash, a.hash, 'the same rules'); assert.notEqual(c.config_sha256, a.config_sha256, 'another config');
-  assert.equal(rulesText('alpha', RULES, 'x'.repeat(64), new Date(0)), `${JSON.stringify({ written_at: new Date(0).toISOString(), hash: snapshotHash(RULES), rules: RULES, product: 'alpha', config_sha256: 'x'.repeat(64) })}\n`);
+  assert.equal(c.hash, a.hash, 'the same rules'); assert.notEqual(c.source_sha256, a.source_sha256, 'another config');
+  assert.equal(rulesText('alpha', RULES, 'x'.repeat(64), new Date(0)), `${JSON.stringify({ written_at: new Date(0).toISOString(), hash: snapshotHash(RULES), rules: RULES, product: 'alpha', source_sha256: 'x'.repeat(64) })}\n`);
+});
+
+test('L1238 m3: the sha256 is of the file\'s bytes, from the one read the config was parsed from, not of the parse', () => {
+  const d = realpathSync(tempDir('orch-wr-')); const f = join(d, 'worker-runner.json');
+  // Two files that parse the same but differ in bytes (spacing, key order) give two sha256s, each its own file's.
+  const one = `{ "a": 1, "b": [2, 3] }\n`; const two = `{"b":[2,3],"a":1}`;
+  writeFileSync(f, one); chmodSync(f, 0o644);
+  const fail = (why) => { throw new Error(why); };
+  const r1 = openJobJson(f, fail);
+  assert.equal(r1.sha256, sha256(Buffer.from(one))); assert.equal(readSha256(r1.value), r1.sha256, 'carried on the config itself');
+  assert.notEqual(r1.sha256, sha256(JSON.stringify(r1.value)), 'not the sha256 of JSON.stringify of the parse');
+  writeFileSync(f, two);
+  const r2 = openJobJson(f, fail);
+  assert.deepEqual(r2.value, r1.value); assert.equal(r2.sha256, sha256(Buffer.from(two))); assert.notEqual(r2.sha256, r1.sha256);
+  // The bytes hashed are the descriptor's: one handle opens, checks, reads and hashes (a file read twice could differ).
+  let opened = 0; const open = (...a) => { opened += 1; return openSync(...a); };
+  assert.equal(openJobJson(f, fail, { open }).sha256, r2.sha256); assert.equal(opened, 1);
+  assert.equal(readSha256({ a: 1 }), null, 'a config not read by descriptor has none, and the job refuses it');
+  assert.equal(readSha256(undefined), null);
 });
 
 test('L1226 plant 5: a hard link the builder made to the snapshot (two names, which every reader refuses) is removed with a refusal, and the next beat writes it fresh', () => {
@@ -207,21 +265,42 @@ test('L1226 plant 3: a base whose folders are not root\'s alone is refused, and 
   assert.throws(() => w.mac.lstat(workerRulesDir(w.cfg)), /ENOENT/);
 });
 
-test('L1226: main refuses without root, with no workerRunner entry, and an unknown command; --dry-run says what it would write and writes nothing', () => {
+test('L1226: main refuses without root, with no workerRunner entry, and an unknown command; --dry-run says what it would write and writes nothing; the runner off exits 0, anything else 1 (L1238 m1)', () => {
   const run = (w, argv, plan) => { const out = []; const err = []; const code = main(argv, { io: w.mac, out: (x) => out.push(x), err: (x) => err.push(x), plan }); return { code, out: out.join('\n'), err: err.join('\n') }; };
   const withConfig = (w, over = {}) => { writeFileSync(w.mac.at(ROOT_CONFIG_PATH), JSON.stringify({ base: BASE, owner: 'sam', products: ['alpha'], address: 'https://example.invalid/o/r.git', label: LABEL, runnerConfig: '/x/review.json', workerRunner: { product: 'alpha' }, ...over })); return w; };
-  const plan = { readConfig: () => runnerConfig(), now: new Date('2026-11-14T12:00:00Z') };
+  let reads = 0;
+  const plan = { readConfig: () => { reads += 1; return source(runnerConfig()); }, now: new Date('2026-11-14T12:00:00Z') };
   assert.equal(run(world(), ['nope']).code, 2);
   assert.equal(run(world(), ['write', '--force']).code, 2);
-  const notRoot = world(); notRoot.mac.as = 501;
-  assert.match(run(notRoot, ['write']).err, /refused: .*root/);
+  // Not root: refused for that reason, before any config is read (L1238 m4), even with root's setup config in place.
+  const notRoot = withConfig(world()); notRoot.mac.as = 501; let setupReads = 0;
+  const readSetup = notRoot.mac.readConfig; notRoot.mac.readConfig = (...a) => { setupReads += 1; return readSetup(...a); };
+  const nr = run(notRoot, ['write'], plan);
+  assert.equal(nr.code, 2); assert.match(nr.err, /^refused: .*must run as root/);
+  assert.equal(setupReads, 0, 'root\'s setup config was not read'); assert.equal(reads, 0, 'the runner\'s config was not read');
+  // No workerRunner entry (c2): refused, and the runner's config is not read.
+  const off = withConfig(world(), { workerRunner: undefined }); const ro = run(off, ['write'], plan);
+  assert.equal(ro.code, 2); assert.match(ro.err, /no workerRunner entry/); assert.equal(reads, 0);
   const w = withConfig(world());
   const r0 = run(w, ['write', '--dry-run'], plan);
   assert.equal(r0.code, 0, r0.err); assert.match(r0.out, /would write \/Library\/orchestrate\/worker-rules\/alpha\.json/);
   assert.throws(() => w.mac.lstat(workerRulesDir(w.cfg)), /ENOENT/);
   const r1 = run(w, ['write'], plan);
   assert.equal(r1.code, 0, r1.err); assert.equal(JSON.parse(written(w)).product, 'alpha');
+  // The runner off (not loaded, or loaded and not running): nothing written, the reason logged, exit 0.
   w.mac.loaded.delete(RUNNER);
   const r2 = run(w, ['write'], plan);
-  assert.equal(r2.code, 1); assert.match(r2.err, /is not loaded, so no snapshot was written/);
+  assert.equal(r2.code, 0); assert.match(r2.err, /is not loaded, so no snapshot was written/);
+  w.mac.loaded.set(RUNNER, { state: 'waiting', pid: 0 });
+  const r3 = run(w, ['write'], plan);
+  assert.equal(r3.code, 0); assert.match(r3.err, /is waiting, not running, so no snapshot was written/);
+  // Anything else that writes nothing exits 1: stopped, a zombie, the wrong user, a config that can't be used, a failed write.
+  const exit1 = (opts, why, p = plan) => { const x = withConfig(world(opts)); const r = run(x, ['write'], p); assert.equal(r.code, 1, `${why}: ${r.err}`); assert.match(r.err, why); };
+  exit1({ runner: { state: 'running', pid: 4100, uid: BUILDER_UID, stat: 'T' } }, /is stopped/);
+  exit1({ runner: { state: 'running', pid: 4100, uid: BUILDER_UID, stat: 'Z' } }, /is a zombie/);
+  exit1({ runner: { state: 'running', pid: 4100, uid: 0 } }, /runs as uid 0/);
+  exit1({ print: { status: 0, stdout: `system/${RUNNER} = {\n\tstate = running\n}\n`, stderr: '' } }, /gives 0 pid lines/);
+  exit1({}, /claimMs/, { ...plan, readConfig: () => source(runnerConfig({ claimMs: 0 })) });
+  const bad = withConfig(world()); chmodSync(bad.mac.at(BASE), 0o777);
+  const rb = run(bad, ['write'], plan); assert.equal(rb.code, 1); assert.match(rb.err, /alpha's rules snapshot was not written: .*is not safe for root to write in/);
 });

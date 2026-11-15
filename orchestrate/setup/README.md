@@ -528,11 +528,14 @@ file, so nothing the `builder` user runs (a session, a product's own install or 
 sessions' safety checks read.
 
 **It writes only while the worker runner is running.** Each run asks launchd for the worker runner's job by its exact
-label, takes the pid from that answer, and asks `ps` whose that pid is. It writes only when the job is running as
-`builder`. Otherwise, or when launchd's answer can't be read, it writes nothing and says why in
-`worker-rules.err.log`. Worker sessions outlive a runner restart by design, so a stopped runner shows as its sessions'
-snapshots going stale: after 5 minutes their safety checks refuse every call, as they did when the runner wrote the
-snapshots itself.
+label, takes the pid from that answer, and asks `ps` whose that pid is and what state it is in. It writes only when the
+job is running as `builder` and the process is not stopped (`kill -STOP`), traced or a zombie (L1238). Otherwise, or
+when launchd's or ps's answer can't be read, it writes nothing and says why in `worker-rules.err.log`. Worker sessions
+outlive a runner restart by design, so a stopped runner shows as its sessions' snapshots going stale: after 5 minutes
+their safety checks refuse every call, as they did when the runner wrote the snapshots itself. A run that writes nothing
+only because the runner is not loaded or not running ends with exit 0 (the runner is just off); any other reason ends
+with exit 1, which `daemons check` shows. **Known limit:** a runner that hangs without stopping (its process still
+asleep or runnable) is not caught; it is on the cutover checklist.
 
 **What reads it.** Nothing yet. The worker runner's check 8 and the sessions' safety checks move to it in the next
 change (L1226 PR (ii)); until then the job only writes.
@@ -542,3 +545,8 @@ change (L1226 PR (ii)); until then the job only writes.
 | `/usr/local/bin/node <base>/install/orchestrate/setup/worker-rules.mjs write --dry-run` | says which files one run would write, or why it would write none; writes nothing | no |
 | `sudo /usr/local/bin/node <base>/install/orchestrate/setup/worker-rules.mjs write` | one run, as the job does it | yes |
 | `sudo /usr/local/bin/node setup.mjs daemons unload --only worker-rules` | takes the job out; the snapshots then go stale within 5 minutes | yes |
+
+**Check afterwards** (L1238), once the worker runner is running:
+1. `sudo /usr/local/bin/node setup.mjs daemons check --only worker-rules` PASSes: the job file is exact, it is loaded, and its last run ended with exit 0.
+2. `stat -f '%Su:%Sg %Lp' <base>/worker-rules/<product>.json` prints `root:wheel 644`.
+3. `cat <base>/worker-rules/<product>.json` shows a `written_at` within the last minute or two (the job writes every minute); run it again a minute later and it has moved on.
