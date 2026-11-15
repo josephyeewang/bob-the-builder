@@ -49,7 +49,13 @@ export function parseArgs(argv, { machineWide = false } = {}) {
     const k = argv[i];
     const v = argv[i + 1];
     if (!k?.startsWith('--') || v === undefined || v.startsWith('--')) throw new Error(`bad argument ${k}`);
-    out[k.slice(2)] = v;
+    // #610 r1 m4: a name is lower case with dashes, so none can land on a name parseArgs sets itself (snapshotOwner,
+    // notKinds) or on an object's own (__proto__). m1: and each is given once, so a later one can't quietly replace an
+    // earlier one (--snapshot-owner 0 then 501 would read as 501).
+    const name = k.slice(2);
+    if (!/^[a-z][a-z0-9-]*$/.test(name)) throw new Error(`bad argument ${k}`);
+    if (Object.hasOwn(out, name)) throw new Error(`--${name} given twice`);
+    out[name] = v;
   }
   for (const need of ['role', 'outbox', 'snapshot']) if (!out[need]) throw new Error(`missing --${need}`);
   if (!isAbsolute(out.outbox) || (out.copy && !isAbsolute(out.copy)) || (out.notes && !isAbsolute(out.notes))) throw new Error('paths must be absolute');

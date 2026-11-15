@@ -4,12 +4,12 @@
 // worker runner always gives 0). A hook given no --snapshot-owner reads its snapshot as before (the review roles').
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, mkdirSync, chmodSync, linkSync, symlinkSync, realpathSync } from 'node:fs';
+import { writeFileSync, mkdirSync, chmodSync, linkSync, symlinkSync, realpathSync, lstatSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from './lib.mjs';
-import { makeSnapshot, readHookSnapshot, readSnapshot, SNAPSHOT_MAX_AGE_MS, WORKER_RULES_COPY } from './snapshot.mjs';
+import { makeSnapshot, readHookSnapshot, readSnapshot, rootChainProblem, SNAPSHOT_MAX_AGE_MS, WORKER_RULES_COPY } from './snapshot.mjs';
 import { decide as guard } from './production-write-guard.mjs';
 import { decide as secrets } from './secret-file-block.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
@@ -100,4 +100,50 @@ test('L1226: the real hook scripts, run with --snapshot-owner 0 as a worker sess
     else { assert.equal(r.status, 2, `${h}: ${r.stderr}`); assert.match(r.stderr, /worker sessions' rules snapshot .*is not root's alone/, h); }
     assert.equal(run(String(ME)).status, 0, `${h}: control, its owner named`);
   }
+});
+
+// #610 r1 M1: the file's own owner check, alone. A wrong-owner plant in a test's own folders is refused by the folder check
+// first, so here the file is a real one of root's (one name, 0644) in folders root owns all the way up, read with this
+// test's uid as the owner named: only the file's owner is wrong. Picked when the test runs; skipped if none qualifies.
+const ROOT_FILE = (() => {
+  if (ME === 0) return null;
+  for (const p of ['/private/etc/shells', '/private/etc/protocols', '/private/etc/services', '/private/etc/networks', '/private/etc/rpc']) {
+    try {
+      const st = lstatSync(p);
+      if (st.isFile() && st.uid === 0 && st.nlink === 1 && !(st.mode & 0o022) && rootChainProblem(p, 0) === null) return p;
+    } catch { /* not on this Mac */ }
+  }
+  return null;
+})();
+test('#610 r1 M1: a file root owns, in folders root owns, read with another owner named, is refused by the FILE check (worker and machine-wide)', { skip: !ROOT_FILE && 'no root-owned, one-name, 0644 file in a root-only chain here (or running as root)' }, () => {
+  const fileMsg = (what) => new RegExp(`^${what.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} is not root's alone \\(it must be owned by uid ${ME}, standing in for root,`);
+  assert.equal(rootChainProblem(ROOT_FILE, ME), null, 'the folders pass, so only the file check can refuse');
+  const w = readHookSnapshot(args(ROOT_FILE, ME));
+  assert.equal(w.ok, false); assert.match(w.reason, fileMsg(WORKER_RULES_COPY)); assert.doesNotMatch(w.reason, /the folder/);
+  const m = readSnapshot(ROOT_FILE, { ownerUid: ME });
+  assert.equal(m.ok, false); assert.match(m.reason, fileMsg('the machine-wide rules copy')); assert.doesNotMatch(m.reason, /the folder/);
+  // Control: named as root's, the same file passes both checks and is refused only as not a snapshot.
+  assert.match(readSnapshot(ROOT_FILE, { ownerUid: 0 }).reason, /not JSON/);
+});
+
+test('#610 r1 m3: the path as written is checked too: a link reached through a folder others can write is refused, though its real folder is root\'s alone', () => {
+  const { d, f } = snapAt();
+  const open = join(d, 'open'); mkdirSync(open); chmodSync(open, 0o775);
+  const via = join(open, 'to'); symlinkSync(d, via);
+  const p = join(via, 'alpha.json');
+  assert.equal(realpathSync(dirname(p)), d, 'its real folder is the good one');
+  refused(p, ME, /the folder .*open above the worker sessions' rules snapshot .*is not root's alone/, 'a link inside a group-writable folder');
+  chmodSync(open, 0o755);
+  assert.equal(readHookSnapshot(args(p, ME)).ok, true, 'control: the same link, its folder root\'s alone again');
+  if (ME !== 0) assert.match(rootChainProblem(p, ME + 1), /not root's/, 'a link owned by neither root nor the owner named');
+  for (const bad of ['alpha.json', `${d}//alpha.json`, `${d}/./alpha.json`, `${d}/x/../alpha.json`]) assert.match(rootChainProblem(bad, ME), /not a full path in its simplest form/, bad);
+  assert.equal(readHookSnapshot(args(f, ME)).ok, true, 'control: the plain path');
+});
+
+test('#610 r1 m1 and m4: a key given twice, or one not lower case with dashes, is refused', () => {
+  const base = ['--role', 'worker', '--outbox', '/o', '--snapshot', '/s/alpha.json'];
+  assert.throws(() => parseArgs([...base, '--snapshot-owner', '0', '--snapshot-owner', '501']), /--snapshot-owner given twice/);
+  assert.throws(() => parseArgs([...base, '--snapshot', '/s/other.json']), /--snapshot given twice/);
+  for (const k of ['--snapshotOwner', '--notKinds', '--__proto__', '--Role', '---x']) assert.throws(() => parseArgs([...base, k, '501']), /bad argument/, k);
+  assert.equal(parseArgs([...base, '--snapshot-owner', '0']).snapshotOwner, 0, 'control: once');
 });

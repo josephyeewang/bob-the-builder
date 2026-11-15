@@ -11,7 +11,7 @@
 // it fresh with `keepSnapshotFresh`, never by raising the limit.
 
 import { readFileSync, writeFileSync, renameSync, unlinkSync, openSync, fstatSync, closeSync, lstatSync, realpathSync, constants as FS } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, isAbsolute, normalize } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 
 export const SNAPSHOT_MAX_AGE_MS = 5 * 60 * 1000;
@@ -67,7 +67,7 @@ export function readSnapshot(path, opts = {}) {
     let st; try { st = fstatSync(fd); } catch { return refuse('rules snapshot is missing or unreadable'); }
     if (!st.isFile()) return refuse('rules snapshot is not a plain file');
     if (st.nlink !== 1) return refuse(`rules snapshot has ${st.nlink} names (a hard link); it must have one`);
-    if (ownerUid !== undefined && (st.uid !== ownerUid || (st.mode & 0o022))) return refuse(`${what} is not root's alone (it must be owned by root and written by no one else)`);
+    if (ownerUid !== undefined && (st.uid !== ownerUid || (st.mode & 0o022))) return refuse(`${what} is not root's alone (it must be owned by ${ownerUid === 0 ? 'root' : `uid ${ownerUid}, standing in for root,`} and written by no one else)`);
     let text; try { text = readFileSync(fd, 'utf8'); } catch { return refuse('rules snapshot is missing or unreadable'); }
     return parseSnapshot(text, parseOpts);
   } finally { try { closeSync(fd); } catch { /* closed */ } }
@@ -83,12 +83,24 @@ export const readHookSnapshot = (args) => readSnapshot(args.snapshot, args.snaps
  * Why a folder above `path` could let someone other than root swap the file, or null (L1031): each one, from the file's
  * real folder up to /, must be a folder owned by root (or `ownerUid`, which a test stands in for root) and written by no
  * one else. The real folder is used, so a linked folder on the way (/var on a Mac) is judged where it leads.
+ * #610 r1 m3: the path as written is walked too, since a link on it is where the real one is decided: each folder on it
+ * is held to the same test, and a link on it must be root's (or `ownerUid`'s), in a folder this walk has also held to it
+ * (root's /var link passes). Otherwise whoever could write a folder the path goes through could point a link elsewhere.
  */
 export function rootChainProblem(path, ownerUid = 0, what = MACHINE_WIDE_COPY) {
+  if (typeof path !== 'string' || !isAbsolute(path) || normalize(path) !== path) return `the path of ${what} is not a full path in its simplest form`;
+  const owner = ownerUid === 0 ? 'root' : `root or uid ${ownerUid}, standing in for root,`;
+  const bad = (st) => (st.uid !== 0 && st.uid !== ownerUid) || (st.mode & 0o022);
+  for (let dir = dirname(path); ; dir = dirname(dir)) {
+    let st; try { st = lstatSync(dir); } catch { return 'rules snapshot is missing or unreadable'; }
+    if (st.isSymbolicLink()) { if (st.uid !== 0 && st.uid !== ownerUid) return `the link ${dir} on the way to ${what} is not root's (it must be owned by ${owner.replace(/,$/, '')})`; }
+    else if (!st.isDirectory() || bad(st)) return `the folder ${dir} above ${what} is not root's alone (it must be owned by ${owner} and written by no one else)`;
+    if (dirname(dir) === dir) break;
+  }
   let dir; try { dir = realpathSync.native(dirname(path)); } catch { return 'rules snapshot is missing or unreadable'; }
   for (;;) {
     let st; try { st = lstatSync(dir); } catch { return 'rules snapshot is missing or unreadable'; }
-    if (!st.isDirectory() || (st.uid !== 0 && st.uid !== ownerUid) || (st.mode & 0o022)) return `the folder ${dir} above ${what} is not root's alone (it must be owned by root and written by no one else)`;
+    if (!st.isDirectory() || bad(st)) return `the folder ${dir} above ${what} is not root's alone (it must be owned by ${owner} and written by no one else)`;
     const up = dirname(dir);
     if (up === dir) return null;
     dir = up;
