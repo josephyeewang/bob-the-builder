@@ -112,13 +112,14 @@ test('worker-config: the config is built from the layout, the Mac, the copy\'s r
     outboxRoot: `${BASE}/outboxes`, copiesRoot: `${BASE}/worker-copies`, home: H, path: '/usr/bin:/bin:/usr/sbin:/sbin', claudeBin: RC.claudeBin,
     recordRoot: `${BASE}/products/alpha/store`, recordUid: 401, claimMs: WORKER_CLAIM_MS,
     products: { alpha: {
-      repo: 'example-org/alpha-repo', mirror: `${BASE}/mirror`, rules: RULES,
+      // L1261: the builder sign-in's folder joins the rules' secrets, so the secret-file hook refuses it too.
+      repo: 'example-org/alpha-repo', mirror: `${BASE}/mirror`, rules: { ...RULES, secrets: { paths: [...RULES.secrets.paths, `${BASE}/builder-signin`] } },
       render: {
         paths: {
           // Slip-catchers (L1112 (3)): the rules' full plain paths (a relative or ~ one is left to the hooks), the private folder,
           // the Dispatcher's rules-state and approvals folders, and the owner's home.
           deny: { record: `${BASE}/products/alpha/store`, ssh: `${H}/.ssh`, gh: `${H}/.config/gh`, claudeHome: `${H}/.claude`, robotKeys: `${BASE}/keys`,
-            secrets: ['/srv/app/keys', '/srv/app/prod.cfg', `${BASE}/private`, DISP.rulesStateDir, DISP.approvalsStateDir, '/Users/sam'] },
+            secrets: ['/srv/app/keys', '/srv/app/prod.cfg', `${BASE}/private`, DISP.rulesStateDir, DISP.approvalsStateDir, '/Users/sam', `${BASE}/builder-signin`] },
           hooksDir: RC.hooksDir, node: `${R}/${NODE}`, bobFolder: RC.bobFolder, snapshot: `${BASE}/worker-rules/alpha.json`, snapshotOwner: 0,
         },
         // From the rules, never the entry (L1112 (2), I7); every product's proposals folder.
@@ -130,6 +131,8 @@ test('worker-config: the config is built from the layout, the Mac, the copy\'s r
     budget: RC.budget, dispatcherRules: RC.dispatcherRules, reviewStatusFile: `${BASE}/review/status.json`, reviewUid: 402,
     // L1193: root's wall job's status, at layout's place (builder-wall.mjs reads it as STATUS_FILE).
     wallStatus: `${BASE}/builder-wall-status/status.json`,
+    // L1261: the builder sessions' sign-in file, read fresh by the runner before each start.
+    signinFile: `${BASE}/builder-signin/claude-signin`,
   });
   assert.equal(workerRunnerConfigText(config), `${JSON.stringify(config, null, 1)}\n`);
 });

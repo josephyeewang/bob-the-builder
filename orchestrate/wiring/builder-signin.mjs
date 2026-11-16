@@ -19,8 +19,8 @@
 //                                 value is never opened.
 //
 // CAPABILITY NOTE (Principle 9, expires): the prefix is read in Claude Code's own code, `isAnthropicOAuthToken = (e) =>
-// e.startsWith("sk-ant-oat")`, and its CLAUDE_CODE_OAUTH_TOKEN read (checked: claude-code 2.1.325, NOT the pin 2.1.316;
-// re-check at the next pin change). The token lasting about a year is per Anthropic's docs at the time of writing; re-check.
+// e.startsWith("sk-ant-oat")`, and its CLAUDE_CODE_OAUTH_TOKEN read (checked: claude-code 2.1.325, open
+// until 2027-01-15 (L1261)): NOT the pin 2.1.316; the live proof (setup/live-proofs/builder-signin.mjs) on the pin closes it. The token lasting about a year is per Anthropic's docs at the time of writing; re-check.
 
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from 'node:fs';
 import { dirname } from 'node:path';

@@ -25,14 +25,14 @@ export function planBuilderSignin(io, cfg) {
   const b = readUser(io, BUILDER);
   if (!b.exists) return { ops: [], problems: [`the ${BUILDER} user does not exist yet (run users-folders first)`] };
   const f = builderSigninPath(cfg); const dir = dirname(f);
-  let d; try { d = io.lstat(dir); } catch { return { ops: [], problems: [`${dir} is not there (run users-folders first)`] }; }
+  let d; try { d = io.lstat(dir); } catch { return { ops: [], problems: [`${dir} is missing: users-folders makes it, so run that first`] }; }
   if (d.isSymbolicLink() || !d.isDirectory() || d.uid !== b.uid || modeOf(d) !== 0o700) return { ops: [], problems: [`${dir} is not ${BUILDER}'s own 0700 folder (run users-folders first)`] };
-  try { const st = io.lstat(f); if (st.isSymbolicLink() || !st.isFile()) return { ops: [], problems: [`${f} exists but is not a plain file; nothing was changed`] }; } catch (e) { if (e?.code !== 'ENOENT') return { ops: [], problems: [`${f} could not be looked at (${e?.code ?? e})`] }; }
+  try { const st = io.lstat(f); if (st.isSymbolicLink() || !st.isFile()) return { ops: [], problems: [`${f} is there but is not a plain file (a link or a folder); nothing was saved`] }; } catch (e) { if (e?.code !== 'ENOENT') return { ops: [], problems: [`${f} could not be looked at (${e?.code ?? e})`] }; }
   return { ops: [op(`read the sign-in token from the terminal (typed with the echo off, never shown), then save it as ${f} (${BUILDER}, 0600); the same token again changes nothing`, () => {
     let t = registerSecret(io.readSecret(SIGNIN_PROMPT).trim());
     const bad = signinShapeProblem(t); if (bad) { t = ''; throw new Error(`that does not look like a Claude sign-in token: ${bad}; nothing was saved`); }
     let st = null; try { st = io.lstat(f); } catch { /* not there */ }
-    if (st && st.isDirectory() && !st.isSymbolicLink()) { t = ''; throw new Error(`${f} is now a folder; nothing was saved`); }
+    if (st && st.isDirectory() && !st.isSymbolicLink()) { t = ''; throw new Error(`${f} became a folder while the token was typed; nothing was saved`); }
     if (st && (st.isSymbolicLink() || !st.isFile())) { t = ''; throw new Error(`${f} is now not a plain file; nothing was saved`); }
     // The same token, already saved as it should be: nothing is written (a second run with the same value does nothing).
     if (st && st.uid === b.uid && modeOf(st) === 0o600 && st.size <= SIGNIN_MAX + 1) {
