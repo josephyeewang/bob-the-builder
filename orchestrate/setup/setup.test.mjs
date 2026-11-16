@@ -11,11 +11,13 @@ import { REVIEW_USER } from '../modules/M4-workshop/launcher/review-user.mjs';
 import { readOutboxFile } from '../modules/M9-record/outbox.mjs';
 import { AI_ROLES } from '../shared/record.mjs';
 import { RUNNER_ROLES } from '../shared/review-roles.mjs';
-import { BASE_MARKER, FLAT_OUTBOX_ROLES, ORCHESTRATE_READ_ACL, PRODUCT_OUTBOX_ROLES, ROOT_CONFIG_PATH, USERS, USER_ID_RANGE, WORKER_ROLES, aclText, folderTable, homeOf, parseConfig } from './layout.mjs';
+import { BASE_MARKER, FLAT_OUTBOX_ROLES, ORCHESTRATE_READ_ACL, PRODUCT_OUTBOX_ROLES, ROOT_CONFIG_PATH, USERS, USER_ID_RANGE, WORKER_ROLES, aclText, builderSigninDir, builderSigninPath, folderTable, homeOf, parseConfig, privatePath } from './layout.mjs';
 import { nodeProblemOf, realIo, secureFolder } from './mac.mjs';
 import { aclEntries, adminAnswer, apply, check, parseDscl, plan, readUser } from './users-folders.mjs';
 import { ACL_CHANGE, WALK_MAX, builderAclWhy, changedWhy, groupsProblem, hopsOn, identOn, kindOn, proofCommands, proofInputs, proofList, proveList, refusedWhy, runProofs, stickyOn, walkOn } from './proofs.mjs';
 import { main } from './setup.mjs';
+import { parseInstallConfig } from './install.mjs';
+import { workerRunnerConfigFor } from './worker-runner-setup.mjs';
 import { parseDispatcher } from './dispatcher-setup.mjs';
 import { fakeMac, macTest as test } from './fake-mac.test-helper.mjs';
 
@@ -35,7 +37,7 @@ const applied = () => { const mac = fakeMac(); const r = run(mac, ['users-folder
 // The proofs' Mac (L1079): set up, with the owner's home (0750, its own) holding a production file the installed review.json's
 // rules name, so every proof has something to try. `files`: what the rules name (default the one there).
 const SECRET = '/Users/sam/app/.env.production';
-const proven = ({ files = [SECRET], mac = applied() } = {}) => {
+const proven = ({ files = [SECRET], mac = applied(), signin = true } = {}) => {
   const sam = { uid: uidOf(mac, 'sam'), gid: 20 };
   for (const [d, mode] of [['/Users', 0o755], ['/Users/sam', 0o750], ['/Users/sam/app', 0o755]]) { mkdirSync(mac.at(d), { recursive: true }); chmodSync(mac.at(d), mode); mac.owners.set(d, d === '/Users' ? { uid: mac.rootUid, gid: 80 } : sam); }
   writeFileSync(mac.at(SECRET), 'x'); chmodSync(mac.at(SECRET), 0o600); mac.owners.set(SECRET, sam);
@@ -44,8 +46,11 @@ const proven = ({ files = [SECRET], mac = applied() } = {}) => {
   const pr = run(mac, ['proposals']); assert.equal(pr.code, 0, pr.text);
   const root = P('install/orchestrate'); mkdirSync(mac.at(root), { recursive: true });
   writeFileSync(mac.at(`${root}/review.json`), JSON.stringify({ rules: { production: { env_files: files }, secrets: { paths: [] } } }));
+  // The builder sessions' sign-in (L1261), saved as setup's own step saves it: its proof is NOT TRIED until it is made.
+  if (signin) { mac.secretInput = SIGNIN_SAMPLE; const s = run(mac, ['builder-signin']); assert.equal(s.code, 0, s.text); }
   return mac;
 };
+const SIGNIN_SAMPLE = `sk-ant-oat01-${'Pz3_q-'.repeat(15)}AA`;   // made up
 const fails = (mac) => check(mac, cfg).filter((r) => !r.ok);
 const isDarwin = process.platform === 'darwin';
 const P = (s) => `${cfg.base}/${s}`;
@@ -1351,6 +1356,47 @@ test('#528 r3 m2: through main, every NOT TRIED line prints NOT TRIED, never PAS
   assert.match(r.text, /2 NOT TRIED: containment is not proven/);
   // And the result itself (P19): a NOT TRIED line is never ok, so no reader that takes ok first can call it PASS.
   const res = runProofs(mac, cfg).filter((x) => x.notTried); assert.equal(res.length, 2); for (const x of res) assert.equal(x.ok, false, x.what);
+});
+
+// PR #616 r1 M1: the sign-in folder is on every session's deny list (worker-config puts it in each product's secrets), but
+// builder is the one user that must read it: it is kept out of the "builder cannot read" proofs, and proven private in its
+// own way (no user but builder and root can read it, root's look). Without this the deny-list entry made a proof that FAILs.
+test('PR #616 r1 M1: the sign-in folder on the deny list is not a "builder cannot read" proof; no user but builder and root can read it', () => {
+  const mac = proven();
+  // The rules as worker-config itself writes them (r2): its own entry for the sign-in folder, beside a near name
+  // (<folder>-x) and another path under the base, which must stay proven: the filter drops the sign-in folder only.
+  const near = `${builderSigninDir(cfg)}-x`; const inside = `${builderSigninDir(cfg)}/x`;
+  mkdirSync(mac.at(near), { mode: 0o700 }); mac.owners.set(near, { uid: mac.rootUid, gid: 0 });
+  const R = P('install/orchestrate'); const disp = { product: 'alpha', productsFile: P('private/products.json'), rulesStateDir: P('private/rules-state'), tokenFile: P('keys/t'), approvalsStateDir: P('private/approvals') };
+  const wcfg = parseInstallConfig({ ...RAW, address: 'https://github.com/example-org/example-repo.git', label: 'com.example.orch', runnerConfig: '/Users/sam/review.json', nodeBin: '/usr/local/bin/node', hostLockPath: '/Users/sam/host.lock', dispatcher: disp, workerRunner: { product: 'alpha' } });
+  const rc = { installRoot: R, recordRoot: P('products/alpha/store'), rules: { production: { env_files: [], programs: [], hosts: [] }, secrets: { paths: [SECRET, near, privatePath(cfg), inside] } }, pin: '2.1.300', claudeBin: `${R}/claude-code/2.1.300/claude`, hooksDir: `${R}/hooks`,
+    machineWide: '/Library/Application Support/ClaudeCode/managed-settings.json', accountCopy: P('account-copy.json'), budget: `${R}/modules/M11-dispatcher/budget.mjs`, dispatcherRules: P('products/alpha/rules/dispatcher-rules.json') };
+  const given = { [`${R}/review.json`]: JSON.stringify(rc), [disp.productsFile]: JSON.stringify([{ product: 'alpha', owner: 'example-org', repo: 'alpha-repo', joe_github_id: 7 }]) };
+  const ids = { orchestrate: 401, review: 402, builder: 403, sam: 501 };
+  const built = workerRunnerConfigFor({ rootUid: 0, prefix: '', at: (x) => x, readText(f) { if (!Object.hasOwn(given, f)) throw Object.assign(new Error('no'), { code: 'ENOENT' }); return given[f]; } }, wcfg,
+    { userOf: (n) => (ids[n] ? { exists: true, uid: ids[n], home: n === 'sam' ? '/Users/sam' : P(`home/${n}`) } : { exists: false }) });
+  assert.deepEqual(built.problems, []);
+  assert.ok(built.config.products.alpha.rules.secrets.paths.includes(builderSigninDir(cfg)), 'worker-config no longer puts the sign-in folder on the deny list');
+  writeFileSync(mac.at(P('install/orchestrate/worker-runner.json')), JSON.stringify(built.config));
+  const files = proofInputs(mac, cfg).rules.files;
+  for (const kept of [SECRET, near, privatePath(cfg)]) assert.ok(files.includes(kept), `${kept} was dropped from the proofs: ${JSON.stringify(files)}`);
+  assert.ok(!files.includes(builderSigninDir(cfg)) && !files.includes(inside), JSON.stringify(files));
+  const list = proofList(cfg, { ...proofInputs(mac, cfg), kindOf: kindOn(mac) });
+  assert.ok(!list.some((x) => x.args && x.what.includes(builderSigninDir(cfg))), 'a "builder cannot" proof names the sign-in');
+  const own = list.filter((x) => x.privateTo); assert.equal(own.length, 1); assert.equal(own[0].privateTo, builderSigninPath(cfg));
+  const mine = () => runProofs(mac, cfg).find((r) => r.what === own[0].what);
+  assert.deepEqual(runProofs(mac, cfg).filter((r) => !r.ok), [], 'the sign-in on the deny list made a proof FAIL');
+  assert.equal(mine().ok, true);
+  // PLANTs: readable by others, a second name, an access list, the folder opened → FAIL; not made yet → NOT TRIED.
+  const F = builderSigninPath(cfg);
+  for (const m of [0o644, 0o640, 0o604]) { chmodSync(mac.at(F), m); assert.match(mine().why ?? 'passed', new RegExp(`mode is ${m.toString(8)}, want 600`)); }
+  chmodSync(mac.at(F), 0o600);
+  linkSync(mac.at(F), mac.at(`${builderSigninDir(cfg)}/second`)); assert.match(mine().why, /another name/); rmSync(mac.at(`${builderSigninDir(cfg)}/second`));
+  assert.equal(mac.run('/bin/chmod', ['+a', 'user:orchestrate allow read', mac.at(F)]).status, 0); assert.match(mine().why, /has an access list/);
+  assert.equal(mac.run('/bin/chmod', ['-N', mac.at(F)]).status, 0); assert.equal(mine().ok, true);
+  chmodSync(mac.at(builderSigninDir(cfg)), 0o755); assert.match(mine().why, /mode is 755, want 700/); chmodSync(mac.at(builderSigninDir(cfg)), 0o700);
+  rmSync(mac.at(F)); const nt = mine(); assert.equal(nt.ok, false); assert.equal(nt.notTried, true); assert.match(nt.why, /not made yet/);
+  assert.match(run(mac, ['proofs']).text, /NOT TRIED {2}no user but builder and root can read/);
 });
 
 test('#528 r3 (minor): the worker runner\'s per-product rules are proven too, the union with review.json\'s', () => {

@@ -36,14 +36,19 @@
 // And the builder's groups are an allowed list: its own group and the groups macOS gives every local user, nothing else
 // (so no later membership, staff above all, quietly opens the owner's home, which macOS makes 0750 to staff). A group
 // list that can't be read is a FAIL, never an empty list.
+// The builder sessions' sign-in (L1261) is the one secret the builder must read: its folder is on the worker rules'
+// secrets.paths (so the sessions' hook refuses it), but it is kept out of the "builder cannot read" proofs, which it
+// would always fail. Its own proof is the other way round: root looks, and no user but the builder (and root) can read
+// the file or its folder (builder's own, 0600 in 0700, one name, no access list, every folder above root's).
 
 import { basename, dirname, join } from 'node:path';
 import { RUNNER_ROLES } from '../shared/review-roles.mjs';
 import { runnerPlaces } from '../shared/product-paths.mjs';
-import { BUILDER, BUILDER_SHELL, FLAT_OUTBOX_ROLES, PRODUCT_OUTBOX_ROLES, USERS, WORKER_RUNNER_CONFIG, baseMarkerPath, proposalRows, homeOf, outboxRootPath, workerCopiesPath } from './layout.mjs';
+import { BUILDER, BUILDER_SHELL, builderSigninDir, builderSigninPath, FLAT_OUTBOX_ROLES, PRODUCT_OUTBOX_ROLES, USERS, WORKER_RUNNER_CONFIG, baseMarkerPath, proposalRows, homeOf, outboxRootPath, workerCopiesPath } from './layout.mjs';
 import { RUNNER_CONFIG } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { installPaths } from './install.mjs';
 import { aclEntries, readUser } from './users-folders.mjs';
+import { signinFileRows } from '../wiring/builder-signin.mjs';
 
 const SUDO = '/usr/bin/sudo';
 const TEST = '/bin/test';
@@ -81,7 +86,9 @@ export function proofInputs(io, cfg) {
     if (!prods || typeof prods !== 'object' || Array.isArray(prods)) workerWhy = `the installed ${wfile} names no products`;
     else worker = Object.values(prods).flatMap((x) => lists(x?.rules));
   } catch (e) { if (e?.code !== 'ENOENT') workerWhy = `the installed ${wfile} could not be read (${e?.code ?? 'not JSON'})`; }
-  const all = [...(why ? [] : lists(rules)), ...worker];
+  // The sign-in's folder (layout's one name for it), and anything under it, is the builder's own: not a "cannot read" proof.
+  const signin = builderSigninDir(cfg); const notSignin = (x) => typeof x !== 'string' || (x !== signin && !x.startsWith(`${signin}/`));
+  const all = [...(why ? [] : lists(rules)), ...worker].filter(notSignin);
   const files = [...new Set(all.filter((x) => typeof x === 'string'))];
   // An entry that is not text is said, one NOT TRIED line each, never dropped (#528 r2): it names no file to try.
   const odd = all.filter((x) => typeof x !== 'string');
@@ -202,6 +209,8 @@ export function proofList(cfg, { ownerHome = null, rules = { files: [], why: 'no
     ...rules.files.flatMap(readProof),
     ...(rules.odd ?? []).map((x) => notTried(`${B} cannot read the rules entry ${String(JSON.stringify(x) ?? typeof x).slice(0, 60)}`, 'it is not text, so it names no file: nothing was tried')),
     ...(rules.workerWhy ? [notTried(`${B} cannot read the worker runner's production files and secrets`, rules.workerWhy)] : []),
+    // L1261: the builder sessions' sign-in is private to the builder: root looks (proveList runs signinFileRows).
+    { what: `no user but ${B} and root can read the builder sessions' sign-in ${builderSigninPath(cfg)} or its folder (root looks: ${B}'s own, 600 in 700, one name, no access list, root's folders above)`, privateTo: builderSigninPath(cfg), expect: 'ok' },
   ];
   // A folder above many places is proven once (r4 m4).
   const once = new Set();
@@ -275,6 +284,16 @@ export function proveList(io, list, kindOf = kindOn(io), walkOf = walkOn(io), { 
     if (pr.bad) { out.push({ ok: false, what: pr.what, why: pr.bad }); continue; }
     if (!controlsHold) { out.push({ ok: false, what: pr.what, why: 'not proven: a control above failed' }); continue; }   // one way of asking is already broken
     // A place's owner and access list, as root sees them, its link not followed (#528 r5 M-1, r6 M-A, M-B, m-1, m-2).
+    if (pr.privateTo) {
+      const b = uidNow();
+      if (b === null) { out.push({ ok: false, notTried: true, what: pr.what, why: `${BUILDER}'s id could not be read: nothing was proven` }); continue; }
+      const rows = signinFileRows(io, { file: pr.privateTo, builderUid: b, acl: (q) => aclEntries(io, q) });
+      const bad = rows.filter((r) => !r.ok && !r.skip);
+      const missing = bad.length > 0 && bad.every((r) => /missing/.test(String(r.why)));
+      out.push(missing ? { ok: false, notTried: true, what: pr.what, why: `it is not made yet (${bad.map((r) => r.why).join('; ')}): nothing was proven` }
+        : { ok: bad.length === 0, what: pr.what, ...(bad.length ? { why: bad.map((r) => `${r.what}: ${r.why}`).join('; ') } : {}) });
+      continue;
+    }
     if (pr.ownerOf) {
       const no = (why) => out.push({ ok: false, notTried: true, what: pr.what, why: `${why}: nothing was proven` });
       const b = uidNow();
@@ -419,5 +438,5 @@ export const identOn = (io) => (p) => { try { const s = io.lstat(p); return s.in
 /** What `--dry-run` prints: the commands, not run, and what will not be tried. */
 export const proofCommands = (io, cfg) => {
   const inputs = proofInputs(io, cfg);
-  return [...proofList(cfg, { ...inputs, kindOf: kindOn(io), walkOf: walkOn(io), stickyOf: stickyOn(io), identOf: identOn(io) }).map((pr) => (pr.ownerOf ? `root looks at who owns ${pr.ownerOf} and at its access list, a link not followed   (must not be ${BUILDER}, nor let it change it)` : pr.args ? `sudo -n -H -u ${BUILDER} ${pr.args.join(' ')}   (${pr.expect === 'ok' ? 'must work' : pr.expect === 'denied' ? 'must be refused: Permission denied' : 'must fail'})` : `not tried: ${pr.what} (${pr.notTried ?? pr.bad})`)), `${ID} -Gn ${BUILDER}   (its own group and the allowed ones only)`];
+  return [...proofList(cfg, { ...inputs, kindOf: kindOn(io), walkOf: walkOn(io), stickyOf: stickyOn(io), identOf: identOn(io) }).map((pr) => (pr.privateTo ? `root looks at ${pr.privateTo} and its folder, links not followed   (must be ${BUILDER}'s own 600 in 700, one name, no access list)` : pr.ownerOf ? `root looks at who owns ${pr.ownerOf} and at its access list, a link not followed   (must not be ${BUILDER}, nor let it change it)` : pr.args ? `sudo -n -H -u ${BUILDER} ${pr.args.join(' ')}   (${pr.expect === 'ok' ? 'must work' : pr.expect === 'denied' ? 'must be refused: Permission denied' : 'must fail'})` : `not tried: ${pr.what} (${pr.notTried ?? pr.bad})`)), `${ID} -Gn ${BUILDER}   (its own group and the allowed ones only)`];
 };

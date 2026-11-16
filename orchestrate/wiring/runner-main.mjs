@@ -16,6 +16,9 @@
 //     "budget": "/abs.mjs"?, "bobManifest": "/abs"?,        inside installRoot and root's alone, each loaded once at start (L1001)
 //     "dispatcherRules": "/abs"?, "reviewStatusFile": "/abs"?, "reviewUid": <uid>?  required with budget,
 //     "accountCopy": "/abs"? root's copy of the owner's account choice (L1079: the runner runs as the builder; runner-ports.mjs workerAccount),
+//     "signinFile": "/abs"? the builder sessions' sign-in (L1261, builder-signin.mjs): when named, the token in it is read
+//                   fresh for each start and each lock-down job, and accountCopy is not followed; any problem holds the start,
+//                   told once per reason (signinTold),
 //     "wallStatus": "/abs"? root's builder wall status (wall-gate.mjs, L1193): left out, every start is held }
 // The launch checks (runner-checks.mjs, step 6) read pin, machineWide and each product's rules; one that is left out
 // leaves its check without a port, so launch() refuses there and no session starts. `budget` names M11's budget module
@@ -125,7 +128,7 @@ export function checkRunnerConfig(c) {
     for (const k of RENDER_PATHS) if (p.render.paths[k] !== undefined && !fullPath(p.render.paths[k])) fail(`product ${name}: render.paths.${k} must be a full path in its simplest form, not / itself`);
   }
   if (c.pin !== undefined && (typeof c.pin !== 'string' || !/^\d+\.\d+\.\d+$/.test(c.pin))) fail('pin must be a Claude Code version');
-  for (const k of [...PINNED, 'dispatcherRules', 'reviewStatusFile', 'accountCopy', 'wallStatus']) if (c[k] !== undefined && !fullPath(c[k])) fail(`${k} must be a full path in its simplest form, not / itself`);
+  for (const k of [...PINNED, 'dispatcherRules', 'reviewStatusFile', 'accountCopy', 'signinFile', 'wallStatus']) if (c[k] !== undefined && !fullPath(c[k])) fail(`${k} must be a full path in its simplest form, not / itself`);
   if (c.reviewUid !== undefined && (!Number.isInteger(c.reviewUid) || c.reviewUid < 0)) fail('reviewUid must be a uid');
   if (c.budget !== undefined) for (const k of BUDGET_NEEDS) if (c[k] === undefined) fail(`${k} must be set with budget (launch check 12 reads it)`);
   for (const k of PINNED) if (c[k] !== undefined && !insideCopy(c.installRoot, c[k])) fail(`${k} must be inside installRoot (${c.installRoot})`);
@@ -211,7 +214,9 @@ export function workerCheckInputs(c, x, { log = () => {}, runLocked = null, budg
   const p = c.products[x.product];
   return { ...x, runLocked, installCommand: p.render.product?.commands?.install, registryHosts: p.render.registryHosts, mirror: p.mirror, pin: c.pin, hooksDir: p.render.paths.hooksDir, rules: p.rules, snapshot: p.render.paths.snapshot, sourceSha256: c.sourceSha256,
     machineWide: c.machineWide, busy: holdersOf, alert: (t) => log(`worker runner: ${x.sessionId}: ${t}`), spawn: childSpawn, home: c.home,
-    testCommand: p.render.product?.commands?.test, budget, bobFolder: p.render.paths.bobFolder, bobManifest };
+    testCommand: p.render.product?.commands?.test, budget, bobFolder: p.render.paths.bobFolder, bobManifest,
+    // Check 9 lets the builder sign-in through only when the config names its file (L1261; runner-ports.mjs workerAccount).
+    allowSigninToken: c.signinFile !== undefined };
 }
 
 /**
@@ -234,7 +239,8 @@ export const testProductHeld = (budget, held, problem = testProductProblem) => (
 export const RECHECK = Object.freeze([1, 2, 3, 8]);
 /** The start port's ports from the config: the stop flag, check 0's pinned version, the worker launch checks, and the
  * RECHECK checks once more just before claude starts. */
-export const startDeps = (c, { stopped = () => false, log, productHeld, runLocked = null, budget = null, bobManifest = null, checksOf = (x) => workerChecks(workerCheckInputs(c, x, { log, runLocked, budget, bobManifest })) } = {}) => ({ stopped, log, productHeld, names: { version: c.pin },
+export const startDeps = (c, { stopped = () => false, log, productHeld, runLocked = null, budget = null, bobManifest = null, account, checksOf = (x) => workerChecks(workerCheckInputs(c, x, { log, runLocked, budget, bobManifest })) } = {}) => ({ stopped, log, productHeld, names: { version: c.pin },
+  ...(typeof account === 'function' ? { account } : {}),
   checksFor: checksOf,
   beforeStart: async (x) => {
     const k = checksOf(x);
@@ -313,11 +319,11 @@ export function lockedOf(c, { make = lockedRunner, who: account = () => workerAc
  * Save-work and launch check 4 from ONE runLocked (#456 r1 m3): a launch is never possible while its work could not be
  * saved. Without one, save-work refuses ("lock-down") and no worker passes check 4 (no port); with one, both run.
  */
-export function lockedWiring(c, { runLocked = lockedOf(c), stopped, log, productHeld, budget = null, bobManifest = null } = {}) {
+export function lockedWiring(c, { account, runLocked = lockedOf(c, typeof account === 'function' ? { who: account } : {}), stopped, log, productHeld, budget = null, bobManifest = null } = {}) {
   return {
     runLocked,
     saveWork: saveWorkPort({ mirrorOf: (product) => c.products[product]?.mirror, runLocked, settingsDir: c.settingsDir }),
-    startDeps: startDeps(c, { stopped, log, productHeld, runLocked, budget, bobManifest }),
+    startDeps: startDeps(c, { stopped, log, productHeld, runLocked, budget, bobManifest, account }),
   };
 }
 
@@ -325,8 +331,8 @@ export function lockedWiring(c, { runLocked = lockedOf(c), stopped, log, product
 export const listenStop = (fn) => { process.on('SIGTERM', fn); };
 
 /** The ports from the config; `over` replaces any (a test's fakes). `stopped` tells the start port the runner is stopping. */
-export function realRunnerPorts(c, over = {}, { stopped = () => false, log, productHeld, runLocked, budget = null, bobManifest = null, wire = lockedWiring } = {}) {
-  const locked = wire(c, { stopped, log, productHeld, budget, bobManifest, ...(runLocked !== undefined ? { runLocked } : {}) });
+export function realRunnerPorts(c, over = {}, { stopped = () => false, log, productHeld, runLocked, budget = null, bobManifest = null, account, wire = lockedWiring } = {}) {
+  const locked = wire(c, { stopped, log, productHeld, budget, bobManifest, account, ...(runLocked !== undefined ? { runLocked } : {}) });
   return {
     ...processGroupPorts(),
     start: startPort(c, locked.startDeps),
@@ -337,6 +343,23 @@ export function realRunnerPorts(c, over = {}, { stopped = () => false, log, prod
     outboxDrained: drainedPort({ readFact: (fact) => readFactFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, fact }), readSession: (session) => readSessionFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, session }) }),
     size: sizePort(),
     ...over,
+  };
+}
+
+/**
+ * The sign-in each start and each lock-down job reads (workerAccount, fresh every call), told once (as rootSnapshots tells a
+ * snapshot): a reason is logged when it first holds the starts and again whenever it changes; the first read that works,
+ * ever or after a hold, is told as "read, builder's own" (no byte of it, L1261). `account` is a port for tests.
+ * → () => workerAccount's answer, unchanged.
+ */
+export function signinTold(c, { log = () => {}, account = () => workerAccount(c) } = {}) {
+  let said = null;
+  return () => {
+    let who; try { who = account(); } catch (e) { who = { account: null, reason: `the sign-in can't be read (${e?.message ?? e})` }; }
+    const tell = who?.account ? (who.signinToken === true ? 'the builder sign-in file: read, builder\'s own (the sessions sign in with it)' : `the sign-in: account ${who.account}`)
+      : `no sign-in, so no session starts: ${who?.reason ?? 'no answer'}`;
+    if (said !== tell) { said = tell; log(`worker runner: ${tell}`); }
+    return who;
   };
 }
 
@@ -369,14 +392,14 @@ export function rootSnapshots(c, { log = () => {}, problem = workerSnapshotProbl
 /**
  * argv: [config]. opts (tests only): asUser (personUserProblem), readConfig, lock, ports, run, log, onStop (how a SIGTERM is listened for), realpath,
  * memory (the memory reader), snapshotProblem (workerSnapshotProblem), sourceOf (the config's bytes' sha256: readSha256), loadWall (lane A's builder-wall module), wallPorts
- * ({ chain, readRoot, now, uid } for wall-gate.mjs wallProblem).
+ * ({ chain, readRoot, now, uid } for wall-gate.mjs wallProblem), signinOf (the sign-in reader, workerAccount's place: L1261).
  * → the exit code.
  */
 export async function main(argv, { readConfig = (f) => readRunnerConfig(f, selfPath()), lock = (dir) => makeLock({ dir, timeoutMs: 2_000 }),
   ports = {}, run = runRunner, log = (s) => process.stderr.write(`${new Date().toISOString()} ${s}\n`), onStop = listenStop,
   realpath = (p) => realpathSync.native(p), memory = loadMemory, asUser = () => personUserProblem(process.getuid(), readGroups(), readName()), snapshotProblem = workerSnapshotProblem, sourceOf = readSha256,
   pinnedProblem, loadBudget, readManifest, portsOf = realRunnerPorts, hooksOf = hookStoreOf, testProduct = testProductProblem,
-  loadWall = () => import('../setup/builder-wall.mjs'), wallPorts = {} } = {}) {
+  loadWall = () => import('../setup/builder-wall.mjs'), wallPorts = {}, signinOf } = {}) {
   // Who it runs as comes first, before the config is read (L1079): never root, never a person's user.
   { let who; try { who = asUser(); } catch (e) { who = `its user can't be checked (${e?.message ?? e})`; } if (who) { log(`the worker runner did not start: ${who}`); return 1; } }
   let c;
@@ -411,7 +434,7 @@ export async function main(argv, { readConfig = (f) => readRunnerConfig(f, selfP
   const snaps = rootSnapshots(c, { log, problem: (s) => snapshotProblem(s) });
   let P;
   try {
-    P = portsOf(c, ports, { stopped: () => stopping, log, productHeld: wallHeld(wallGate, testProductHeld(budget, snaps.held, testProduct)), budget, bobManifest });
+    P = portsOf(c, ports, { stopped: () => stopping, log, productHeld: wallHeld(wallGate, testProductHeld(budget, snaps.held, testProduct)), budget, bobManifest, account: signinTold(c, { log, ...(signinOf ? { account: signinOf } : {}) }) });
     // A memory that can't be read is the loop's to refuse; one read is checked for carried-over sessions first.
     let m = null; try { m = memory(c.memoryFile, { uid: process.getuid() }); } catch { m = null; }
     const why = m ? carriedOverProblem(c, m, { groupGone: P.groupGone }) : null;

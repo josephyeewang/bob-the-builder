@@ -213,6 +213,12 @@ export const privatePath = (cfg) => join(cfg.base, 'private');
 export const bobPath = (cfg) => join(cfg.base, 'bob');
 export const reviewCopiesPath = (cfg) => join(cfg.base, 'review-copies');
 export const workerCopiesPath = (cfg) => join(cfg.base, 'worker-copies');
+// The worker (builder) sessions' Claude sign-in (L1261): a long-lived token the owner makes (`claude setup-token`) and root saves
+// with `setup.mjs builder-signin`, read fresh by the worker runner (as builder) before each start (wiring/builder-signin.mjs).
+// Its own builder 0700 folder, right under the root-owned base: not in keys/ (orchestrate's), not in the worker copies (which
+// sessions work in), and never in a home folder (the sessions' HOME). The one place both are named (I7).
+export const builderSigninDir = (cfg) => join(cfg.base, 'builder-signin');
+export const builderSigninPath = (cfg) => join(builderSigninDir(cfg), 'claude-signin');
 export const outboxRootPath = (cfg) => join(cfg.base, 'outboxes');
 /** A product's Record (the folder table's `products/<prod>/store`, and the runner's recordRoot). */
 export const storePath = (cfg, prod) => join(cfg.base, 'products', prod, 'store');
@@ -317,6 +323,7 @@ export function folderTable(cfg) {
     [p('home'), 'root', 0o755, 'the plain-script users\' home folders'],
     ...USERS.map((u) => [homeOf(cfg, u), u, 0o700, `${u}'s home`]),
     [keysPath(cfg), 'orchestrate', 0o700, 'robot keys: nothing else reads them'],
+    [builderSigninDir(cfg), BUILDER, 0o700, 'the worker sessions\' Claude sign-in (a long-lived token file): builder-only; every builder process can read it (L1261); every session\'s settings deny it'],
     [privatePath(cfg), 'orchestrate', 0o700, 'private data: attempt logs, raw facts before masking'],
     [p('watch'), 'orchestrate', 0o700, 'the watch-only week: the log of what the Merge Gate would have done, and the rules draft'],
     [watchNotesPath(cfg), 'owner', 0o755, 'the watch-only week\'s written explanations: the owner writes, orchestrate and the summary only read'],

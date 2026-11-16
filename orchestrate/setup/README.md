@@ -30,9 +30,9 @@ A config that does not parse is reported as "not valid JSON": the file's own tex
 |---|---|---|
 | `node setup.mjs users-folders --config <file> --dry-run` | prints every step it would take; changes nothing (`--config` names your editable copy; there is no `--config` under `sudo`) | no |
 | `sudo /usr/local/bin/node setup.mjs users-folders` | makes the users in `USERS` (ids 600-699, all different; hidden, shell `/usr/bin/false` except `builder`'s `/bin/zsh`, which its sessions' Bash tool runs, password `*`, own group with no members, never admin), then the folders (owner, group, exact mode, exact access list), then runs `check` | yes |
-| `node setup.mjs check --config <file>` | read only: `PASS`, `FAIL` or `NEEDS ROOT` per item; exit 1 on any FAIL, exit 3 if all that could be seen passed but some items need root. Before setup it lists 56 FAILs of 60 items for one product (about 10 more for each extra product: its copies, outbox and rules folders, L836), which is expected | no |
+| `node setup.mjs check --config <file>` | read only: `PASS`, `FAIL` or `NEEDS ROOT` per item; exit 1 on any FAIL, exit 3 if all that could be seen passed but some items need root. Before setup it lists 57 FAILs of 61 items for one product (about 10 more for each extra product: its copies, outbox and rules folders, L836), which is expected | no |
 | `sudo /usr/local/bin/node setup.mjs check` | the same with nothing hidden: the sudo-rule and password-hash items can be read | yes |
-| `sudo /usr/local/bin/node setup.mjs proofs` | runs, as `builder` (L1079), the "cannot" proofs: the record, hooks, settings, launcher, lead-main, claude-code and install copies and the outbox folders cannot be written; the robot keys, the other users' homes, the owner's home and every production file and secret the installed `review.json`'s rules and the worker runner's `worker-runner.json` (each product's rules, when it is installed) name cannot be read; and `builder` is in no group but its own and the ones macOS gives every local user (controls first). A rules entry that names nothing on this Mac (none, a relative name, a pattern, a missing file) is NOT TRIED, which fails the run like a FAIL: containment is proven only when every line is PASS. Every place is judged by what it reaches, never by its name (#528 r3): when root finds its real place elsewhere (a link anywhere along the path), both are proven and both must be refused; a place that is not there, or that has changed between making the list and proving it, is NOT TRIED. What a place reaches includes (#528 r4) the links inside a folder of secrets that lead out (each proven as its own place), a file's other names (a file with more than one is NOT TRIED), and the folders above it, which `builder` must neither write nor own. Those folders are every one met on the way, one link at a time, a middle link's included (#528 r5); in a shared folder (`/private/tmp`, `/Users/Shared`) root itself looks at who owns the name there, without following a link. Who owns a place is always root's own look, never `test -O` (#528 r6): the place itself, every step on the way and every folder above, a link not followed; `builder` owning one is a FAIL (it could chmod a secret it owns), and so is an access-list entry that lets it, or a group it is in, write, delete, rename or change who may. Root first checks it is the very thing the list saw, with one name only; otherwise NOT TRIED | yes |
+| `sudo /usr/local/bin/node setup.mjs proofs` | runs, as `builder` (L1079), the "cannot" proofs: the record, hooks, settings, launcher, lead-main, claude-code and install copies and the outbox folders cannot be written; the robot keys, the other users' homes, the owner's home and every production file and secret the installed `review.json`'s rules and the worker runner's `worker-runner.json` (each product's rules, when it is installed) name cannot be read; and `builder` is in no group but its own and the ones macOS gives every local user (controls first). A rules entry that names nothing on this Mac (none, a relative name, a pattern, a missing file) is NOT TRIED, which fails the run like a FAIL: containment is proven only when every line is PASS. Every place is judged by what it reaches, never by its name (#528 r3): when root finds its real place elsewhere (a link anywhere along the path), both are proven and both must be refused; a place that is not there, or that has changed between making the list and proving it, is NOT TRIED. What a place reaches includes (#528 r4) the links inside a folder of secrets that lead out (each proven as its own place), a file's other names (a file with more than one is NOT TRIED), and the folders above it, which `builder` must neither write nor own. Those folders are every one met on the way, one link at a time, a middle link's included (#528 r5); in a shared folder (`/private/tmp`, `/Users/Shared`) root itself looks at who owns the name there, without following a link. Who owns a place is always root's own look, never `test -O` (#528 r6): the place itself, every step on the way and every folder above, a link not followed; `builder` owning one is a FAIL (it could chmod a secret it owns), and so is an access-list entry that lets it, or a group it is in, write, delete, rename or change who may. Root first checks it is the very thing the list saw, with one name only; otherwise NOT TRIED. The one exception is the builder sessions' sign-in (L1261): its folder is on the worker rules' secrets but is `builder`'s own, so it is not a "cannot read" proof; instead root looks that no user but `builder` and root can read the file or its folder (NOT TRIED until `builder-signin` has made it) | yes |
 
 - Run it twice and the second run does nothing. A run cut off at any step is finished by the next one: it writes only
   the attributes that are missing and deletes nothing. The safe settings of a user (no shell, hidden, no password) are
@@ -127,16 +127,12 @@ deletes anything. Steps, on the Mini, in a new Terminal app window, with your ba
    *Moves the old work out of the base into your home, where `builder` can't read it.*
 4. Paste the same command without `--dry-run`: `sudo /usr/local/bin/node setup.mjs users-folders`.
    *Makes `builder` and hands it the worker folders; it ends with `check`.*
-5. Sign `builder` in to Claude Code once per account it will use, **after Part 2's `add-to-install`** (step 6 doesn't
-   need it, so go on and come back). The program `builder` signs in with is the pinned one in the installed copy, which
-   `add-to-install` puts there (root's, 0755): `<base>/install/orchestrate/claude-code/<pin>/claude`, with `<pin>` the
-   version given to `--pin`. Not a `claude` in your own home (`builder` can't read it), and not `/usr/local/bin/claude`,
-   which setup never makes. With the base `/Library/orchestrate`, in a new Terminal app window, paste
-   `sudo -H -u builder /Library/orchestrate/install/orchestrate/claude-code/<pin>/claude`, then type `/login` and finish in
-   the browser. For account b, paste
-   `sudo -H -u builder env CLAUDE_CONFIG_DIR=/Library/orchestrate/home/builder/.claude-b /Library/orchestrate/install/orchestrate/claude-code/<pin>/claude`
-   and do the same (`env` sets the folder for the program itself, whatever sudo's own rules on such names).
-   *The sign-in lives in `builder`'s home (`<base>/home/builder`); it is never copied from yours.*
+5. Give `builder` its Claude sign-in, **after Part 2's `add-to-install`** (step 6 doesn't need it, so go on and come
+   back). `/login` as `builder` does not work: `builder` never logs in to macOS, so it has no login Keychain ("A keychain
+   cannot be found to store builder"). Instead (L1261) make a long-lived token as yourself and save it for `builder`:
+   the steps are in Part 3, "Where the builder sessions' sign-in lives".
+   *The sign-in lives in `<base>/builder-signin/claude-signin`, `builder`'s own file; the workers use it on the account
+   that made it.*
 6. Paste `sudo /usr/local/bin/node setup.mjs proofs`. *Must end "all N proofs PASS: containment is proven on this Mac";
    a FAIL or NOT TRIED line says what to fix.*
 
@@ -265,6 +261,58 @@ moving parts, and `security add-generic-password -w <value>` would show the toke
 Keychain — the owner's AI sessions (workers) could reach it: refused. **Recommended: (a).** Built as (a).
 The token text is never printed, logged, put in a step's text or an error, or given to a program as an argument; the
 tests assert that over the output, the step list, the Mac's call log and every program call.
+
+### Where the builder sessions' sign-in lives (L1261)
+**Why.** The worker sessions run as the hidden `builder` user, which never logs in to macOS, so it has no login Keychain:
+`/login` in a builder session fails with "A keychain cannot be found to store builder". Joe's decision (L1261, not to be
+revisited): a long-lived Claude sign-in token, in a file only `builder` can read, handed by the worker runner to each
+session's claude in its environment (`CLAUDE_CODE_OAUTH_TOKEN`).
+
+**Where.** `<base>/builder-signin/claude-signin` (layout.mjs `builderSigninPath`): builder's own 0600 file, one name, in
+builder's own 0700 folder (`users-folders` makes it), right under the base, which is root's, as is every folder above it.
+It is not in `keys/` (orchestrate's), not in the worker copies, and not in builder's home (the sessions' HOME). Every
+worker session's settings deny the folder (worker-config puts it on the deny list and in the worker rules' `secrets.paths`,
+so the secret-file hook refuses it too).
+
+**Make it, or replace it** (each step on the Mini):
+1. In a Terminal window, as yourself (not sudo): `claude setup-token`. It opens the browser to sign in and prints a
+   long-lived token (it starts `sk-ant-oat`). Copy it. Make it on the account the workers should spend.
+2. In the same window, from the installed copy: `sudo /usr/local/bin/node setup.mjs builder-signin` (try `--dry-run` first: it reads
+   nothing). Paste the token at the prompt; nothing shows as you paste. It is checked for shape (a wrong paste is refused
+   and not repeated), then saved whole or not at all. The same token again changes nothing.
+3. `sudo /usr/local/bin/node setup.mjs check-builder-signin` (or `sudo /usr/local/bin/node setup.mjs daemons check --only worker-runner`, which shows
+   the same row): the folder, owner, mode, size and access list; the token itself is never opened.
+4. After a setup update that adds this (L1261), on a Mac already set up: `sudo /usr/local/bin/node setup.mjs users-folders`
+   first (it makes the sign-in's folder, which step 2 needs), then `sudo /usr/local/bin/node setup.mjs worker-config` again,
+   so the runner's config names the file and the new deny entries; `daemons check` says so until then.
+5. The live proof, as builder: `sudo -H -u builder <installRoot>/bin/node <installRoot>/setup/live-proofs/builder-signin.mjs --config <installRoot>/worker-runner.json`.
+   It starts the pinned claude once with no tools and asks it to reply OK; PASS means the sign-in works there.
+
+**How the runner uses it.** Before each start and each lock-down job (the install and save-work runs), the runner, as
+builder, reads the file fresh through one handle without following a link, and refuses it unless it and its folder are
+builder's own (0600, 0700, one name), every folder above is root's alone, and it holds one token. Any problem holds the
+start, told once in the runner's log per reason (and once when it reads fine). The token goes into that claude's
+environment, never onto a command line (`ps` shows command lines to every Mac user) and never into a log.
+
+**Who can read it (accepted, L1261).** Anything running as `builder` can read the token: every worker session, and every
+program one runs, including the lock-down claude's install and test commands and any third-party package script they
+run. They inherit it in their environment, and the file is `builder`'s own anyway. What limits where it can go is the
+walls: the `builder` user itself (another Mac user's `ps` does not show `builder`'s environment; only `builder` and root
+can), the network wall, and the deny lists (every session's settings and the secret-file hook refuse the file's folder).
+Possible later narrowing, not adopted: Claude Code's subprocess environment scrub (it forces the permission mode back to
+default) and handing the token on an open file instead (unproven on the pin). Both were read in a newer release than
+the pin and expire on upgrade; which release, and the dates, are in wiring/builder-signin.mjs (the one place they are kept).
+
+**Accounts.** The workers ignore the owner's account switch (a/b): they run in account a's folder on whichever account
+made the token.
+**A lapsed or revoked token** shows up only when a session starts (its claude fails to sign in) or when the live proof
+runs: the runner checks the file, not the token.
+
+**Revoke it.** On claude.ai, in the account's settings, where its sign-ins and tokens are listed (the place as of the
+time of writing; re-check); then make a new one as above. Deleting the file stops new starts at once.
+**How long it lasts.** About a year, per Anthropic's docs at the time of writing; re-check. The runner checks the file,
+not whether the token still works: a lapsed or revoked token passes the file check and the session's claude then fails
+to sign in. Replace it as above.
 
 Checked on macOS 27.0.1 (these notes expire with an OS upgrade): `dscl . -read` of a missing key prints `No such key` on
 stderr with exit 0; opening a link with `O_NOFOLLOW|O_DIRECTORY` gives `ENOTDIR` (Linux: `ELOOP`).

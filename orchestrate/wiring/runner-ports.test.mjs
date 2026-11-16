@@ -11,7 +11,7 @@ import { tempDir } from '../shared/test-tmp.mjs';
 import { SETTINGS as S } from '../modules/M4-workshop/launcher/settings-names.mjs';
 import { gitOk, initMirror } from '../modules/M4-workshop/git/safe-git.mjs';
 import { launch } from '../modules/M4-workshop/launcher/launch.mjs';
-import { INTAKE_DONE, chmodTree, removeAll, cardStartCommit, undoCommitProblem, drainedPort, groupThere, pauseLeadPort, liveWallProblem, productWallGap, projectFolderName, folderNameAsGiven, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath, workerPromptText, TRANSCRIPT_PLACE_CHECKED_AGAINST } from './runner-ports.mjs';
+import { INTAKE_DONE, chmodTree, removeAll, cardStartCommit, undoCommitProblem, drainedPort, groupThere, pauseLeadPort, liveWallProblem, productWallGap, projectFolderName, folderNameAsGiven, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath, workerAccount, workerPromptText, TRANSCRIPT_PLACE_CHECKED_AGAINST } from './runner-ports.mjs';
 import { roleEnv } from '../modules/M4-workshop/launcher/env-check.mjs';
 import { walledLaunchSettings } from './runner-launch.mjs';
 import { leaderStart } from './runner-loop.mjs';
@@ -409,6 +409,47 @@ test('L970: the default promptFor is the worker prompt builder, asked with the h
   const untag = (t) => t.replace(/\[[0-9a-f]{24}\]/g, '[tag]');
   assert.equal(untag(workerPromptText(full)), untag(workerPrompt(full).text));
   assert.match(workerPromptText(full), /^You are a worker\./);
+});
+
+// L1261: with the builder sign-in, the value reaches the spawned claude's environment and nothing else: not its arguments,
+// not the launch's names, not the walled settings, not the start's answer.
+test('L1261: the builder sign-in reaches the spawned session\'s environment only', async () => {
+  const V = `sk-ant-oat01-${'Mn4_k-'.repeat(15)}TT`;   // made up
+  const w = world({ account: () => ({ account: 'a', dir: '/h/builder/.claude', env: { CLAUDE_CODE_OAUTH_TOKEN: V }, signinToken: true }) });
+  try {
+    const a = await w.start();
+    assert.equal(a.ok, true, a.reason);
+    const sp = w.calls.find((c) => c[0] === 'spawn');
+    assert.equal(sp[3].env.CLAUDE_CODE_OAUTH_TOKEN, V);
+    const elsewhere = JSON.stringify([sp[1], sp[2], a, w.calls.filter((c) => c[0] !== 'spawn'), readFileSync(join(w.settingsDir, `${SID}.json`), 'utf8')]);
+    assert.ok(!elsewhere.includes(V.slice(0, 20)), 'the sign-in reached more than claude\'s environment');
+    // Without signinToken the same variable is refused by the one form of the environment (check 9), and nothing starts.
+    const v = world({ account: () => ({ account: 'a', dir: '/nowhere', env: { CLAUDE_CODE_OAUTH_TOKEN: V } }) });
+    try { const b = await v.start(); assert.equal(b.ok, false); assert.match(b.reason, /CLAUDE_CODE_OAUTH_TOKEN/); assert.ok(!b.reason.includes(V.slice(0, 20))); assert.equal(v.calls.some((c) => c[0] === 'spawn'), false); }
+    finally { rmSync(v.d, { recursive: true, force: true }); }
+  } finally { rmSync(w.d, { recursive: true, force: true }); }
+});
+
+// r1 Minor 3: the runner's own environment never holds the sign-in, so no child but claude gets it: not the copy's
+// preparing (git), not any other program the runner starts. The real workerAccount, its file read through the port.
+test('L1261: after the sign-in is read and a start made, the runner\'s own environment and its other children hold no token', async () => {
+  const V = `sk-ant-oat01-${'Rs5_t-'.repeat(15)}UU`;   // made up
+  const seen = [];
+  const child = () => { const r = spawnSync('/usr/bin/env', [], { encoding: 'utf8' }); seen.push(r.stdout); };   // inherits the runner's environment, as git does
+  const w = world({
+    account: () => workerAccount({ home: '/h/builder', signinFile: '/b/builder-signin/claude-signin' }, { readSignin: () => ({ ok: true, value: V }) }),
+  });
+  const realPrepare = w.deps.prepare;
+  w.deps.prepare = async (x) => { child(); seen.push(JSON.stringify(x)); return realPrepare(x); };
+  try {
+    const a = await w.start();
+    assert.equal(a.ok, true, a.reason);
+    child();
+    assert.equal(w.calls.find((c) => c[0] === 'spawn')[3].env.CLAUDE_CODE_OAUTH_TOKEN, V, 'claude gets it');
+    assert.equal(Object.values(process.env).some((v) => String(v).includes(V.slice(0, 20))), false, 'the runner\'s own environment holds the sign-in');
+    assert.equal(process.env.CLAUDE_CODE_OAUTH_TOKEN, undefined);
+    assert.ok(seen.length >= 3 && seen.every((t) => !t.includes(V.slice(0, 20))), 'a child other than claude got the sign-in');
+  } finally { rmSync(w.d, { recursive: true, force: true }); }
 });
 
 test('step 5: a script card gets the script outbox', async () => {

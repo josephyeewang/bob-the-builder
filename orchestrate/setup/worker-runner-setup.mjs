@@ -21,7 +21,7 @@ import { readUpdaterConfig } from '../modules/M4-workshop/launcher/review-update
 import { checkProducts } from '../modules/M10-rules/reader.mjs';
 import { checkRunnerConfig } from '../wiring/runner-main.mjs';
 import { fullPath, workerRunnerPlist } from '../wiring/runner-job.mjs';
-import { BUILDER, WORKER_RUNNER_CONFIG, WORKER_STATUS_FILE, homeOf, keysPath, mirrorPath, outboxRootPath, privatePath, proposalsParentOf, storePath, workerCopiesPath, workerRulesPath, workerRunnerPaths } from './layout.mjs';
+import { BUILDER, WORKER_RUNNER_CONFIG, WORKER_STATUS_FILE, builderSigninDir, builderSigninPath, homeOf, keysPath, mirrorPath, outboxRootPath, privatePath, proposalsParentOf, storePath, workerCopiesPath, workerRulesPath, workerRunnerPaths } from './layout.mjs';
 import { NOT_THE_LINK, installPaths } from './install.mjs';
 import { readUser } from './users-folders.mjs';
 import * as layout from './layout.mjs';
@@ -109,7 +109,9 @@ export function workerRunnerLoadCheck(io, cfg, { built = () => workerRunnerConfi
 //   products.json  the Dispatcher's (its `dispatcher` entry's productsFile): the product's GitHub owner/name
 // The deny lists (runner-main.mjs DENY_KEYS and secrets) are slip-catchers only: the wall is ownership and mode (L1112 (3),
 // BUILD-RULES). secrets: the rules' secrets.paths and production env_files that are full plain paths (the hooks hold the
-// rest), the private folder, the Dispatcher's rules-state and approvals folders, and the owner's home.
+// rest), the private folder, the Dispatcher's rules-state and approvals folders, the owner's home, and the builder
+// sign-in's folder (L1261), which also goes into the worker rules' own secrets.paths so the secret-file hook refuses it.
+// signinFile: the builder sessions' sign-in file (layout.mjs builderSigninPath), always named: builder has no Keychain.
 // Written into the copy only, as add-to-install writes there: it is built from the copy's own review.json, which a first
 // install does not yet have in full. So the install neither seeds it nor keeps it (install.mjs updaterConfigFor: the
 // updater refuses a keep item the seed lacks); worker-config writes the file and then adds its name to the copy's
@@ -171,14 +173,18 @@ export function workerRunnerConfigFor(io, cfg, { userOf = (n) => readUser(io, n)
   const W = workerRunnerPaths(cfg); const home = at(homeOf(cfg, BUILDER));
   const prodRules = rc.rules.production;
   const fromRules = [...rc.rules.secrets.paths, ...prodRules.env_files].filter(fullPath);
-  const secrets = [...new Set([...fromRules, at(privatePath(cfg)), at(cfg.dispatcher.rulesStateDir), at(cfg.dispatcher.approvalsStateDir), owner.home])];
+  // The builder sign-in's folder (L1261): the runner reads it, no session may. ACCEPTED (L1261): the session's own environment
+  // still holds the value (wiring/builder-signin.mjs); this deny keeps the file itself, and a newer token put there later, out of reach.
+  const secrets = [...new Set([...fromRules, at(privatePath(cfg)), at(cfg.dispatcher.rulesStateDir), at(cfg.dispatcher.approvalsStateDir), owner.home, at(builderSigninDir(cfg))])];
   const opt = (k) => (rc[k] !== undefined ? { [k]: rc[k] } : {});
   const config = {
     installRoot: root, requestsDir: at(W.requests), statusFile: at(join(W.state, WORKER_STATUS_FILE)), orchestrateUid: orch.uid,
     outboxRoot: at(outboxRootPath(cfg)), copiesRoot: at(workerCopiesPath(cfg)), home, path: PATH, claudeBin: rc.claudeBin,
     recordRoot, recordUid: orch.uid, claimMs: WORKER_CLAIM_MS,
     products: { [product]: {
-      repo, mirror: at(mirrorPath(cfg)), rules: rc.rules,
+      // The rules as review.json has them, with the builder sign-in's folder added to secrets.paths (L1261): the worker
+      // sessions' secret-file hook reads its list from these rules (root's snapshot of them), so it refuses that folder too.
+      repo, mirror: at(mirrorPath(cfg)), rules: { ...rc.rules, secrets: { ...rc.rules.secrets, paths: [...new Set([...rc.rules.secrets.paths, at(builderSigninDir(cfg))])] } },
       render: {
         paths: {
           deny: { record: recordRoot, ssh: join(home, '.ssh'), gh: join(home, '.config', 'gh'), claudeHome: join(home, '.claude'), robotKeys: at(keysPath(cfg)), secrets },
@@ -194,6 +200,8 @@ export function workerRunnerConfigFor(io, cfg, { userOf = (n) => readUser(io, n)
     // Check 12 (L1001): M11's module and the Dispatcher's rules, as the review runner names them, with the review runner's status.
     budget: rc.budget, dispatcherRules: rc.dispatcherRules, reviewStatusFile: at(join(P.reviewRoot, REVIEW_FOLDERS.status)), reviewUid: rev.uid,
     wallStatus,
+    // The builder sessions' sign-in (L1261): read fresh by the runner before each start (runner-ports.mjs workerAccount).
+    signinFile: at(builderSigninPath(cfg)),
   };
   try { checkRunnerConfig(config); } catch (e) { return { config: null, problems: [`the config this would write is one the worker runner refuses (${e.message})`], denied }; }
   return { config, problems: [], denied };
