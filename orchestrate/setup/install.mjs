@@ -111,10 +111,18 @@ function ownTree(io, p) {
   } else io.secureFile(p, { uid: io.rootUid, gid: 0, mode: (st.mode & 0o111) ? 0o755 : 0o644 });
 }
 
-/** The updater's own config, as the copy keeps it. Paths are the ones the updater will see (io.at). */
+/** Why an install whose top is a plain folder is refused: one text for every step that writes into the copy (I7). */
+export const NOT_THE_LINK = 'is a plain folder, not the link the updater flips';
+
+/**
+ * The updater's own config, as the copy keeps it. Paths are the ones the updater will see (io.at). Every name in `keep` is
+ * one the install seeds (planInstall), since the updater refuses a keep item the seed lacks. worker-runner.json is not
+ * one: it is built from the copy's full review.json, which exists only after install, so `worker-config` writes it and then
+ * adds it to the copy's keep itself (worker-runner-setup.mjs planWorkerRunnerConfig), as add-to-install does for its two.
+ */
 export function updaterConfigFor(io, cfg) {
   const P = installPaths(cfg);
-  return { installRoot: io.at(P.installRoot), clone: io.at(P.clone), address: cfg.address, keep: ['bin', UPDATER_CONFIG, RUNNER_CONFIG, ...(cfg.dispatcher ? [DISPATCHER_CONFIG, SENSORS_CONFIG] : []), ...(cfg.workerRunner ? [WORKER_RUNNER_CONFIG] : []), ...cfg.extras.map((e) => posix.basename(e))], gitBin: cfg.gitBin };
+  return { installRoot: io.at(P.installRoot), clone: io.at(P.clone), address: cfg.address, keep: ['bin', UPDATER_CONFIG, RUNNER_CONFIG, ...(cfg.dispatcher ? [DISPATCHER_CONFIG, SENSORS_CONFIG] : []), ...cfg.extras.map((e) => posix.basename(e))], gitBin: cfg.gitBin };
 }
 
 /**
@@ -132,7 +140,7 @@ export function keepsNot(io, cfg) {
   return updaterConfigFor(io, cfg).keep.filter((n) => !keep.includes(n));
 }
 /** How a copy whose keep list lacks a name is put right: the one statement, said by install and dispatcher-config (L1029). */
-export const reinstallSteps = (cfg) => `install again, before the pinned Claude Code and add-to-install (a new install throws both away): unload the jobs (sudo node setup.mjs daemons unload), remove ${installPaths(cfg).install}, put the --for-install review.json at runnerConfig, run install, then put the full review.json back and run add-to-install (README, part 6); the machine-wide guard keeps running from its own folder throughout, and after add-to-install run managed-settings again if its code changed (README, part 2: a reinstall and the machine-wide guard)`;
+export const reinstallSteps = (cfg) => `install again, before the pinned Claude Code and add-to-install (a new install throws both away): unload the jobs (sudo node setup.mjs daemons unload), remove ${installPaths(cfg).install}, put the --for-install review.json at runnerConfig, run install, then put the full review.json back and run add-to-install, then worker-config and bob again, if set up (README, part 6); the machine-wide guard keeps running from its own folder throughout, and after add-to-install run managed-settings again if its code changed (README, part 2: a reinstall and the machine-wide guard)`;
 /** The warning for a copy that does not keep `names`. */
 export const keepsNotWarning = (cfg, names) => `the installed copy's updater does not keep ${names.join(', ')} (its keep list is fixed at the first install), so the copy never gets ${names.length > 1 ? 'them' : 'it'} and an update would drop ${names.length > 1 ? 'them' : 'it'}: ${reinstallSteps(cfg)}`;
 
@@ -224,7 +232,7 @@ export function planInstall(io, cfg, { readSource, runUpdater }) {
   const P = installPaths(cfg); const ops = []; const problems = [];
   const cur = currentCopy(io.at(P.installRoot), { owner: io.rootUid });
   if (!cur.missing) {
-    const why = cur.problem ?? (cur.link ? null : 'is a plain folder, not the link the updater flips');
+    const why = cur.problem ?? (cur.link ? null : NOT_THE_LINK);
     if (why) problems.push(`${P.installRoot}: ${why}. Nothing was changed`);
     // A copy made before something this setup now carries (the Dispatcher's config, the robot's, another extra): install does
     // nothing, so say what it would take (L1029).
@@ -288,7 +296,7 @@ export function planAddToInstall(io, cfg, { pin, sha256, readSource }) {
   const P = installPaths(cfg);
   const cur = currentCopy(io.at(P.installRoot), { owner: io.rootUid });
   if (cur.missing) return { ops: [], problems: [`${P.installRoot} is not installed yet: run install first. Nothing was changed`], installed: false };
-  const why = cur.problem ?? (cur.link ? null : 'is a plain folder, not the link the updater flips');
+  const why = cur.problem ?? (cur.link ? null : NOT_THE_LINK);
   if (why) return { ops: [], problems: [`${P.installRoot}: ${why}. Nothing was changed`], installed: false };
 
   const copy = join(P.install, relative(realpathSync(io.at(P.install)), cur.real));   // the real folder, by its own name: the link can't redirect a step

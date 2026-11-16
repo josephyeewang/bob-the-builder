@@ -23,7 +23,7 @@
 //   check-dispatcher     the review runner's launches folder, the job's dispatcher.json's outboxRoot and copiesRoot, and whether orchestrate can read the owner's host.lock, and if not why  (read only; sudo to read as orchestrate)
 //   dispatcher-config    [--dry-run]    write the Dispatcher's config, <base>/dispatcher.json, and the Sensors', <base>/sensors.json (and the copy's, when the copy keeps them)  (root)
 //                                       an existing dispatcher.json without outboxRoot and copiesRoot won't start the Dispatcher until this is run again
-//   worker-config        [--dry-run]    write the worker runner's config into the copy, <copy>/worker-runner.json (worker-runner-setup.mjs, L1112)  (root)
+//   worker-config        [--dry-run]    write the worker runner's config into the copy, <copy>/worker-runner.json, and add it to the copy's updater keep (worker-runner-setup.mjs, L1112)  (root)
 //   host-lock-copier     prints the owner's host.lock copier job file (a LaunchAgent of the owner's, L1029 E) on stdout and how to load it on
 //                        stderr; needs hostLockSource (read only; refused under sudo)
 //   scanner --from <the gitleaks program> [--dry-run]   the push step's secret scanner: the pinned program (hash checked) and the
@@ -325,7 +325,7 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, bobGitOf, man
     err(/run: daemons load/i.test(e.message) ? `stopped: ${why}.` : `stopped: ${why}. Run it again after fixing that; it picks up where it stopped.`); return 1; }
   const after = o.cmd === 'users-folders' ? check(io, cfg, { alsoKnown: rootMadeEntries(cfg, { dispatcher: o.dispatcherOn }) }) : o.cmd === 'install' || o.cmd === 'add-to-install' ? checkInstall(io, cfg)
     : o.cmd === 'dispatcher-config' ? checkDispatcherAndSensors(io, cfg)
-    : o.cmd === 'worker-config' ? ((why) => [{ ok: why === null, what: 'the copy\'s worker-runner.json is the config this setup writes, and the runner takes it', why: why ?? '' }])(workerRunnerLoadProblem(io, cfg))
+    : o.cmd === 'worker-config' ? ((why) => [{ ok: why === null, what: 'the copy\'s worker-runner.json is the config this setup writes, the runner takes it, and the copy\'s updater keeps it', why: why ?? '' }])(workerRunnerLoadProblem(io, cfg))
     : o.cmd === 'bob' ? checkBob(io, cfg, { commit: o.commit })
     : o.cmd === 'managed-settings' ? checkManagedSettings(io, cfg)
     : o.cmd === 'proposals' ? checkProposals(io, cfg) : o.cmd === 'safe-directory' ? checkSafeDirectory(io, cfg) : o.cmd === 'token' ? checkToken(io, cfg) : o.cmd === 'watch-rules' ? checkRulesCopy(io, cfg) : o.cmd === 'scanner' ? checkScannerFiles(io, cfg, scannerPin(testScannerSha)) : o.cmd === 'watch-app' ? checkWatchAppConfig(io, cfg, o.app, o.pin)

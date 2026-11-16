@@ -8,7 +8,7 @@ import { parseInstallConfig } from './install.mjs';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { checkDaemons, jobsFor, onlyJobs, OPTIONAL_JOBS, planLoad, planPlace, runRows, startChecks } from './daemons.mjs';
-import { WORKER_CLAIM_MS, WORKER_RUNNER_CONFIG, WORKER_RUNNER_JOB, parseWorkerRunner, planWorkerRunnerConfig, workerRunnerConfigFor, workerRunnerConfigText, workerRunnerJobPlist, workerRunnerLoadCheck, workerRunnerLoadProblem } from './worker-runner-setup.mjs';
+import { COPY_CHANGED, WORKER_CLAIM_MS, WORKER_RUNNER_CONFIG, WORKER_RUNNER_JOB, parseWorkerRunner, planWorkerRunnerConfig, workerRunnerConfigFor, workerRunnerConfigText, workerRunnerJobPlist, workerRunnerLoadCheck, workerRunnerLoadProblem } from './worker-runner-setup.mjs';
 import { fakeMac, macTest } from './fake-mac.test-helper.mjs';
 import { updaterConfigFor } from './install.mjs';
 import { checkRunnerConfig } from '../wiring/runner-main.mjs';
@@ -70,18 +70,23 @@ function fakeIo(files, { uid = 0, mode = 0o644, link = false } = {}) {
 test('worker runner load: refused until the copy holds worker-runner.json, root\'s 0644, that the runner takes', () => {
   const cfg = parseInstallConfig({ ...RAW, workerRunner: { product: 'alpha' } });
   const f = `${R}/${WORKER_RUNNER_CONFIG}`; const good = { [f]: workerRunnerConfigText(GOOD) };
-  const built = () => ({ config: GOOD, problems: [] });
-  assert.equal(workerRunnerLoadProblem(fakeIo(good), cfg, { built }), null);
+  const built = () => ({ config: GOOD, problems: [] }); const keepsOf = () => true;
+  assert.equal(workerRunnerLoadProblem(fakeIo(good), cfg, { built, keepsOf }), null);
   for (const [io, why] of [[fakeIo({}), /is not there \(run worker-config first\)/], [fakeIo(good, { uid: 501 }), /not root's 0644/],
     [fakeIo(good, { mode: 0o666 }), /not root's 0644/], [fakeIo(good, { link: true }), /not a plain file/], [fakeIo({ [f]: '{' }), /not valid JSON/],
     [fakeIo({ [f]: JSON.stringify({ ...GOOD, products: {} }) }), /one the runner refuses \(config: products must name at least one product\)/]]) {
-    const p = workerRunnerLoadProblem(io, cfg, { built });
+    const p = workerRunnerLoadProblem(io, cfg, { built, keepsOf });
     assert.match(p ?? '', why); assert.match(p, /so the worker runner's job would not start/);
   }
   // One the runner takes but not what setup writes now (another folder, by hand or an older setup), or setup can't build one: refused too.
   const other = workerRunnerConfigText({ ...GOOD, claimMs: 1 });
-  assert.match(workerRunnerLoadProblem(fakeIo({ [f]: other }), cfg, { built }), /is not the config worker-config writes now: claimMs is 1, not 600000 \(run worker-config\)/);
-  assert.match(workerRunnerLoadProblem(fakeIo(good), cfg, { built: () => ({ config: null, problems: ['no review.json'] }) }), /can't be compared with the config setup builds \(no review\.json\)/);
+  assert.match(workerRunnerLoadProblem(fakeIo({ [f]: other }), cfg, { built, keepsOf }), /is not the config worker-config writes now: claimMs is 1, not 600000 \(run worker-config\)/);
+  assert.match(workerRunnerLoadProblem(fakeIo(good), cfg, { built: () => ({ config: null, problems: ['no review.json'] }), keepsOf }), /can't be compared with the config setup builds \(no review\.json\)/);
+  // The right file, but the copy's updater does not keep it (worker-config cut off before the keep list): refused, never loaded.
+  assert.match(workerRunnerLoadProblem(fakeIo(good), cfg, { built, keepsOf: () => false }), /is not in the keep list of the copy's updater\.json, so the next update would drop it \(run worker-config\), so the worker runner's job would not start/);
+  assert.match(workerRunnerLoadProblem({ ...fakeIo(good), euid: () => 0 }, cfg, { built, keepsOf: () => null }), /can't be checked against the copy's updater\.json, which can't be read/);
+  const unk = workerRunnerLoadCheck({ ...fakeIo(good), euid: () => 501 }, cfg, { built, keepsOf: () => null });
+  assert.equal(unk.unknown, true); assert.match(unk.why, /the copy's updater\.json can't be read/);
 });
 
 // ── worker-config (L1112): every value from the layout, the Mac, the copy's review.json and the Dispatcher's products.json.
@@ -152,9 +157,11 @@ test('worker-config PLANT: refused by name, nothing built, when a source is miss
   assert.match(workerRunnerConfigFor(ioOf(FILES({ ...RC, pin: 'latest' })), cfgOn(), { userOf }).problems.join(), /one the worker runner refuses \(config: pin must be a Claude Code version\)/);
 });
 
-test('worker-config: the copy\'s updater keeps worker-runner.json once the entry is on, and the name can\'t ride in as an extra', () => {
+test('worker-config: install\'s keep list never names worker-runner.json (worker-config adds it), and the name can\'t ride in as an extra', () => {
   const io = { at: (p) => p };
-  assert.ok(updaterConfigFor(io, cfgOn()).keep.includes(WORKER_RUNNER_CONFIG));
+  // The install can't seed it (it is built from the full review.json, after install), and the updater refuses a keep item
+  // the seed lacks: so it joins keep at worker-config, never at install.
+  assert.ok(!updaterConfigFor(io, cfgOn()).keep.includes(WORKER_RUNNER_CONFIG));
   assert.ok(!updaterConfigFor(io, parseInstallConfig(RAW)).keep.includes(WORKER_RUNNER_CONFIG));
   assert.throws(() => parseInstallConfig({ ...RAW, extras: ['/Users/sam/x/worker-runner.json'] }), /extras must be full paths/);
 });
@@ -170,19 +177,87 @@ const gateIo = (files, { euid = 0, deny = null } = {}) => ({
 });
 const WF = `${R}/${WORKER_RUNNER_CONFIG}`;
 
-test('#537 r1 m1: worker-config writes only into a copy that is there, keeps the file, and is root\'s alone', () => {
+test('#537 r1 m1: worker-config writes only into a copy that is there and root\'s alone, then adds the file to its keep', () => {
   const cfg = cfgOn(); const built = () => ({ config: GOOD, problems: [] });
-  const plan = (o = {}, files = {}) => planWorkerRunnerConfig(ioOf(files), cfg, { built, keepsOf: () => true, copyProblem: () => null, ...o });
-  const ok = plan(); assert.deepEqual(ok.problems, []); assert.equal(ok.ops.length, 1);
-  assert.ok(ok.ops[0].text.startsWith(`write ${WF} `), ok.ops[0].text); assert.match(ok.ops[0].text, /root:wheel 0644; the runner reads it once, at start/);
-  assert.deepEqual(plan({}, { [WF]: workerRunnerConfigText(GOOD) }).ops, [], 'twice does nothing');
-  for (const [o, why] of [[{ keepsOf: () => null }, /the install is not there yet \(run the install first\)/], [{ keepsOf: () => false }, /the installed copy's updater does not keep worker-runner\.json/],
-    [{ keepsOf: () => 'updater.json is not readable' }, /the installed copy's updater does not keep worker-runner\.json/],
+  const DIR = `${BASE}/install/orchestrate.v-1/orchestrate`; const F = `${DIR}/${WORKER_RUNNER_CONFIG}`; const U = `${DIR}/updater.json`;
+  const KEEP = ['bin', 'updater.json', 'review.json'];
+  const copyOf = (keep = KEEP) => () => ({ dir: DIR, updater: { installRoot: R, keep } });
+  const plan = (o = {}, files = {}) => planWorkerRunnerConfig(ioOf(files), cfg, { built, copyOf: copyOf(), copyProblem: () => null, ...o });
+  // Not kept yet (a fresh install): the file, then the keep list, in that order, both in the copy's real folder.
+  const ok = plan(); assert.deepEqual(ok.problems, []); assert.equal(ok.ops.length, 2);
+  assert.ok(ok.ops[0].text.startsWith(`write ${F} `), ok.ops[0].text); assert.match(ok.ops[0].text, /root:wheel 0644; the runner reads it once, at start/);
+  assert.ok(ok.ops[1].text.startsWith(`add ${WORKER_RUNNER_CONFIG} to the keep list of ${U} `), ok.ops[1].text);
+  // Already kept: only the file. The file already right: only the keep list. Both: nothing (twice does nothing).
+  assert.deepEqual(plan({ copyOf: copyOf([...KEEP, WORKER_RUNNER_CONFIG]) }).ops.map((o) => o.text.split(' ')[0]), ['write']);
+  assert.deepEqual(plan({}, { [F]: workerRunnerConfigText(GOOD) }).ops.map((o) => o.text.split(' ')[0]), ['add']);
+  assert.deepEqual(plan({ copyOf: copyOf([...KEEP, WORKER_RUNNER_CONFIG]) }, { [F]: workerRunnerConfigText(GOOD) }).ops, [], 'twice does nothing');
+  for (const [o, why] of [[{ copyOf: () => null }, /the install is not there yet \(run the install first\)/],
+    [{ copyOf: () => ({ dir: DIR, problem: 'the copy\'s updater.json was refused: config: keep must list plain top-level names' }) }, /the copy's updater\.json was refused/],
     [{ copyProblem: () => 'x is uid 501\'s' }, /the installed copy is not root's alone \(x is uid 501's\), so root won't write in it/]]) {
     const p = plan(o); assert.deepEqual(p.ops, [], String(why)); assert.match(p.problems.join('\n'), why);
   }
   assert.deepEqual(plan({ copyProblem: () => false }).problems, [], 'no reason is no problem');
   assert.deepEqual(plan({ built: () => ({ config: null, problems: ['no review.json'] }) }), { ops: [], problems: ['no review.json'] });
+});
+
+// The fix for the live install failure: the keep list is written after the file, each whole (writeAside), so a run cut off
+// between the two never leaves keep naming a file the copy lacks (the updater refuses that), and a second run finishes it.
+test('worker-config: missing from keep → written and added; twice → nothing; cut off between file and keep → consistent, and the next run finishes', () => {
+  const cfg = cfgOn(); const built = () => ({ config: GOOD, problems: [] });
+  const DIR = R; const F = `${DIR}/${WORKER_RUNNER_CONFIG}`; const U = `${DIR}/updater.json`;
+  const updater0 = { installRoot: R, clone: `${BASE}/install/clone`, address: RAW.address, keep: ['bin', 'updater.json', 'review.json'], gitBin: '/usr/bin/git' };
+  const files = { [U]: `${JSON.stringify(updater0, null, 1)}\n`, [`${DIR}/review.json`]: '{}' }; const order = [];
+  const io = { ...ioOf(files), euid: () => 0, lstat: (p) => { if (!Object.hasOwn(files, p)) throw Object.assign(new Error('no'), { code: 'ENOENT' }); return { isFile: () => true, isSymbolicLink: () => false, uid: 0, mode: 0o100644 }; }, unlink: (p) => { delete files[p]; }, write: (p, t) => { files[p] = t; }, secureFile: () => {},
+    rename: (a, b) => { order.push(b); files[b] = files[a]; delete files[a]; } };
+  const copyOf = () => ({ dir: DIR, updater: JSON.parse(files[U]) });
+  const plan = () => planWorkerRunnerConfig(io, cfg, { built, copyOf, copyProblem: () => null });
+  const keeps = () => JSON.parse(files[U]).keep.includes(WORKER_RUNNER_CONFIG);
+  // Cut off after the first step: the file is there, the keep list does not name it yet. The updater takes that (keep names
+  // only files the copy holds), and the job's load refuses it (the update would drop the file).
+  const first = plan(); assert.equal(first.ops.length, 2); first.ops[0].run();
+  assert.equal(files[F], workerRunnerConfigText(GOOD)); assert.equal(keeps(), false);
+  assert.ok(JSON.parse(files[U]).keep.every((n) => n === 'bin' || Object.hasOwn(files, `${DIR}/${n}`)), 'keep names only what the copy holds');
+  assert.match(workerRunnerLoadProblem(io, cfg, { built, keepsOf: () => keeps() }) ?? '', /is not in the keep list of the copy's updater\.json/);
+  // The next run finishes it: only the keep list, and nothing else in updater.json changes.
+  const second = plan(); assert.equal(second.ops.length, 1); assert.match(second.ops[0].text, /^add worker-runner\.json to the keep list/); second.ops[0].run();
+  assert.deepEqual(JSON.parse(files[U]), { ...updater0, keep: [...updater0.keep, WORKER_RUNNER_CONFIG] });
+  assert.deepEqual(order, [F, U], 'the file went in before the keep list');
+  assert.equal(workerRunnerLoadProblem(io, cfg, { built, keepsOf: () => keeps() }), null, 'loads once the file is there and kept');
+  assert.deepEqual(plan().ops, [], 'twice does nothing');
+  // Uncut, from the start: both in one run, file first.
+  delete files[F]; files[U] = `${JSON.stringify(updater0, null, 1)}\n`; order.length = 0;
+  for (const o of plan().ops) o.run();
+  assert.deepEqual(order, [F, U]); assert.equal(keeps(), true); assert.deepEqual(plan().ops, []);
+  // The keep step adds to the keep list there when it runs: a name another step (bob, add-to-install) added since the plan stays.
+  delete files[F]; files[U] = `${JSON.stringify(updater0, null, 1)}\n`;
+  const later = plan(); assert.equal(later.ops.length, 2);
+  files[U] = `${JSON.stringify({ ...updater0, keep: [...updater0.keep, 'bob-manifest.json'] }, null, 1)}\n`;
+  for (const o of later.ops) o.run();
+  assert.deepEqual(JSON.parse(files[U]).keep, [...updater0.keep, 'bob-manifest.json', WORKER_RUNNER_CONFIG]);
+});
+
+test('worker-config: an update that flips the copy between the file and the keep step is refused, and the new copy\'s keep is not touched', () => {
+  const cfg = cfgOn(); const built = () => ({ config: GOOD, problems: [] });
+  const OLD = `${BASE}/install/orchestrate.v-1/orchestrate`; const NEW = `${BASE}/install/orchestrate.v-2/orchestrate`;
+  const updater0 = { installRoot: R, clone: `${BASE}/install/clone`, address: RAW.address, keep: ['bin', 'updater.json', 'review.json'], gitBin: '/usr/bin/git' };
+  const files = { [`${OLD}/updater.json`]: JSON.stringify(updater0), [`${NEW}/updater.json`]: JSON.stringify(updater0) };
+  const io = { ...ioOf(files), unlink: (p) => { delete files[p]; }, write: (p, t) => { files[p] = t; }, secureFile: () => {}, rename: (a, b) => { files[b] = files[a]; delete files[a]; } };
+  let at = OLD; const copyOf = () => ({ dir: at, updater: JSON.parse(files[`${at}/updater.json`]) });
+  const p = planWorkerRunnerConfig(io, cfg, { built, copyOf, copyProblem: () => null });
+  assert.equal(p.ops.length, 2); p.ops[0].run();
+  at = NEW;   // the updater flips the link here
+  assert.throws(() => p.ops[1].run(), new RegExp(COPY_CHANGED.replace(/[()]/g, '\\$&')));
+  assert.deepEqual(JSON.parse(files[`${NEW}/updater.json`]), updater0, 'the new copy\'s keep list is as the update left it');
+  assert.deepEqual(JSON.parse(files[`${OLD}/updater.json`]), updater0, 'and the old one\'s too');
+  // Run again: into the new copy, file and keep.
+  const again = planWorkerRunnerConfig(io, cfg, { built, copyOf, copyProblem: () => null }); for (const o of again.ops) o.run();
+  assert.ok(Object.hasOwn(files, `${NEW}/${WORKER_RUNNER_CONFIG}`)); assert.ok(JSON.parse(files[`${NEW}/updater.json`]).keep.includes(WORKER_RUNNER_CONFIG));
+  // The copy gone by the keep step: refused the same way.
+  delete files[`${NEW}/${WORKER_RUNNER_CONFIG}`]; files[`${NEW}/updater.json`] = JSON.stringify(updater0);
+  let there = true; const vanishing = () => (there ? copyOf() : null);
+  const last = planWorkerRunnerConfig(io, cfg, { built, copyOf: vanishing, copyProblem: () => null });
+  assert.equal(last.ops.length, 2); last.ops[0].run(); there = false;
+  assert.throws(() => last.ops[1].run(), /the copy changed during this run/);
 });
 
 test('#537 r1 m2: place and load refuse the worker runner while the copy\'s worker-runner.json is missing or not one setup writes', () => {
@@ -277,8 +352,15 @@ test('#537 r1 (L1188): daemons check\'s worker-runner.json row: not known withou
   assert.equal(unknown.skip, true, 'NEEDS ROOT'); assert.equal(unknown.ok, true, 'a skip, never a FAIL'); assert.match(unknown.why, /can't be checked without root/);
   const differs = row({ ...src, [WF]: workerRunnerConfigText({ ...built.config, claimMs: 1 }) });
   assert.equal(differs.ok, false); assert.ok(!differs.skip); assert.match(differs.why, /worker-runner\.json/);
-  const same = row({ ...src, [WF]: workerRunnerConfigText(built.config) });
+  const kept = { [`${R}/updater.json`]: JSON.stringify({ keep: ['bin', 'updater.json', 'review.json', WORKER_RUNNER_CONFIG] }) };
+  const same = row({ ...src, ...kept, [WF]: workerRunnerConfigText(built.config) });
   assert.deepEqual(same, { ok: true, what: same.what }, 'PASS: no reason, no skip');
+  // The same file, but the copy's updater does not keep it yet (worker-config cut off before the keep list): a FAIL.
+  const notKept = row({ ...src, [`${R}/updater.json`]: JSON.stringify({ keep: ['bin', 'updater.json', 'review.json'] }), [WF]: workerRunnerConfigText(built.config) });
+  assert.equal(notKept.ok, false); assert.match(notKept.why, /is not in the keep list of the copy's updater\.json/);
+  // A keep that is not a list is an updater.json that can't be read, never "not kept".
+  const odd = row({ ...src, [`${R}/updater.json`]: JSON.stringify({ keep: 'worker-runner.json' }), [WF]: workerRunnerConfigText(built.config) });
+  assert.equal(odd.ok, false); assert.match(odd.why, /can't be checked against the copy's updater\.json, which can't be read/);
 });
 
 test('L1193: worker-config names the builder wall status file at layout\'s place, and refuses a layout that names none (L1205 m3)', () => {

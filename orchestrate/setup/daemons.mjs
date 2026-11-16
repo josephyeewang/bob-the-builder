@@ -459,7 +459,7 @@ export function checkDaemons(io, cfg, jobs = jobsFor(cfg)) {
   if (jobs.includes(DISPATCHER_JOB)) { const why = dispatcherConfigProblem(io, cfg); item(why === null, `the Dispatcher's config in the copy (dispatcher.json) is the one this setup writes`, why); }
   if (jobs.includes(SENSORS_JOB)) { const why = sensorsConfigProblem(io, cfg); item(why === null, `the Sensors' config in the copy (sensors.json) is the one this setup writes`, why); }
   if (jobs.includes(WORKER_RUNNER_JOB)) {
-    const { why, unknown: u } = workerRunnerLoadCheck(io, cfg); const what = `the worker runner's config in the copy (worker-runner.json) is the one this setup writes`;
+    const { why, unknown: u } = workerRunnerLoadCheck(io, cfg); const what = `the worker runner's config in the copy (worker-runner.json) is the one this setup writes, and the copy's updater keeps it`;
     if (u) out.push({ ok: true, skip: true, what, why }); else item(why === null, what, why);   // NEEDS ROOT, never a pass nor a FAIL (audit #305 n3)
   }
   // The Sensors read who is signed in and the usage from the owner's answer: stale, and the Dispatcher starts nothing (L1051).

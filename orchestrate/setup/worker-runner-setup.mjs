@@ -5,21 +5,24 @@
 //                builder's home under the base (never a person's under /Users) and Umask 63 (wiring/runner-job.mjs
 //                workerRunnerPlist), logs worker-runner.out.log and worker-runner.err.log.
 //   load         refuses unless the install check passes (every job) and the copy holds worker-runner.json, root's 0644,
-//                which the runner's own check (runner-main.mjs checkRunnerConfig) takes. A job placed without it would
-//                start at boot and stop at once, every minute.
+//                which the runner's own check (runner-main.mjs checkRunnerConfig) takes, and its updater keeps it. A job
+//                placed without it would start at boot and stop at once, every minute; one whose file the updater does not
+//                keep would lose it at the next update.
 //
 // Off unless the setup config has a `workerRunner` entry. For the thin slice (L1112 (1)) it names one product, one of the
 // config's products. The rules lists the sessions' settings need come from the rules already set up, never a second copy
 // in the entry (L1112 (2), I7). Nothing here names a product or a person.
 
-import { join } from 'node:path';
+import { realpathSync } from 'node:fs';
+import { join, relative } from 'node:path';
 import { NODE, RUNNER_CONFIG, UPDATER_CONFIG, currentCopy, installProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { FOLDERS as REVIEW_FOLDERS } from '../modules/M4-workshop/launcher/review-runner.mjs';
+import { readUpdaterConfig } from '../modules/M4-workshop/launcher/review-updater.mjs';
 import { checkProducts } from '../modules/M10-rules/reader.mjs';
 import { checkRunnerConfig } from '../wiring/runner-main.mjs';
 import { fullPath, workerRunnerPlist } from '../wiring/runner-job.mjs';
 import { BUILDER, WORKER_RUNNER_CONFIG, WORKER_STATUS_FILE, homeOf, keysPath, mirrorPath, outboxRootPath, privatePath, proposalsParentOf, storePath, workerCopiesPath, workerRulesPath, workerRunnerPaths } from './layout.mjs';
-import { installPaths, keepsNotWarning } from './install.mjs';
+import { NOT_THE_LINK, installPaths } from './install.mjs';
 import { readUser } from './users-folders.mjs';
 import * as layout from './layout.mjs';
 import { BUILDER_ROLE, rulesProblems } from './review-config.mjs';
@@ -53,7 +56,8 @@ export function workerRunnerJobPlist(cfg) {
 
 /**
  * Null, or why the worker runner's job must not be loaded: the copy's worker-runner.json missing, not root's 0644 plain file,
- * one the runner refuses, or not exactly what worker-config writes now (`built` is a port for tests).
+ * one the runner refuses, not exactly what worker-config writes now, or not kept by the copy's updater (`built` and
+ * `keepsOf` are ports for tests).
  */
 export const workerRunnerLoadProblem = (io, cfg, opts) => workerRunnerLoadCheck(io, cfg, opts).why;
 
@@ -63,7 +67,7 @@ const deniedCode = (e) => e?.code === 'EACCES' || e?.code === 'EPERM';
  * the check reads was refused (EACCES, EPERM), so it can't tell, which is not the job being broken (L1043): place and
  * check leave it out of what they act on, and the line says to run with sudo.
  */
-export function workerRunnerLoadCheck(io, cfg, { built = () => workerRunnerConfigFor(io, cfg) } = {}) {
+export function workerRunnerLoadCheck(io, cfg, { built = () => workerRunnerConfigFor(io, cfg), keepsOf = () => copyKeepsWorker(io, cfg) } = {}) {
   const f = join(installPaths(cfg).installRoot, WORKER_RUNNER_CONFIG);
   const stop = (why) => ({ why: `${f} ${why}, so the worker runner's job would not start`, unknown: false });
   const asRoot = io.euid?.() === 0;
@@ -82,6 +86,11 @@ export function workerRunnerLoadCheck(io, cfg, { built = () => workerRunnerConfi
   if (b.problems.length) return b.denied && !asRoot ? notKnown(`a file the config is built from can't be read: ${b.problems.join('; ')}`) : stop(`can't be compared with the config setup builds (${b.problems.join('; ')})`);
   const want = workerRunnerConfigText(b.config);
   if (text !== want) return stop(`is not the config worker-config writes now${keysDiffer(text, want)} (run worker-config)`);
+  // Last: the file is right, but an update keeps only what the copy's updater.json lists (a run of worker-config cut off
+  // between the file and the keep list leaves this; running it again finishes it).
+  const keeps = keepsOf();
+  if (keeps === null) return asRoot ? stop(`can't be checked against the copy's ${UPDATER_CONFIG}, which can't be read`) : notKnown(`the copy's ${UPDATER_CONFIG} can't be read`);
+  if (keeps !== true) return stop(`is not in the keep list of the copy's ${UPDATER_CONFIG}, so the next update would drop it (run worker-config)`);
   return { why: null, unknown: false };
 }
 
@@ -102,10 +111,13 @@ export function workerRunnerLoadCheck(io, cfg, { built = () => workerRunnerConfi
 // BUILD-RULES). secrets: the rules' secrets.paths and production env_files that are full plain paths (the hooks hold the
 // rest), the private folder, the Dispatcher's rules-state and approvals folders, and the owner's home.
 // Written into the copy only, as add-to-install writes there: it is built from the copy's own review.json, which a first
-// install does not yet have in full. The copy's updater keeps it (install.mjs updaterConfigFor) once the entry is on at
-// install; a copy made before that never gets it, which the command says.
+// install does not yet have in full. So the install neither seeds it nor keeps it (install.mjs updaterConfigFor: the
+// updater refuses a keep item the seed lacks); worker-config writes the file and then adds its name to the copy's
+// updater.json keep, the file first, so a keep list never names a file the copy lacks.
 
 export const WORKER_CLAIM_MS = 600_000;
+/** What worker-config says when an update flipped the install's link between its plan and its keep step. */
+export const COPY_CHANGED = 'the copy changed during this run (an update): run worker-config again';
 const plainObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
 /**
@@ -189,29 +201,61 @@ export function workerRunnerConfigFor(io, cfg, { userOf = (n) => readUser(io, n)
 /** The file's exact text: what the writer writes and what load compares. */
 export const workerRunnerConfigText = (config) => `${JSON.stringify(config, null, 1)}\n`;
 
-/** Whether the copy's updater keeps worker-runner.json: true, false, or null when there is no copy or no readable updater.json. */
+/** Whether the copy's updater keeps worker-runner.json: true, false, or null when its updater.json can't be read or has no
+ *  keep list (no copy, refused, not JSON). The copy itself being whole and root's is the install check's, which every job's
+ *  load runs first. */
 function copyKeepsWorker(io, cfg) {
-  const P = installPaths(cfg);
-  const cur = currentCopy(io.at(P.installRoot), { owner: io.rootUid });
-  if (cur.missing || cur.problem || !cur.link) return null;
-  try { const u = JSON.parse(io.readText(join(P.installRoot, UPDATER_CONFIG))); return Array.isArray(u?.keep) && u.keep.includes(WORKER_RUNNER_CONFIG); } catch { return null; }
+  let u; try { u = JSON.parse(io.readText(join(installPaths(cfg).installRoot, UPDATER_CONFIG))); } catch { return null; }
+  return Array.isArray(u?.keep) ? u.keep.includes(WORKER_RUNNER_CONFIG) : null;
 }
 
 /**
- * `worker-config`: write <copy>/worker-runner.json. → { ops, problems, warnings }. Twice does nothing. The runner reads its
- * config once, at start: a changed file reaches a loaded job only when it is unloaded and loaded again, which the step says.
+ * The copy worker-config writes into → null when there is no copy; { problem } when the install's link is broken or not
+ * root's; else { dir, updater } or { dir, problem }: `dir` the
+ * copy's real folder by its own name (never through the link, so an update's flip can't send one write to one copy and the
+ * other to another), `updater` its updater.json as the updater reads it.
  */
-export function planWorkerRunnerConfig(io, cfg, { built = () => workerRunnerConfigFor(io, cfg), keepsOf = () => copyKeepsWorker(io, cfg),
+function copyFolder(io, cfg) {
+  const P = installPaths(cfg);
+  const cur = currentCopy(io.at(P.installRoot), { owner: io.rootUid });
+  if (cur.missing) return null;
+  if (cur.problem || !cur.link) return { problem: `${P.installRoot}: ${cur.problem ?? NOT_THE_LINK}. Nothing was changed` };
+  let dir; try { dir = join(P.install, relative(realpathSync(io.at(P.install)), cur.real)); } catch (e) { return { problem: `${P.installRoot}: its real folder can't be found (${e?.code ?? e?.message}). Nothing was changed` }; }
+  try { return { dir, updater: readUpdaterConfig(io.at(join(dir, UPDATER_CONFIG))) }; } catch (e) { return { dir, problem: `the copy's ${UPDATER_CONFIG} was refused: ${e.message}` }; }
+}
+
+/**
+ * `worker-config`: write <copy>/worker-runner.json, then add it to the copy's updater.json keep. → { ops, problems, warnings }.
+ * The file goes first: a run cut off between the two leaves the file in a copy whose keep does not name it yet (the
+ * updater is fine with that; the job's load refuses it), never a keep naming a file that is not there (the updater
+ * refuses that, so no update could run). A second run finishes it; twice does nothing. Each write is whole or not at all
+ * (writeAside). The keep step looks at the copy again when it runs: an update that flipped the link after the plan is
+ * refused (the file went to the old copy; run it again), and the keep list it adds to is the one there now, so a name
+ * another step added since the plan is kept. The runner reads its config once, at start: a changed file reaches a loaded job only when it is unloaded
+ * and loaded again, which the step says.
+ */
+export function planWorkerRunnerConfig(io, cfg, { built = () => workerRunnerConfigFor(io, cfg), copyOf = () => copyFolder(io, cfg),
   copyProblem = () => installProblem(io.at(installPaths(cfg).installRoot), [], { owner: io.rootUid, top: io.prefix || '/' }) } = {}) {
   const { config, problems } = built();
   if (problems.length) return { ops: [], problems };
-  const P = installPaths(cfg); const f = join(P.installRoot, WORKER_RUNNER_CONFIG); const text = workerRunnerConfigText(config);
-  const keeps = keepsOf();
-  if (keeps === null) return { ops: [], problems: [NO_INSTALL] };
-  if (keeps !== true) return { ops: [], problems: [keepsNotWarning(cfg, [WORKER_RUNNER_CONFIG])] };
+  const copy = copyOf();
+  if (copy === null) return { ops: [], problems: [NO_INSTALL] };
+  if (copy.problem) return { ops: [], problems: [copy.problem] };
   const bad = copyProblem();
   if (bad) return { ops: [], problems: [notRootsAlone(bad)] };
+  const f = join(copy.dir, WORKER_RUNNER_CONFIG); const text = workerRunnerConfigText(config);
   let same = false; try { same = io.readText(f) === text; } catch { /* not there: written below */ }
   const restart = `the runner reads it once, at start: a loaded job takes it after daemons unload --only ${WORKER_RUNNER_JOB}, then daemons load --only ${WORKER_RUNNER_JOB}`;
-  return { ops: same ? [] : [{ text: `write ${f}   (root:wheel 0644; ${restart})`, run: () => writeAside(io, f, text) }], problems: [], warnings: [] };
+  const ops = same ? [] : [{ text: `write ${f}   (root:wheel 0644; ${restart})`, run: () => writeAside(io, f, text) }];
+  if (!copy.updater.keep.includes(WORKER_RUNNER_CONFIG)) {
+    const u = join(copy.dir, UPDATER_CONFIG);
+    ops.push({ text: `add ${WORKER_RUNNER_CONFIG} to the keep list of ${u}   (root:wheel 0644; after the file, so an update carries it and keep never names a missing file)`, run: () => {
+      const now = copyOf();
+      if (now === null || (now.dir !== undefined && now.dir !== copy.dir)) throw new Error(`${COPY_CHANGED}; the new copy's keep list was not touched`);
+      if (now.problem) throw new Error(now.problem);
+      if (now.updater.keep.includes(WORKER_RUNNER_CONFIG)) return;
+      writeAside(io, u, `${JSON.stringify({ ...now.updater, keep: [...now.updater.keep, WORKER_RUNNER_CONFIG] }, null, 1)}\n`);
+    } });
+  }
+  return { ops, problems: [], warnings: [] };
 }
