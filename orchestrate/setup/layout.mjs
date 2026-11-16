@@ -323,7 +323,7 @@ export function folderTable(cfg) {
     [p('home'), 'root', 0o755, 'the plain-script users\' home folders'],
     ...USERS.map((u) => [homeOf(cfg, u), u, 0o700, `${u}'s home`]),
     [keysPath(cfg), 'orchestrate', 0o700, 'robot keys: nothing else reads them'],
-    [builderSigninDir(cfg), BUILDER, 0o700, 'the worker sessions\' Claude sign-in (a long-lived token file, L1261): only the worker runner reads it; every session\'s settings deny it'],
+    [builderSigninDir(cfg), BUILDER, 0o700, 'the worker sessions\' Claude sign-in (a long-lived token file): builder-only; every builder process can read it (L1261); every session\'s settings deny it'],
     [privatePath(cfg), 'orchestrate', 0o700, 'private data: attempt logs, raw facts before masking'],
     [p('watch'), 'orchestrate', 0o700, 'the watch-only week: the log of what the Merge Gate would have done, and the rules draft'],
     [watchNotesPath(cfg), 'owner', 0o755, 'the watch-only week\'s written explanations: the owner writes, orchestrate and the summary only read'],

@@ -53,6 +53,7 @@ test('PLANT each wrong owner, mode, link or chain → refused with a reason that
   const cases = [
     ['file 0644 (others could read it)', () => place({ fileMode: 0o644 }), (p) => read(p.file), /is 644, want 600/],
     ['file 0640', () => place({ fileMode: 0o640 }), (p) => read(p.file), /is 640, want 600/],
+    ['file 0604', () => place({ fileMode: 0o604 }), (p) => read(p.file), /is 604, want 600/],
     ['folder 0755', () => place({ dirMode: 0o755 }), (p) => read(p.file), /its folder .* is 755, want 700/],
     ['file another user\'s', () => place(), (p) => read(p.file, { uid: me + 1, lstat: (x) => ({ ...lstatOwn(x), uid: me + 1 }) }), /is not this user's own \(uid \d+, want \d+\)/],
     ['folder another user\'s', () => place(), (p) => read(p.file, { uid: me + 1 }), /its folder .* is not this user's own/],
@@ -163,7 +164,9 @@ test('signinFileRows: lstat only; every wrong owner, mode, link or access list i
   try {
     assert.deepEqual(rows().filter((r) => !r.ok), []);
     assert.equal(rows().length, 3);
-    chmodSync(p.file, 0o644); assert.match(rows().find((r) => !r.ok).why, /mode is 644, want 600/); chmodSync(p.file, 0o600);
+    // Exactly 0600: group-readable or world-readable alone is a FAIL too (r2).
+    for (const m of [0o644, 0o640, 0o604]) { chmodSync(p.file, m); assert.match(rows().find((r) => !r.ok)?.why ?? 'passed', new RegExp(`mode is ${m.toString(8)}, want 600`)); }
+    chmodSync(p.file, 0o600);
     chmodSync(p.dir, 0o750); assert.match(rows().find((r) => !r.ok).why, /mode is 750, want 700/); chmodSync(p.dir, 0o700);
     assert.match(rows({ uid: me + 1 }).filter((r) => !r.ok).map((r) => r.why).join(), /owner is uid \d+, want \d+/);
     assert.match(rows({ chain: () => '/x is a link' }).find((r) => !r.ok).why, /\/x is a link/);
