@@ -33,7 +33,8 @@
 //   7  hooks and version    reviewChecks' 7 (checkVersion, checkHooks with the product's rules)
 //   8  rules snapshot       read only (L1226): root's worker-rules job's file, workerSnapshotProblem below, and the
 //                           session's hooks read that file with --snapshot-owner 0. The runner never writes it
-//   9  no stray keys        reviewChecks' 9 (checkRoleEnv on the environment claude gets)
+//   9  no stray keys        checkRoleEnv on the environment claude gets, as reviewChecks' 9, but with the builder sign-in let
+//                           through when the config names its file (x.allowSigninToken, L1261): that one name only
 //   10 machine-wide block   reviewChecks' 10 (checkMachineWide)
 //   11 smoke and baseline   reviewChecks' smoke first, with the owner's home as the place outside the copy it must not
 //                           write, so the lock-down is shown on before any of the branch's code runs (#369 M2); then a
@@ -68,6 +69,7 @@
 import { lstatSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { reviewChecks } from '../modules/M4-workshop/launcher/review-launch.mjs';
+import { checkRoleEnv } from '../modules/M4-workshop/launcher/env-check.mjs';
 import { baselineTest, installStep } from '../modules/M4-workshop/launcher/launch.mjs';
 import { isProtectedName } from '../modules/M4-workshop/launcher/worker-copy.mjs';
 import { git } from '../modules/M4-workshop/git/safe-git.mjs';
@@ -199,7 +201,7 @@ export const baselineCommand = (test, file) => exitCodeCommand(test, file, 'test
 export function workerChecks(x, { gateOf = check12, snapshotOwner = 0 } = {}) {
   const r = reviewChecks({ ...x, reviewHome: x.home });
   // reviewChecks' check 1 says "the review copy"; a worker's is the card's copy (#369 r1 c1).
-  const ports = { 1: async () => { const a = await r[1](); return a?.ok ? a : { ...a, reason: String(a?.reason).replaceAll('the review copy', 'the copy') }; }, 5: r[5], 9: r[9] };
+  const ports = { 1: async () => { const a = await r[1](); return a?.ok ? a : { ...a, reason: String(a?.reason).replaceAll('the review copy', 'the copy') }; }, 5: r[5], 9: async () => checkRoleEnv(x.env, { allowSigninToken: x.allowSigninToken === true }) };
   if (has(x.mirror)) ports[2] = async () => { const p = await setupFilesProblem(x); return p ? refuse(p) : { ok: true }; };
   if (typeof x.busy === 'function') ports[3] = r[3];
   if (has(x.pin) && typeof x.spawn === 'function') ports[6] = r[6];

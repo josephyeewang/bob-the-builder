@@ -127,16 +127,12 @@ deletes anything. Steps, on the Mini, in a new Terminal app window, with your ba
    *Moves the old work out of the base into your home, where `builder` can't read it.*
 4. Paste the same command without `--dry-run`: `sudo /usr/local/bin/node setup.mjs users-folders`.
    *Makes `builder` and hands it the worker folders; it ends with `check`.*
-5. Sign `builder` in to Claude Code once per account it will use, **after Part 2's `add-to-install`** (step 6 doesn't
-   need it, so go on and come back). The program `builder` signs in with is the pinned one in the installed copy, which
-   `add-to-install` puts there (root's, 0755): `<base>/install/orchestrate/claude-code/<pin>/claude`, with `<pin>` the
-   version given to `--pin`. Not a `claude` in your own home (`builder` can't read it), and not `/usr/local/bin/claude`,
-   which setup never makes. With the base `/Library/orchestrate`, in a new Terminal app window, paste
-   `sudo -H -u builder /Library/orchestrate/install/orchestrate/claude-code/<pin>/claude`, then type `/login` and finish in
-   the browser. For account b, paste
-   `sudo -H -u builder env CLAUDE_CONFIG_DIR=/Library/orchestrate/home/builder/.claude-b /Library/orchestrate/install/orchestrate/claude-code/<pin>/claude`
-   and do the same (`env` sets the folder for the program itself, whatever sudo's own rules on such names).
-   *The sign-in lives in `builder`'s home (`<base>/home/builder`); it is never copied from yours.*
+5. Give `builder` its Claude sign-in, **after Part 2's `add-to-install`** (step 6 doesn't need it, so go on and come
+   back). `/login` as `builder` does not work: `builder` never logs in to macOS, so it has no login Keychain ("A keychain
+   cannot be found to store builder"). Instead (L1261) make a long-lived token as yourself and save it for `builder`:
+   the steps are in Part 3, "Where the builder sessions' sign-in lives".
+   *The sign-in lives in `<base>/builder-signin/claude-signin`, `builder`'s own file; the workers use it on the account
+   that made it.*
 6. Paste `sudo /usr/local/bin/node setup.mjs proofs`. *Must end "all N proofs PASS: containment is proven on this Mac";
    a FAIL or NOT TRIED line says what to fix.*
 
@@ -265,6 +261,47 @@ moving parts, and `security add-generic-password -w <value>` would show the toke
 Keychain — the owner's AI sessions (workers) could reach it: refused. **Recommended: (a).** Built as (a).
 The token text is never printed, logged, put in a step's text or an error, or given to a program as an argument; the
 tests assert that over the output, the step list, the Mac's call log and every program call.
+
+### Where the builder sessions' sign-in lives (L1261)
+**Why.** The worker sessions run as the hidden `builder` user, which never logs in to macOS, so it has no login Keychain:
+`/login` in a builder session fails with "A keychain cannot be found to store builder". Joe's decision (L1261, not to be
+revisited): a long-lived Claude sign-in token, in a file only `builder` can read, handed by the worker runner to each
+session's claude in its environment (`CLAUDE_CODE_OAUTH_TOKEN`).
+
+**Where.** `<base>/builder-signin/claude-signin` (layout.mjs `builderSigninPath`): builder's own 0600 file, one name, in
+builder's own 0700 folder (`users-folders` makes it), right under the base, which is root's, as is every folder above it.
+It is not in `keys/` (orchestrate's), not in the worker copies, and not in builder's home (the sessions' HOME). Every
+worker session's settings deny the folder (worker-config puts it on the deny list and in the worker rules' `secrets.paths`,
+so the secret-file hook refuses it too).
+
+**Make it, or replace it** (each step on the Mini):
+1. In a Terminal window, as yourself (not sudo): `claude setup-token`. It opens the browser to sign in and prints a
+   long-lived token (it starts `sk-ant-oat`). Copy it. Make it on the account the workers should spend.
+2. In the same window, from the installed copy: `sudo node setup.mjs builder-signin` (try `--dry-run` first: it reads
+   nothing). Paste the token at the prompt; nothing shows as you paste. It is checked for shape (a wrong paste is refused
+   and not repeated), then saved whole or not at all. The same token again changes nothing.
+3. `sudo node setup.mjs check-builder-signin` (or `sudo node setup.mjs daemons check --only worker-runner`, which shows
+   the same row): the folder, owner, mode, size and access list; the token itself is never opened.
+4. After a setup update that adds this (L1261): `sudo node setup.mjs worker-config` again, so the runner's config names
+   the file and the new deny entries; `daemons check` says so until then.
+5. The live proof, as builder: `sudo -H -u builder <installRoot>/bin/node <installRoot>/setup/live-proofs/builder-signin.mjs --config <installRoot>/worker-runner.json`.
+   It starts the pinned claude once with no tools and asks it to reply OK; PASS means the sign-in works there.
+
+**How the runner uses it.** Before each start and each lock-down job (the install and save-work runs), the runner, as
+builder, reads the file fresh through one handle without following a link, and refuses it unless it and its folder are
+builder's own (0600, 0700, one name), every folder above is root's alone, and it holds one token. Any problem holds the
+start, told once in the runner's log per reason (and once when it reads fine). The token goes into that claude's
+environment only, never onto a command line (`ps` shows command lines to every Mac user) and never into a log.
+Accepted (L1261): the session's own environment holds the value, so a program the session runs, as builder, can read it.
+Another Mac user's `ps` does not show another user's environment; builder's own processes and root can.
+The workers run in account a's folder on whichever account made the token: the owner's account switch (a/b) does not
+apply to them.
+
+**Revoke it.** On claude.ai, in the account's settings, where its sign-ins and tokens are listed (the place as of the
+time of writing; re-check); then make a new one as above. Deleting the file stops new starts at once.
+**How long it lasts.** About a year, per Anthropic's docs at the time of writing; re-check. The runner checks the file,
+not whether the token still works: a lapsed or revoked token passes the file check and the session's claude then fails
+to sign in. Replace it as above.
 
 Checked on macOS 27.0.1 (these notes expire with an OS upgrade): `dscl . -read` of a missing key prints `No such key` on
 stderr with exit 0; opening a link with `O_NOFOLLOW|O_DIRECTORY` gives `ENOTDIR` (Linux: `ELOOP`).

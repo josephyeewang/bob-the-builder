@@ -32,6 +32,11 @@ export const LAUNCHER_ENV = Object.freeze([CONFIG_VAR]);   // accounts.mjs's one
 export const ROLE_ENV_ALLOWED = Object.freeze([...PASS_ENV, 'PATH', ...LAUNCHER_ENV]);
 // Names that look like a key for some service: named as such when refused, so the reason says what slipped in.
 const KEYISH = /(^|_)(TOKEN|API_KEY|SECRET|PASSWORD|PRIVATE_KEY|ACCESS_KEY)(_|$)|^(GH|GITHUB)_|^GIT_ASKPASS$|^SSH_AUTH_SOCK$/;
+// The one exception (L1261): a worker (builder) session signs in with the long-lived sign-in the worker runner reads fresh from its
+// file before each start (runner-ports.mjs workerSignin). Only this name, and only when the caller says so (allowSigninToken);
+// every other start path still refuses it, since REFUSED_ENV lists it. ACCEPTED (Joe, L1261): the session's own environment
+// holds the value, so a program the session runs as builder can read it; the file itself is on the sessions' deny lists.
+export const SIGNIN_TOKEN_VAR = 'CLAUDE_CODE_OAUTH_TOKEN';
 
 export function roleEnv(base, { path, extra = {} } = {}) {
   const env = {};
@@ -44,10 +49,13 @@ export function roleEnv(base, { path, extra = {} } = {}) {
 }
 
 // Launch check 9: every name in the role's environment is on the allow-list. `extra` may carry only allowed names.
-export function checkRoleEnv(env) {
-  const left = REFUSED_ENV.filter((k) => Object.hasOwn(env, k));
+// `allowSigninToken`: the worker runner's sessions only (L1261); SIGNIN_TOKEN_VAR may then be there, and nothing else more.
+export function checkRoleEnv(env, { allowSigninToken = false } = {}) {
+  const ok = (k) => allowSigninToken === true && k === SIGNIN_TOKEN_VAR;
+  if (allowSigninToken === true && Object.hasOwn(env, SIGNIN_TOKEN_VAR) && (typeof env[SIGNIN_TOKEN_VAR] !== 'string' || env[SIGNIN_TOKEN_VAR] === '')) return refuse(`${SIGNIN_TOKEN_VAR} in the role's environment is empty`);
+  const left = REFUSED_ENV.filter((k) => Object.hasOwn(env, k) && !ok(k));
   if (left.length) return refuse(`refused variables in the role's environment: ${left.join(', ')}`);
-  const off = Object.keys(env).filter((k) => !ROLE_ENV_ALLOWED.includes(k));
+  const off = Object.keys(env).filter((k) => !ROLE_ENV_ALLOWED.includes(k) && !ok(k));
   const keyish = off.filter((k) => KEYISH.test(k));
   if (keyish.length) return refuse(`key-like variables in the role's environment: ${keyish.join(', ')}`);
   if (off.length) return refuse(`variables not on the role's allow-list (${ROLE_ENV_ALLOWED.join(', ')}): ${off.join(', ')}`);
@@ -64,7 +72,7 @@ export function startEnv(base, opts = {}) {
   if (!plain(base)) return refuse('the base environment is not an object, so no environment was built');
   if (opts.extra !== undefined && !plain(opts.extra)) return refuse('the extra environment is not an object, so no environment was built');
   const env = roleEnv(base, opts);
-  const nine = checkRoleEnv(env);
+  const nine = checkRoleEnv(env, { allowSigninToken: opts.allowSigninToken === true });
   return nine.ok ? { ok: true, env } : nine;
 }
 

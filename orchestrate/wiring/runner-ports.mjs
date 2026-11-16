@@ -87,6 +87,7 @@ import { prepareWorkerCopy } from '../modules/M4-workshop/launcher/worker-copy.m
 import { sessionArgs, spawnClaude } from '../modules/M4-workshop/launcher/review-launch.mjs';
 import { accountDir, accountEnv, accountInUse, isSetUp, readAccountFile } from '../modules/M4-workshop/launcher/accounts.mjs';
 import { startEnv } from '../modules/M4-workshop/launcher/env-check.mjs';
+import { SIGNIN_TOKEN_VAR, readSigninFile } from './builder-signin.mjs';
 import { readCardFile } from '../modules/M4-workshop/launcher/review-runner-main.mjs';
 import { createSaveWork } from '../modules/M4-workshop/git/save-work.mjs';
 import { cardBranch } from '../modules/M4-workshop/git/branch.mjs';
@@ -246,7 +247,7 @@ export function saveWorkPort({ mirrorOf, runLocked, settingsDir, make = createSa
  * The session's environment (#463 r1 m6): the one form, for the start and the lock-down runner, built by the launcher's
  * one check (R-0b-156 startEnv: the allow-list). → { ok: true, env } | { ok: false, reason }.
  */
-export const sessionEnv = (c, who, base = process.env) => startEnv(base, { path: c.path, extra: { ...who.env, HOME: c.home } });
+export const sessionEnv = (c, who, base = process.env) => startEnv(base, { path: c.path, extra: { ...who.env, HOME: c.home }, allowSigninToken: who?.signinToken === true });
 
 /** pauseLead({ product }): not wired (see the top of this file). */
 export const pauseLeadPort = () => async () => notWired('the Lead\'s wrap-up needs the activity tracker\'s feed, which the runner does not have yet');
@@ -413,13 +414,25 @@ export function liveWallProblem(live, product, places, read) {
 export const workerPromptText = (x) => { const p = workerPrompt(x); return p.ok ? p.text : { ok: false, reason: p.reason }; };
 
 /**
- * The account a worker session signs in with (L1079). The runner runs as the builder user, so its own home's account file
+ * The account a worker session signs in with (L1079, L1261). With `signinFile` (setup's worker-config always names it, layout.mjs
+ * builderSigninPath): the long-lived token in that file, read fresh at each call (builder-signin.mjs readSigninFile: one
+ * handle, never a link, builder's own 0600 file in builder's own 0700 folder, every folder above root's alone, one token),
+ * handed to the session as SIGNIN_TOKEN_VAR in its environment only (sessionEnv lets that one name past check 9). No
+ * Keychain is needed (builder has none), so isSetUp is not asked; the session runs in account a's folder, on whichever
+ * account the owner made the token with: the owner's a/b choice (accountCopy) is not followed. Any problem refuses the
+ * start, with a reason that never holds a byte of the file. `readSignin` is a port for tests.
+ * Without `signinFile` (a config from before L1261): The runner runs as the builder user, so its own home's account file
  * is not the owner's choice: with `accountCopy` (root's copy of the owner's choice, setup's, as the review runner reads it,
  * review-runner-main.mjs) the choice is read there, and the sign-in folder is the builder's own for that account. A copy
  * named but not readable is refused, never read as account a: a wrong account spends the other budget. Without
  * `accountCopy`, the builder home's own file (accountInUse). → accountInUse's shape: { account, dir, env } or { account: null, reason }.
  */
-export function workerAccount(c, { readCopy = readAccountFile, inUse = accountInUse, setUp = isSetUp } = {}) {
+export function workerAccount(c, { readCopy = readAccountFile, inUse = accountInUse, setUp = isSetUp, readSignin = readSigninFile } = {}) {
+  if (c.signinFile !== undefined) {
+    let r; try { r = readSignin(c.signinFile); } catch (e) { r = { ok: false, reason: `the builder sign-in file can't be read (${e?.code ?? 'error'})` }; }
+    if (!r?.ok || typeof r.value !== 'string' || r.value === '') return { account: null, reason: r?.reason ?? 'the builder sign-in file gave no answer' };
+    return { account: 'a', dir: accountDir(c.home, 'a'), env: { ...accountEnv(c.home, 'a'), [SIGNIN_TOKEN_VAR]: r.value }, signinToken: true };
+  }
   if (c.accountCopy === undefined) return inUse({ home: c.home });
   const r = readCopy({ file: c.accountCopy, uid: 0 });
   if (!r?.ok) return { account: null, reason: `the owner's account choice could not be read (${r?.reason ?? 'no answer'})` };

@@ -31,6 +31,7 @@ import { answerRows } from './owner-answer-setup.mjs';
 import { SENSORS_JOB, SENSORS_RUN_LIMIT_S, sensorsConfigProblem, sensorsLoadProblem, sensorsPlist } from './sensors-setup.mjs';
 import { WALL_CHECK_JOB, wallCheckPlist } from './builder-wall.mjs';
 import { WORKER_RULES_JOB, workerRulesPlist } from './worker-rules.mjs';
+import { checkBuilderSignin } from './builder-signin-setup.mjs';
 
 // The worker runner's script, as its job starts it from the copy (wiring/runner-job.mjs): an old job is found by it (#528 r2 m7).
 const WORKER_RUNNER_SCRIPT = 'wiring/runner-main.mjs';
@@ -461,6 +462,8 @@ export function checkDaemons(io, cfg, jobs = jobsFor(cfg)) {
   if (jobs.includes(WORKER_RUNNER_JOB)) {
     const { why, unknown: u } = workerRunnerLoadCheck(io, cfg); const what = `the worker runner's config in the copy (worker-runner.json) is the one this setup writes, and the copy's updater keeps it`;
     if (u) out.push({ ok: true, skip: true, what, why }); else item(why === null, what, why);   // NEEDS ROOT, never a pass nor a FAIL (audit #305 n3)
+    // The builder sessions' sign-in (L1261): without it every start is held. Looked at only (lstat), never read; NEEDS ROOT without sudo.
+    out.push(...checkBuilderSignin(io, cfg));
   }
   // The Sensors read who is signed in and the usage from the owner's answer: stale, and the Dispatcher starts nothing (L1051).
   if (jobs.includes(SENSORS_JOB)) out.push(...answerRows(io, cfg));

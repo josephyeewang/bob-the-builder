@@ -411,6 +411,25 @@ test('L970: the default promptFor is the worker prompt builder, asked with the h
   assert.match(workerPromptText(full), /^You are a worker\./);
 });
 
+// L1261: with the builder sign-in, the value reaches the spawned claude's environment and nothing else: not its arguments,
+// not the launch's names, not the walled settings, not the start's answer.
+test('L1261: the builder sign-in reaches the spawned session\'s environment only', async () => {
+  const V = `sk-ant-oat01-${'Mn4_k-'.repeat(15)}TT`;   // made up
+  const w = world({ account: () => ({ account: 'a', dir: '/h/builder/.claude', env: { CLAUDE_CODE_OAUTH_TOKEN: V }, signinToken: true }) });
+  try {
+    const a = await w.start();
+    assert.equal(a.ok, true, a.reason);
+    const sp = w.calls.find((c) => c[0] === 'spawn');
+    assert.equal(sp[3].env.CLAUDE_CODE_OAUTH_TOKEN, V);
+    const elsewhere = JSON.stringify([sp[1], sp[2], a, w.calls.filter((c) => c[0] !== 'spawn'), readFileSync(join(w.settingsDir, `${SID}.json`), 'utf8')]);
+    assert.ok(!elsewhere.includes(V.slice(0, 20)), 'the sign-in reached more than claude\'s environment');
+    // Without signinToken the same variable is refused by the one form of the environment (check 9), and nothing starts.
+    const v = world({ account: () => ({ account: 'a', dir: '/nowhere', env: { CLAUDE_CODE_OAUTH_TOKEN: V } }) });
+    try { const b = await v.start(); assert.equal(b.ok, false); assert.match(b.reason, /CLAUDE_CODE_OAUTH_TOKEN/); assert.ok(!b.reason.includes(V.slice(0, 20))); assert.equal(v.calls.some((c) => c[0] === 'spawn'), false); }
+    finally { rmSync(v.d, { recursive: true, force: true }); }
+  } finally { rmSync(w.d, { recursive: true, force: true }); }
+});
+
 test('step 5: a script card gets the script outbox', async () => {
   const w = world();
   try {
