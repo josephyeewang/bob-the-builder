@@ -357,7 +357,8 @@ A copy installed before the entry existed has an updater that does not keep `dis
 (L1029 B); `check-dispatcher` and `daemons load` refuse a copy that won't keep `dispatcher.json`. The copy must be installed again, and **that reinstall comes first**,
 before the pinned Claude Code and `add-to-install`, since a new install throws both away: unload the jobs, remove
 `<base>/install`, put the `--for-install` `review.json` at `runnerConfig`, run `install`, then put the full `review.json` back
-and run `add-to-install` (Part 2's order, steps 3 to 5). The machine-wide guard, if placed, keeps running from its own folder
+and run `add-to-install` (Part 2's order, steps 3 to 5), then `worker-config` and `bob` again, if set up (a new install
+throws away `worker-runner.json` and the Bob list too). The machine-wide guard, if placed, keeps running from its own folder
 through the reinstall; after `add-to-install`, run `managed-settings` again if the guard's code changed (Part 2, "A reinstall and the
 machine-wide guard").
 

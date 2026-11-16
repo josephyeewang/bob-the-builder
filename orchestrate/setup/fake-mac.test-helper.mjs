@@ -31,6 +31,9 @@ export function macTest(name, opts, fn) {
 }
 
 export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
+  // A real root runs with umask 022. A shell with umask 002 would make every folder the tests make group-writable, which
+  // setup rightly refuses ("can be written by others than root"), so the stand-in sets root's umask for this test process.
+  process.umask(0o022);
   const prefix = realpathSync(tempDir('orch-setup-mac-'));   // real: the updater compares real paths
   const mac = {
     as, prefix, rootUid: process.getuid(),

@@ -326,6 +326,7 @@ test('#487 r2 m4: isOurs takes only this guard\'s own hook command; one `*` hook
 
 test('#487 r2 m5: the reinstall steps say what happens to the machine-wide guard, and where the README says it', () => {
   const steps = reinstallSteps({ base: BASE, owner: 'sam', products: ['alpha'] });
+  assert.match(steps, /run add-to-install, then worker-config and bob again, if set up \(README, part 6\)/, 'a new install throws away worker-runner.json and the Bob list too');
   assert.match(steps, /the machine-wide guard keeps running from its own folder throughout, and after add-to-install run managed-settings again if its code changed \(README, part 2: a reinstall and the machine-wide guard\)$/);
   const readme = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'README.md'), 'utf8');
   const part6 = readme.slice(readme.indexOf('## Part 6'));

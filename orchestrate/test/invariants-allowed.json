@@ -1397,15 +1397,6 @@
   },
   {
    "kind": "text",
-   "copy": "is a plain folder, not the link the updater flips",
-   "files": [
-    "setup/bob-manifest.mjs",
-    "setup/install.mjs"
-   ],
-   "why": "baseline (L1078)"
-  },
-  {
-   "kind": "text",
    "copy": "its ended record names a verdict file",
    "files": [
     "modules/M4-workshop/launcher/review-runner.mjs",

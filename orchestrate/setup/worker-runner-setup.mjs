@@ -22,7 +22,7 @@ import { checkProducts } from '../modules/M10-rules/reader.mjs';
 import { checkRunnerConfig } from '../wiring/runner-main.mjs';
 import { fullPath, workerRunnerPlist } from '../wiring/runner-job.mjs';
 import { BUILDER, WORKER_RUNNER_CONFIG, WORKER_STATUS_FILE, homeOf, keysPath, mirrorPath, outboxRootPath, privatePath, proposalsParentOf, storePath, workerCopiesPath, workerRulesPath, workerRunnerPaths } from './layout.mjs';
-import { installPaths } from './install.mjs';
+import { NOT_THE_LINK, installPaths } from './install.mjs';
 import { readUser } from './users-folders.mjs';
 import * as layout from './layout.mjs';
 import { BUILDER_ROLE, rulesProblems } from './review-config.mjs';
@@ -116,6 +116,8 @@ export function workerRunnerLoadCheck(io, cfg, { built = () => workerRunnerConfi
 // updater.json keep, the file first, so a keep list never names a file the copy lacks.
 
 export const WORKER_CLAIM_MS = 600_000;
+/** What worker-config says when an update flipped the install's link between its plan and its keep step. */
+export const COPY_CHANGED = 'the copy changed during this run (an update): run worker-config again';
 const plainObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
 /**
@@ -199,22 +201,26 @@ export function workerRunnerConfigFor(io, cfg, { userOf = (n) => readUser(io, n)
 /** The file's exact text: what the writer writes and what load compares. */
 export const workerRunnerConfigText = (config) => `${JSON.stringify(config, null, 1)}\n`;
 
-/** Whether the copy's updater keeps worker-runner.json: true, false, or null when its updater.json can't be read (no copy,
- *  or refused). The copy itself being whole and root's is the install check's, which every job's load runs first. */
+/** Whether the copy's updater keeps worker-runner.json: true, false, or null when its updater.json can't be read or has no
+ *  keep list (no copy, refused, not JSON). The copy itself being whole and root's is the install check's, which every job's
+ *  load runs first. */
 function copyKeepsWorker(io, cfg) {
-  try { const u = JSON.parse(io.readText(join(installPaths(cfg).installRoot, UPDATER_CONFIG))); return Array.isArray(u?.keep) && u.keep.includes(WORKER_RUNNER_CONFIG); } catch { return null; }
+  let u; try { u = JSON.parse(io.readText(join(installPaths(cfg).installRoot, UPDATER_CONFIG))); } catch { return null; }
+  return Array.isArray(u?.keep) ? u.keep.includes(WORKER_RUNNER_CONFIG) : null;
 }
 
 /**
- * The copy worker-config writes into → null when there is no copy; else { dir, updater } or { dir, problem }: `dir` the
+ * The copy worker-config writes into → null when there is no copy; { problem } when the install's link is broken or not
+ * root's; else { dir, updater } or { dir, problem }: `dir` the
  * copy's real folder by its own name (never through the link, so an update's flip can't send one write to one copy and the
  * other to another), `updater` its updater.json as the updater reads it.
  */
 function copyFolder(io, cfg) {
   const P = installPaths(cfg);
   const cur = currentCopy(io.at(P.installRoot), { owner: io.rootUid });
-  if (cur.missing || cur.problem || !cur.link) return null;
-  let dir; try { dir = join(P.install, relative(realpathSync(io.at(P.install)), cur.real)); } catch { return null; }
+  if (cur.missing) return null;
+  if (cur.problem || !cur.link) return { problem: `${P.installRoot}: ${cur.problem ?? NOT_THE_LINK}. Nothing was changed` };
+  let dir; try { dir = join(P.install, relative(realpathSync(io.at(P.install)), cur.real)); } catch (e) { return { problem: `${P.installRoot}: its real folder can't be found (${e?.code ?? e?.message}). Nothing was changed` }; }
   try { return { dir, updater: readUpdaterConfig(io.at(join(dir, UPDATER_CONFIG))) }; } catch (e) { return { dir, problem: `the copy's ${UPDATER_CONFIG} was refused: ${e.message}` }; }
 }
 
@@ -223,7 +229,9 @@ function copyFolder(io, cfg) {
  * The file goes first: a run cut off between the two leaves the file in a copy whose keep does not name it yet (the
  * updater is fine with that; the job's load refuses it), never a keep naming a file that is not there (the updater
  * refuses that, so no update could run). A second run finishes it; twice does nothing. Each write is whole or not at all
- * (writeAside). The runner reads its config once, at start: a changed file reaches a loaded job only when it is unloaded
+ * (writeAside). The keep step looks at the copy again when it runs: an update that flipped the link after the plan is
+ * refused (the file went to the old copy; run it again), and the keep list it adds to is the one there now, so a name
+ * another step added since the plan is kept. The runner reads its config once, at start: a changed file reaches a loaded job only when it is unloaded
  * and loaded again, which the step says.
  */
 export function planWorkerRunnerConfig(io, cfg, { built = () => workerRunnerConfigFor(io, cfg), copyOf = () => copyFolder(io, cfg),
@@ -241,8 +249,13 @@ export function planWorkerRunnerConfig(io, cfg, { built = () => workerRunnerConf
   const ops = same ? [] : [{ text: `write ${f}   (root:wheel 0644; ${restart})`, run: () => writeAside(io, f, text) }];
   if (!copy.updater.keep.includes(WORKER_RUNNER_CONFIG)) {
     const u = join(copy.dir, UPDATER_CONFIG);
-    const updater = { ...copy.updater, keep: [...copy.updater.keep, WORKER_RUNNER_CONFIG] };
-    ops.push({ text: `add ${WORKER_RUNNER_CONFIG} to the keep list of ${u}   (root:wheel 0644; after the file, so an update carries it and keep never names a missing file)`, run: () => writeAside(io, u, `${JSON.stringify(updater, null, 1)}\n`) });
+    ops.push({ text: `add ${WORKER_RUNNER_CONFIG} to the keep list of ${u}   (root:wheel 0644; after the file, so an update carries it and keep never names a missing file)`, run: () => {
+      const now = copyOf();
+      if (now === null || (now.dir !== undefined && now.dir !== copy.dir)) throw new Error(`${COPY_CHANGED}; the new copy's keep list was not touched`);
+      if (now.problem) throw new Error(now.problem);
+      if (now.updater.keep.includes(WORKER_RUNNER_CONFIG)) return;
+      writeAside(io, u, `${JSON.stringify({ ...now.updater, keep: [...now.updater.keep, WORKER_RUNNER_CONFIG] }, null, 1)}\n`);
+    } });
   }
   return { ops, problems: [], warnings: [] };
 }

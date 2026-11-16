@@ -2242,6 +2242,10 @@ test('install with a workerRunner entry: every keep item is seeded, the real fir
   assert.notEqual(real(w), before, 'the link moved');
   assert.equal(readFileSync(join(w.root, 'a.txt'), 'utf8'), 'two\n');
   assert.equal(readFileSync(join(w.root, WORKER_RUNNER_CONFIG), 'utf8'), workerRunnerConfigText(config), 'the update carried worker-runner.json');
+  // An install whose link is not the updater's (here a plain folder) is said as such, never "not there yet" (c1).
+  renameSync(w.root, `${w.root}.moved`); mkdirSync(w.root);
+  const plain = plan(); assert.deepEqual(plain.ops, []);
+  assert.match(plain.problems.join(), /is a plain folder, not the link the updater flips\. Nothing was changed/);
 });
 
 // L1031: managed-settings through setup.mjs's own main, after add-to-install: the way out is said first, a dry run changes
