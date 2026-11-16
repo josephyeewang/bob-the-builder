@@ -26,6 +26,7 @@ import { CONFIG_KEYS, checkConfig } from '../wiring/dispatcher-wiring.mjs';
 import { ROOT_CONFIG_PATH as _R } from './layout.mjs';
 import { checkDispatcherKeys, dispatcherKeysOn } from './dispatcher-check.mjs';
 import { checkInstall, planAddToInstall, rootMadeEntries } from './install.mjs';
+import { WORKER_RUNNER_CONFIG, planWorkerRunnerConfig, workerRunnerConfigText } from './worker-runner-setup.mjs';
 import { main, parseArgs, planCommand } from './setup.mjs';
 import { apply, check } from './users-folders.mjs';
 import { fakeMac, macTest as test } from './fake-mac.test-helper.mjs';
@@ -80,7 +81,7 @@ async function origin(root) {
 }
 
 /** The throwaway Mac with the users and folders already set up (part 1), and the files the install needs. */
-async function world({ euid = 0, rules = null, robot = null, dispatcher = null, lock = DLOCK } = {}) {
+async function world({ euid = 0, rules = null, robot = null, dispatcher = null, lock = DLOCK, workerRunner = false } = {}) {
   const mac = fakeMac({ euid: 0 });
   const ext = realpathSync(tempDir('orch-setup-ext-'));
   const bare = await origin(ext);
@@ -105,6 +106,8 @@ async function world({ euid = 0, rules = null, robot = null, dispatcher = null, 
   if (robot !== null) { raw.robot = true; raw.extras.push(join(ext, 'robot.json')); writeFileSync(join(ext, 'robot.json'), '{}'); }
   // `dispatcher` (an entry, or true for a good one): the config turns the Dispatcher job on, with the owner's host.lock at `lock`.
   if (dispatcher !== null) { raw.hostLockPath = lock; raw.dispatcher = dispatcher === true ? { ...GOOD_DISPATCHER } : dispatcher; }
+  // `workerRunner` (true): the config turns the worker runner on, for alpha.
+  if (workerRunner) raw.workerRunner = { product: 'alpha' };
   const cfgFile = join(ext, 'install.json'); writeFileSync(cfgFile, JSON.stringify(raw));
   const cfg = parseInstallConfig(raw);
   // The updater's first run, for real, in a child: the setup's own seed and bootstrap copy, GitHub's address swapped for the
@@ -2194,6 +2197,51 @@ test('add-to-install: the next real update carries claude-code and hooks across,
   assert.equal(readFileSync(join(w.root, 'a.txt'), 'utf8'), 'two\n');
   assert.equal(readFileSync(pinnedBinary(w.root, PIN), 'utf8'), PROGRAM);
   assert.deepEqual(readdirSync(join(w.root, 'hooks')), ['guard.mjs']);
+});
+
+// The live failure (Nov 2026): with a workerRunner entry, install's keep list named worker-runner.json, which install never
+// seeds (it is built from the copy's full review.json, which only exists after install), so the updater's first run refused
+// ("the copy's own item worker-runner.json is missing from .../seed") and no install with the entry could complete. Now
+// every keep item is seeded, and worker-config adds the file to keep after writing it; the next real update carries it.
+test('install with a workerRunner entry: every keep item is seeded, the real first run passes; worker-config then keeps the file, and the next update carries it', async () => {
+  const w = await world({ dispatcher: true, workerRunner: true });
+  const c = w.run(['dispatcher-config']); assert.equal(c.code, 0, c.text);
+  // The plan: every name the seeded updater.json keeps is put into the seed by some step.
+  const P = installPaths(w.cfg);
+  const p = planCommand(w.mac, w.cfg, { cmd: 'install' }, { runUpdater: w.runUpdater });
+  assert.deepEqual(p.problems, []);
+  const seeded = new Set(p.ops.flatMap((o) => [...o.text.matchAll(new RegExp(`${P.seed}/([^/\\s]+)`, 'g'))].map((m) => m[1])));
+  const keep = updaterConfigFor(w.mac, w.cfg).keep;
+  for (const n of keep) assert.ok(seeded.has(n), `keep names ${n}, which no install step seeds (seeded: ${[...seeded].join(', ')})`);
+  assert.ok(!keep.includes(WORKER_RUNNER_CONFIG), 'worker-runner.json joins keep at worker-config, not at install');
+  // The real first run.
+  const r = w.run(['install']); assert.equal(r.code, 0, r.text);
+  assert.equal(failed(checkInstall(w.mac, w.cfg)).length, 0, JSON.stringify(failed(checkInstall(w.mac, w.cfg))));
+  // worker-config (its built config stubbed: what it is built from is worker-runner-setup.test.mjs's): the file, then keep.
+  const uc = join(real(w), UPDATER_CONFIG); const was = JSON.parse(readFileSync(uc, 'utf8')); w.bare = was.address;
+  writeFileSync(uc, JSON.stringify({ ...was, address: w.raw.address }));   // the real kind of address, as the step reads it
+  const config = { products: { alpha: {} } }; const built = () => ({ config, problems: [] });
+  const plan = () => planWorkerRunnerConfig(w.mac, w.cfg, { built });
+  const first = plan(); assert.deepEqual(first.problems, []);
+  assert.deepEqual(first.ops.map((o) => o.text.split(' ')[0]), ['write', 'add']);
+  for (const o of first.ops) o.run();
+  assert.equal(readFileSync(join(real(w), WORKER_RUNNER_CONFIG), 'utf8'), workerRunnerConfigText(config));
+  assert.equal(lstatSync(join(real(w), WORKER_RUNNER_CONFIG)).mode & 0o7777, 0o644);
+  const kept = readUpdaterConfig(uc); assert.ok(kept.keep.includes(WORKER_RUNNER_CONFIG));
+  assert.deepEqual({ ...kept, keep: kept.keep.filter((n) => n !== WORKER_RUNNER_CONFIG) }, { ...was, address: w.raw.address }, 'nothing else in updater.json changed');
+  assert.deepEqual(plan().ops, [], 'twice does nothing');
+  // The next real update carries it into the new copy.
+  writeFileSync(uc, JSON.stringify({ ...kept, address: w.bare }));
+  const seed = join(w.ext, 'second'); const sg = { gitDir: join(seed, '.git'), workTree: seed, cwd: seed, extraConfig: ID };
+  assert.equal(spawnSync(GIT, ['clone', '-q', w.bare, seed]).status, 0);
+  writeFileSync(join(seed, 'orchestrate', 'a.txt'), 'two\n');
+  await gitOk(['add', '-A'], sg); await gitOk(['commit', '-q', '-m', 'second'], sg); await gitOk(['push', '-q', w.bare, 'HEAD:refs/heads/main'], sg);
+  const before = real(w);
+  const u = spawnSync(process.execPath, [join(w.ext, 'run-updater.mjs'), join(HERE, '..', SCRIPTS.updater), JSON.stringify({ uid: ME, owner: ME, top: w.mac.prefix, localAddress: true, pathDirs: [], self: join(real(w), SCRIPTS.updater) }), join(w.root, UPDATER_CONFIG)], { encoding: 'utf8' });
+  assert.equal(u.status, 0, u.stderr);
+  assert.notEqual(real(w), before, 'the link moved');
+  assert.equal(readFileSync(join(w.root, 'a.txt'), 'utf8'), 'two\n');
+  assert.equal(readFileSync(join(w.root, WORKER_RUNNER_CONFIG), 'utf8'), workerRunnerConfigText(config), 'the update carried worker-runner.json');
 });
 
 // L1031: managed-settings through setup.mjs's own main, after add-to-install: the way out is said first, a dry run changes

@@ -111,10 +111,15 @@ function ownTree(io, p) {
   } else io.secureFile(p, { uid: io.rootUid, gid: 0, mode: (st.mode & 0o111) ? 0o755 : 0o644 });
 }
 
-/** The updater's own config, as the copy keeps it. Paths are the ones the updater will see (io.at). */
+/**
+ * The updater's own config, as the copy keeps it. Paths are the ones the updater will see (io.at). Every name in `keep` is
+ * one the install seeds (planInstall), since the updater refuses a keep item the seed lacks. worker-runner.json is not
+ * one: it is built from the copy's full review.json, which exists only after install, so `worker-config` writes it and then
+ * adds it to the copy's keep itself (worker-runner-setup.mjs planWorkerRunnerConfig), as add-to-install does for its two.
+ */
 export function updaterConfigFor(io, cfg) {
   const P = installPaths(cfg);
-  return { installRoot: io.at(P.installRoot), clone: io.at(P.clone), address: cfg.address, keep: ['bin', UPDATER_CONFIG, RUNNER_CONFIG, ...(cfg.dispatcher ? [DISPATCHER_CONFIG, SENSORS_CONFIG] : []), ...(cfg.workerRunner ? [WORKER_RUNNER_CONFIG] : []), ...cfg.extras.map((e) => posix.basename(e))], gitBin: cfg.gitBin };
+  return { installRoot: io.at(P.installRoot), clone: io.at(P.clone), address: cfg.address, keep: ['bin', UPDATER_CONFIG, RUNNER_CONFIG, ...(cfg.dispatcher ? [DISPATCHER_CONFIG, SENSORS_CONFIG] : []), ...cfg.extras.map((e) => posix.basename(e))], gitBin: cfg.gitBin };
 }
 
 /**
