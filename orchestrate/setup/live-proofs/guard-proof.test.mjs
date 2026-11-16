@@ -360,7 +360,8 @@ test('r1 m4: a temp folder, a thread, a datagram, a name lookup or a listener at
 
 test('r1 m5: every job daemons.mjs knows is either proved or left out with its reason, and no other', () => {
   assert.deepEqual([...Object.keys(PROVED_JOBS), ...Object.keys(NOT_CHECKED)].sort(), [...ALL_JOBS].sort());
-  assert.equal(Object.keys(PROVED_JOBS).length + Object.keys(NOT_CHECKED).length, 10, 'eight jobs, the wall check and root\'s worker-rules job');
+  assert.equal(Object.keys(PROVED_JOBS).length + Object.keys(NOT_CHECKED).length, 11, 'eight jobs, the wall check, root\'s worker-rules job and the builder proxy');
+  assert.ok(Object.hasOwn(NOT_CHECKED, 'builder-proxy'), 'the builder proxy is left out by its exact label (wall v2)');
   assert.ok(Object.hasOwn(NOT_CHECKED, WALL_CHECK_JOB), 'the wall check is left out by its exact label (L1223)');
   assert.ok(Object.hasOwn(NOT_CHECKED, 'worker-rules'), 'root\'s worker-rules job is left out by its exact label (#604)');
 });

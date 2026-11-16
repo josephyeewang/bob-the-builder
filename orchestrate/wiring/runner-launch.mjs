@@ -27,7 +27,9 @@ export function walledLaunchSettings({ kind, workerRunner, render = renderRoleSe
   if (!pc.ok) return refuse(pc.reason);
   // The render and the check read the disk the same way (#439 m6, r1 c1).
   const disk = { ...(realpath ? { realpath } : {}), ...(lstat ? { lstat } : {}) };
-  const r = render({ ...rest, role, paths: { ...paths, workerRunner }, ...disk });
+  // Every session the worker runner starts runs as the builder, behind the builder wall (v2): its shell reaches the
+  // network only through the allow-list proxy in the builder's ports (render-settings builderProxy).
+  const r = render({ ...rest, builderProxy: true, role, paths: { ...paths, workerRunner }, ...disk });
   if (!r?.ok) return refuse(`the ${role} settings can't be made (${r?.reason ?? 'no answer'})`);
   const c = check({ settings: r.settings, workerRunner, paths, ...disk });
   if (!c?.ok) return refuse(c?.reason ?? 'the wall check gave no answer');

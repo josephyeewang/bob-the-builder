@@ -32,6 +32,7 @@ import { SENSORS_JOB, SENSORS_RUN_LIMIT_S, sensorsConfigProblem, sensorsLoadProb
 import { WALL_CHECK_JOB, wallCheckPlist } from './builder-wall.mjs';
 import { WORKER_RULES_JOB, workerRulesPlist } from './worker-rules.mjs';
 import { checkBuilderSignin } from './builder-signin-setup.mjs';
+import { BUILDER_PROXY_JOB, builderProxyPlist, proxyListenRows } from './builder-proxy.mjs';
 
 // The worker runner's script, as its job starts it from the copy (wiring/runner-job.mjs): an old job is found by it (#528 r2 m7).
 const WORKER_RUNNER_SCRIPT = 'wiring/runner-main.mjs';
@@ -48,9 +49,11 @@ export const JOBS = Object.freeze(['review-updater', 'review-account', 'review-r
 // runner's gate reads before every start, so it loads just before the runner.
 // Root's worker-rules job (worker-rules.mjs, L1226) is on exactly when the worker runner is too: it writes the rules snapshots
 // the runner's sessions' hooks read, and only while the runner's job is running, so it loads first of the three.
-export const jobsFor = (cfg) => [...JOBS, ...(cfg.watch?.rulesSha256 ? ['watch-only'] : []), ...(cfg.dispatcher ? [DISPATCHER_JOB, SENSORS_JOB] : []), ...(cfg.robot ? [ROBOT_JOB] : []), ...(cfg.workerRunner ? [WORKER_RULES_JOB, WALL_CHECK_JOB, WORKER_RUNNER_JOB] : [])];
+// The builder's allow-list proxy (builder-proxy.mjs, wall v2) is on exactly when the worker runner is too: every builder
+// session's shell reaches the network only through it, so it loads before the wall's check job and the runner.
+export const jobsFor = (cfg) => [...JOBS, ...(cfg.watch?.rulesSha256 ? ['watch-only'] : []), ...(cfg.dispatcher ? [DISPATCHER_JOB, SENSORS_JOB] : []), ...(cfg.robot ? [ROBOT_JOB] : []), ...(cfg.workerRunner ? [WORKER_RULES_JOB, BUILDER_PROXY_JOB, WALL_CHECK_JOB, WORKER_RUNNER_JOB] : [])];
 /** The jobs a config may turn on or leave off. One left off must not be placed or loaded either (a full check says so). */
-export const OPTIONAL_JOBS = Object.freeze(['watch-only', DISPATCHER_JOB, SENSORS_JOB, ROBOT_JOB, WORKER_RULES_JOB, WALL_CHECK_JOB, WORKER_RUNNER_JOB]);
+export const OPTIONAL_JOBS = Object.freeze(['watch-only', DISPATCHER_JOB, SENSORS_JOB, ROBOT_JOB, WORKER_RULES_JOB, WALL_CHECK_JOB, BUILDER_PROXY_JOB, WORKER_RUNNER_JOB]);
 export const ALL_JOBS = Object.freeze([...JOBS, ...OPTIONAL_JOBS]);
 const ROBOT_OFF = 'the config does not turn the robot job on: add "robot": true, with its robot.json among the extras';
 /**
@@ -60,12 +63,12 @@ const ROBOT_OFF = 'the config does not turn the robot job on: add "robot": true,
  * tests pin it, and changing it is outside this change (raised with the lead).
  */
 export function onlyJobs(cfg, name, { anyKnown = false } = {}) {
-  if (anyKnown && (name === ROBOT_JOB || name === DISPATCHER_JOB || name === SENSORS_JOB || name === WORKER_RULES_JOB || name === WALL_CHECK_JOB || name === WORKER_RUNNER_JOB)) return [name];
+  if (anyKnown && (name === ROBOT_JOB || name === DISPATCHER_JOB || name === SENSORS_JOB || name === WORKER_RULES_JOB || name === WALL_CHECK_JOB || name === BUILDER_PROXY_JOB || name === WORKER_RUNNER_JOB)) return [name];
   const all = jobsFor(cfg);
   if (name === 'watch-only' && cfg.watch && !cfg.watch.rulesSha256) throw new Error(WATCH_NO_HASH);
   if (name === ROBOT_JOB && !cfg.robot) throw new Error(ROBOT_OFF);
   if ((name === DISPATCHER_JOB || name === SENSORS_JOB) && !cfg.dispatcher) throw new Error(DISPATCHER_OFF);
-  if ((name === WORKER_RUNNER_JOB || name === WALL_CHECK_JOB || name === WORKER_RULES_JOB) && !cfg.workerRunner) throw new Error(WORKER_RUNNER_OFF);
+  if ((name === WORKER_RUNNER_JOB || name === WALL_CHECK_JOB || name === BUILDER_PROXY_JOB || name === WORKER_RULES_JOB) && !cfg.workerRunner) throw new Error(WORKER_RUNNER_OFF);
   if (!all.includes(name)) throw new Error(`--only names no job of this config: ${JSON.stringify(String(name).slice(0, 60))}; the jobs are ${all.join(', ')}`);
   return [name];
 }
@@ -96,7 +99,7 @@ export function plistTexts(io, cfg) {
     if (cfg.watch?.rulesSha256) plists['watch-only'] = watchPlist(io, cfg);
     if (cfg.dispatcher) { plists[DISPATCHER_JOB] = dispatcherPlist(cfg); plists[SENSORS_JOB] = sensorsPlist(cfg); }
     if (cfg.robot) plists[ROBOT_JOB] = robotPlist(cfg);
-    if (cfg.workerRunner) { plists[WORKER_RULES_JOB] = workerRulesPlist(cfg); plists[WALL_CHECK_JOB] = wallCheckPlist(cfg); plists[WORKER_RUNNER_JOB] = workerRunnerJobPlist(cfg); }
+    if (cfg.workerRunner) { plists[WORKER_RULES_JOB] = workerRulesPlist(cfg); plists[WALL_CHECK_JOB] = wallCheckPlist(cfg); plists[BUILDER_PROXY_JOB] = builderProxyPlist(cfg); plists[WORKER_RUNNER_JOB] = workerRunnerJobPlist(cfg); }
     return { plists, problems };
   } catch (e) { return { plists: {}, problems: [`the job files cannot be built from the owner's Mac user ${cfg.owner} (${e.message}); is its home folder set?`] }; }
 }
@@ -367,7 +370,7 @@ export const FIRST_RUN_LIMIT_S = 30 * 60;
 // How long one run of `job` may go before it reads as stuck: a Dispatcher pass may run to its deadline and watchdog margin
 // (self-review m5); the others, FIRST_RUN_LIMIT_S.
 // Jobs whose one run is the whole life of the job (the worker runner's loop, L1092): no run limit applies.
-const LONG_RUNNING = Object.freeze([WORKER_RUNNER_JOB]);
+const LONG_RUNNING = Object.freeze([WORKER_RUNNER_JOB, BUILDER_PROXY_JOB]);
 const runLimitS = (job) => (job === DISPATCHER_JOB ? DISPATCHER_RUN_LIMIT_S : job === SENSORS_JOB ? SENSORS_RUN_LIMIT_S : FIRST_RUN_LIMIT_S);
 const UNREADABLE = 'unreadable';
 /** Seconds the process has been running (`ps -o etime=`: [[dd-]hh:]mm:ss); null if there is no such process any more (ps failed or printed nothing: it ended between the two reads); UNREADABLE if ps answered with something this cannot parse (L180 m5b). */
@@ -447,7 +450,7 @@ export function checkDaemons(io, cfg, jobs = jobsFor(cfg)) {
       why ?? `${agents.map((n) => join(dir, n)).join(', ')}: the old worker runner, which would start a second runner as ${cfg.owner}. As ${cfg.owner}: launchctl bootout gui/$(id -u)/<its label>, then delete the file (README, "Moving the workers to the builder user", step 1)`);
   }
   // Each job the config leaves off: none placed or loaded (listed only when there is one).
-  const offWhy = { 'watch-only': 'the config names no rules fingerprint', [ROBOT_JOB]: 'the config does not turn the robot job on', [DISPATCHER_JOB]: 'the config has no dispatcher entry', [SENSORS_JOB]: 'the config has no dispatcher entry', [WORKER_RULES_JOB]: 'the config has no workerRunner entry', [WALL_CHECK_JOB]: 'the config has no workerRunner entry', [WORKER_RUNNER_JOB]: 'the config has no workerRunner entry' };
+  const offWhy = { 'watch-only': 'the config names no rules fingerprint', [ROBOT_JOB]: 'the config does not turn the robot job on', [DISPATCHER_JOB]: 'the config has no dispatcher entry', [SENSORS_JOB]: 'the config has no dispatcher entry', [WORKER_RULES_JOB]: 'the config has no workerRunner entry', [WALL_CHECK_JOB]: 'the config has no workerRunner entry', [BUILDER_PROXY_JOB]: 'the config has no workerRunner entry', [WORKER_RUNNER_JOB]: 'the config has no workerRunner entry' };
   for (const off of subset ? [] : OPTIONAL_JOBS.filter((j) => !jobsFor(cfg).includes(j))) {
     const s = jobState(io, cfg, off); let placed = false; try { io.lstat(plistPath(cfg, off)); placed = true; } catch { /* none */ }
     item(!s.loaded && !placed, `no ${labelOf(cfg, off)} job is placed or loaded (${offWhy[off]})`, `${s.loaded ? `it is loaded: take it out with sudo node setup.mjs daemons unload --only ${off}, then` : 'its file is there:'} delete ${plistPath(cfg, off)}`, !s.loaded && !placed);
@@ -491,6 +494,9 @@ export function checkDaemons(io, cfg, jobs = jobsFor(cfg)) {
     const text = fileText(io, cfg, job);
     item(text !== null && rec[label] === sha(text), `${label} was loaded from the job file as it is now`, 'it runs an older definition than the file on disk (or was not loaded by this tool); run daemons load, which reloads it');
     out.push(...runRows(io, cfg, job, s));
+    // The proxy (wall v2): listening on its fixed ports, on both loopback addresses, as the builder. Needs root to see
+    // another user's sockets; without it the row is NEEDS ROOT, never a pass nor a FAIL.
+    if (job === BUILDER_PROXY_JOB) out.push(...proxyListenRows(io, cfg));
   }
   return out;
 }

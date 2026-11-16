@@ -72,7 +72,8 @@ test('L1226: the job is root\'s (no UserName), runs node <copy>/setup/worker-rul
   assert.equal(t.includes('UserName'), false, 'it runs as root');
   assert.ok(WRITE_EVERY_S * 4 < 300, 'four beats can be missed inside the snapshot\'s 5-minute limit');
   const off = { ...cfg, workerRunner: undefined };
-  assert.deepEqual(jobsFor(cfg).slice(-3), [WORKER_RULES_JOB, WALL_CHECK_JOB, WORKER_RUNNER_JOB]);
+  // Wall v2: the builder's proxy sits between it and the wall's check job; it is still first of the worker runner's jobs.
+  assert.deepEqual(jobsFor(cfg).slice(-4), [WORKER_RULES_JOB, 'builder-proxy', WALL_CHECK_JOB, WORKER_RUNNER_JOB]);
   assert.equal(jobsFor(off).includes(WORKER_RULES_JOB), false);
   assert.ok(OPTIONAL_JOBS.includes(WORKER_RULES_JOB));
   assert.throws(() => onlyJobs(off, WORKER_RULES_JOB), /workerRunner/);

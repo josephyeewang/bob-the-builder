@@ -10,7 +10,7 @@ import { randomUUID } from 'node:crypto';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { refusalSeen } from './settings-names.mjs';
 import { BASH_OPT_OUT, GETS, callOutput, sentGets, wantOf, BACKUP_SUFFIX, BAD_EFFORT, CONNECTORS_FALLBACK, HOST, META_SUFFIX, PAGE, PEER_FROM, PEER_WORD, READY, REFUSAL, STDIN_ARGS, REPLAY_USER_MESSAGES, peerLine, peerTaken, replayed, saidWord, unbuildable, voidProblem, accountSettingsFiles, effortWarning, NOT_TRIED, NOT_USED, SPELLING_LABEL, misspell, READBACK_NAMES, TESTS, allNames, finish, guardProblem, judgeNames, main, report, restoreUserFile, roleReadback, runAll, runArgs, runProblem, runToEnd, withUserSettings, writeReceipt } from './settings-names.mjs';
-import { CONFIRMED, FLAGS as F, PROOF_KIND, REFUSED_SETTINGS, SPELLING_ONLY, noToolServerArgs, proofCounts, sourcesArgs, unconfirmedNames } from '../../modules/M4-workshop/launcher/settings-names.mjs';
+import { CONFIRMED, SETTINGS as SN, FLAGS as F, PROOF_KIND, REFUSED_SETTINGS, SPELLING_ONLY, noToolServerArgs, proofCounts, sourcesArgs, unconfirmedNames } from '../../modules/M4-workshop/launcher/settings-names.mjs';
 import { FIRST_ROUND_EFFORT, SEND_BACK_EFFORT } from '../../modules/M4-workshop/launcher/review-launch.mjs';
 import { sourcesProblem } from '../../modules/M4-workshop/launcher/readback.mjs';
 import { DESIGN_PROFILES } from '../../modules/M4-workshop/launcher/role-profiles.mjs';
@@ -276,7 +276,10 @@ test('m5: every run ends with its own receipt; one that can\'t be written is NOT
   const all = Object.fromEntries(TESTS.map((t) => [t.id, { ok: true }]));
   const res = { outcomes: all, readback: { ok: true }, gets: { 'api.github.com': 2, 'example.com': 3 } };
   const home = tempDir('orch-names-'); let out = '';
-  assert.equal(finish({ res, pin: PIN, base: null, home, at: 0, print: (t) => { out += t; } }), 0);
+  assert.equal(finish({ res, pin: PIN, base: null, home, at: 0, print: (t) => { out += t; }, confirmed: WITH_PROXY }), 0);
+  // Without a proof of the proxy port names the same run is NOT DONE: they stay NOT TRIED.
+  let out2 = ''; assert.equal(finish({ res, pin: PIN, base: null, home, at: 1, print: (t) => { out2 += t; } }), 1);
+  assert.match(out2, /NOT TRIED\s+httpProxyPort/); assert.match(out2.trimEnd().split('\n').at(-1), /^NOT DONE/);
   assert.match(out.trimEnd().split('\n').at(-1), /^PASS/);
   const path = out.match(/Written to (\S+)/)[1]; assert.ok(existsSync(path) && path.startsWith(home));
   // L1171 M-1: the receipt's header has the asked-for GETs and the sent ones.
@@ -308,7 +311,7 @@ test('L1160 m4, m5: every PASS row in the receipt carries a proof kind; a pair r
   all.strictAllowlist = await runOne(byId('strictAllowlist'), strictFake());
   assert.equal(all.strictAllowlist.ok, true);
   const home = tempDir('orch-names-'); let out = '';
-  assert.equal(finish({ res: { outcomes: all, readback: { ok: true } }, pin: PIN, base: null, home, at: 0, print: (t) => { out += t; } }), 0);
+  assert.equal(finish({ res: { outcomes: all, readback: { ok: true } }, pin: PIN, base: null, home, at: 0, print: (t) => { out += t; }, confirmed: WITH_PROXY }), 0);
   const rows = readFileSync(out.match(/Written to (\S+)/)[1], 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
   const passes = rows.filter((r) => r.result === 'PASS');
   assert.ok(passes.length > 10);
@@ -806,12 +809,16 @@ test('L1128 m4: a spelling pair\'s name side runs twice; skipped counts only whe
 });
 
 // main with stand-ins for what it reads; a config whose own folder is this user's.
+// Wall v2: the proxy port names have no pair here (NOT_TRIED); a stand-in run that must reach PASS stands them on a
+// confirmed entry, as a real run would once builder-proxy.mjs's proof is recorded in CONFIRMED.
+const PROXY_STAND_IN = Object.freeze(Object.fromEntries([SN.httpProxyPort, SN.socksProxyPort].map((n) => [n, { by: 'break-it:a stand-in for builder-proxy.mjs', version: PIN }])));
+const WITH_PROXY = Object.freeze({ ...CONFIRMED, ...PROXY_STAND_IN });
 function mainSetup() {
   const root = tempDir('orch-names-'); const own = join(root, 'state'); mkdirSync(own); const home = join(root, 'builder'); mkdirSync(join(home, '.claude'), { recursive: true });
   const c = { ownDir: own, home, claudeBin: '/opt/claude', pin: PIN };
   const deps = { readConfig: () => c, accountInUse: () => ({ account: 'a', dir: join(home, '.claude') }), sessionEnv: () => ({}), claudeVersion: () => PIN,
     makeBase: () => { const b = join(root, 'runs'); mkdirSync(b, { recursive: true }); return b; },
-    runAll: async () => ({ outcomes: Object.fromEntries(TESTS.map((t) => [t.id, { ok: true }])), readback: { ok: true } }) };
+    runAll: async () => ({ outcomes: Object.fromEntries(TESTS.map((t) => [t.id, { ok: true }])), readback: { ok: true } }), confirmed: WITH_PROXY };
   return { root, c, home, deps, receipts: join(root, 'receipts') };
 }
 const runMain = async (argv, { deps, receipts }, extra = {}) => {

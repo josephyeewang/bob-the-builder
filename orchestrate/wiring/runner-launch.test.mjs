@@ -9,6 +9,7 @@ import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.m
 import { SETTINGS as S } from '../modules/M4-workshop/launcher/settings-names.mjs';
 import { renderRoleSettings, checkRunnerWall } from '../modules/M4-workshop/launcher/render-settings.mjs';
 import { walledLaunchSettings } from './runner-launch.mjs';
+import { PROXY_PORTS } from '../shared/builder-ports.mjs';
 import { writeStatus } from './runner-files.mjs';
 import { checkRunnerConfig } from './runner-main.mjs';
 
@@ -36,6 +37,13 @@ test('L759 step 2: an editing or undo launch gets worker settings that carry the
       assert.equal(r.role, 'worker');
       assert.ok(r.settings[S.sandbox][S.filesystem][S.denyRead].includes(runner.requestsDir), kind);
     }
+    // Wall v2: every session the runner starts is the builder's, so its shell goes through the allow-list proxy.
+    const withHost = walledLaunchSettings(input('editing', runner, { product: { commands: { test: 'npm test' }, hosts: ['github.com'] }, rulesHosts: ['github.com'] }));
+    assert.equal(withHost.ok, true, withHost.reason);
+    assert.equal(withHost.settings[S.sandbox][S.network][S.httpProxyPort], PROXY_PORTS.session);
+    assert.equal(withHost.settings[S.sandbox][S.network][S.socksProxyPort], PROXY_PORTS.session);
+    let seen; walledLaunchSettings({ ...input('editing', runner), render: (a) => { seen = a; return { ok: false, reason: 'stop' }; } });
+    assert.equal(seen.builderProxy, true);
     // The runner's own paths win over any the caller put in paths.
     const forged = walledLaunchSettings(input('editing', runner, { paths: { ...PATHS, workerRunner: { requestsDir: '/elsewhere/req', statusFile: '/elsewhere/s/status.json' } } }));
     assert.equal(forged.ok, true, forged.reason);

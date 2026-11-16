@@ -484,18 +484,59 @@ too, so it is a code change, never a config edit.
 | `sudo /usr/local/bin/node setup.mjs scanner --from <full path> [--dry-run]` | reads the named program once, refuses it unless its bytes hash to the pin (`ba52fb1bfabbcde42f032afad3d6e0b19dff8ed105229a16e7caa338bbc0e84f`, the program inside the checked tarball), and writes those same bytes as `<base>/scanner/gitleaks` (root:wheel 0755). Beside it, the push step's own rules (`DO_PLANE_TOML`, copied from the code, never retyped) as `gitleaks.toml` and an empty `gitleaksignore`, both root:wheel 0644. A file already exactly right is left; one that drifted (bytes, mode, owner, a second name, an access list) is written again. A scanner folder that is not root's 0755, or has an access list, is refused, never taken over; an empty one of root's (a run cut off before it was secured) is secured again. Then the file rows of `check-scanner` | yes |
 | `node setup.mjs check-scanner` | read only, **without sudo** (it runs the downloaded program, which never runs as root; with sudo it refuses). The folder root:wheel 0755; each file root:wheel, its mode, one name, its hash; no access list on any. Only when all of that passes, the push step's own check (`checkScanner`, which the push runs before every scan): the program's hash, owner, mode and one name (a link is not followed), the rules byte for byte, the ignore file empty, and the program run once with `version`, which must say 8.30.1. Anything else FAILs (exit 1) | no |
 
-## Part 8 — the builder wall (R-0b-179; L1149, L1150, L1193, L1215)
+## Part 8 — the builder wall (R-0b-179; L1149, L1150, L1193, L1215; v2 2026-11-16)
 
-**What it changes.** As root, it turns on the Mac's packet filter (pf) with three rules of its own. Then the `builder`
-user, which runs the worker runner and every worker session, can reach only its **own** listeners on this Mac. It can't
-reach the owner's dev servers, databases or Claude ports, or root's local services, on 127.0.0.1, ::1 or the Mac's own
-address. Everyone else's traffic is untouched, except that other users can't reach a listener of `builder`'s either,
-which is intended (L1154). macOS's own `/etc/pf.conf` is never edited: the rules go into an anchor under the
-`com.apple/*` one it already has. What it places, all root's:
+**What it changes.** As root, it turns on the Mac's packet filter (pf) with five rules of its own. Then the `builder`
+user, which runs the worker runner and every worker session, can reach on this Mac only its **own** listeners in its own
+port range, **47000-47999** (one home: `shared/builder-ports.mjs`). It can't reach the owner's dev servers, databases or
+Claude ports, or root's local services, on 127.0.0.1, ::1 or the Mac's own address. Everyone else's traffic is untouched,
+except that no other user's listener in 47000-47999 gets anything (L1154). macOS's own `/etc/pf.conf` is never edited:
+the rules go into an anchor under the `com.apple/*` one it already has. What it places, all root's:
 - the rules file `/private/etc/pf.anchors/orchestrate.builder` (0644);
 - `<base>/builder-wall/` (0700), which keeps the pf on-switch's reference number (`pf-token`);
 - the job `/Library/LaunchDaemons/<label>.builder-wall.plist` (0644). At load, at boot and every 5 minutes, it loads the
   rules and keeps pf on.
+
+**Why v2 (a port range, not a tag).** v1 marked the builder's packets with a pf tag on the way out and blocked marked
+packets on the way in. That tag shape was **disproved on macOS 27.0.1 on 2026-11-16** (Joe's wall-diag runs): a tag set on
+the way out of loopback is not seen on the way in, so v1 blocked nothing. pf does see who owns the socket (the sender on
+the way out, the receiver on the way in), so v2 tells the builder's traffic by port: on loopback the builder may only
+open connections into 47000-47999, and only the builder's own sockets may listen there.
+
+**What it costs.**
+- Any server the builder runs that must be reached on loopback has to listen in 47000-47999. The builder can't reach even
+  its own listener outside the range: a worker's test that starts a dev server on a port the system picks and then calls
+  it will fail. (The read-back proves this cost is paid, row vii.)
+- Claude Code's own network proxy listens on a port it picks, outside the range, so builder sessions use the builder's
+  allow-list proxy instead (below).
+- No other user (the owner included) can use a listener of its own in 47000-47999. `place` refuses while one is there.
+- One UDP gap: a builder program listening in the range may send UDP to any port in the Mac's ephemeral range
+  (49152-65535), so it could send a forged answer to an owner program waiting on a UDP reply, if it guesses that program's
+  port. No TCP is affected, and no listener on a fixed port. `place` refuses if the Mac's ephemeral range has moved.
+
+**The builder's allow-list proxy** (`builder-proxy.mjs`, setup's `builder-proxy` job, on exactly when the config's
+`workerRunner` entry is). It runs as `builder` and listens on 127.0.0.1 and ::1 at two fixed ports in the range: **47000**
+for a session's shell, **47001** for a worker's install step. Every role file the worker runner writes points the shell
+at it (`httpProxyPort` and `socksProxyPort`, both the same port; one port serves HTTP and SOCKS5). It lets through only
+the hosts the session's own settings allow, read from the installed `worker-runner.json` the same way the settings read
+them (`render-settings.mjs` `phaseHosts`): the session port the products' hosts, the install port those plus the registry
+hosts. It refuses any other host, an IP address in place of a name, a name with a user name or password in it, ports
+other than 22, 80 and 443, and a name whose address is on this Mac or a private network. It never passes on or writes down
+a proxy password, and its log (`<base>/logs/builder-proxy.out.log`) has only the time, port, host, allow or deny, and
+bytes. It caps connections at 64 at once, the request head at 16 KB, and each connection at 2 GB each way.
+- (checked: claude-code 2.1.316; Principle 9, re-check on upgrade) With both ports set, Claude Code starts no proxy
+  of its own and no longer filters by `allowedDomains` (it says so: "will never apply"), so this proxy is the filter.
+  Setting only one of the two starts Claude Code's own proxy for the other.
+- Claude's own traffic to Anthropic (api.anthropic.com) is **not** affected: the claude program talks to Anthropic itself,
+  not from the sandboxed shell and not over loopback, so neither the wall nor this proxy sees it.
+- A cost: the proxy can't tell which product's session is asking, so one product's session may reach another product's
+  listed hosts (all of them are on the rules' list).
+- `sudo /usr/local/bin/node setup.mjs daemons check --only builder-proxy` adds a row per port: listening on 127.0.0.1 and
+  [::1], as `builder`, on no other address (NEEDS ROOT without sudo).
+- The live proof: `sudo /usr/local/bin/node <base>/install/orchestrate/setup/live-proofs/builder-proxy.mjs --config
+  <base>/install/orchestrate/worker-runner.json`, run after the job is loaded. As `builder`, it reaches a listed host
+  through the proxy (a), and is refused a host on no list (b). Part (c), going direct from a builder session's sandboxed
+  shell fails, says NOT DONE until the builder can sign in to Claude Code (PR #616).
 
 The code, with its known limits, is `builder-wall.mjs` (its header).
 
@@ -515,7 +556,7 @@ the rules of the script that wrote it, and the worker runner compares them with 
    token folder, the job file, and the job's load. A `refused:` line says why it won't run; with one, nothing would change.
 2. **The real run.** `sudo /usr/local/bin/node <base>/install/orchestrate/setup/builder-wall.mjs place`. It prints a
    `doing:` line per step, then waits up to 15 seconds for the job's first run. Then it reads the wall back, one line per
-   row, and writes the status. **Check:** the exit is 0, and the last row line is `all 46 PASS` (`all 39 PASS` on a Mac
+   row, and writes the status. **Check:** the exit is 0, and the last row line is `all 77 PASS` (`all 64 PASS` on a Mac
    with no address but loopback; one row then says only 127.0.0.1 and ::1 were probed). The rows, in order, `<uid>`
    being `builder`'s:
    - `PASS  the job <label>.builder-wall ran once and finished well (within 15 seconds of loading)`
@@ -524,13 +565,19 @@ the rules of the script that wrote it, and the worker runner compares them with 
    - `PASS  the pf token in <base>/builder-wall/pf-token is held (iii): pf stays on while the job holds it`
    - `PASS  the main ruleset reaches com.apple/* (iv)`
    - `PASS  com.apple/100.orchestrate.builder holds exactly the wall's rules (iv)`
+   - `PASS  the Mac's ephemeral port range is inside 49152-65535, clear of the builder's ports (iv)`
    - then, for TCP and for UDP, and for each of `IPv4 (127.0.0.1)`, `IPv6 (::1)`, `IPv4 (127.0.0.1, listening on 0.0.0.0)`,
-     `IPv6 (::1, listening on ::)` and `this Mac's own address (<address>)`, four rows (`<where>` is e.g. `TCP IPv4 (127.0.0.1)`):
-     `PASS  builder reaches its own listener on <where> (v; the proxy path)`,
+     `IPv6 (::1, listening on ::)` and `this Mac's own address (<address>)`, seven rows (`<where>` is e.g. `TCP IPv4 (127.0.0.1)`):
+     `PASS  builder reaches its own listener in its ports on <where> (v; the proxy path)`,
      `PASS  the owner reaches its own listener on <where> (ii)`,
-     `PASS  the owner still reaches its own listener on <where> after (i) (ii)` and
-     `PASS  builder can NOT reach the owner's listener on <where> (i)`.
+     `PASS  the owner reaches the builder user's listener in its ports on <where> and hears its answer (vi)`,
+     `PASS  the owner still reaches its own listener on <where> after (i) (ii)`,
+     `PASS  builder can NOT reach the owner's listener outside its ports on <where> (i)`,
+     `PASS  builder can NOT reach the owner's listener in its ports on <where> (i)` and
+     `PASS  builder can NOT reach its own listener outside its ports on <where> (vii; the documented cost)`.
 
+   `place` refuses before changing anything when the Mac's ephemeral port range is not inside 49152-65535, or when a
+   program that is not `builder`'s already listens in 47000-47999 (the line names it).
    Any `FAIL` row means the wall did not hold, or blocked the owner or `builder`'s own proxy. `place` then takes the wall
    out again by itself and says what it undid. Its `done:` lines list each step, and a `NOT done:` line names a step to do
    by hand (the way out, below). It writes the status as not ok and exits 1. Nothing stays half on.
@@ -552,7 +599,7 @@ the rules of the script that wrote it, and the worker runner compares them with 
    and at most 10 minutes old. A `FAIL` line gives the reason the worker runner would hold a start. The status `place`
    wrote passes for 10 minutes on its own, so run this after `daemons load` to see the check job's own status. To recheck
    the wall at any time, run `sudo /usr/local/bin/node <base>/install/orchestrate/setup/builder-wall.mjs check`. It runs
-   the same read-back (`all 45 PASS`, or `all 38 PASS` with no address but loopback), changes no rule, and writes the status.
+   the same read-back (`all 76 PASS`, or `all 63 PASS` with no address but loopback), changes no rule, and writes the status.
 4. **The way out** (also printed after every run). With `<label>` and `<base>` from the setup config:
    ```
    sudo launchctl bootout system/<label>.builder-wall
@@ -565,7 +612,9 @@ the rules of the script that wrote it, and the worker runner compares them with 
    readable token from `pfctl -E`. Find that hold with `sudo pfctl -s References` and release it with `sudo pfctl -X <number>`.
    **The worker runner then holds every start** (the check job keeps writing ok false), until the wall is placed again
    or both jobs are unloaded: `sudo /usr/local/bin/node setup.mjs daemons unload --only worker-runner`, then
-   `sudo /usr/local/bin/node setup.mjs daemons unload --only builder-wall-check`.
+   `sudo /usr/local/bin/node setup.mjs daemons unload --only builder-wall-check`. The proxy too, once
+   the worker runner is unloaded: `sudo /usr/local/bin/node setup.mjs daemons unload --only builder-proxy` (a builder
+   session's shell reaches the internet only through it).
 
 | Command | What it does | Root? |
 |---|---|---|

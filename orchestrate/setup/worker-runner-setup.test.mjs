@@ -38,7 +38,8 @@ test('worker runner job: off without its entry; on, runner-main.mjs with the cop
   assert.ok(OPTIONAL_JOBS.includes(WORKER_RUNNER_JOB));
   const cfg = parseInstallConfig({ ...RAW, workerRunner: { product: 'alpha' }, robot: false });
   // L1193: the builder wall's check job comes with the runner, just before it (it leaves the status the runner's gate reads).
-  assert.deepEqual(jobsFor(cfg), ['review-updater', 'review-account', 'review-runner', 'worker-rules', 'builder-wall-check', WORKER_RUNNER_JOB]);
+  // Wall v2: the builder's allow-list proxy comes with it too, before the wall's check job.
+  assert.deepEqual(jobsFor(cfg), ['review-updater', 'review-account', 'review-runner', 'worker-rules', 'builder-proxy', 'builder-wall-check', WORKER_RUNNER_JOB]);
   const t = workerRunnerJobPlist(cfg);
   assert.ok(t.includes('<key>Label</key><string>com.example.orch.worker-runner</string>'), t);
   assert.ok(t.includes(`<key>ProgramArguments</key><array><string>${R}/${NODE}</string><string>--disable-sigusr1</string><string>${R}/wiring/runner-main.mjs</string><string>${R}/${WORKER_RUNNER_CONFIG}</string></array>`), t);

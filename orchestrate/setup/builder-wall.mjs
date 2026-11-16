@@ -1,22 +1,42 @@
 #!/usr/bin/env node
-// R-0b-179 (L1148 F1, L1149, L1150): the builder wall. The builder user (L1079) reaches only its OWN listeners on this Mac:
-// never the owner's dev servers, databases, Claude or codex control ports, nor root's local services. Measured before it
-// (L1148): the Application Firewall is off and pf holds only Apple's anchors, so every Mac user reaches every 127.0.0.1
-// service. A plain "builder may not reach 127.0.0.1" would also cut a worker session's sandboxed shell off from Claude
-// Code's own network proxy, which listens on 127.0.0.1 as the builder (read in 2.1.316's code; checked: claude-code
-// 2.1.316), so the wall is by the LISTENER's owner, not by address (L1150):
+// R-0b-179 (L1148 F1, L1149, L1150), v2 (2026-11-16): the builder wall. The builder user (L1079) reaches only its OWN
+// listeners on this Mac: never the owner's dev servers, databases, Claude or codex control ports, nor root's local
+// services. Measured before it (L1148): the Application Firewall is off and pf holds only Apple's anchors, so every Mac
+// user reaches every 127.0.0.1 service.
 //
-//   out on lo0, a packet from a builder socket is tagged ORCH_BUILDER; in on lo0, a tagged packet to a listener that is
-//   not the builder's is blocked (pf's `user` is the sending socket's owner on the way out, the receiving one's on the way
-//   in). TCP and UDP, IPv4 and IPv6 (the rules name no family, so ::1 is covered with 127.0.0.0/8). A connect to one of
-//   this Mac's other addresses goes through lo0 as well (the read-back probes one); a third rule blocks the builder to
-//   `self` off lo0 all the same.
-//   Another user's connection TO a builder listener fails too, and that is intended (L1154): the builder's reply is tagged
-//   and meets a socket that is not the builder's. builder-wall.test.mjs pins it; the read-back on the Mac does not probe it.
+// Why v2 (Principle 9: the v1 note below was a capability claim, and it was wrong). v1 tagged the builder's packets on the
+// way out of lo0 and blocked tagged packets on the way in to a listener that was not the builder's. The tag shape was
+// DISPROVED on macOS 27.0.1 on 2026-11-16 (Joe's wall-diag and wall-diag2 runs): a tag set by a `pass out ... tag` rule is
+// not seen by a `tagged` rule on the way in over lo0, so v1 blocked nothing. Measured in the same runs: pf's `user` is the
+// SENDING socket's owner on the way out and the RECEIVING socket's owner on the way in; a `block return out` on lo0 shows
+// to TCP as a timeout, a `block return in` as refused, and to UDP both show as no answer. So v2 tells the builder's
+// traffic by PORT. One range, WALL_RANGE (shared/builder-ports.mjs, its one home), is the builder's on loopback:
+//
+//   1. pass out quick on lo0 proto udp from any port <R> to any port <ephemeral> user <b> no state
+//        a UDP server of the builder's in R answers a client (whose port the kernel picked from the ephemeral range)
+//   2. block return out quick on lo0 proto udp from any to any port <outside R> user <b>
+//   3. block return out quick on lo0 proto tcp from any to any port <outside R> user <b> flags S/SA
+//        the builder opens nothing on loopback outside R. `flags S/SA` matches only a connection's first packet, so the
+//        builder's replies on a connection someone opened TO it (a SYN-ACK, every later packet) still go out
+//   4. block return in quick on lo0 proto { tcp udp } from any to any port <R> user != <b>
+//        a socket in R that is not the builder's gets nothing: so the builder reaches only its own listeners in R
+//   5. block return out quick on ! lo0 proto { tcp udp } from any to self user <b>   (kept from v1)
+// No rule names a family, so IPv4 and IPv6 (127.0.0.1 and ::1, 0.0.0.0 and ::) are covered alike. A connect to one of this
+// Mac's other addresses goes through lo0 too (the read-back probes one); rule 5 covers it off lo0 all the same.
+//
+// The costs, said in setup/README.md too:
+//   - Every server the builder runs that something on loopback must reach (Claude Code's proxy, a dev server a worker
+//     starts) must listen in R. The builder can't reach even its OWN listener outside R. Claude Code runs its own network
+//     proxy on a port it picks, so builder sessions are pointed at the allow-list proxy (setup/builder-proxy.mjs) in R
+//     instead (render-settings httpProxyPort / socksProxyPort; checked: claude-code 2.1.316).
+//   - The owner (and every other user) can't use a listener of its own in R. place refuses while one is there.
+//   - Rule 1 lets a builder socket in R send UDP to any socket on an ephemeral port: a UDP client of the owner's (it
+//     holds such a port while it waits for an answer) could be sent a forged answer by a builder that guesses its port.
+//     No TCP is affected, and no listener on a fixed port.
 //
 // Known limits (#556 r1, L1158; said in Joe's run sheet too):
-//   - A packet sent by a setuid-root program the builder runs (traceroute's UDP probes, ping) comes from root's socket, so it
-//     is not tagged and reaches the owner's listener. Such a program sends probes; it holds no conversation the builder can use.
+//   - A packet sent by a setuid-root program the builder runs (traceroute's UDP probes, ping) comes from root's socket, so
+//     no `user` rule sees it as the builder's. Such a program sends probes; it holds no conversation the builder can use.
 //   - The wall is network only. Claude Code's session sockets (/tmp/cc-socks) are files, guarded by their folder's owner and
 //     mode: the builder can make the owner's session messaging go quiet by making that folder first after a reboot (Claude
 //     Code refuses a folder another user owns, so it can not take the messaging over). A login job of the owner's that makes
@@ -32,24 +52,30 @@
 //       rules into com.apple/100.orchestrate.builder (a child of the `anchor "com.apple/*"` that macOS's own /etc/pf.conf
 //       has, and that com.apple.pfctl loads at every boot: so /etc/pf.conf is never edited) and, unless the token it
 //       holds is still held and pf is on, enables pf with `pfctl -E` and keeps the new token.
-// then waits (15 seconds at most) for the job's first run to have finished well, runs the read-back, and when either
+// It refuses, changing nothing, when the Mac's ephemeral port range (sysctl net.inet.ip.portrange.*) is not inside
+// EPHEMERAL or overlaps R, or when a socket that is not the builder's already listens in R (lsof): the wall would cut it off.
+// Then it waits (15 seconds at most) for the job's first run to have finished well, runs the read-back, and when either
 // refuses, takes the wall out again (the way out, below) and says why: a wall that blocks the owner or the builder's own
 // proxy never stays live.
 //
-// The read-back (`check`, and the last step of `place`) refuses in five cases (L1149, L1150):
-//   (i)   the builder still connects to a throwaway listener of the owner's, or that listener received what it sent
-//   (ii)  the owner can not connect to its own throwaway listener, before (i) or after it
+// The read-back (`check`, and the last step of `place`) refuses when (L1149, L1150):
+//   (i)   the builder connects to a throwaway listener of the owner's, in R or outside it, or that listener received what
+//         it sent
+//   (ii)  the owner can not connect to its own throwaway listener outside R, before (i) or after it
 //   (iii) the anchor file is there but pf is off, or the token this job keeps isn't held
 //   (iv)  the rules didn't load: com.apple/100.orchestrate.builder isn't exactly these rules, or the main ruleset has no
-//         `anchor "com.apple/*"` to reach it
-//   (v)   the builder can't reach its own throwaway listener (the proxy path would be cut)
-// Both directions, in each of TCP and UDP over 127.0.0.1, ::1 and one other address of this Mac, on every run. (i) proves
-// nothing unless (ii) and (v) pass in the same protocol and address: they are its controls, as proofs.mjs's are. A timeout
-// counts as a block only when the owner's listener received nothing from the builder.
+//         `anchor "com.apple/*"` to reach it; or the ephemeral range has moved into R
+//   (v)   the builder can't reach its own throwaway listener in R (the proxy path would be cut)
+//   (vi)  the owner can't reach the builder's listener in R and hear its answer (rule 1 and `flags S/SA` at work)
+//   (vii) the builder reaches its own listener outside R (rules 2 and 3 not at work: the documented cost not paid)
+// In each of TCP and UDP over 127.0.0.1, ::1, 0.0.0.0, :: and one other address of this Mac, on every run. A blocked row
+// proves nothing unless (ii) and (v) passed in the same protocol and address, and its listener is still running: they are
+// its controls, as proofs.mjs's are. A timeout counts as a block only when the listener received nothing.
 //
-// How pfctl prints loaded rules is read from OpenBSD's pfctl (print_rule), from which macOS's comes; it is not yet seen on
-// this Mac (Joe's run sheet, laneA-builder-wall-runsheet.md). The check takes each printed rule as a set of words and wants
-// exactly the wall's set: a word missing or a word more refuses, so an unexpected print fails closed, never open.
+// How macOS's pfctl prints these rules was seen on this Mac for `port = N`, `port a:b` and `user = N` / `user != N`
+// (wall-diag2, 2026-11-16); `port a <> b` and `flags S/SA` are read from OpenBSD's pfctl (print_rule), from which macOS's
+// comes, and are not yet seen. The check takes each printed rule as a set of words and wants exactly the wall's set: a
+// word missing or a word more refuses, so an unexpected print fails closed, never open (and place then takes it out).
 //
 // The status (L1193): every `check` and every `place` writes <base>/builder-wall-status/status.json (STATUS_FILE; root's
 // 0644 in a folder of root's 0755, written whole): when, the builder's uid, the sha256 of anchorText(uid), ok and why. ok
@@ -74,11 +100,12 @@ import { writeAside } from './dispatcher-setup.mjs';
 import { installPaths, parseInstallConfig } from './install.mjs';
 import { NODE, chainProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { SHA256 } from '../shared/plan-fingerprint.mjs';
+import { EPHEMERAL, PROBE_FIRST, WALL_RANGE } from '../shared/builder-ports.mjs';
 
 export const ANCHOR = 'com.apple/100.orchestrate.builder';
 export const ANCHOR_DIR = '/private/etc/pf.anchors';
 export const ANCHOR_FILE = `${ANCHOR_DIR}/orchestrate.builder`;
-export const TAG = 'ORCH_BUILDER';
+export { WALL_RANGE, EPHEMERAL };   // shared/builder-ports.mjs's one definition
 export const PROTOS = Object.freeze(['tcp', 'udp']);
 export const FAMILIES = Object.freeze([['IPv4', '127.0.0.1'], ['IPv6', '::1']]);
 /** Listeners bound to every address, probed through loopback: [what, the address probed, the address bound]. */
@@ -89,6 +116,8 @@ export { wallStatusPath as STATUS_FILE };
 export const RECHECK_EVERY_S = 300;
 export const FIRST_RUN_WAIT_MS = 15_000;
 const PFCTL = '/sbin/pfctl';
+const SYSCTL = '/usr/sbin/sysctl';
+const LSOF = '/usr/sbin/lsof';
 const SUDO = '/usr/bin/sudo';
 /** The node every Mac user can run (nodejs.org's, root's; managed-settings.mjs NODE_BIN): the probes run it as the builder and the owner. */
 export const PROBE_NODE = '/usr/local/bin/node';
@@ -106,25 +135,33 @@ const said = (r) => (String(r?.stderr ?? '').trim() || String(r?.stdout ?? '').t
 export function anchorText(uid) {
   if (!Number.isSafeInteger(uid) || uid <= 0) throw new Error(`the builder's uid must be a whole number above 0, not ${uid}`);
   return [
-    `# The builder wall (R-0b-179; L1148, L1150): the ${BUILDER} user (uid ${uid}) reaches only its own listeners on this Mac.`,
+    `# The builder wall v2 (R-0b-179; L1148, L1150): the ${BUILDER} user (uid ${uid}) reaches only its own listeners on this Mac,`,
+    `# in ports ${R} on loopback (shared/builder-ports.mjs), and only it may be reached there.`,
     '# Written by the orchestrate setup (setup/builder-wall.mjs) and compared by its check: do not edit.',
     ...RULES.map((r) => r.text(uid)),
     '',
   ].join('\n');
 }
 
+const R = `${WALL_RANGE.first}:${WALL_RANGE.last}`;
+const NOT_R = `${WALL_RANGE.first} <> ${WALL_RANGE.last}`;
+const EPH = `${EPHEMERAL.first}:${EPHEMERAL.last}`;
 /**
- * Each rule: its text, and the exact words pfctl prints for it in one protocol (OpenBSD's print_rule: one rule per protocol,
- * `all` for `from any to any`, `user = N`). The self rule alone may name a family and an address: pf turns `self` into this
- * Mac's own addresses as it loads, one rule each. Any other word (a family, a port, a group, `keep state`, no `quick`) is
- * a different rule, and refuses (#556 r1 m2).
+ * Each rule: its text, and the exact words pfctl prints for it in one protocol (one rule per protocol, `user = N`; `all`
+ * only for a rule with no address and no port). The self rule alone may name a family and an address: pf turns `self`
+ * into this Mac's own addresses as it loads, one rule each. Any other word (a family, another port, a group, `keep
+ * state`, no `quick`) is a different rule, and refuses (#556 r1 m2). The header says which prints were seen on this Mac.
  */
 export const RULES = Object.freeze([
-  { id: 'tag', text: (u) => `pass out quick on lo0 proto { tcp udp } from any to any user ${u} tag ${TAG} no state`,
-    words: (u, p) => `pass out quick on lo0 proto ${p} all user = ${u} no state tag ${TAG}` },
-  { id: 'block-in', text: (u) => `block return in quick on lo0 proto { tcp udp } from any to any tagged ${TAG} user != ${u}`,
-    words: (u, p) => `block return in quick on lo0 proto ${p} all user != ${u} tagged ${TAG}` },
-  { id: 'self', text: (u) => `block return out quick on ! lo0 proto { tcp udp } from any to self user ${u}`,
+  { id: 'udp-reply', protos: ['udp'], text: (u) => `pass out quick on lo0 proto udp from any port ${R} to any port ${EPH} user ${u} no state`,
+    words: (u, p) => `pass out quick on lo0 proto ${p} from any port ${R} to any port ${EPH} user = ${u} no state` },
+  { id: 'udp-out', protos: ['udp'], text: (u) => `block return out quick on lo0 proto udp from any to any port ${NOT_R} user ${u}`,
+    words: (u, p) => `block return out quick on lo0 proto ${p} from any to any port ${NOT_R} user = ${u}` },
+  { id: 'tcp-out', protos: ['tcp'], text: (u) => `block return out quick on lo0 proto tcp from any to any port ${NOT_R} user ${u} flags S/SA`,
+    words: (u, p) => `block return out quick on lo0 proto ${p} from any to any port ${NOT_R} user = ${u} flags S/SA` },
+  { id: 'range-in', protos: PROTOS, text: (u) => `block return in quick on lo0 proto { tcp udp } from any to any port ${R} user != ${u}`,
+    words: (u, p) => `block return in quick on lo0 proto ${p} from any to any port ${R} user != ${u}` },
+  { id: 'self', protos: PROTOS, text: (u) => `block return out quick on ! lo0 proto { tcp udp } from any to self user ${u}`,
     words: (u, p) => `block return out quick on ! lo0 proto ${p} from any to ADDRESS user = ${u}`, anyAddress: true },
 ]);
 
@@ -137,12 +174,12 @@ function perProto(line) {
 const sorted = (s) => s.trim().replace(/!\s+/g, '!').split(/\s+/).sort().join(' ');
 /** The words of a printed rule as the wall's are written: `from any to any` as `all`, the user as `user = N` / `user != N`. */
 function normal(line, uid, anyAddress) {
-  let s = ` ${line} `.replace(/\s+/g, ' ').replace(/ from any to any /, ' all ')
+  let s = ` ${line} `.replace(/\s+/g, ' ').replace(/ from any to any (?!port )/, ' all ')
     .replace(/ user\s*(!=|=)?\s*(\S+) /, (_, op, who) => ` user ${op ?? '='} ${who === BUILDER ? uid : who} `);
   if (anyAddress) s = s.replace(/ inet6? /, ' ').replace(/ to (?!any )\S+ /, ' to ADDRESS ');
   return sorted(s);
 }
-const fits = (r, uid, line, p) => normal(line, uid, r.anyAddress) === sorted(r.words(uid, p));
+const fits = (r, uid, line, p) => r.protos.includes(p) && normal(line, uid, r.anyAddress) === normal(r.words(uid, p), uid, r.anyAddress);
 
 /**
  * Null, or why the anchor as pfctl prints it is not these rules (iv): each rule in each protocol, and no line that is none of
@@ -152,7 +189,7 @@ export function loadedRulesProblem(text, uid) {
   const lines = String(text).split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#')).flatMap(perProto);
   if (!lines.length) return `${ANCHOR} holds no rules`;
   const missing = [];
-  for (const r of RULES) for (const p of PROTOS) if (!lines.some((l) => fits(r, uid, l, p))) missing.push(`${r.id} (${p})`);
+  for (const r of RULES) for (const p of r.protos) if (!lines.some((l) => fits(r, uid, l, p))) missing.push(`${r.id} (${p})`);
   const extra = lines.filter((l) => !RULES.some((r) => PROTOS.some((p) => fits(r, uid, l, p))));
   if (missing.length) return `${ANCHOR} is missing the rule${missing.length > 1 ? 's' : ''} ${missing.join(', ')} exactly as written: what is loaded is not the wall`;
   if (extra.length) return `${ANCHOR} holds ${extra.length === 1 ? 'a line' : `${extra.length} lines`} that ${extra.length === 1 ? 'is' : 'are'} not the wall's: ${extra[0].slice(0, 120)}`;
@@ -323,6 +360,44 @@ export function builderUid(io, cfg) {
   return { uid: b.uid };
 }
 
+/** The sysctl names of the Mac's ephemeral port ranges: every port the kernel picks for a client comes from one of them. */
+export const PORT_RANGE_SYSCTLS = Object.freeze(['net.inet.ip.portrange.first', 'net.inet.ip.portrange.last', 'net.inet.ip.portrange.hifirst', 'net.inet.ip.portrange.hilast']);
+
+/**
+ * Null, or why the Mac's ephemeral range does not fit the wall (iv): it must lie inside EPHEMERAL (rule 1's reply ports)
+ * and so clear of R. A port the kernel picks for one of the owner's clients inside R would be cut off by rule 4, and a
+ * builder client's port inside R would make it look like a server of the builder's to rule 1.
+ */
+export function ephemeralProblem(io) {
+  const r = io.run(SYSCTL, ['-n', ...PORT_RANGE_SYSCTLS]);
+  const n = String(r.stdout ?? '').trim().split(/\s+/).map(Number);
+  if (r.status !== 0 || n.length !== 4 || !n.every(Number.isInteger)) return `sysctl could not read the ephemeral port range (${said(r)})`;
+  const [first, last, hifirst, hilast] = n;
+  for (const [a, z] of [[first, last], [hifirst, hilast]]) {
+    if (a < EPHEMERAL.first || z > EPHEMERAL.last || a > z) return `the Mac's ephemeral port range is ${a}-${z}, not inside ${EPHEMERAL.first}-${EPHEMERAL.last}: ${a <= WALL_RANGE.last && z >= WALL_RANGE.first ? `it overlaps the builder's ports ${R}, so the wall would cut off other users' connections` : 'the builder\'s UDP servers could not answer a client there'} (set it back with sudo sysctl -w net.inet.ip.portrange.first=${EPHEMERAL.first} net.inet.ip.portrange.last=${EPHEMERAL.last})`;
+  }
+  return null;
+}
+
+/**
+ * Null, or why another user's socket already listening in R refuses place: the wall would cut it off (rule 4). From
+ * `lsof -nP -i<proto>:<R> -Fpun` (TCP: listening only); lsof says 1 with nothing printed when there is none.
+ */
+export function rangeListenersProblem(io, uid) {
+  const theirs = [];
+  for (const [proto, listening] of [['TCP', ['-sTCP:LISTEN']], ['UDP', []]]) {
+    const r = io.run(LSOF, ['-nP', `-i${proto}:${WALL_RANGE.first}-${WALL_RANGE.last}`, ...listening, '-Fpun']);
+    const out = String(r.stdout ?? '');
+    if (r.status !== 0 && !(r.status === 1 && !out.trim())) return `lsof could not list the ${proto} sockets in ${R} (${said(r)})`;
+    let who = null; let pid = null;
+    for (const l of out.split('\n')) {
+      if (l.startsWith('p')) pid = l.slice(1); else if (l.startsWith('u')) who = Number(l.slice(1));
+      else if (l.startsWith('n') && who !== uid) theirs.push(`${proto} ${l.slice(1)} (uid ${who}, pid ${pid})`);
+    }
+  }
+  return theirs.length ? `${theirs.length === 1 ? 'a socket that is' : `${theirs.length} sockets that are`} not the ${BUILDER} user's already listen${theirs.length === 1 ? 's' : ''} in the builder's ports ${R}, which the wall would cut off: ${theirs.slice(0, 3).join(', ')}. Stop ${theirs.length === 1 ? 'it' : 'them'} or move ${theirs.length === 1 ? 'it' : 'them'} to another port; nothing was changed` : null;
+}
+
 const op = (text, run) => ({ text, run });
 const sameFile = (io, f, text, mode = 0o644) => { const s = lstatOr(io, f); try { return !!s && s.isFile() && !s.isSymbolicLink() && s.uid === io.rootUid && (s.mode & 0o7777) === mode && io.readText(f) === text; } catch { return false; } };
 
@@ -338,6 +413,10 @@ export function planWall(io, cfg) {
   }
   const dir = lstatOr(io, wallDir(cfg));
   if (dir && (!dir.isDirectory() || dir.isSymbolicLink() || dir.uid !== io.rootUid)) problems.push(`${wallDir(cfg)} is there but is not a folder of root's; look at it, remove it by hand, and run this again. Nothing was changed`);
+  const eph = ephemeralProblem(io);
+  if (eph) problems.push(`${eph}; nothing was changed`);
+  const busy = rangeListenersProblem(io, id.uid);
+  if (busy) problems.push(busy);
   if (problems.length) return { ops: [], problems };
   const ops = []; const text = anchorText(id.uid); const job = wallPlist(cfg);
   if (!sameFile(io, ANCHOR_FILE, text)) ops.push(op(`write ${ANCHOR_FILE}   (root:wheel 0644; the rules for uid ${id.uid})`, () => writeAside(io, ANCHOR_FILE, text)));
@@ -408,6 +487,8 @@ export function settingsChecks(io, cfg, uid) {
   const a = io.run(PFCTL, ['-a', ANCHOR, '-s', 'rules']);
   const why = a.status !== 0 ? `pfctl -a ${ANCHOR} -s rules failed (${said(a)})` : loadedRulesProblem(a.stdout, uid);
   item(why === null, `${ANCHOR} holds exactly the wall's rules (iv)`, why);
+  const eph = ephemeralProblem(io);
+  item(eph === null, `the Mac's ephemeral port range is inside ${EPHEMERAL.first}-${EPHEMERAL.last}, clear of the builder's ports (iv)`, eph);
   return out;
 }
 
@@ -435,44 +516,62 @@ export async function waitForFirstRun(io, cfg, { limitMs = FIRST_RUN_WAIT_MS, st
 }
 
 /**
- * The traffic half (i, ii, v), in each protocol and address: the builder reaches its own listener, the owner its own, the
- * builder NOT the owner's (and the owner's listener received nothing from it), and the owner still reaches its own after.
- * `net`: { addresses() → [one other address of this Mac, or none], listen({ user, proto, host }) → Promise<{ port,
- * received() → how many connections or messages it has had, settle() → Promise, close() }>, connect({ user, proto, host,
- * port }) → Promise<'ok' | 'refused' | 'timeout' | 'error: …'> }.
+ * The traffic half (i, ii, v, vi, vii), in each protocol and place. Four throwaway listeners: the builder's in R and
+ * outside it, the owner's in R and outside it.
+ *   controls: the builder reaches its own in R (v); the owner its own outside R (ii), before and after the blocked probes
+ *   (vi):     the owner reaches the builder's in R and hears its answer
+ *   blocked:  the builder does NOT reach the owner's outside R or in R (i), nor its own outside R (vii, the cost)
+ * A blocked row passes only with its controls passed, its listener still running and nothing received there. The three
+ * blocked probes run at once (a UDP block waits out the probe's 3 seconds).
+ * `net`: { addresses() → [one other address of this Mac, or none], listen({ user, proto, host, inRange }) → Promise<{ port,
+ * received() → how many connections or messages it has had, settle() → Promise, alive() → still running, close() }>,
+ * connect({ user, proto, host, port }) → Promise<'ok' | 'refused' | 'timeout' | 'error: …'> }. A listener `inRange` takes a
+ * port in WALL_RANGE (from PROBE_FIRST, clear of the proxy's); otherwise one the kernel picks (ephemeral, outside it).
  */
 export async function trafficChecks(cfg, net) {
   const out = [];
   const other = net.addresses().slice(0, 1);
   if (!other.length) out.push({ ok: true, what: 'this Mac has no address but loopback, so only 127.0.0.1 and ::1 were probed' });
-  // [what, the address probed, the address the listeners bind]: an owner service bound to every address (`*` or `::`)
-  // is reached through loopback too, so it is probed as its own place.
+  // [what, the address probed, the address the listeners bind]: a service bound to every address (`*` or `::`) is
+  // reached through loopback too, so it is probed as its own place.
   const places = [...FAMILIES.map(([f, h]) => [f, h, h]), ...ALL_ADDRESSES, ...other.map((a) => [`this Mac's own address`, a, a])];
+  const row = (ok, what, why) => out.push(ok ? { ok: true, what } : { ok: false, what, why });
   for (const proto of PROTOS) for (const [fam, host, bind] of places) {
     const where = `${proto.toUpperCase()} ${fam} (${host}${bind === host ? '' : `, listening on ${bind}`})`;
-    let mine = null; let theirs = null;
+    const L = {};
     try {
-      try { mine = await net.listen({ user: BUILDER, proto, host: bind }); theirs = await net.listen({ user: cfg.owner, proto, host: bind }); } catch (e) {
-        out.push({ ok: false, what: `the probes could listen on ${where}`, why: `${e?.message ?? e}: nothing about ${where} was proven` });
+      try {
+        for (const [k, user, inRange] of [['bIn', BUILDER, true], ['bOut', BUILDER, false], ['oIn', cfg.owner, true], ['oOut', cfg.owner, false]]) L[k] = await net.listen({ user, proto, host: bind, inRange });
+      } catch (e) {
+        row(false, `the probes could listen on ${where}`, `${e?.message ?? e}: nothing about ${where} was proven`);
         continue;
       }
-      const v = await net.connect({ user: BUILDER, proto, host, port: mine.port });
-      out.push(v === 'ok' ? { ok: true, what: `${BUILDER} reaches its own listener on ${where} (v; the proxy path)` } : { ok: false, what: `${BUILDER} reaches its own listener on ${where} (v; the proxy path)`, why: `it got ${v}: a worker session's sandboxed shell would lose its network proxy` });
-      const ii = await net.connect({ user: cfg.owner, proto, host, port: theirs.port });
-      out.push(ii === 'ok' ? { ok: true, what: `the owner reaches its own listener on ${where} (ii)` } : { ok: false, what: `the owner reaches its own listener on ${where} (ii)`, why: `it got ${ii}: the wall is blocking the owner` });
-      await theirs.settle(); const before = theirs.received();
-      const i = await net.connect({ user: BUILDER, proto, host, port: theirs.port });
+      const v = await net.connect({ user: BUILDER, proto, host, port: L.bIn.port });
+      row(v === 'ok', `${BUILDER} reaches its own listener in its ports on ${where} (v; the proxy path)`, `it got ${v}: a builder session would lose its network proxy`);
+      const ii = await net.connect({ user: cfg.owner, proto, host, port: L.oOut.port });
+      row(ii === 'ok', `the owner reaches its own listener on ${where} (ii)`, `it got ${ii}: the wall is blocking the owner`);
+      const vi = await net.connect({ user: cfg.owner, proto, host, port: L.bIn.port });
+      row(vi === 'ok', `the owner reaches the ${BUILDER} user's listener in its ports on ${where} and hears its answer (vi)`, `it got ${vi}: the builder's answers are blocked`);
+      for (const l of [L.oOut, L.oIn, L.bOut]) await l.settle();
+      const before = { oOut: L.oOut.received(), oIn: L.oIn.received(), bOut: L.bOut.received() };
+      const [toOut, toIn, ownOut] = await Promise.all([L.oOut, L.oIn, L.bOut].map((l) => net.connect({ user: BUILDER, proto, host, port: l.port })));
       // (ii) again: the owner's listener is still up and answering, so a block in (i) is the wall's, not a listener gone.
-      const again = await net.connect({ user: cfg.owner, proto, host, port: theirs.port });
-      await theirs.settle(); const got = theirs.received() - before - (again === 'ok' ? 1 : 0);
-      out.push(again === 'ok' ? { ok: true, what: `the owner still reaches its own listener on ${where} after (i) (ii)` } : { ok: false, what: `the owner still reaches its own listener on ${where} after (i) (ii)`, why: `it got ${again}` });
-      const what = `${BUILDER} can NOT reach the owner's listener on ${where} (i)`;
-      if (v !== 'ok' || ii !== 'ok' || again !== 'ok') out.push({ ok: false, what, why: 'not proven: a control in this protocol and address failed' });
-      else if (i === 'ok') out.push({ ok: false, what, why: `${BUILDER} connected: the wall is not up` });
-      else if (got > 0) out.push({ ok: false, what, why: `the owner's listener received ${got} from ${BUILDER} (the probe said ${i}): what the builder sent got through` });
-      else if (i === 'refused' || i === 'timeout') out.push({ ok: true, what });
-      else out.push({ ok: false, what, why: `the probe said ${i}, which is not a block` });
-    } finally { mine?.close(); theirs?.close(); }
+      const again = await net.connect({ user: cfg.owner, proto, host, port: L.oOut.port });
+      for (const l of [L.oOut, L.oIn, L.bOut]) await l.settle();
+      row(again === 'ok', `the owner still reaches its own listener on ${where} after (i) (ii)`, `it got ${again}`);
+      const blocked = (what, said, l, k, extra = 0) => {
+        const got = l.received() - before[k] - extra;
+        if (v !== 'ok' || ii !== 'ok' || again !== 'ok') row(false, what, 'not proven: a control in this protocol and address failed');
+        else if (!l.alive()) row(false, what, `not proven: the listener had stopped (the probe said ${said})`);
+        else if (said === 'ok') row(false, what, `${BUILDER} connected: the wall is not up`);
+        else if (got > 0) row(false, what, `the listener received ${got} from ${BUILDER} (the probe said ${said}): what the builder sent got through`);
+        else if (said === 'refused' || said === 'timeout') row(true, what);
+        else row(false, what, `the probe said ${said}, which is not a block`);
+      };
+      blocked(`${BUILDER} can NOT reach the owner's listener outside its ports on ${where} (i)`, toOut, L.oOut, 'oOut', again === 'ok' ? 1 : 0);
+      blocked(`${BUILDER} can NOT reach the owner's listener in its ports on ${where} (i)`, toIn, L.oIn, 'oIn');
+      blocked(`${BUILDER} can NOT reach its own listener outside its ports on ${where} (vii; the documented cost)`, ownOut, L.bOut, 'bOut');
+    } finally { for (const l of Object.values(L)) l?.close(); }
   }
   return out;
 }
@@ -486,11 +585,17 @@ export async function checkWall(io, cfg, { net = realNet(), id = builderUid(io, 
 // --- the real probes: node run as the builder or the owner, through sudo, each on its own ----------------------------
 
 // The listener says GOT for each connection or message it receives, so (i) can tell a block from a reply that was lost.
-const LISTENER = `const [proto, host] = process.argv.slice(1); const end = () => process.exit(0); setTimeout(end, 60000).unref(); process.stdin.on('end', end); process.stdin.resume();
-const got = () => process.stdout.write('GOT\\n');
-if (proto === 'tcp') { const s = require('net').createServer((c) => { got(); c.end(); }); s.listen(0, host, () => process.stdout.write('PORT ' + s.address().port + '\\n')); s.on('error', (e) => { process.stdout.write('ERR ' + e.code + '\\n'); end(); }); }
-else { const s = require('dgram').createSocket(host.includes(':') ? 'udp6' : 'udp4'); s.on('message', (m, r) => { got(); s.send('pong', r.port, r.address); }); s.on('error', (e) => { process.stdout.write('ERR ' + e.code + '\\n'); end(); }); s.bind(0, host, () => process.stdout.write('PORT ' + s.address().port + '\\n')); }`;
-const CLIENT = `const [proto, host, port] = process.argv.slice(1); const say = (w) => { process.stdout.write(w); process.exit(0); }; setTimeout(() => say('timeout'), 3000);
+// It never stops on a socket's error (a connection reset by a wall, #wall-diag V0): only on its parent's word or a minute.
+// `lo hi`: a port picked at random in lo..hi, again on EADDRINUSE; `0 0`: one the kernel picks.
+export const LISTENER = `const [proto, host, lo, hi] = process.argv.slice(1).map((x, i) => (i > 1 ? Number(x) : x)); const end = () => process.exit(0); setTimeout(end, 60000).unref(); process.stdin.on('end', end); process.stdin.resume();
+process.on('uncaughtException', (e) => { process.stdout.write('NOTE ' + (e && e.code) + '\\n'); });
+const got = () => process.stdout.write('GOT\\n'); let tries = 0;
+const pick = () => (lo ? lo + Math.floor(Math.random() * (hi - lo + 1)) : 0);
+const failed = (e, again) => { if (e.code === 'EADDRINUSE' && lo && (tries += 1) < 50) return again(); process.stdout.write('ERR ' + e.code + '\\n'); end(); };
+if (proto === 'tcp') { const s = require('net').createServer((c) => { got(); c.on('error', () => {}); c.end(); }); const go = () => s.listen(pick(), host); s.on('listening', () => process.stdout.write('PORT ' + s.address().port + '\\n')); s.on('error', (e) => failed(e, go)); go(); }
+else { const open = () => { const s = require('dgram').createSocket(host.includes(':') ? 'udp6' : 'udp4'); let up = false; s.on('message', (m, r) => { got(); s.send('pong', r.port, r.address, () => {}); }); s.on('error', (e) => { if (!up) { s.close(); failed(e, open); } }); s.bind(pick(), host, () => { up = true; process.stdout.write('PORT ' + s.address().port + '\\n'); }); }; open(); }`;
+export const CLIENT = `const [proto, host, port] = process.argv.slice(1); const say = (w) => { process.stdout.write(w); process.exit(0); }; setTimeout(() => say('timeout'), 3000);
+process.on('uncaughtException', (e) => say('error: ' + (e && e.code)));
 if (proto === 'tcp') { const c = require('net').connect(Number(port), host, () => say('ok')); c.on('error', (e) => say(e.code === 'ECONNREFUSED' || e.code === 'ECONNRESET' ? 'refused' : 'error: ' + e.code)); }
 else { const s = require('dgram').createSocket(host.includes(':') ? 'udp6' : 'udp4'); s.on('message', (m) => say(String(m) === 'pong' ? 'ok' : 'error: odd reply')); s.on('error', (e) => say(e.code === 'ECONNREFUSED' ? 'refused' : 'error: ' + e.code)); s.connect(Number(port), host, () => s.send('ping')); }`;
 
@@ -504,10 +609,12 @@ export function realNet({ node = PROBE_NODE } = {}) {
   const as = (user) => ['-n', '-H', '-u', user, node];
   return {
     addresses: () => otherAddresses(),
-    listen: ({ user, proto, host }) => new Promise((resolve, reject) => {
+    listen: ({ user, proto, host, inRange = false }) => new Promise((resolve, reject) => {
       // From /, which every user may enter: root's own folder may be one the builder can't.
-      const p = spawn(SUDO, [...as(user), '-e', LISTENER, proto, host], { cwd: '/', stdio: ['pipe', 'pipe', 'pipe'], env: ENV });
-      let buf = ''; let err = ''; let ready = false;
+      const span = inRange ? [PROBE_FIRST, WALL_RANGE.last] : [0, 0];
+      const p = spawn(SUDO, [...as(user), '-e', LISTENER, proto, host, ...span.map(String)], { cwd: '/', stdio: ['pipe', 'pipe', 'pipe'], env: ENV });
+      let buf = ''; let err = ''; let ready = false; let running = true;
+      p.on('exit', () => { running = false; });
       const t = setTimeout(() => { p.kill(); reject(new Error(`a listener as ${user} did not start within 10 seconds`)); }, 10_000);
       p.stderr.on('data', (d) => { err += d; });
       p.stdout.on('data', (d) => {
@@ -520,6 +627,7 @@ export function realNet({ node = PROBE_NODE } = {}) {
             received: () => (buf.match(/^GOT$/mg) ?? []).length,
             // A GOT the listener printed reaches this process a moment later: let it.
             settle: () => new Promise((r) => setTimeout(r, 300)),
+            alive: () => running,
             close: () => { p.stdin.end(); p.kill(); },
           });
         } else if (e) { clearTimeout(t); p.kill(); reject(new Error(`a listener as ${user} could not bind ${host} (${e[1]})`)); }
