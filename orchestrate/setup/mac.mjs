@@ -32,6 +32,7 @@ import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { chainProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { registerSecret } from '../shared/secret-guard.mjs';
+import { readSigninFile } from '../wiring/builder-signin.mjs';
 
 /** The refusal when a file setup would change is not a plain file (here and managed-settings.mjs): one home (I7). */
 /** The refusal when a file to read is a link: a link is never followed (mac, approve-rules): one text (I7). */
@@ -189,6 +190,9 @@ export function realIo({ prefix = '' } = {}) {
     readConfig: (p, { strict = false } = {}) => readConfigFile(strict ? at(p) : p, { strict, rootUid: 0, top: prefix || '/', what: strict ? "root's setup config" : 'the setup config' }),
     nodeProblem: () => nodeProblemOf(process.execPath),
     readSecret: (prompt) => readSecretFromTty(prompt),
+    // The builder sessions' sign-in, read as the runner reads it (one handle, never a link, owner, mode, one name, the
+    // folders above root's): root's setup step uses it only to see whether the same token is already saved (L1261).
+    readSignin: (p, { uid }) => readSigninFile(at(p), { uid, rootUid: 0, top: prefix || '/' }),
     // Plain fetch for the one place the setup talks to GitHub (prove-token). → { status, text }; a time limit; redirects are not followed.
     fetch: async (url, init) => { const r = await fetch(url, { ...init, redirect: 'manual', signal: AbortSignal.timeout(20_000) }); return { status: r.status, text: await r.text(), rateRemaining: r.headers.get('x-ratelimit-remaining') }; },
     nodeBinProblem: (p) => nodeProblemOf(p, { exact: true }),

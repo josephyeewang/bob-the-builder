@@ -32,7 +32,7 @@ A config that does not parse is reported as "not valid JSON": the file's own tex
 | `sudo /usr/local/bin/node setup.mjs users-folders` | makes the users in `USERS` (ids 600-699, all different; hidden, shell `/usr/bin/false` except `builder`'s `/bin/zsh`, which its sessions' Bash tool runs, password `*`, own group with no members, never admin), then the folders (owner, group, exact mode, exact access list), then runs `check` | yes |
 | `node setup.mjs check --config <file>` | read only: `PASS`, `FAIL` or `NEEDS ROOT` per item; exit 1 on any FAIL, exit 3 if all that could be seen passed but some items need root. Before setup it lists 57 FAILs of 61 items for one product (about 10 more for each extra product: its copies, outbox and rules folders, L836), which is expected | no |
 | `sudo /usr/local/bin/node setup.mjs check` | the same with nothing hidden: the sudo-rule and password-hash items can be read | yes |
-| `sudo /usr/local/bin/node setup.mjs proofs` | runs, as `builder` (L1079), the "cannot" proofs: the record, hooks, settings, launcher, lead-main, claude-code and install copies and the outbox folders cannot be written; the robot keys, the other users' homes, the owner's home and every production file and secret the installed `review.json`'s rules and the worker runner's `worker-runner.json` (each product's rules, when it is installed) name cannot be read; and `builder` is in no group but its own and the ones macOS gives every local user (controls first). A rules entry that names nothing on this Mac (none, a relative name, a pattern, a missing file) is NOT TRIED, which fails the run like a FAIL: containment is proven only when every line is PASS. Every place is judged by what it reaches, never by its name (#528 r3): when root finds its real place elsewhere (a link anywhere along the path), both are proven and both must be refused; a place that is not there, or that has changed between making the list and proving it, is NOT TRIED. What a place reaches includes (#528 r4) the links inside a folder of secrets that lead out (each proven as its own place), a file's other names (a file with more than one is NOT TRIED), and the folders above it, which `builder` must neither write nor own. Those folders are every one met on the way, one link at a time, a middle link's included (#528 r5); in a shared folder (`/private/tmp`, `/Users/Shared`) root itself looks at who owns the name there, without following a link. Who owns a place is always root's own look, never `test -O` (#528 r6): the place itself, every step on the way and every folder above, a link not followed; `builder` owning one is a FAIL (it could chmod a secret it owns), and so is an access-list entry that lets it, or a group it is in, write, delete, rename or change who may. Root first checks it is the very thing the list saw, with one name only; otherwise NOT TRIED | yes |
+| `sudo /usr/local/bin/node setup.mjs proofs` | runs, as `builder` (L1079), the "cannot" proofs: the record, hooks, settings, launcher, lead-main, claude-code and install copies and the outbox folders cannot be written; the robot keys, the other users' homes, the owner's home and every production file and secret the installed `review.json`'s rules and the worker runner's `worker-runner.json` (each product's rules, when it is installed) name cannot be read; and `builder` is in no group but its own and the ones macOS gives every local user (controls first). A rules entry that names nothing on this Mac (none, a relative name, a pattern, a missing file) is NOT TRIED, which fails the run like a FAIL: containment is proven only when every line is PASS. Every place is judged by what it reaches, never by its name (#528 r3): when root finds its real place elsewhere (a link anywhere along the path), both are proven and both must be refused; a place that is not there, or that has changed between making the list and proving it, is NOT TRIED. What a place reaches includes (#528 r4) the links inside a folder of secrets that lead out (each proven as its own place), a file's other names (a file with more than one is NOT TRIED), and the folders above it, which `builder` must neither write nor own. Those folders are every one met on the way, one link at a time, a middle link's included (#528 r5); in a shared folder (`/private/tmp`, `/Users/Shared`) root itself looks at who owns the name there, without following a link. Who owns a place is always root's own look, never `test -O` (#528 r6): the place itself, every step on the way and every folder above, a link not followed; `builder` owning one is a FAIL (it could chmod a secret it owns), and so is an access-list entry that lets it, or a group it is in, write, delete, rename or change who may. Root first checks it is the very thing the list saw, with one name only; otherwise NOT TRIED. The one exception is the builder sessions' sign-in (L1261): its folder is on the worker rules' secrets but is `builder`'s own, so it is not a "cannot read" proof; instead root looks that no user but `builder` and root can read the file or its folder (NOT TRIED until `builder-signin` has made it) | yes |
 
 - Run it twice and the second run does nothing. A run cut off at any step is finished by the next one: it writes only
   the attributes that are missing and deletes nothing. The safe settings of a user (no shell, hidden, no password) are
@@ -277,13 +277,14 @@ so the secret-file hook refuses it too).
 **Make it, or replace it** (each step on the Mini):
 1. In a Terminal window, as yourself (not sudo): `claude setup-token`. It opens the browser to sign in and prints a
    long-lived token (it starts `sk-ant-oat`). Copy it. Make it on the account the workers should spend.
-2. In the same window, from the installed copy: `sudo node setup.mjs builder-signin` (try `--dry-run` first: it reads
+2. In the same window, from the installed copy: `sudo /usr/local/bin/node setup.mjs builder-signin` (try `--dry-run` first: it reads
    nothing). Paste the token at the prompt; nothing shows as you paste. It is checked for shape (a wrong paste is refused
    and not repeated), then saved whole or not at all. The same token again changes nothing.
-3. `sudo node setup.mjs check-builder-signin` (or `sudo node setup.mjs daemons check --only worker-runner`, which shows
+3. `sudo /usr/local/bin/node setup.mjs check-builder-signin` (or `sudo /usr/local/bin/node setup.mjs daemons check --only worker-runner`, which shows
    the same row): the folder, owner, mode, size and access list; the token itself is never opened.
-4. After a setup update that adds this (L1261): `sudo node setup.mjs worker-config` again, so the runner's config names
-   the file and the new deny entries; `daemons check` says so until then.
+4. After a setup update that adds this (L1261), on a Mac already set up: `sudo /usr/local/bin/node setup.mjs users-folders`
+   first (it makes the sign-in's folder, which step 2 needs), then `sudo /usr/local/bin/node setup.mjs worker-config` again,
+   so the runner's config names the file and the new deny entries; `daemons check` says so until then.
 5. The live proof, as builder: `sudo -H -u builder <installRoot>/bin/node <installRoot>/setup/live-proofs/builder-signin.mjs --config <installRoot>/worker-runner.json`.
    It starts the pinned claude once with no tools and asks it to reply OK; PASS means the sign-in works there.
 
@@ -291,11 +292,21 @@ so the secret-file hook refuses it too).
 builder, reads the file fresh through one handle without following a link, and refuses it unless it and its folder are
 builder's own (0600, 0700, one name), every folder above is root's alone, and it holds one token. Any problem holds the
 start, told once in the runner's log per reason (and once when it reads fine). The token goes into that claude's
-environment only, never onto a command line (`ps` shows command lines to every Mac user) and never into a log.
-Accepted (L1261): the session's own environment holds the value, so a program the session runs, as builder, can read it.
-Another Mac user's `ps` does not show another user's environment; builder's own processes and root can.
-The workers run in account a's folder on whichever account made the token: the owner's account switch (a/b) does not
-apply to them.
+environment, never onto a command line (`ps` shows command lines to every Mac user) and never into a log.
+
+**Who can read it (accepted, L1261).** Anything running as `builder` can read the token: every worker session, and every
+program one runs, including the lock-down claude's install and test commands and any third-party package script they
+run. They inherit it in their environment, and the file is `builder`'s own anyway. What limits where it can go is the
+walls: the `builder` user itself (another Mac user's `ps` does not show `builder`'s environment; only `builder` and root
+can), the network wall, and the deny lists (every session's settings and the secret-file hook refuse the file's folder).
+Possible later narrowing, not adopted: Claude Code's subprocess environment scrub (it forces the permission mode back to
+default) and handing the token on an open file instead (unproven on the pin). Both were read in a newer release than
+the pin and expire on upgrade; which release, and the dates, are in wiring/builder-signin.mjs (the one place they are kept).
+
+**Accounts.** The workers ignore the owner's account switch (a/b): they run in account a's folder on whichever account
+made the token.
+**A lapsed or revoked token** shows up only when a session starts (its claude fails to sign in) or when the live proof
+runs: the runner checks the file, not the token.
 
 **Revoke it.** On claude.ai, in the account's settings, where its sign-ins and tokens are listed (the place as of the
 time of writing; re-check); then make a new one as above. Deleting the file stops new starts at once.

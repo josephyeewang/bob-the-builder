@@ -60,7 +60,7 @@ test('PLANT each wrong owner, mode, link or chain → refused with a reason that
     ['the file is a link to the value', () => { const p = place({ text: null }); const real = join(p.d, 'elsewhere'); writeFileSync(real, `${VALUE}\n`); chmodSync(real, 0o600); symlinkSync(real, p.file); return p; }, (p) => read(p.file), /is a link, which is never followed/],
     ['the folder is a link', () => { const p = place(); const alias = join(p.d, 'alias'); symlinkSync(p.dir, alias); return { ...p, file: join(alias, 'claude-signin') }; }, (p) => read(p.file), /is not a plain folder/],
     ['a second name (hard link)', () => { const p = place(); linkSync(p.file, join(p.dir, 'other')); return p; }, (p) => read(p.file), /has another name/],
-    ['missing', () => place({ text: null }), (p) => read(p.file), /is missing \(make it: claude setup-token as the owner, then sudo node setup.mjs builder-signin\)/],
+    ['missing', () => place({ text: null }), (p) => read(p.file), /is missing \(make it: claude setup-token as the owner, then sudo \/usr\/local\/bin\/node setup.mjs builder-signin\)/],
     ['empty', () => place({ text: '' }), (p) => read(p.file), /is not the size of one sign-in token/],
     ['not a token (a password of the right size)', () => place({ text: `${'p'.repeat(60)}\n` }), (p) => read(p.file), /does not hold one sign-in token: it does not start the way/],
     ['two tokens', () => place({ text: `${VALUE}\n${VALUE}\n` }), (p) => read(p.file), /does not hold one sign-in token|is not the size/],
@@ -169,7 +169,7 @@ test('signinFileRows: lstat only; every wrong owner, mode, link or access list i
     assert.match(rows({ chain: () => '/x is a link' }).find((r) => !r.ok).why, /\/x is a link/);
     assert.match(rows({ acl: (x) => ({ entries: x === p.file ? ['user:other allow read'] : [], error: null }) }).find((r) => !r.ok).why, /has an access list/);
     linkSync(p.file, join(p.dir, 'second')); assert.match(rows().find((r) => !r.ok).why, /another name/); rmSync(join(p.dir, 'second'));
-    rmSync(p.file); assert.match(rows().find((r) => !r.ok).why, /missing: as the owner run claude setup-token, then sudo node setup.mjs builder-signin/);
+    rmSync(p.file); assert.match(rows().find((r) => !r.ok).why, /missing: as the owner run claude setup-token, then sudo \/usr\/local\/bin\/node setup.mjs builder-signin/);
     noValue(JSON.stringify(rows()));
   } finally { p.done(); }
 });

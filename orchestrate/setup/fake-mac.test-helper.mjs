@@ -13,6 +13,7 @@ import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { nodeProblemOf, readConfigFile, secureFile, secureFolder, writeNewFile } from './mac.mjs';
+import { readSigninFile } from '../wiring/builder-signin.mjs';
 
 // The stand-in runs the Mac's own `ls -le` and `chmod +a` for the access-list items. A machine that is not a Mac (the Linux
 // check on GitHub) has neither, so a test that reaches them is SKIPPED with the reason on show, never passed; the macOS job
@@ -217,6 +218,8 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
     nodeProblem: () => mac.nodeProblemText,
     // A stand-in for GitHub: a test sets mac.github = (url, init) => ({ status, text }). Every call is kept (the token is in init.headers).
     fetch: async (url, init) => { mac.fetchLog.push({ url, method: init?.method ?? 'GET' }); if (!mac.github) throw Object.assign(new Error('offline'), { code: 'ENOTFOUND' }); return mac.github(url, init); },
+    // The real reader; the stand-in owners (a test is not root) by the logical path of what it looked at.
+    readSignin: (p, { uid }) => readSigninFile(at(p), { uid, rootUid: mac.rootUid, top: prefix, ownerOf: (st, real) => mac.owners.get(real.startsWith(`${prefix}/`) ? real.slice(prefix.length) : real)?.uid ?? -1 }),
     readSecret(prompt) { mac.secretPrompts.push(prompt); if (mac.secretInput === null) throw new Error('there is no terminal to type the token into; run this in the Terminal app'); return mac.secretInput; },
     // The real checks on a node program the config names, for the file's own owner (the test process) and mode, in its own folder.
     nodeBinProblem: (p) => nodeProblemOf(p, { exact: true, rootUid: mac.rootUid, top: (() => { try { return dirname(realpathSync(p)); } catch { return '/'; } })() }),

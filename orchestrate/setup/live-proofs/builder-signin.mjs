@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Live proof (L1261): a builder session can sign in with the long-lived token file, on the pinned claude. Joe pastes one
-// command on the Mini, as the worker runner's own Mac user, after `sudo node setup.mjs builder-signin`:
+// command on the Mini, as the worker runner's own Mac user, after `sudo /usr/local/bin/node setup.mjs builder-signin`:
 //
 //   sudo -H -u builder <installRoot>/bin/node <installRoot>/setup/live-proofs/builder-signin.mjs --config <installRoot>/worker-runner.json
 //
@@ -11,8 +11,9 @@
 // tools, one turn, no settings sources and nothing kept: `-p "Reply with the word OK."`. PASS when claude ends with
 // success and its answer holds OK; else FAIL with claude's own words, any byte of the token masked; NOT DONE when it
 // could not be tried (root, another user, not the pin, no sign-in). The token is never printed, never put on the command
-// line (the secret guard throws if it were), and only this one claude is given it, in its environment. It writes nothing
-// and needs no lock: it starts no session of the runner's.
+// line (the secret guard throws if it were), and only this one claude is given it, in its environment. It writes only
+// claude's own settings in builder's home (and its own temp folder, removed after), and needs no lock: it starts no
+// session of the runner's.
 import { lstatSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

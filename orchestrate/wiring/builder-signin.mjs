@@ -4,11 +4,19 @@
 // keychain cannot be found to store builder"). Joe's decision (L1261, not to be revisited): he runs `claude setup-token` as
 // himself, pastes the token into root's hidden prompt (setup.mjs builder-signin), root saves it as builder's own 0600 file
 // in builder's own 0700 folder (layout.mjs builderSigninPath, right under the root-owned base), and the worker runner reads
-// it fresh before each start and hands it to that session's claude, and to nothing else, as SIGNIN_TOKEN_VAR in its
-// environment (never on a command line: a command line is shown to every Mac user by /bin/ps).
-// ACCEPTED (Joe, L1261): the session's own environment holds the value, so a program the session runs, as builder, can read
-// it (its own environment, or `ps -E` on a builder process). Another Mac user's `ps` does not show it (macOS shows a
-// process's environment only to its own user and root). The file itself is on every session's deny lists.
+// it fresh before each start and each lock-down job and hands it to that claude as SIGNIN_TOKEN_VAR in its environment
+// (never on a command line: a command line is shown to every Mac user by /bin/ps; never in a log).
+// ACCEPTED (Joe, L1261), said plainly: ANYTHING RUNNING AS BUILDER CAN READ THE TOKEN. That is every worker session, and
+// every program one runs: the lock-down claude's (the install job, check 11's baseline, save-work) Bash children too, so
+// the product's install and test commands and any third-party package script they run. They inherit it in their
+// environment, can see it with `ps -E` on a builder process, and the file is builder's own anyway. What limits where it
+// can go is the walls: the builder user (no other user's `ps` shows another user's environment; only builder and root),
+// the pf network wall, and the deny lists (every session's settings and the secret-file hook refuse the file's folder).
+// POSSIBLE LATER NARROWING (not adopted, L1261 r1): Claude Code's SUBPROCESS_ENV_SCRUB (it forces the permission mode back
+// to default, which the walled sessions can't use), and handing the token on an open file (a descriptor variable) in place
+// of the environment (unproven on the pin). Both were read in claude-code's own code (checked: claude-code 2.1.325, open
+// until 2027-01-15 (L1261)), and the descriptor one also (checked: claude-code 2.1.318, open until 2027-01-15 (L1261));
+// NOT the pin 2.1.316. These notes expire on any upgrade: re-check before relying on either.
 //
 // One reader and one shape check, for root's setup step and the runner alike (I7):
 //   signinShapeProblem(value)   → null, or why it does not look like a sign-in token (never repeating what it saw)
@@ -46,27 +54,29 @@ export function signinShapeProblem(v) {
 
 /**
  * The token, read now. `uid`: the user who must own the file and its folder (the runner's own, builder). `rootUid`, `top`,
- * `chain`, `lstat`, `open`, `fstat` and `read` are ports for a test, which is not root. The value is registered with the
+ * `chain`, `lstat`, `open`, `fstat`, `read` and `ownerOf(st, path)` (who owns what was looked at; setup's stand-in Mac
+ * keeps its owners apart) are ports for a test, which is not root. Root's setup step reads it through the same function
+ * (io.readSignin) to see whether the same token is already saved. The value is registered with the
  * secret guard as soon as it is read, so no program can be started with it on its command line.
  */
-export function readSigninFile(file, { uid = process.getuid(), rootUid = 0, top = '/', chain = chainProblem, lstat = lstatSync, open = openSync, fstat = fstatSync, read = readSync } = {}) {
+export function readSigninFile(file, { uid = process.getuid(), rootUid = 0, top = '/', chain = chainProblem, lstat = lstatSync, open = openSync, fstat = fstatSync, read = readSync, ownerOf = (st) => st.uid } = {}) {
   const no = (reason) => ({ ok: false, reason: `the builder sign-in file ${file} ${reason}` });
   if (typeof file !== 'string' || !file.startsWith('/')) return { ok: false, reason: 'no builder sign-in file is named' };
   const dir = dirname(file);
   let d; try { d = lstat(dir); } catch (e) { return no(`can't be reached: its folder ${dir} ${e?.code === 'ENOENT' ? 'is missing (run setup users-folders)' : `can't be looked at (${e?.code ?? 'error'})`}`); }
   if (d.isSymbolicLink() || !d.isDirectory()) return no(`is refused: its folder ${dir} is not a plain folder`);
-  if (d.uid !== uid) return no(`is refused: its folder ${dir} is not this user's own (uid ${d.uid}, want ${uid})`);
+  if (ownerOf(d, dir) !== uid) return no(`is refused: its folder ${dir} is not this user's own (uid ${ownerOf(d, dir)}, want ${uid})`);
   if ((d.mode & 0o7777) !== 0o700) return no(`is refused: its folder ${dir} is ${mode(d)}, want 700`);
   const above = chain(dirname(dir), { owner: rootUid, top });
   if (above) return no(`is refused: a folder above it is not root's alone (${above})`);
   let fd;
   try { fd = open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) {
-    return no(e?.code === 'ENOENT' ? 'is missing (make it: claude setup-token as the owner, then sudo node setup.mjs builder-signin)' : e?.code === 'ELOOP' ? 'is a link, which is never followed' : `can't be opened (${e?.code ?? 'error'})`);
+    return no(e?.code === 'ENOENT' ? 'is missing (make it: claude setup-token as the owner, then sudo /usr/local/bin/node setup.mjs builder-signin)' : e?.code === 'ELOOP' ? 'is a link, which is never followed' : `can't be opened (${e?.code ?? 'error'})`);
   }
   try {
     const st = fstat(fd);
     if (!st.isFile()) return no('is not a plain file');
-    if (st.uid !== uid) return no(`is not this user's own (uid ${st.uid}, want ${uid})`);
+    if (ownerOf(st, file) !== uid) return no(`is not this user's own (uid ${ownerOf(st, file)}, want ${uid})`);
     if ((st.mode & 0o7777) !== 0o600) return no(`is ${mode(st)}, want 600`);
     if (st.nlink !== 1) return no('has another name (a hard link), so it may not be the file setup wrote');
     if (st.size < SIGNIN_MIN || st.size > SIGNIN_MAX + 1) return no('is not the size of one sign-in token');
@@ -96,7 +106,7 @@ export function signinFileRows(io, { file, builderUid, acl, chain = (p) => chain
   row(dWhy === null, `${dir} is builder's own 0700 folder`, dWhy);
   const above = chain(dirname(dir)); row(above === null, `every folder above ${dir} is root's alone`, above);
   let st = null; try { st = io.lstat(file); } catch (e) {
-    row(false, `${file} (the builder sessions' sign-in) is there`, e?.code === 'ENOENT' ? 'missing: as the owner run claude setup-token, then sudo node setup.mjs builder-signin (README, "Where the builder sessions\' sign-in lives")' : `can't be looked at (${e?.code ?? 'error'})`);
+    row(false, `${file} (the builder sessions' sign-in) is there`, e?.code === 'ENOENT' ? 'missing: as the owner run claude setup-token, then sudo /usr/local/bin/node setup.mjs builder-signin (README, "Where the builder sessions\' sign-in lives")' : `can't be looked at (${e?.code ?? 'error'})`);
     return rows;
   }
   const why = [];

@@ -9,7 +9,8 @@ import { spawn } from 'node:child_process';
 import { makeLock } from '../modules/M9-record/lock.mjs';
 import { loginJobPlist } from '../modules/M11-dispatcher/login-job.mjs';
 import { statusOf, statusText } from '../setup/builder-wall.mjs';
-import { DENY_KEYS, personUserProblem, carriedOverProblem, checkRunnerConfig, hookStoreOf, launchInputs, readRunnerConfig, startDeps, listenStop, main, readRootFile, realRunnerPorts, testProductHeld, testProductProblem } from './runner-main.mjs';
+import { DENY_KEYS, personUserProblem, carriedOverProblem, checkRunnerConfig, hookStoreOf, launchInputs, lockedOf, lockedWiring, readRunnerConfig, startDeps, listenStop, main, readRootFile, realRunnerPorts, testProductHeld, testProductProblem, workerCheckInputs } from './runner-main.mjs';
+import { SIGNIN_TOKEN_VAR, checkRoleEnv } from '../modules/M4-workshop/launcher/env-check.mjs';
 import { workerSnapshotProblem } from './runner-checks.mjs';
 import { rulesText } from '../setup/worker-rules.mjs';
 import { RUNNER_JOB_LOG, RUNNER_JOB_UMASK, RUNNER_JOB_USER, RUNNER_NODE_FLAGS, fullPath, workerRunnerPlist } from './runner-job.mjs';
@@ -643,4 +644,38 @@ test('L1193: the config\'s wallStatus, when given, is a full path in its simples
   assert.doesNotThrow(() => checkRunnerConfig(config(d)));
   assert.doesNotThrow(() => checkRunnerConfig(config(d, { wallStatus: undefined })));
   for (const w of ['rel/status.json', '/a/../status.json', '/a//status.json', '/', '', 5]) assert.throws(() => checkRunnerConfig(config(d, { wallStatus: w })), /wallStatus must be a full path in its simplest form/, String(w));
+});
+
+// r1 Minor 4: with the builder sign-in, the lock-down runner and each start pass the token through launch check 9, and
+// main wires the told reader (signinTold) into both. Plant P8 (dropping the reader on the way) fails this.
+test('L1261: the sign-in reaches the lock-down runner and each start through check 9, and main wires signinTold into both', async () => {
+  const V = `sk-ant-oat01-${'Wq7_z-'.repeat(15)}KK`;   // made up
+  const who = () => ({ account: 'a', dir: '/h/builder/.claude', env: { [SIGNIN_TOKEN_VAR]: V }, signinToken: true });
+  const c = checkRunnerConfig(config('/x', { signinFile: '/x/builder-signin/claude-signin' }));
+  // The lock-down runner: its environment holds the token and passes check 9 (the one form).
+  let made; lockedOf(c, { who, make: (o) => { made = o; return () => {}; }, base: { PATH: '/usr/bin' } });
+  const env = made.envOf();
+  assert.equal(env[SIGNIN_TOKEN_VAR], V);
+  assert.equal(checkRoleEnv(env, { allowSigninToken: true }).ok, true);
+  // Each start's check 9 lets it through only because the config names the file.
+  assert.equal(workerCheckInputs(c, { product: 'p1', env }).allowSigninToken, true);
+  assert.equal(workerCheckInputs(checkRunnerConfig(config('/x')), { product: 'p1', env }).allowSigninToken, false);
+  // lockedWiring hands the same reader to the lock-down runner and to the start port.
+  const counted = () => who();
+  const w = lockedWiring(c, { account: counted, log: () => {} });
+  assert.equal(w.startDeps.account, counted, 'the start port was not given the sign-in reader');
+  assert.equal(typeof w.runLocked, 'function');
+  // main: the reader it hands the ports is signinTold's (told once in the log), wrapping the one it was given.
+  const d = roots(tempDir('orch-rmain-'));
+  try {
+    mkdirSync(join(d, 'runner'), { recursive: true });
+    const logs = []; let opts = null;
+    const code = await main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: () => config(d, { signinFile: join(d, 'builder-signin', 'claude-signin') }), log: (s) => logs.push(s), onStop: () => {},
+      signinOf: who, portsOf: (cc, ports, o) => { opts = o; return realRunnerPorts(cc, ports, o); }, run: async () => {} });
+    assert.equal(code, 0, logs.join('\n'));
+    assert.equal(typeof opts?.account, 'function', 'main gave the ports no sign-in reader');
+    assert.equal(opts.account().env[SIGNIN_TOKEN_VAR], V); opts.account();
+    assert.equal(logs.filter((l) => /the builder sign-in file: read/.test(l)).length, 1, logs.join('\n'));
+    assert.ok(!logs.join('\n').includes(V.slice(0, 20)));
+  } finally { rmSync(d, { recursive: true, force: true }); }
 });

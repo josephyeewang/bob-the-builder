@@ -35,8 +35,15 @@ export function planBuilderSignin(io, cfg) {
     if (st && st.isDirectory() && !st.isSymbolicLink()) { t = ''; throw new Error(`${f} became a folder while the token was typed; nothing was saved`); }
     if (st && (st.isSymbolicLink() || !st.isFile())) { t = ''; throw new Error(`${f} is now not a plain file; nothing was saved`); }
     // The same token, already saved as it should be: nothing is written (a second run with the same value does nothing).
-    if (st && st.uid === b.uid && modeOf(st) === 0o600 && st.size <= SIGNIN_MAX + 1) {
-      let same = false; try { same = io.readText(f) === `${t}\n`; } catch { /* written again below */ }
+    // "As it should be" is the runner's own read (io.readSignin, wiring/builder-signin.mjs readSigninFile: one handle with
+    // O_NOFOLLOW|O_NONBLOCK, builder's 0600 in its 0700 folder, one name, the folders above root's, one token) and no
+    // access list on the file; anything else is written again, so the new file replaces it.
+    if (st && st.isFile() && !st.isSymbolicLink() && Number(st.nlink) === 1 && st.size <= SIGNIN_MAX + 1) {
+      let same = false;
+      try {
+        const a = aclEntries(io, f);
+        if (!a.error && a.entries.length === 0) { const r = io.readSignin(f, { uid: b.uid }); same = r?.ok === true && r.value === t; }
+      } catch { /* written again below */ }
       if (same) { t = ''; return; }
     }
     // A side name first, then renamed over the old one, so a write that fails keeps the sign-in that works. A leftover side name

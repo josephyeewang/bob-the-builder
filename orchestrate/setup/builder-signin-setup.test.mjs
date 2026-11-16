@@ -3,11 +3,12 @@
 // arguments. PLANT tests break one clause each.
 
 import assert from 'node:assert/strict';
-import { chmodSync, linkSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, linkSync, lstatSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ROOT_CONFIG_PATH, builderSigninDir, builderSigninPath, folderTable, parseConfig } from './layout.mjs';
 import { main } from './setup.mjs';
-import { checkBuilderSignin } from './builder-signin-setup.mjs';
+import { checkBuilderSignin, planBuilderSignin } from './builder-signin-setup.mjs';
+import { spawnSync } from 'node:child_process';
 import { fakeMac, macTest as test } from './fake-mac.test-helper.mjs';
 import { tempDir } from '../shared/test-tmp.mjs';
 
@@ -108,4 +109,54 @@ test('PLANT check-builder-signin FAILs on a wrong mode, owner, second name or ac
   assert.deepEqual(failing(checkBuilderSignin(w.mac, cfg)), []);
   rmSync(w.mac.at(F)); assert.match(why(), /missing: as the owner run claude setup-token/);
   w.mac.as = 501; const s = checkBuilderSignin(w.mac, cfg); assert.equal(s.length, 1); assert.equal(s[0].skip, true); assert.match(s[0].why, /needs root/);
+});
+
+// r1 Minor 1: the same token is left alone only when the file is as the runner wants it: one name, no access list.
+test('PLANT the same token with a second name, or an access list on the file → written again, so the new file has neither', () => {
+  const w = world(); w.mac.secretInput = VALUE; assert.equal(w.run(['builder-signin']).code, 0);
+  const other = `${builderSigninDir(cfg)}/second`;
+  linkSync(w.mac.at(F), w.mac.at(other));
+  let before = w.mac.log.length;
+  assert.equal(w.run(['builder-signin']).code, 0);
+  assert.ok(w.mac.log.slice(before).some((l) => l.startsWith('rename ')), 'a file with another name was left as it was');
+  assert.equal(statSync(w.mac.at(F)).nlink, 1); assert.equal(readFileSync(w.mac.at(F), 'utf8'), `${VALUE}\n`);
+  rmSync(w.mac.at(other));
+  assert.equal(w.mac.run('/bin/chmod', ['+a', 'user:orchestrate allow read', w.mac.at(F)]).status, 0);
+  assert.match(failing(checkBuilderSignin(w.mac, cfg)).map((r) => r.why).join(), /has an access list/);
+  before = w.mac.log.length;
+  assert.equal(w.run(['builder-signin']).code, 0);
+  assert.ok(w.mac.log.slice(before).some((l) => l.startsWith('rename ')), 'a file with an access list was left as it was');
+  assert.deepEqual(failing(checkBuilderSignin(w.mac, cfg)), []);
+});
+
+// r1 Minor 2: the compare read is the runner's own (one handle, O_NOFOLLOW|O_NONBLOCK): a named pipe or a link put in the
+// file's place after the plan is refused, never read through and never waited on.
+test('PLANT a link or a named pipe put in the file\'s place just after the run looked → the compare read refuses it, no wait, and the new file replaces it', () => {
+  for (const kind of ['link', 'fifo']) {
+    const w = world(); w.mac.secretInput = VALUE; assert.equal(w.run(['builder-signin']).code, 0);
+    const plan = planBuilderSignin(w.mac, cfg); assert.deepEqual(plan.problems, []);
+    // The same token sits in a file elsewhere: a compare that followed the link would find it "the same" and keep the link.
+    const victim = w.mac.at('/victim.txt'); writeFileSync(victim, `${VALUE}\n`, { mode: 0o600 });
+    const look = w.mac.lstat; let swapped = false;
+    w.mac.lstat = (p) => {
+      const st = look.call(w.mac, p);
+      if (p === F && !swapped) {   // the run's own look saw the plain file; the swap comes right after it
+        swapped = true; rmSync(w.mac.at(F));
+        if (kind === 'fifo') assert.equal(spawnSync('/usr/bin/mkfifo', ['-m', '600', w.mac.at(F)]).status, 0);
+        else symlinkSync(victim, w.mac.at(F));
+      }
+      return st;
+    };
+    try { plan.ops[0].run(); } finally { w.mac.lstat = look; }
+    assert.ok(swapped, kind);
+    const now = lstatSync(w.mac.at(F));
+    assert.ok(now.isFile() && !now.isSymbolicLink(), `${kind}: the ${kind} was kept, so the compare read went through it`);
+    assert.equal(readFileSync(w.mac.at(F), 'utf8'), `${VALUE}\n`); assert.equal(readFileSync(victim, 'utf8'), `${VALUE}\n`);
+    // The port itself, asked straight about a link and a pipe: refused at once, its reason without the value.
+    for (const make of [() => symlinkSync(victim, w.mac.at(F)), () => assert.equal(spawnSync('/usr/bin/mkfifo', ['-m', '600', w.mac.at(F)]).status, 0)]) {
+      rmSync(w.mac.at(F)); make();
+      const r = w.mac.readSignin(F, { uid: w.builder });
+      assert.equal(r.ok, false, kind); assert.ok(!r.reason.includes(VALUE.slice(0, 20)));
+    }
+  }
 });
