@@ -37,7 +37,9 @@
 // starting with a space or tab (a folded line), or a field name that is not plain token characters followed by its
 // colon. A connection carries ONE request: its body is Content-Length bytes, a chunked body is refused, and a byte past
 // the body (a pipelined second request) refuses the connection before it goes up. SOCKS clients wanting plain HTTP must
-// use the HTTP proxy (the same port).
+// use the HTTP proxy (the same port). Routing headers (Forwarded, X-Forwarded-*, X-Host, X-Original-URL, X-Rewrite-URL)
+// are dropped (#617 r3). Upgrade is passed on but harmless: Connection becomes close, and any client bytes after a 101
+// reply end the connection (they are past the one request's body).
 // What it can't stop: inside a CONNECT tunnel the TLS is the client's, so a client may ask a listed name's server (a
 // shared CDN, say) for another site by the TLS server name or the inner Host (domain fronting). Claude Code's own
 // proxy has the same limit; only a proxy that ends the TLS could see it.
@@ -76,6 +78,9 @@ export const TUNNEL_PORTS = Object.freeze([22, 443]);
 export const HTTP_PORTS = Object.freeze([80]);
 /** A request-head field name: HTTP's token characters, the colon right after it (no space, no folded line). */
 const FIELD = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+:/;
+/** Plain-HTTP header fields never passed on: the proxy's own, the connection's, and routing ones (#617 r3) an upstream or a
+ * front end may obey in place of Host. Any case; `_` counts as `-`. */
+const DROPPED = /^(host|proxy[-_]authorization|proxy[-_]connection|connection|keep[-_]alive|forwarded|x[-_]forwarded(?:[-_][^:]*)?|x[-_]host|x[-_]original[-_]url|x[-_]rewrite[-_]url):/i;
 export const MAX_CONNECTIONS = 64;
 export const MAX_HEAD = 16 * 1024;
 export const HANDSHAKE_MS = 10_000;
@@ -245,18 +250,27 @@ export function createProxy({ allowed, log, port = 0, lookup = lookupAll, connec
       if (!fields.every((f) => FIELD.test(f))) return deny('bad-request', R400);
       if (/^http:\/\/[^/?#]*@/i.test(target)) return deny('userinfo', R403);
       let u; try { u = new URL(target); } catch { return deny('bad-request', R400); }
+      // #617 r3: both sides compared as name (lowercase, one trailing dot dropped) plus port as a number (80 left out), so
+      // `allowed.com.` and `:080` match their own URL. URL already gives the port that way; the Host side is made to.
+      const urlHost = `${u.hostname.replace(/\.$/, '')}${u.port ? `:${u.port}` : ''}`;
+      const sameHost = (raw) => {
+        const hp = /^(\[[^\]]*\]|[^:]*)(?::(\d{1,5}))?$/.exec(raw.toLowerCase()); if (!hp) return null;
+        const hostPort = hp[2] === undefined ? 80 : Number(hp[2]);
+        return `${hp[1].replace(/\.$/, '')}${hostPort === 80 ? '' : `:${hostPort}`}`;
+      };
       // A name with _ for - counts as that name too (some servers read Transfer_Encoding as Transfer-Encoding).
       const named = (k) => fields.filter((f) => new RegExp(`^${k.replace(/-/g, '[-_]')}:`, 'i').test(f)).map((f) => f.slice(f.indexOf(':') + 1).trim());
       const hosts = named('host');
-      if (hosts.length > 1 || (hosts.length === 1 && hosts[0].toLowerCase().replace(/\.(?=:|$)/, '').replace(/:80$/, '') !== u.host)) { rec.host = logHost(u.hostname); return deny('host-mismatch', R403); }
+      if (hosts.length > 1 || (hosts.length === 1 && sameHost(hosts[0]) !== urlHost)) { rec.host = logHost(u.hostname); return deny('host-mismatch', R403); }
       if (named('transfer-encoding').length) return deny('bad-request', R400);
       const lengths = named('content-length');
       if (lengths.length > 1 || (lengths.length === 1 && !/^\d{1,12}$/.test(lengths[0]))) return deny('bad-request', R400);
       let left = lengths.length ? Number(lengths[0]) : 0;
       if (rest.length > left) { rec.host = logHost(u.hostname); return deny('second-request', R400); }
       left -= rest.length;
-      const kept = fields.filter((f) => !/^(host|proxy[-_]authorization|proxy[-_]connection|connection|keep[-_]alive):/i.test(f));
-      const out = Buffer.concat([Buffer.from(`${method} ${u.pathname}${u.search} HTTP/1.1\r\n${[`Host: ${u.host}`, ...kept, 'Connection: close'].join('\r\n')}\r\n\r\n`, 'latin1'), rest]);
+      // #617 r3: routing headers an upstream (or a front end before it) may obey in place of Host are dropped as well.
+      const kept = fields.filter((f) => !DROPPED.test(f));
+      const out = Buffer.concat([Buffer.from(`${method} ${u.pathname}${u.search} HTTP/1.1\r\n${[`Host: ${urlHost}`, ...kept, 'Connection: close'].join('\r\n')}\r\n\r\n`, 'latin1'), rest]);
       const oneBody = (d, up) => {
         if (d.length > left) { if (left) up.write(d.subarray(0, left)); left = 0; kill('second-request'); return; }
         left -= d.length; up.write(d);

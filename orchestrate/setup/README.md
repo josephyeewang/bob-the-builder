@@ -537,11 +537,16 @@ the request head at 16 KB, and each connection at 2 GB each way. A name whose ad
 network the Mac is on, is refused too. Plain `http://` requests: the `Host` line must name the same host as the address
 (or the request is refused), and one connection carries one request (a second one sent on it is refused, never passed on).
 A request head with a lone line-break character, a line that starts with a space or tab, or a field name that is not
-plain letters, digits and the usual punctuation followed straight by its colon is refused too.
+plain letters, digits and the usual punctuation followed straight by its colon is refused too. Routing headers that a server might obey in place
+of `Host` (`Forwarded`, `X-Forwarded-*`, `X-Host`, `X-Original-URL`, `X-Rewrite-URL`) are dropped. An `Upgrade` header is
+passed on but harmless: `Connection` becomes `close`, and any bytes the program sends after a 101 reply end the connection.
 - **What it can't stop (domain fronting).** For `https://` the proxy only opens a tunnel to a listed name; the encrypted
   request inside is the program's own. On a shared delivery network (a CDN) a program can open the tunnel to a listed
   name and ask, inside, for another site served by the same network. Claude Code's own proxy has the same limit; only a
   proxy that decrypts the traffic could see it.
+- **What it can't stop (ssh as a relay).** Port 22 is open to every listed host. If a listed host allows ssh port
+  forwarding and the session holds a login for it, ssh to that host can carry traffic on to anywhere. The list is
+  ours, so keep it to hosts we trust for ssh.
 - (checked: claude-code 2.1.316; Principle 9, re-check on upgrade) With both ports set, Claude Code starts no proxy
   of its own and no longer filters by `allowedDomains` (it says so: "will never apply"), so this proxy is the filter.
   Setting only one of the two starts Claude Code's own proxy for the other.

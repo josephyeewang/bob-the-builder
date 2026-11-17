@@ -170,6 +170,39 @@ test('#617 r1 M2 plain HTTP: one request per connection; a pipelined second one 
   await p.close(); up.close();
 });
 
+test('#617 r3 plain HTTP: routing headers (Forwarded, X-Forwarded-*, X-Host, X-Original-URL, X-Rewrite-URL; any case, _ for -) never reach the upstream; other headers do', { timeout: 20_000 }, async () => {
+  const up = await upstream({ http: true }); const p = await proxy({ up });
+  const routing = ['Forwarded: for=1.2.3.4;host=evil.example.net', 'X-Forwarded-For: 1.2.3.4', 'X-Forwarded-Host: evil.example.net',
+    'x-forwarded-proto: https', 'X_Forwarded_Host: evil.example.net', 'X-Forwarded: evil.example.net', 'X-Host: evil.example.net',
+    'X-Original-URL: /admin', 'x_original_url: /admin', 'X-Rewrite-URL: /admin', 'X-REWRITE-URL: /admin'];
+  const { log: l } = await via(p, [`GET http://allowed.example.com/x HTTP/1.1\r\nHost: allowed.example.com\r\n${routing.join('\r\n')}\r\nAccept: */*\r\n\r\n`]);
+  assert.equal(l.verdict, 'allow');
+  const sent = up.got();
+  assert.match(sent, /\r\nAccept: \*\/\*\r\n/, 'an ordinary header goes on');
+  for (const h of routing) assert.ok(!sent.includes(h.slice(0, h.indexOf(':') + 1)), h);
+  assert.doesNotMatch(sent, /forwarded|x[-_]host|original|rewrite|evil|admin/i);
+  await p.close(); up.close();
+});
+
+test('#617 r3 plain HTTP: a trailing dot and a padded port are the same host on both sides (http://allowed.example.com./ with Host allowed.example.com., :080 with Host :080)', { timeout: 20_000 }, async () => {
+  const up = await upstream({ http: true }); const p = await proxy({ up });
+  for (const [url, host] of [['http://allowed.example.com./x', 'allowed.example.com.'], ['http://allowed.example.com./x', 'allowed.example.com'],
+    ['http://allowed.example.com:080/x', 'allowed.example.com:080'], ['http://allowed.example.com:080/x', 'allowed.example.com'],
+    ['http://allowed.example.com/x', 'allowed.example.com:0080'], ['http://allowed.example.com.:080/x', 'ALLOWED.example.com.:80']]) {
+    const n = up.got().length;
+    const { log: l } = await via(p, [`GET ${url} HTTP/1.1\r\nHost: ${host}\r\n\r\n`]);
+    assert.equal(l.verdict, 'allow', `${url} ${host}`);
+    assert.match(up.got().slice(n), /\r\nHost: allowed\.example\.com\r\n/, `${url} ${host}`);
+  }
+  // Still refused: another name, another port, a dot or port that only looks the same.
+  for (const [url, host] of [['http://allowed.example.com./x', 'evil.example.net.'], ['http://allowed.example.com:080/x', 'allowed.example.com:8080'],
+    ['http://allowed.example.com/x', 'allowed.example.com..'], ['http://allowed.example.com/x', 'allowed.example.com:80:80']]) {
+    const { log: l } = await via(p, [`GET ${url} HTTP/1.1\r\nHost: ${host}\r\n\r\n`]);
+    assert.equal(l.why, 'host-mismatch', `${url} ${host}`);
+  }
+  await p.close(); up.close();
+});
+
 test('#617 r2 M1: a tunnel (CONNECT or SOCKS) reaches only 22 and 443; port 80 only by the checked plain-HTTP path, so a smuggled Host or a pipelined request never goes up', { timeout: 20_000 }, async () => {
   const up = await upstream(); const p = await proxy({ up });
   const smuggled = 'GET / HTTP/1.1\r\nHost: evil.example.net\r\n\r\nGET /2 HTTP/1.1\r\nHost: other.example.org\r\n\r\n';
