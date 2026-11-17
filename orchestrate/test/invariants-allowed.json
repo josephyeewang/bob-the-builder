@@ -1094,11 +1094,12 @@
     "setup/builder-wall.mjs",
     "setup/dispatcher-check.mjs",
     "setup/extras.mjs",
+    "setup/live-proofs/builder-proxy.mjs",
     "setup/proofs.mjs",
     "setup/users-folders.mjs",
     "setup/watch-setup.mjs"
    ],
-   "why": "baseline (L1078); setup/builder-wall.mjs (#556, R-0b-179): its probes start the listener and client as the builder and the owner, as the others start theirs; no module exports one"
+   "why": "baseline (L1078); setup/builder-wall.mjs (#556, R-0b-179): its probes start the listener and client as the builder and the owner, as the others start theirs; no module exports one; setup/live-proofs/builder-proxy.mjs (wall v2): it runs curl as the builder, as builder-wall.mjs's probes do"
   },
   {
    "kind": "definition",
@@ -1689,6 +1690,24 @@
     "setup/daemons.mjs"
    ],
    "why": "#556 (R-0b-179): the wall's refusal for a folder root can't safely write in says it the way daemons.mjs says it for the job folder, so one message reads the same wherever setup stops"
+  },
+  {
+   "kind": "definition",
+   "copy": "LSOF = '/usr/sbin/lsof'",
+   "files": [
+    "setup/builder-proxy.mjs",
+    "setup/builder-wall.mjs"
+   ],
+   "why": "wall v2: the program's fixed path, as SUDO's is; builder-proxy.mjs (its daemons check rows) keeps its own so the long-running proxy job does not load the wall's module and all it imports"
+  },
+  {
+   "kind": "text",
+   "copy": "loginJobPlist did not write UserName ",
+   "files": [
+    "setup/builder-proxy.mjs",
+    "wiring/runner-job.mjs"
+   ],
+   "why": "wall v2: each job that must not run as root checks its own plist for its own user (the builder proxy as builder, the worker runner as its user); the check is two lines with different users, not one rule in two places"
   }
  ]
 }

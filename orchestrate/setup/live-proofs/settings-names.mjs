@@ -565,6 +565,9 @@ export const TESTS = Object.freeze([
 // Names with no live test yet, and why (L1109: left failing check 0, never assumed).
 export const NOT_TRIED = Object.freeze({
   [S.allowUnsandboxedCommands]: 'no pair here: a command asking to leave the sandbox is a model\'s choice (its break-it test is the review walls proof)',
+  // Wall v2: read in 2.1.316's code, not proven by a pair yet. Its live proof is setup/live-proofs/builder-proxy.mjs.
+  [S.httpProxyPort]: 'no pair yet: a builder session\'s shell going through the allow-list proxy is shown by the live proof builder-proxy.mjs, not by a pair here',
+  [S.socksProxyPort]: 'no pair yet: set with httpProxyPort to the same port; shown with it by the live proof builder-proxy.mjs',
 });
 
 // Names the launcher no longer writes (L1114), shown and not counted. Each comes back only after its proof (R-0b-178).
@@ -866,8 +869,8 @@ export function writeReceipt({ home, at, header, lines, outcomes = {}, readback 
  * The end of a run: judges the names, prints a line for each, writes the receipt and prints its path, then the verdict,
  * last. PASS only when every counted name passed and the receipt was written (L1124 m5). → the exit code.
  */
-export function finish({ res, pin, base, home, at, print }) {
-  const lines = judgeNames({ outcomes: res.outcomes, readback: res.readback, version: pin });
+export function finish({ res, pin, base, home, at, print, confirmed = CONFIRMED }) {
+  const lines = judgeNames({ outcomes: res.outcomes, readback: res.readback, version: pin, confirmed });
   const r = report(lines, pin);
   print(r.text);
   if (base) print(`The runs' folders are kept in ${base}.\n`);
@@ -960,7 +963,7 @@ export async function main(argv, { print = (t) => process.stdout.write(t), uid =
   // A put-back that failed mid-run leaves the backup (L1128 m6): say how to put the file back, in this same run.
   if (backupLeft(userFile)) print(`${userFile} could not be put back during the run; its backup is beside it. To put it back: ${restoreCommand(c, argv)}\n`);
   // The version counts only because claude --version said it before the run (the guard): a name is proven on that pin.
-  return finish({ res, pin: c.pin, base, home, at: now(), print });
+  return finish({ res, pin: c.pin, base, home, at: now(), print, ...(d.confirmed ? { confirmed: d.confirmed } : {}) });
 }
 
 const invoked = (() => { try { return process.argv[1] ? realpathSync.native(process.argv[1]) : null; } catch { return null; } })();

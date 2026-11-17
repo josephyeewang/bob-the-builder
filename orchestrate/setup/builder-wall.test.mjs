@@ -1,6 +1,8 @@
-// R-0b-179 (L1148 F1, L1149, L1150): the builder wall, on the stand-in Mac with a stand-in pf. The stand-in pf loads the
-// anchor's text, prints it the way OpenBSD's pfctl does (one rule per protocol, `user = N`, `all`), and decides each probe
-// connection from the rules it holds, so a wrong rule shows up twice: in what the check reads back, and in the traffic.
+// R-0b-179 (L1148 F1, L1149, L1150), wall v2: the builder wall, on the stand-in Mac with a stand-in pf. The stand-in pf
+// loads the anchor's text, prints it the way macOS's pfctl does (one rule per protocol, `user = N`, `all` only for a rule
+// with no port: seen on the Mac in wall-diag2), and decides every packet of each probe from the rules it holds: its
+// direction, family, ports, TCP flags and the owner of the socket at that end (the sender's going out, the receiver's
+// coming in, as measured). So a wrong rule shows up twice: in what the check reads back, and in the traffic.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, linkSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync, symlinkSync } from 'node:fs';
@@ -11,16 +13,19 @@ import { tempDir } from '../shared/test-tmp.mjs';
 import { ROOT_CONFIG_PATH } from './layout.mjs';
 import { chainProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
 import {
-  ALL_ADDRESSES, ANCHOR, ANCHOR_DIR, ANCHOR_FILE, FAMILIES, PROTOS, TAG, anchorText, bootScript, checkWall, loadedRulesProblem, main, otherAddresses,
+  ALL_ADDRESSES, ANCHOR, ANCHOR_DIR, ANCHOR_FILE, FAMILIES, PROTOS, RULES, WALL_RANGE, EPHEMERAL, anchorText, bootScript, checkWall, loadedRulesProblem, main, otherAddresses,
   planWall, tokenPath, unreadPath, waitForFirstRun, wallLabel, wallPlistPath, wallDir,
   RECHECK_EVERY_S, STATUS_FILE, STATUS_VERSION, WALL_CHECK_JOB, WALL_SCRIPT, WHY_CHARS, WHY_MAX, anchorSha256, parseStatus, statusOf, statusText,
-  wallCheckPlist, WAY_OUT_TEXT,
+  wallCheckPlist, WAY_OUT_TEXT, LISTENER, CLIENT, ephemeralProblem, rangeListenersProblem, SETTINGS_ROWS, expectedRows, ownAddresses, trafficChecks,
 } from './builder-wall.mjs';
+import { spawn } from 'node:child_process';
+import { createServer, connect as tcpConnect } from 'node:net';
 import { createHash } from 'node:crypto';
 import { readdirSync } from 'node:fs';
 import { installPaths, parseInstallConfig } from './install.mjs';
 import { OPTIONAL_JOBS, jobsFor, onlyJobs } from './daemons.mjs';
 import { NODE } from '../modules/M4-workshop/launcher/install-check.mjs';
+import { PROBE_FIRST, PROXY_PORTS } from '../shared/builder-ports.mjs';
 
 const BASE = '/Library/orchestrate';
 const LABEL = 'com.example.orch';
@@ -30,18 +35,20 @@ const LAN = '192.168.1.20';   // the stand-in Mac's one address that is not loop
 /** Every place the read-back probes: [family, the address probed, how its rows name it]. */
 const PLACES = [...FAMILIES.map(([f, h]) => [f, h, `${f} (${h})`]), ...ALL_ADDRESSES.map(([f, h, b]) => [f, h, `${f} (${h}, listening on ${b})`]),
   ["this Mac's own address", LAN, `this Mac's own address (${LAN})`]];
-const ROWS_CHECK = 5 + PROTOS.length * PLACES.length * 4;   // the settings half, then v, ii, i, ii-again per protocol and place
+// The settings half (7, the WARN row among them), then per place v, ii, vi, ii-again, i (out), i (in), vii for TCP and the
+// same but vi for UDP, then (viii) for UDP on 127.0.0.1 and ::1 (#617 r1 M1).
+const ROWS_CHECK = 7 + PLACES.length * 7 + PLACES.length * 6 + FAMILIES.length;
 const FAST = { sleep: async () => {}, limitMs: 15_000, stepMs: 500 };
 
-/** pf, stood in: its state, pfctl's answers, and a rule evaluator for the probes. */
+/** pf, stood in: its state, pfctl's answers, and a rule evaluator for the probes' packets. */
 function fakePf(mac, { mainAnchor = true } = {}) {
   const pf = { enabled: false, refs: new Map(), next: 41, anchors: new Map(), mainAnchor, calls: [] };
   const ok = (stdout = '') => ({ status: 0, stdout, stderr: '' });
-  // The way OpenBSD's print_rule writes a loaded rule: one per protocol, `user = N`, `all` for from any to any.
+  // The way macOS's pfctl writes a loaded rule: one per protocol, `user = N`, `all` only for from any to any with no port.
   const printed = (text) => text.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#')).flatMap((l) => {
     const m = /\bproto \{ ([a-z ]+) \}/.exec(l);
     const each = m ? m[1].split(' ').map((p) => l.replace(m[0], `proto ${p}`)) : [l];
-    return each.map((x) => x.replace(/from any to any/, 'all').replace(/\buser (!=\s*)?(\d+)/, (_, n, u) => `user ${n ? '!= ' : '= '}${u}`).replace(/\s+/g, ' '));
+    return each.map((x) => x.replace(/from any to any(?! port)/, 'all').replace(/\buser (!=\s*)?(\d+)/, (_, n, u) => `user ${n ? '!= ' : '= '}${u}`).replace(/\bport (\d+)(?=\s|$)(?! <>| ><|:)/g, 'port = $1').replace(/\s+/g, ' '));
   });
   pf.run = (args) => {
     pf.calls.push(args.join(' '));
@@ -67,49 +74,87 @@ function fakePf(mac, { mainAnchor = true } = {}) {
     const r = pf.run(['-E']); writeFileSync(mac.at(tokenPath({ base: BASE })), /Token : (\d+)/.exec(r.stderr)[1]);
     return 0;
   };
+  /** A port expression as pfctl prints it (`= N`, `a:b`, `a <> b`, `a >< b`) → a test, or null for none. */
+  const portTest = (spec) => {
+    if (!spec) return null;
+    let m = /^= (\d+)$/.exec(spec); if (m) return (p) => p === Number(m[1]);
+    m = /^(\d+):(\d+)$/.exec(spec); if (m) return (p) => p >= Number(m[1]) && p <= Number(m[2]);
+    m = /^(\d+) <> (\d+)$/.exec(spec); if (m) return (p) => p < Number(m[1]) || p > Number(m[2]);
+    m = /^(\d+) >< (\d+)$/.exec(spec); if (m) return (p) => p > Number(m[1]) && p < Number(m[2]);
+    throw new Error(`the stand-in pf does not read the port ${spec}`);
+  };
+  const PORT = '(= \\d+|\\d+:\\d+|\\d+ <> \\d+|\\d+ >< \\d+)';
   /** One rule line as the evaluator needs it. */
-  const parse = (l) => ({
-    action: l.split(' ')[0], dir: /\bin\b/.test(l) ? 'in' : 'out', quick: /\bquick\b/.test(l),
-    lo0: /\bon lo0\b/.test(l) ? true : /\bon ! lo0\b/.test(l) ? false : null,
-    proto: /\bproto (\w+)/.exec(l)?.[1] ?? null, fam: /\binet6\b/.test(l) ? 'IPv6' : /\binet\b/.test(l) ? 'IPv4' : null,
-    user: /\buser (=|!=) (\d+)/.exec(l), tag: / tag (\S+)/.exec(l)?.[1] ?? null, tagged: /\btagged (\S+)/.exec(l)?.[1] ?? null,
-  });
-  const matches = (r, { dir, proto, fam, uid, tag }) => r.dir === dir && r.lo0 !== false && (!r.proto || r.proto === proto) && (!r.fam || r.fam === fam)
-    && (!r.user || (r.user[1] === '=' ? uid === Number(r.user[2]) : uid !== Number(r.user[2]))) && (!r.tagged || r.tagged === tag);
-  /** A connection on lo0 from user `from` to a listener of user `to`: 'ok' or 'refused'. */
-  pf.decide = ({ fromUid, toUid, proto, fam }) => {
-    if (!pf.enabled) return 'ok';
+  const parse = (l) => {
+    const from = new RegExp(`\\bfrom (\\S+)(?: port ${PORT})?`).exec(l); const to = new RegExp(`\\bto (\\S+)(?: port ${PORT})?`).exec(l);
+    return {
+      action: l.split(' ')[0], dir: /\bin\b/.test(l) ? 'in' : 'out', quick: /\bquick\b/.test(l),
+      lo0: /\bon lo0\b/.test(l) ? true : /\bon ! lo0\b/.test(l) ? false : null,
+      proto: /\bproto (\w+)/.exec(l)?.[1] ?? null, fam: /\binet6\b/.test(l) ? 'IPv6' : /\binet\b/.test(l) ? 'IPv4' : null,
+      user: /\buser (=|!=) (\d+)/.exec(l), flags: /\bflags (\S+)/.exec(l)?.[1] ?? null,
+      sport: portTest(from?.[2]), dport: portTest(to?.[2]),
+    };
+  };
+  /** Whether a packet's TCP flags meet `flags A/B`: of the flags in B, exactly those in A are set. */
+  const flagsMeet = (want, has) => { const [a, b] = want.split('/'); return [...b].every((f) => a.includes(f) === has.includes(f)); };
+  const matches = (r, k) => r.dir === k.dir && r.lo0 !== false && (!r.proto || r.proto === k.proto) && (!r.fam || r.fam === k.fam)
+    && (!r.sport || r.sport(k.sport)) && (!r.dport || r.dport(k.dport)) && (!r.flags || (k.proto === 'tcp' && flagsMeet(r.flags, k.flags)))
+    && (!r.user || (r.user[1] === '=' ? k.uid === Number(r.user[2]) : k.uid !== Number(r.user[2])));
+  /**
+   * One packet on lo0, out from the sender's socket and in to the receiver's: 'pass', or where it was blocked ('out' or
+   * 'in'). pf's last matching rule decides, a quick one at once; with none, the packet passes.
+   */
+  pf.packet = ({ proto, fam, sport, dport, fromUid, toUid, flags = '' }) => {
+    if (!pf.enabled) return 'pass';
     const rules = (pf.anchors.get(ANCHOR) ?? []).map(parse);
-    let tag = null;
-    for (const r of rules) if (matches(r, { dir: 'out', proto, fam, uid: fromUid })) { if (r.action === 'block') return 'refused'; if (r.tag) tag = r.tag; if (r.quick) break; }
-    for (const r of rules) if (matches(r, { dir: 'in', proto, fam, uid: toUid, tag })) { if (r.action === 'block') return 'refused'; if (r.quick) break; }
-    return 'ok';
+    for (const [dir, uid] of [['out', fromUid], ['in', toUid]]) {
+      let act = 'pass';
+      for (const r of rules) if (matches(r, { dir, proto, fam, sport, dport, uid, flags })) { act = r.action; if (r.quick) break; }
+      if (act === 'block') return dir;
+    }
+    return 'pass';
   };
   return pf;
 }
 
-/** The probes, stood in: listeners are numbers, a connection is pf's decision. `twist` lets a test break the probes themselves. */
-function fakeNet(pf, { twist = null, addresses = null } = {}) {
+const RANGE_PORT = (n) => PROBE_FIRST + n;
+/**
+ * The probes, stood in: a listener is a port (in the builder's range, or an ephemeral one), and a connection is its
+ * packets through pf: the first (a TCP SYN, the UDP ping) from an ephemeral client port, then the answer (a SYN-ACK, the
+ * pong) back. A block going out shows as a timeout, coming in as refused (TCP; UDP gets no answer either way), as on the
+ * Mac. `twist` lets a test break the probes themselves.
+ */
+function fakeNet(pf, { twist = null, addresses = null, dies = null } = {}) {
   const uidOf = (user) => (user === 'builder' ? BUILDER_UID : user === 'sam' ? OWNER_UID : -1);
-  const listeners = new Map(); let port = 50000;
+  const listeners = new Map(); let eph = 50000; let inR = 0; let fromR = 0;
   const log = []; const binds = [];
   return {
     log,
     binds,
+    listeners,
     addresses: () => (addresses ? [...addresses] : [LAN]),
-    listen: async ({ user, proto, host }) => {
-      const p = port++; const l = { user, proto, host, got: 0 }; listeners.set(p, l); binds.push(`${user} ${proto} ${host}`);
-      return { port: p, received: () => l.got, settle: async () => {}, close: () => listeners.delete(p) };
+    selfAddresses: () => new Set(['127.0.0.1', '::1', 'fe80::1', LAN]),
+    listen: async ({ user, proto, host, inRange = false }) => {
+      const p = inRange ? RANGE_PORT(inR++) : eph++;
+      const l = { user, proto, host, got: 0, up: true, inRange }; listeners.set(p, l); binds.push(`${user} ${proto} ${host}${inRange ? ' in' : ''}`);
+      return { port: p, received: () => l.got, settle: async () => {}, alive: () => l.up, close: () => { l.up = false; listeners.delete(p); } };
     },
-    connect: async ({ user, proto, host, port: p }) => {
+    connect: async ({ user, proto, host, port: p, fromRange = false }) => {
       const l = listeners.get(p); const fam = host.includes(':') ? 'IPv6' : 'IPv4';
-      log.push(`${user}→${l.user} ${proto} ${host}`);
-      // The request, then the listener's reply back (the TCP SYN-ACK, the UDP pong): both legs must pass for an 'ok'. A
-      // request that got there is received, whatever the reply's fate.
-      const there = pf.decide({ fromUid: uidOf(user), toUid: uidOf(l.user), proto, fam });
-      if (there === 'ok') l.got += 1;
-      const said = there === 'ok' ? pf.decide({ fromUid: uidOf(l.user), toUid: uidOf(user), proto, fam }) : there;
-      return twist ? twist({ user, to: l.user, proto, fam, host, said }) : said;
+      const fromR_ = fromRange && proto === 'udp';
+      log.push(`${user}${fromR_ ? ' from R' : ''}→${l.user}${l.inRange ? ' in' : ''} ${proto} ${host}`);
+      // A UDP client sent from the range takes a port from its top down, clear of the listeners' (from PROBE_FIRST up).
+      const cport = fromR_ ? WALL_RANGE.last - (fromR++ % 400) : eph++;
+      let said;
+      const there = pf.packet({ proto, fam, sport: cport, dport: p, fromUid: uidOf(user), toUid: uidOf(l.user), flags: 'S' });
+      if (there !== 'pass') said = proto === 'tcp' && there === 'in' ? 'refused' : 'timeout';
+      else {
+        l.got += 1;
+        if (dies && dies(l)) l.up = false;
+        const back = pf.packet({ proto, fam, sport: p, dport: cport, fromUid: uidOf(l.user), toUid: uidOf(user), flags: 'SA' });
+        said = back === 'pass' ? 'ok' : 'timeout';
+      }
+      return twist ? twist({ user, to: l.user, inRange: l.inRange, proto, fam, host, said }) : said;
     },
   };
 }
@@ -118,7 +163,7 @@ function fakeNet(pf, { twist = null, addresses = null } = {}) {
  * The stand-in Mac with a builder, the stand-in pf, and the job. `late`: the job's first run comes only at that many
  * `launchctl print`s after load (launchd starts a RunAtLoad job after bootstrap has returned, #556 r1 M2); Infinity, never.
  */
-function world({ builder = true, builderUid = BUILDER_UID, mainAnchor = true, late = 0 } = {}) {
+function world({ builder = true, builderUid = BUILDER_UID, mainAnchor = true, late = 0, ephemeral = '49152\n65535\n49152\n65535\n', listening = { TCP: '', UDP: '' } } = {}) {
   const mac = fakeMac({ users: builder ? { builder: { UniqueID: String(builderUid), PrimaryGroupID: '20', UserShell: '/bin/zsh', NFSHomeDirectory: '/Users/builder' } } : {} });
   // /etc is a link to /private/etc on the stand-in Mac as on a real one: the anchor folder is made through the real path.
   for (const d of [ANCHOR_DIR, BASE]) { mkdirSync(mac.at(d), { recursive: true }); chmodSync(mac.at(d), 0o755); mac.owners.set(d, { uid: mac.rootUid, gid: 0 }); }
@@ -128,6 +173,8 @@ function world({ builder = true, builderUid = BUILDER_UID, mainAnchor = true, la
   const runJob = () => { const j = mac.loaded.get(wallLabel(cfg)); const code = pf.job(); if (j) { j.runs = (j.runs ?? 0) + 1; j.lastExit = code; } };
   mac.run = (cmd, args) => {
     if (cmd === '/sbin/pfctl') return pf.run(args);
+    if (cmd === '/usr/sbin/sysctl') return w.ephemeral === null ? { status: 1, stdout: '', stderr: 'sysctl: unknown oid' } : { status: 0, stdout: w.ephemeral, stderr: '' };
+    if (cmd === '/usr/sbin/lsof') { const t = w.listening[/^-i(TCP|UDP):/.exec(args[1])[1]]; return t ? { status: 0, stdout: t, stderr: '' } : { status: 1, stdout: '', stderr: '' }; }
     if (cmd === '/bin/launchctl' && args[0] === 'print' && args[1] === `system/${wallLabel(cfg)}` && wait !== null && (wait -= 1) <= 0) { wait = null; runJob(); }
     const r = runMac(cmd, args);
     // launchd runs the job at load (RunAtLoad), as root: at once, or a little later.
@@ -137,7 +184,8 @@ function world({ builder = true, builderUid = BUILDER_UID, mainAnchor = true, la
     }
     return r;
   };
-  return { mac, pf, cfg, net: fakeNet(pf) };
+  const w = { mac, pf, cfg, net: fakeNet(pf), ephemeral, listening };
+  return w;
 }
 const writeConfig = (w) => {
   mkdirSync(w.mac.at('/Library'), { recursive: true });
@@ -164,7 +212,16 @@ test('R-0b-179: place writes the rules for the builder\'s uid read from this Mac
   const rows = await placed(w);
   assert.deepEqual(fails(rows), []);
   assert.equal(readFileSync(w.mac.at(ANCHOR_FILE), 'utf8'), anchorText(BUILDER_UID));
-  assert.match(anchorText(BUILDER_UID), new RegExp(`user ${BUILDER_UID} tag ${TAG}`));
+  // The rules, pinned word for word (wall v2): a rule dropped, widened or narrowed fails here first.
+  assert.deepEqual(anchorText(BUILDER_UID).split('\n').filter((l) => l && !l.startsWith('#')), [
+    `block return out quick on lo0 proto udp from any to any port 47000 <> 47999 user ${BUILDER_UID}`,
+    `block return out quick on lo0 proto tcp from any to any port 47000 <> 47999 user ${BUILDER_UID} flags S/SA`,
+    `block return in quick on lo0 proto { tcp udp } from any to any port 47000:47999 user != ${BUILDER_UID}`,
+    `block return out quick on ! lo0 proto { tcp udp } from any to self user ${BUILDER_UID}`,
+  ]);
+  assert.deepEqual([WALL_RANGE.first, WALL_RANGE.last, EPHEMERAL.first, EPHEMERAL.last], [47000, 47999, 49152, 65535]);
+  // The proxy's ports are the builder's, and no probe listener takes them.
+  for (const p of Object.values(PROXY_PORTS)) assert.ok(p >= WALL_RANGE.first && p < PROBE_FIRST, `proxy port ${p}`);
   assert.equal(w.mac.lstat(ANCHOR_FILE).mode & 0o7777, 0o644);
   assert.equal(w.mac.lstat(wallDir(w.cfg)).mode & 0o7777, 0o700);
   assert.ok(w.mac.loaded.has(wallLabel(w.cfg)));
@@ -173,11 +230,18 @@ test('R-0b-179: place writes the rules for the builder\'s uid read from this Mac
   assert.match(ANCHOR_FILE, /^\/private\/etc\/pf\.anchors\//);
   assert.match(chainProblem(w.mac.at('/etc/pf.anchors'), { owner: w.mac.rootUid, top: w.mac.prefix }), /\/etc is a link/);
   // Both directions in each protocol and place, every run (L1150), with one address that is not loopback (r1 m4).
-  for (const p of PROTOS) for (const [, host] of PLACES) for (const who of ['builder→builder', 'sam→sam', 'builder→sam']) assert.ok(w.net.log.includes(`${who} ${p} ${host}`), `${who} ${p} ${host} was not tried`);
+  // Builder UDP probes that expect an answer, or test the range, send from the range (#617 r1 M1); (vi) is TCP only.
+  for (const p of PROTOS) for (const [, host] of PLACES) {
+    const b = p === 'udp' ? 'builder from R' : 'builder';
+    for (const who of [`${b}→builder in`, 'sam→sam', ...(p === 'tcp' ? ['sam→builder in'] : []), 'builder→sam', 'builder→sam in', `${b}→builder`]) assert.ok(w.net.log.includes(`${who} ${p} ${host}`), `${who} ${p} ${host} was not tried`);
+    assert.equal(w.net.log.includes(`builder from R→sam ${p} ${host}`), p === 'udp' && FAMILIES.some(([, h]) => h === host), `(viii) ${p} ${host}`);
+  }
   assert.equal(rows.length, ROWS_CHECK);
   // An owner service bound to every address is a place of its own (#556 r2 m5): the owner's listener is bound to 0.0.0.0 and ::.
-  for (const p of PROTOS) for (const [, , b] of ALL_ADDRESSES) assert.ok(w.net.binds.includes(`sam ${p} ${b}`), `the owner never listened on ${b} (${p})`);
-  assert.equal(rows.filter((r) => /\((i|ii|v)(;|\))/.test(r.what)).length, PROTOS.length * PLACES.length * 4);
+  for (const p of PROTOS) for (const [, , b] of ALL_ADDRESSES) for (const x of ['', ' in']) assert.ok(w.net.binds.includes(`sam ${p} ${b}${x}`), `the owner never listened on ${b}${x} (${p})`);
+  assert.equal(rows.filter((r) => /\((i|ii|v|vi|vii)(;|\))/.test(r.what)).length, PLACES.length * 13);
+  assert.equal(rows.filter((r) => /\(viii\)$/.test(r.what)).length, FAMILIES.length);
+  assert.equal(rows.length, expectedRows(1)); assert.equal(expectedRows(1), 74); assert.equal(expectedRows(0), 62);
   // Twice: nothing is rewritten, the job is reloaded, and it holds the same token (no second reference).
   const again = planWall(w.mac, w.cfg).ops.map((o) => o.text);
   assert.equal(again.some((t) => /^write /.test(t)), false, again.join(' | '));
@@ -248,26 +312,34 @@ test('R-0b-179 (v): a wall that cuts the builder off from its own listener (its 
   const twisted = fakeNet(w.pf, { twist: ({ user, to, said }) => (user === 'builder' && to === 'builder' ? 'refused' : said) });
   const f = fails(await checkWall(w.mac, w.cfg, { net: twisted }));
   assert.equal(f.filter((x) => /reaches its own listener .*\(v; the proxy path\) — it got refused/.test(x)).length, PROTOS.length * PLACES.length, f.join('\n'));
-  assert.equal(f.filter((x) => /\(i\) — not proven/.test(x)).length, PROTOS.length * PLACES.length);
+  assert.equal(f.filter((x) => /\(i\) — not proven/.test(x)).length, PROTOS.length * PLACES.length * 2);
 });
 
-test('R-0b-179 plants (L1150): each wrong rule is refused, by what pf holds and by the traffic it lets through or blocks', async () => {
+test('R-0b-179 plants (L1150, wall v2): each wrong rule is refused, by what pf holds and by the traffic it lets through or blocks', async () => {
   const u = BUILDER_UID;
   const plants = {
-    'a pass rule with no tag': [rulesWith(` tag ${TAG} no state`, ' no state'), /missing the rules? tag \(tcp\), tag \(udp\)/, /\(i\) — builder connected/],
-    'a block rule missing user !=': [rulesWith(` user != ${u}`, ''), /missing the rules? block-in/, /\(v; the proxy path\) — it got refused/],
-    '::1 left out (IPv4 only)': [rulesWith('pass out quick on lo0 proto', 'pass out quick on lo0 inet proto'), /missing the rules? tag/, /UDP IPv6 .*\(i\) — builder connected|TCP IPv6 .*\(i\) — builder connected/],
-    'UDP left out': [rulesWith('proto { tcp udp } from any to any user', 'proto tcp from any to any user'), /tag \(udp\)/, /UDP IPv4 .*\(i\) — builder connected/],
+    // The lead's plants: each must be caught by the traffic as well as by the print.
+    'the in rule missing user != (blocks the builder too)': [rulesWith(`port 47000:47999 user != ${u}`, 'port 47000:47999'), /missing the rules? range-in/, /\(v; the proxy path\) — it got refused/],
+    'UDP left out of the in rule': [rulesWith(`proto { tcp udp } from any to any port 47000:47999`, 'proto tcp from any to any port 47000:47999'), /range-in \(udp\)/, /can NOT reach the owner's listener in its ports on UDP .*\(i\) — builder connected/],
+    'the UDP out rule left out': [anchorText(u).split('\n').filter((l) => !/^block return out quick on lo0 proto udp/.test(l)).join('\n'), /udp-out \(udp\)/, /can NOT reach the owner's listener outside its ports on UDP .*\(i\) — builder connected/],
+    'IPv4 only (::1 left out)': [rulesWith('block return in quick on lo0 proto', 'block return in quick on lo0 inet proto').replace(/block return out quick on lo0 proto/g, 'block return out quick on lo0 inet proto'), /missing the rules? /, /IPv6 .*\(i\) — builder connected/],
+    'flags S/SA dropped (the builder\'s TCP answers blocked)': [rulesWith(' flags S/SA', ''), /tcp-out \(tcp\)/, /TCP .*hears its answer \(vi\) — it got timeout/],
+    // #617 r1 M1: the removed UDP answer rule put back is a line that is not the wall's, and (viii) sees the hole.
+    'the old UDP answer rule put back': [`pass out quick on lo0 proto udp from any port 47000:47999 to any port 49152:65535 user ${u} no state\n${anchorText(u)}`, /a line that is not the wall's: pass out/, /from a port in its ports, can NOT reach the owner's listener on an ephemeral port on UDP IPv(4|6) .*\(viii\) — builder connected/],
+    // #617 r1 m1: a rule with its source and destination swapped is another rule, by the print and by the traffic.
+    'the in rule with from and to swapped': [rulesWith('from any to any port 47000:47999 user !=', 'from any port 47000:47999 to any user !='), /missing the rules? range-in/, /can NOT reach the owner's listener in its ports .*\(i\) — builder connected/],
+    'the UDP out rule with from and to swapped': [rulesWith('proto udp from any to any port 47000 <> 47999', 'proto udp from any port 47000 <> 47999 to any'), /udp-out \(udp\)/, /\(viii\) — builder connected: the wall is not up/],
+    'the range widened on the way out': [rulesWith('proto tcp from any to any port 47000 <> 47999', 'proto tcp from any to any port 1 <> 65535'), /tcp-out \(tcp\)/, /can NOT reach the owner's listener outside its ports on TCP .*\(i\) — builder connected/],
     'the self rule left out': [anchorText(u).split('\n').filter((l) => !/to self/.test(l)).join('\n'), /missing the rules? self \(tcp\), self \(udp\)/, null],
-    'a port narrowed on the block': [rulesWith(`tagged ${TAG} user`, `port 1:1024 tagged ${TAG} user`), /missing the rules? block-in/, /\(i\) — builder connected/],
+    'the in rule narrowed to one port': [rulesWith('port 47000:47999 user !=', 'port = 47000 user !='), /missing the rules? range-in/, /can NOT reach the owner's listener in its ports .*\(i\) — builder connected/],
   };
   for (const [name, [text, held, traffic]] of Object.entries(plants)) {
     const w = world();
     await placed(w);
     const f = fails(await withRules(w, text));
     assert.ok(f.some((x) => held.test(x)), `${name}: what pf holds was not refused:\n${f.join('\n')}`);
-    // The stand-in pf ignores ports, so the narrowed block still blocks there; real pf would not. The self rule is off lo0.
-    if (traffic && name !== 'a port narrowed on the block') assert.ok(f.some((x) => traffic.test(x)), `${name}: the traffic did not show it:\n${f.join('\n')}`);
+    // The self rule is off lo0, which the stand-in's probes never cross.
+    if (traffic) assert.ok(f.some((x) => traffic.test(x)), `${name}: the traffic did not show it:\n${f.join('\n')}`);
   }
 });
 
@@ -282,40 +354,83 @@ test('R-0b-179 plant: a one-direction read-back (no controls) is not this one: e
   }
 });
 
-test('R-0b-179 (L1154): another user cannot reach a builder listener either (the builder\'s tagged reply is blocked), and can with the wall down', async () => {
+test('R-0b-179 (wall v2): the owner reaches a builder listener in its ports and hears it; the builder reaches nothing outside them, its own included', async () => {
   const w = world();
   await placed(w);
   for (const proto of PROTOS) for (const [fam, host] of FAMILIES) {
-    const l = await w.net.listen({ user: 'builder', proto, host });
-    assert.equal(await w.net.connect({ user: 'sam', proto, host, port: l.port }), 'refused', `${proto} ${fam}: the owner reached a builder listener`);
-    w.pf.enabled = false;
-    assert.equal(await w.net.connect({ user: 'sam', proto, host, port: l.port }), 'ok', `${proto} ${fam}: the control (no wall) failed`);
-    w.pf.enabled = true; l.close();
+    const bIn = await w.net.listen({ user: 'builder', proto, host, inRange: true });
+    const bOut = await w.net.listen({ user: 'builder', proto, host });
+    const oIn = await w.net.listen({ user: 'sam', proto, host, inRange: true });
+    // The owner's TCP connection to a builder listener is answered (the SYN-ACK is no first packet); a UDP one is not,
+    // in the range or out of it: the builder's UDP answer is a packet to a port outside its range, like any other
+    // (#617 r1 M1, the documented cost). From the range, the builder's own UDP client is answered.
+    assert.equal(await w.net.connect({ user: 'sam', proto, host, port: bIn.port }), proto === 'tcp' ? 'ok' : 'timeout', `${proto} ${fam}: the owner and a builder listener in its ports`);
+    assert.equal(await w.net.connect({ user: 'builder', proto, host, port: bIn.port, fromRange: true }), 'ok', `${proto} ${fam}: the builder, from its ports, and its own listener there`);
+    assert.equal(await w.net.connect({ user: 'builder', proto, host, port: bIn.port }), proto === 'tcp' ? 'ok' : 'timeout', `${proto} ${fam}: the builder, from a port the kernel picks, and its own listener in its ports`);
+    assert.equal(await w.net.connect({ user: 'sam', proto, host, port: bOut.port }), proto === 'tcp' ? 'ok' : 'timeout', `${proto} ${fam}: the owner and a builder listener outside its ports`);
+    assert.notEqual(await w.net.connect({ user: 'builder', proto, host, port: bOut.port }), 'ok', `${proto} ${fam}: the builder reached its own listener outside its ports`);
+    assert.notEqual(await w.net.connect({ user: 'sam', proto, host, port: oIn.port }), 'ok', `${proto} ${fam}: the owner reached its own listener in the builder's ports`);
+    for (const l of [bIn, bOut, oIn]) l.close();
   }
-  // It is the tag on the reply that does it: with the tag rule gone the owner gets through.
-  await withRules(w, rulesWith(` tag ${TAG} no state`, ' no state'));
-  const l = await w.net.listen({ user: 'builder', proto: 'tcp', host: '127.0.0.1' });
-  assert.equal(await w.net.connect({ user: 'sam', proto: 'tcp', host: '127.0.0.1', port: l.port }), 'ok');
+  // Rule by rule, the packet the wall turns on: a builder TCP answer (SYN-ACK) to an ephemeral port passes, its SYN there does not.
+  const pk = (o) => w.pf.packet({ proto: 'tcp', fam: 'IPv4', fromUid: BUILDER_UID, toUid: OWNER_UID, ...o });
+  assert.equal(pk({ sport: 47100, dport: 50001, flags: 'SA' }), 'pass');
+  assert.equal(pk({ sport: 50002, dport: 50001, flags: 'S' }), 'out');
+  assert.equal(pk({ sport: 50002, dport: 47100, flags: 'S' }), 'in');
+  // #617 r1 M1: builder UDP from the range to an ephemeral port (an owner's client, or its listener) no longer passes.
+  for (const fam of ['IPv4', 'IPv6']) assert.equal(w.pf.packet({ proto: 'udp', fam, sport: 47100, dport: 50001, fromUid: BUILDER_UID, toUid: OWNER_UID }), 'out', `UDP from the range to an ephemeral port (${fam})`);
+  assert.equal(w.pf.packet({ proto: 'udp', fam: 'IPv4', sport: 47100, dport: 47200, fromUid: BUILDER_UID, toUid: BUILDER_UID }), 'pass', 'builder UDP inside the range');
+  assert.equal(w.pf.packet({ proto: 'udp', fam: 'IPv6', sport: 47100, dport: 5353, fromUid: BUILDER_UID, toUid: OWNER_UID }), 'out', 'UDP from the range to a fixed port below the ephemeral range');
 });
 
-test('R-0b-179: loadedRulesProblem reads OpenBSD\'s print or a list not split, in any order, and refuses an extra or a missing word', () => {
+test('R-0b-179: loadedRulesProblem reads macOS\'s print or a list not split, in any order, and refuses an extra or a missing word', () => {
   const u = BUILDER_UID;
   const asPrinted = [
-    `pass out quick on lo0 proto tcp all user = ${u} tag ${TAG} no state`, `pass out quick on lo0 proto udp all user = ${u} tag ${TAG} no state`,
-    `block return in quick on lo0 proto tcp all user != ${u} tagged ${TAG}`, `block return in quick on lo0 proto udp all user != ${u} tagged ${TAG}`,
+    `block return out quick on lo0 proto udp from any to any port 47000 <> 47999 user = ${u}`,
+    `block return out quick on lo0 proto tcp from any to any port 47000 <> 47999 user = ${u} flags S/SA`,
+    // As wall-diag2 saw macOS print a range rule: `from any to any port a:b`, never `all`.
+    `block return in quick on lo0 proto tcp from any to any port 47000:47999 user != ${u}`, `block return in quick on lo0 proto udp from any to any port 47000:47999 user != ${u}`,
     `block return out quick on ! lo0 inet proto tcp from any to 192.168.1.20 user = ${u}`, `block return out quick on ! lo0 inet proto udp from any to 192.168.1.20 user = ${u}`,
     `block return out quick on ! lo0 inet6 proto tcp from any to fe80::1 user = ${u}`, `block return out quick on ! lo0 inet6 proto udp from any to fe80::1 user = ${u}`,
   ];
-  assert.equal(loadedRulesProblem(asPrinted.join('\n'), u), null);
-  assert.equal(loadedRulesProblem(anchorText(u), u), null);
-  assert.equal(loadedRulesProblem([...asPrinted].reverse().join('\n'), u), null);
+  const mine = { selfAddresses: new Set(['127.0.0.1', '::1', 'fe80::1', '192.168.1.20']) };
+  assert.equal(loadedRulesProblem(asPrinted.join('\n'), u, mine), null);
+  assert.equal(loadedRulesProblem(anchorText(u), u, mine), null);
+  assert.equal(loadedRulesProblem([...asPrinted].reverse().join('\n'), u, mine), null);
+  // #617 r1 m1: the self rule may name only this Mac's own addresses (a scope is dropped first); any other is not the wall's.
+  assert.equal(loadedRulesProblem(asPrinted.map((l) => l.replace('to fe80::1 ', 'to fe80::1%en0 ')).join('\n'), u, mine), null);
+  assert.match(String(loadedRulesProblem(asPrinted.map((l) => l.replace('192.168.1.20', '10.9.9.9')).join('\n'), u, mine)), /not the wall's: block return out quick on ! lo0 inet proto tcp from any to 10\.9\.9\.9/);
+  assert.match(String(loadedRulesProblem([...asPrinted, `block return out quick on ! lo0 inet proto tcp from any to 8.8.8.8 user = ${u}`].join('\n'), u, mine)), /not the wall's: .*8\.8\.8\.8/);
+  assert.match(String(loadedRulesProblem(asPrinted.join('\n'), u, { selfAddresses: new Set(['127.0.0.1']) })), /missing the rules? self|not the wall's/, 'the real Mac\'s addresses only');
+  assert.ok(ownAddresses({ en0: [{ address: '10.0.0.7' }, { address: 'fe80::aede:48ff:fe00:1122%en0' }] }).has('fe80::aede:48ff:fe00:1122'));
+  assert.ok(ownAddresses({}).has('::1'));
+  // #617 r1 m1: direction matters. Each rule with its from part and to part swapped is refused (the auditor's swap.mjs).
+  const swaps = {
+    'range-in': ['from any to any port 47000:47999 user !=', 'from any port 47000:47999 to any user !='],
+    'tcp-out': ['proto tcp from any to any port 47000 <> 47999', 'proto tcp from any port 47000 <> 47999 to any'],
+    'udp-out': ['proto udp from any to any port 47000 <> 47999', 'proto udp from any port 47000 <> 47999 to any'],
+    self: ['from any to 192.168.1.20', 'from 192.168.1.20 to any'],
+  };
+  for (const [id, [a, b]] of Object.entries(swaps)) {
+    const text = asPrinted.map((l) => l.replace(a, b)).join('\n');
+    assert.notEqual(text, asPrinted.join('\n'), id);
+    assert.match(String(loadedRulesProblem(text, u, mine)), new RegExp(`missing the rules? .*${id}|not the wall's`), `${id} swapped passed`);
+  }
   assert.match(loadedRulesProblem([...asPrinted, 'pass in quick on lo0 all'].join('\n'), u), /not the wall's/);
-  assert.match(loadedRulesProblem(asPrinted.map((l) => l.replace(`user != ${u}`, `user = ${u}`)).join('\n'), u), /block-in/, '`=` is never read as `!=`');
+  assert.match(loadedRulesProblem(asPrinted.map((l) => l.replace(`user != ${u}`, `user = ${u}`)).join('\n'), u), /range-in/, '`=` is never read as `!=`');
   assert.match(loadedRulesProblem(asPrinted.map((l) => l.replace(`${u}`, '501')).join('\n'), u), /missing/, 'another uid');
+  assert.match(loadedRulesProblem(asPrinted.map((l) => l.replace('<>', '><')).join('\n'), u), /udp-out|tcp-out/, 'the range turned inside out');
+  assert.match(loadedRulesProblem(asPrinted.map((l) => l.replace(' flags S/SA', ' flags S/S')).join('\n'), u), /tcp-out/);
+  // A rule for one protocol printed for the other is not it: UDP has no flags, and the TCP rule is not the UDP one.
+  assert.match(String(loadedRulesProblem(asPrinted.map((l) => l.replace('proto tcp from any to any port 47000 <> 47999', 'proto udp from any to any port 47000 <> 47999')).join('\n'), u)), /tcp-out/);
   assert.match(loadedRulesProblem('', u), /holds no rules/);
   // #556 r2 m4: a `!` belongs to the word after it; moved to another word, it is another rule.
   assert.match(String(loadedRulesProblem(asPrinted.map((l) => l.replace('from any to', 'from ! any to')).join('\n'), u)), /not the wall's|missing/, '`from ! any` passed');
   assert.match(String(loadedRulesProblem(asPrinted.map((l) => l.replace('on ! lo0', '! on lo0')).join('\n'), u)), /not the wall's|missing/, '`! on lo0` passed');
+  // Every rule is checked in exactly its protocols.
+  assert.deepEqual(RULES.map((r) => `${r.id}:${r.protos.join('+')}`), ['udp-out:udp', 'tcp-out:tcp', 'range-in:tcp+udp', 'self:tcp+udp']);
+  // #617 r1 M1: the removed UDP answer rule is refused if it is ever loaded again.
+  assert.match(String(loadedRulesProblem([`pass out quick on lo0 proto udp from any port 47000:47999 to any port 49152:65535 user = ${u} no state`, ...asPrinted].join('\n'), u, mine)), /a line that is not the wall's: pass out/);
 });
 
 test('R-0b-179: a failed read-back takes the wall out again (job unloaded, its file gone, rules emptied, token released)', async () => {
@@ -423,7 +538,7 @@ test('R-0b-179 (r1 m1): a timeout counts as a block only when the owner\'s liste
   w.pf.enabled = false;   // the builder's packets get through, but the probe says timeout (a reply lost on the way back)
   const lost = fakeNet(w.pf, { twist: ({ user, to, said }) => (user === 'builder' && to === 'sam' ? 'timeout' : said) });
   const f = fails(await checkWall(w.mac, w.cfg, { net: lost }));
-  assert.equal(f.filter((x) => /\(i\) — the owner's listener received 1 from builder \(the probe said timeout\)/.test(x)).length, PROTOS.length * PLACES.length, f.join('\n'));
+  assert.equal(f.filter((x) => /\(i\) — the listener received 1 from builder \(the probe said timeout\)/.test(x)).length, PROTOS.length * PLACES.length * 2, f.join('\n'));
   // With the wall up the same timeout is a block: nothing was received.
   w.pf.enabled = true;
   assert.deepEqual(fails(await checkWall(w.mac, w.cfg, { net: fakeNet(w.pf, { twist: ({ user, to, said }) => (user === 'builder' && to === 'sam' ? 'timeout' : said) }) })), []);
@@ -441,23 +556,27 @@ test('R-0b-179 (r1 m4): one address of this Mac that is not loopback is probed; 
   const lone = fakeNet(w.pf, { addresses: [] });
   const rows = await checkWall(w.mac, w.cfg, { net: lone });
   assert.deepEqual(fails(rows), []);
-  assert.ok(rows.some((r) => /no address but loopback, so only 127\.0\.0\.1 and ::1 were probed/.test(r.what)));
+  assert.ok(rows.some((r) => /no address but loopback \(and link-local\), so only 127\.0\.0\.1 and ::1 were probed/.test(r.what)));
   assert.equal(lone.log.some((l) => l.endsWith(LAN)), false);
   // The real lookup: the first IPv4 address that is not internal or link-local.
   assert.deepEqual(otherAddresses({ lo0: [{ address: '127.0.0.1', family: 'IPv4', internal: true }], en0: [{ address: 'fe80::1', family: 'IPv6', internal: false }, { address: '169.254.3.4', family: 'IPv4', internal: false }, { address: '10.0.0.7', family: 'IPv4', internal: false }] }), ['10.0.0.7']);
   assert.deepEqual(otherAddresses({ lo0: [{ address: '127.0.0.1', family: 'IPv4', internal: true }] }), []);
+  // #617 r2: with no IPv4 address beyond loopback, an IPv6 one (not link-local) is probed.
+  assert.deepEqual(otherAddresses({ lo0: [{ address: '::1', family: 'IPv6', internal: true }], en0: [{ address: 'fe80::1%en0', family: 'IPv6', internal: false }, { address: '2001:db8::5', family: 'IPv6', internal: false }] }), ['2001:db8::5']);
+  assert.deepEqual(otherAddresses({ en0: [{ address: 'fe80::1', family: 'IPv6', internal: false }, { address: '169.254.1.1', family: 'IPv4', internal: false }] }), []);
+  assert.deepEqual(otherAddresses({ en0: [{ address: '2001:db8::5', family: 'IPv6', internal: false }], en1: [{ address: '192.168.1.9', family: 'IPv4', internal: false }] }), ['192.168.1.9']);
 });
 
 test('R-0b-179 (r1 m2, m3): every printed word is checked: keep state, no quick, a group, a family on a rule that is not self, and a qualifier more all refuse', async () => {
   const u = BUILDER_UID;
   const plants = {
-    'the tag rule keeping state': rulesWith(`tag ${TAG} no state`, `tag ${TAG} keep state`),
-    'the block rule not quick': rulesWith('block return in quick on lo0', 'block return in on lo0'),
-    'the tag rule not quick': rulesWith('pass out quick on lo0', 'pass out on lo0'),
-    'the block rule narrowed by group': rulesWith(`tagged ${TAG} user != ${u}`, `tagged ${TAG} user != ${u} group = 20`),
-    'the block rule IPv4 only': rulesWith('block return in quick on lo0 proto', 'block return in quick on lo0 inet proto'),
+    'the TCP out rule keeping state': rulesWith('user 65002 flags S/SA', 'user 65002 flags S/SA keep state'),
+    'the in rule not quick': rulesWith('block return in quick on lo0', 'block return in on lo0'),
+    'the UDP out rule not quick': rulesWith('block return out quick on lo0 proto udp', 'block return out on lo0 proto udp'),
+    'the in rule narrowed by group': rulesWith(`port 47000:47999 user != ${u}`, `port 47000:47999 user != ${u} group = 20`),
+    'the in rule IPv4 only': rulesWith('block return in quick on lo0 proto', 'block return in quick on lo0 inet proto'),
     'the self rule to one port': rulesWith('to self user', 'to self port 22 user'),
-    'the block rule dropping, not returning': rulesWith('block return in quick', 'block drop in quick'),
+    'the in rule dropping, not returning': rulesWith('block return in quick', 'block drop in quick'),
   };
   for (const [name, text] of Object.entries(plants)) {
     const w = world();
@@ -507,6 +626,78 @@ test('R-0b-179 (#556 r2 m1): the wait for the job\'s first run refuses while pf 
     const row = await waitForFirstRun(w.mac, w.cfg, { limitMs: 2_000, stepMs: 500, sleep: async (ms) => { t += ms; }, now: () => t });
     assert.equal(row.ok, false); assert.match(row.why, why);
   }
+});
+
+test('wall v2 install refusals: an ephemeral range inside the builder\'s ports, or another user listening there, refuses place and changes nothing', () => {
+  const cases = [
+    ['the ephemeral range overlapping the range', { ephemeral: '32768\n65535\n49152\n65535\n' }, /ephemeral port range is 32768-65535, not inside 49152-65535: it overlaps the builder's ports 47000:47999/],
+    ['the high range moved', { ephemeral: '49152\n65535\n40000\n48000\n' }, /40000-48000.*overlaps/],
+    ['sysctl not answering', { ephemeral: null }, /sysctl could not read the ephemeral port range/],
+    ['the owner listening in the range (TCP)', { listening: { TCP: `p123\nu${OWNER_UID}\nn127.0.0.1:47123\n`, UDP: '' } }, /not the builder user's already listens in the builder's ports 47000:47999.*TCP 127\.0\.0\.1:47123 \(uid 65001, pid 123\)/],
+    ['root listening in the range (UDP)', { listening: { TCP: '', UDP: `p9\nu0\nn*:47500\n` } }, /UDP \*:47500 \(uid 0, pid 9\)/],
+  ];
+  for (const [what, opts, re] of cases) {
+    const w = world(opts);
+    const p = planWall(w.mac, w.cfg);
+    assert.deepEqual(p.ops, [], what);
+    assert.match(p.problems.join(' '), re, what);
+    assert.equal(existsSync(w.mac.at(ANCHOR_FILE)), false, what);
+  }
+  // The builder's own listener in the range is fine (its proxy, a session's dev server).
+  const mine = world({ listening: { TCP: `p77\nu${BUILDER_UID}\nn127.0.0.1:47000\nn[::1]:47000\n`, UDP: '' } });
+  assert.deepEqual(planWall(mine.mac, mine.cfg).problems, []);
+  // lsof failing for another reason is no "nobody listens".
+  const bad = world(); const run = bad.mac.run;
+  bad.mac.run = (cmd, args) => (cmd === '/usr/sbin/lsof' ? { status: 2, stdout: '', stderr: 'lsof: status error' } : run(cmd, args));
+  assert.match(String(rangeListenersProblem(bad.mac, BUILDER_UID)), /lsof could not list the TCP sockets/);
+  assert.equal(ephemeralProblem(world().mac), null);
+});
+
+test('wall v2: the check refuses once the ephemeral range has moved into the builder\'s ports (iv), though place was fine', async () => {
+  const w = world();
+  assert.deepEqual(fails(await placed(w)), []);
+  w.ephemeral = '47500\n65535\n49152\n65535\n';
+  const f = fails(await checkWall(w.mac, w.cfg, { net: w.net }));
+  assert.deepEqual(f.map((x) => x.split(' — ')[0]), ['the Mac\'s ephemeral port range is inside 49152-65535, clear of the builder\'s ports (iv)'], f.join('\n'));
+});
+
+test('wall v2: a blocked row is no pass when its listener had stopped (a crash looks like a block)', async () => {
+  const w = world();
+  await placed(w);
+  w.pf.enabled = false;   // no wall: every probe gets through, and the listener dies on it, as wall-diag's did (ECONNRESET)
+  const net = fakeNet(w.pf, { dies: (l) => l.user === 'sam' && l.inRange, twist: ({ user, to, inRange, said }) => (user === 'builder' && to === 'sam' && inRange ? 'refused' : said) });
+  const f = fails(await checkWall(w.mac, w.cfg, { net }));
+  assert.equal(f.filter((x) => /in its ports .*\(i\) — not proven: the listener had stopped/.test(x)).length, PROTOS.length * PLACES.length, f.join('\n'));
+});
+
+test('wall v2: the real listener keeps running through a reset connection, and takes a free port in the range it is given', async () => {
+  const start = (args) => new Promise((resolve, reject) => {
+    const p = spawn(process.execPath, ['-e', LISTENER, ...args], { stdio: ['pipe', 'pipe', 'pipe'] });
+    let buf = '';
+    p.stdout.on('data', (d) => { buf += d; const m = /^PORT (\d+)$/m.exec(buf); if (m) resolve({ p, port: Number(m[1]), out: () => buf }); const e = /^ERR (\S+)$/m.exec(buf); if (e) reject(new Error(e[1])); });
+    p.on('exit', (c) => reject(new Error(`exit ${c}: ${buf}`)));
+  });
+  const client = (proto, port) => new Promise((resolve) => { const c = spawn(process.execPath, ['-e', CLIENT, proto, '127.0.0.1', String(port)]); let o = ''; c.stdout.on('data', (d) => { o += d; }); c.on('close', () => resolve(o)); });
+  // A TCP connection reset by its client (what a wall's RST does to the server's side): the listener lives on.
+  const t = await start(['tcp', '127.0.0.1', '0', '0']);
+  await new Promise((ok) => { const c = tcpConnect(t.port, '127.0.0.1', () => { c.resetAndDestroy(); setTimeout(ok, 150); }); c.on('error', () => {}); });
+  assert.equal(t.p.exitCode, null, `the listener stopped: ${t.out()}`);
+  assert.equal(await client('tcp', t.port), 'ok');
+  assert.equal(t.out().match(/^GOT$/mg).length, 2);
+  t.p.stdin.end();
+  // UDP: the pong goes back, and the listener answers twice.
+  const u = await start(['udp', '127.0.0.1', '0', '0']);
+  assert.equal(await client('udp', u.port), 'ok'); assert.equal(await client('udp', u.port), 'ok');
+  u.p.stdin.end();
+  // In a range of two ports with one taken, it takes the other.
+  const taken = createServer(); await new Promise((ok) => { taken.listen(0, '127.0.0.1', ok); });
+  const busy = taken.address().port;
+  const lo = busy - 1;   // the range busy-1..busy: one taken, one most likely free
+  try {
+    const r = await start(['tcp', '127.0.0.1', String(lo), String(busy)]);
+    assert.equal(r.port, lo); r.p.stdin.end();
+  } catch (e) { if (!/EADDRINUSE/.test(e.message)) throw e; }   // busy-1 taken by someone else too: nothing to learn here
+  finally { taken.close(); }
 });
 
 test('R-0b-179 (#556 r2 m2): an anchor folder that is not root\'s alone (writable by others, or a link) refuses, and nothing is placed', () => {
@@ -755,4 +946,61 @@ test('L1205 cosmetic: parseStatus takes only the writer\'s exact bytes, and says
   for (const [name, text] of Object.entries(bad)) assert.throws(() => parseStatus(text), /not written exactly as statusText writes it|keys are/, name);
   assert.throws(() => parseStatus(JSON.stringify({ ...o, time: '2026-13-45T99:99:99.999Z' })), /the status's time is not a real UTC time/);
   assert.equal(parseStatus(line).ok, true);
+});
+
+test('#617 r1 m2: check says, as a WARN row that fails nothing, another user\'s listener started in the range after place', async () => {
+  const w = world(); writeConfig(w);
+  assert.equal((await runMain(w, ['place'])).code, 0);
+  const clean = await runMain(w, ['check']);
+  assert.match(clean.out, /^PASS {2}no other user's socket listens in the builder user's ports 47000:47999$/m);
+  assert.match(clean.out, new RegExp(`^all ${ROWS_CHECK} PASS$`, 'm'));
+  w.listening.TCP = `p123\nu${OWNER_UID}\nn127.0.0.1:47123\n`;
+  const r = await runMain(w, ['check']);
+  assert.equal(r.code, 0, r.all);
+  assert.match(r.out, /^WARN {2}no other user's socket listens in the builder user's ports 47000:47999 — TCP 127\.0\.0\.1:47123 \(uid 65001, pid 123\): the wall cuts it off, even from its own user/m);
+  assert.match(r.out, new RegExp(`^all ${ROWS_CHECK} PASS \\(1 with a WARN\\)$`, 'm'));
+  assert.equal(JSON.parse(readFileSync(w.mac.at(STATUS_FILE(w.cfg)), "utf8")).ok, true, "a WARN leaves the status ok");
+  // lsof failing is said the same way: not known, never "nobody listens".
+  const run = w.mac.run;
+  w.mac.run = (cmd, args) => (cmd === '/usr/sbin/lsof' ? { status: 2, stdout: '', stderr: 'lsof: status error' } : run(cmd, args));
+  assert.match((await runMain(w, ['check'])).out, /^WARN .* — lsof could not list the TCP sockets in 47000:47999 .*: not known$/m);
+});
+
+test('#617 r1 m6: only a socket whose own (local) port is in the range counts; one talking TO a port in the range does not', () => {
+  const far = world({ listening: { TCP: '', UDP: `p55\nu${OWNER_UID}\nn127.0.0.1:50123->127.0.0.1:47005\nn[::1]:51000->[::1]:47006\n` } });
+  assert.equal(rangeListenersProblem(far.mac, BUILDER_UID), null);
+  assert.deepEqual(planWall(far.mac, far.cfg).problems, []);
+  const near = world({ listening: { TCP: '', UDP: `p56\nu${OWNER_UID}\nn127.0.0.1:47005->127.0.0.1:50123\nn[::1]:47999\n` } });
+  assert.match(String(rangeListenersProblem(near.mac, BUILDER_UID)), /2 sockets .*UDP 127\.0\.0\.1:47005 \(uid 65001, pid 56\), UDP \[::1\]:47999/);
+  // Below and above the range by one: not in it.
+  const edge = world({ listening: { TCP: `p57\nu${OWNER_UID}\nn127.0.0.1:46999\nn*:48000\n`, UDP: '' } });
+  assert.equal(rangeListenersProblem(edge.mac, BUILDER_UID), null);
+});
+
+test('#617 r1 m7: a read-back with a row skipped (or one more) refuses at run time, though every row it gave passed', async () => {
+  const w = world();
+  await placed(w);
+  assert.equal(SETTINGS_ROWS, 7);
+  const skip = async (cfg, net, other) => (await trafficChecks(cfg, net, other)).filter((r, i) => i !== 3);
+  const rows = await checkWall(w.mac, w.cfg, { net: w.net, traffic: skip });
+  assert.deepEqual(fails(rows), [`the read-back ran all ${ROWS_CHECK} of its rows — it gave ${ROWS_CHECK - 1}: a row skipped or added is no proof, so the check refuses`]);
+  const more = async (cfg, net, other) => [...await trafficChecks(cfg, net, other), { ok: true, what: 'an extra' }];
+  assert.equal(fails(await checkWall(w.mac, w.cfg, { net: w.net, traffic: more })).length, 1);
+  // With no other address: the note row counts, and the count is the loopback one.
+  const lone = await checkWall(w.mac, w.cfg, { net: fakeNet(w.pf, { addresses: [] }) });
+  assert.deepEqual(fails(lone), []); assert.equal(lone.length, expectedRows(0));
+});
+
+test('#617 r1 M1: the real UDP client sends from a port in the range it is given (the builder\'s probes for v, vii and viii)', async () => {
+  const { createSocket } = await import('node:dgram');
+  const s = createSocket('udp4'); const seen = [];
+  s.on('message', (m, r) => { seen.push(r.port); s.send('pong', r.port, r.address); });
+  await new Promise((ok) => { s.bind(0, '127.0.0.1', ok); });
+  const run = (extra) => new Promise((resolve) => { const c = spawn(process.execPath, ['-e', CLIENT, 'udp', '127.0.0.1', String(s.address().port), ...extra]); let o = ''; c.stdout.on('data', (d) => { o += d; }); c.on('close', () => resolve(o)); });
+  try {
+    assert.equal(await run([String(PROBE_FIRST), String(WALL_RANGE.last)]), 'ok');
+    assert.ok(seen[0] >= PROBE_FIRST && seen[0] <= WALL_RANGE.last, `sent from ${seen[0]}`);
+    assert.equal(await run([]), 'ok');
+    assert.ok(seen[1] < WALL_RANGE.first || seen[1] > WALL_RANGE.last, `with no range, sent from ${seen[1]}`);
+  } finally { s.close(); }
 });

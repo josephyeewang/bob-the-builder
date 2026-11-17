@@ -57,6 +57,8 @@ export const SETTINGS = Object.freeze({
   network: 'network',
   allowedDomains: 'allowedDomains',
   strictAllowlist: 'strictAllowlist',
+  httpProxyPort: 'httpProxyPort',
+  socksProxyPort: 'socksProxyPort',
   filesystem: 'filesystem',
   denyRead: 'denyRead',
   denyWrite: 'denyWrite',

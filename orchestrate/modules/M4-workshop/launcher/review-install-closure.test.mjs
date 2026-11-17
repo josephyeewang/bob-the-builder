@@ -49,6 +49,7 @@ import { copierPlist, COPIER_SCRIPT } from '../../../setup/host-lock-copy.mjs';
 import { sensorsJobPlist } from '../../M12-sensors/sensors-job.mjs';
 import { workerRunnerPlist } from '../../../wiring/runner-job.mjs';
 import { WALL_SCRIPT, wallCheckPlist, wallPlist } from '../../../setup/builder-wall.mjs';
+import { BUILDER_PROXY_SCRIPT, builderProxyPlist } from '../../../setup/builder-proxy.mjs';
 import { workerRulesPlist, WORKER_RULES_SCRIPT } from '../../../setup/worker-rules.mjs';
 import { copierAgentPlist } from '../../M13-ledger/handoff-copier.mjs';
 import { updateOnce, MAIN } from './review-updater.mjs';
@@ -123,6 +124,9 @@ const JOB_BUILDERS = Object.freeze({
   // #604 (lane 2's flag): the wall's check job, root's LaunchDaemon every few minutes, starts the copy's builder-wall.mjs
   // check. The same module's wall job starts no copy script and is on NO_COPY_SCRIPT below.
   'setup/builder-wall.mjs': () => [wallCheckPlist({ base: SAMPLE_BASE, label: LABEL })],
+  // Wall v2: the builder's allow-list proxy, a LaunchDaemon run as the builder, built through loginJobPlist; it starts the
+  // copy's setup/builder-proxy.mjs.
+  'setup/builder-proxy.mjs': () => [builderProxyPlist({ base: SAMPLE_BASE, label: LABEL })],
 });
 // R-0b-179: job files that name a start command but start no script of the copy, so nothing they start goes through the
 // link above. Each is checked below: a job builder here must still start no copy script, and a reader must write none.
@@ -212,7 +216,7 @@ function startedScript(text) {
 // the builder it uses; the tripwire checks each still imports it.
 const BUILT_THROUGH = Object.freeze({ 'setup/robot-setup.mjs': 'modules/M11-dispatcher/login-job.mjs', 'setup/dispatcher-setup.mjs': 'modules/M11-dispatcher/login-job.mjs', 'modules/M12-sensors/sensors-job.mjs': 'modules/M11-dispatcher/login-job.mjs', 'wiring/runner-job.mjs': 'modules/M11-dispatcher/login-job.mjs',
   'setup/owner-answer-setup.mjs': 'modules/M11-dispatcher/login-job.mjs', 'setup/sensors-setup.mjs': 'modules/M12-sensors/sensors-job.mjs',
-  'setup/host-lock-copy.mjs': 'modules/M11-dispatcher/login-job.mjs' });
+  'setup/host-lock-copy.mjs': 'modules/M11-dispatcher/login-job.mjs', 'setup/builder-proxy.mjs': 'modules/M11-dispatcher/login-job.mjs' });
 // The functions that build a job file's text, each with the module that exports it (L734 self-review M1; #352 m1, r2 M1).
 // The scan reads each module of the copy through lex() below, so comments, strings and template text are never read as
 // code. A module that brings a builder in, by a named import or re-export (`import { … } from`, `import d, { … } from`,
@@ -623,7 +627,7 @@ test('L92 item 4, L106 M-1: every module of the installed copy loads from the co
 // static imports do not, and on the same module without it.
 test('L136 m1: the programs to start come from every job-file builder of the copy, and a new builder must be listed', () => {
   // Every launchd job file of today, read from its builder: the three LaunchDaemons, the watch-only week, the Dispatcher, the robot job, the Sensors loop, the wall's check job and root's worker-rules job (L1226).
-  assert.deepEqual(ENTRY_POINTS, [...new Set([...Object.values(SCRIPTS), DISPATCHER_MAIN, 'modules/M6-merge-gate/watch-run.mjs', ROBOT_MAIN, SENSORS_LOOP, RUNNER_MAIN, OWNER_SCRIPT, COPIER_SCRIPT, HANDOFF_COPIER, WALL_SCRIPT, WORKER_RULES_SCRIPT])].sort());
+  assert.deepEqual(ENTRY_POINTS, [...new Set([...Object.values(SCRIPTS), DISPATCHER_MAIN, 'modules/M6-merge-gate/watch-run.mjs', ROBOT_MAIN, SENSORS_LOOP, RUNNER_MAIN, OWNER_SCRIPT, COPIER_SCRIPT, HANDOFF_COPIER, WALL_SCRIPT, WORKER_RULES_SCRIPT, BUILDER_PROXY_SCRIPT])].sort());
   // The tripwire: a module of the copy (test code aside) that writes a launchd start command is a job-file builder, and
   // each one must be on JOB_BUILDERS, so the script its jobs start is started through the link above. A listed
   // builder that no longer writes one is stale.

@@ -75,11 +75,15 @@ export const NOT_CHECKED = Object.freeze({
   // builder-wall-check (L1223 ruling), this exact label only: root's by design. builder-wall.mjs reads no secret and starts
   // only pfctl, launchctl and its own network probes (sudo -u <user> node -e <fixed code> <protocol> <host> [port]). If it ever reads a secret or starts a program with one, it must load the guard
   // and be proved here under a root exemption by its exact label, like review-updater.
-  'builder-wall-check': 'it loads no guard: root\'s by design, it reads no secret and starts only pfctl, launchctl and its own sudo/node network probes (builder-wall.mjs:501, 522), with no secret on any line',
+  'builder-wall-check': 'it loads no guard: root\'s by design, it reads no secret and starts only pfctl, launchctl, sysctl, lsof and its own sudo/node network probes (builder-wall.mjs:615, 638), with no secret on any line',
   // worker-rules (L1243 ruling, on the builder-wall-check precedent; the job is #604's, L1226), this exact label only: root's by design, it writes
   // the rules the worker sessions' hooks read. It reads the setup config and the worker runner's config (no code fields:
   // readJobConfig code []), and starts only launchctl print system/<label> and ps -o uid=,stat= -p <pid>. If it ever reads
   // a secret or starts a program with one, it must load the guard and be proved here under a root exemption, like review-updater.
+  // builder-proxy (wall v2, 2026-11-16), this exact label only: the builder's allow-list proxy. It reads only the worker
+  // runner's config (its hosts) and starts no program at all; it drops a proxy password the client sends and never logs
+  // one (builder-proxy.test.mjs). If it ever starts a program, it must load the guard and be proved here.
+  'builder-proxy': 'it loads no guard: it starts no program, reads only the worker runner\'s config for its hosts, and drops and never logs a proxy password (builder-proxy.mjs)',
   'worker-rules': 'it loads no guard: root\'s by design, it reads no secret and starts only launchctl print and ps with a label or a pid (worker-rules.mjs:98, 110), with no secret on any line',
 });
 /** A job whose script writes or connects when it is only loaded is never loaded here: NOT TRIED, with the reason. None today. */

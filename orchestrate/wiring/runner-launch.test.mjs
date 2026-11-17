@@ -9,6 +9,7 @@ import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.m
 import { SETTINGS as S } from '../modules/M4-workshop/launcher/settings-names.mjs';
 import { renderRoleSettings, checkRunnerWall } from '../modules/M4-workshop/launcher/render-settings.mjs';
 import { walledLaunchSettings } from './runner-launch.mjs';
+import { PROXY_PORTS } from '../shared/builder-ports.mjs';
 import { writeStatus } from './runner-files.mjs';
 import { checkRunnerConfig } from './runner-main.mjs';
 
@@ -36,6 +37,21 @@ test('L759 step 2: an editing or undo launch gets worker settings that carry the
       assert.equal(r.role, 'worker');
       assert.ok(r.settings[S.sandbox][S.filesystem][S.denyRead].includes(runner.requestsDir), kind);
     }
+    // Wall v2: every session the runner starts is the builder's, so its shell goes through the allow-list proxy.
+    const withHost = walledLaunchSettings(input('editing', runner, { product: { commands: { test: 'npm test' }, hosts: ['github.com'] }, rulesHosts: ['github.com'] }));
+    assert.equal(withHost.ok, true, withHost.reason);
+    assert.equal(withHost.settings[S.sandbox][S.network][S.httpProxyPort], PROXY_PORTS.session);
+    assert.equal(withHost.settings[S.sandbox][S.network][S.socksProxyPort], PROXY_PORTS.session);
+    let seen; walledLaunchSettings({ ...input('editing', runner), render: (a) => { seen = a; return { ok: false, reason: 'stop' }; } });
+    assert.equal(seen.builderProxy, true);
+    // #617 r1 m3: the port is the phase's own. The install phase's (its list adds the registry hosts) in a session's
+    // settings refuses, and so does the session's in an install's; the real renderer's own ports pass.
+    const hosts = { product: { commands: { test: 'npm test' }, hosts: ['github.com'] }, rulesHosts: ['github.com'] };
+    const swapPort = (port) => (a) => { const r = renderRoleSettings(a); r.settings[S.sandbox][S.network][S.httpProxyPort] = port; r.settings[S.sandbox][S.network][S.socksProxyPort] = port; return r; };
+    assert.match(walledLaunchSettings({ ...input('editing', runner, hosts), render: swapPort(PROXY_PORTS.install) }).reason ?? '', /proxy port 47001 is not the session phase's \(47000\)/);
+    assert.match(walledLaunchSettings({ ...input('editing', runner, { ...hosts, phase: 'install', registryHosts: ['registry.npmjs.org'] }), render: swapPort(PROXY_PORTS.session) }).reason ?? '', /proxy port 47000 is not the install phase's \(47001\)/);
+    const inst = walledLaunchSettings(input('editing', runner, { ...hosts, phase: 'install', registryHosts: ['registry.npmjs.org'] }));
+    assert.equal(inst.ok, true, inst.reason); assert.equal(inst.settings[S.sandbox][S.network][S.httpProxyPort], PROXY_PORTS.install);
     // The runner's own paths win over any the caller put in paths.
     const forged = walledLaunchSettings(input('editing', runner, { paths: { ...PATHS, workerRunner: { requestsDir: '/elsewhere/req', statusFile: '/elsewhere/s/status.json' } } }));
     assert.equal(forged.ok, true, forged.reason);
