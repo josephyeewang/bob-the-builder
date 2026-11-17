@@ -10,11 +10,11 @@ import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { fakeMac } from './fake-mac.test-helper.mjs';
 import { tempDir } from '../shared/test-tmp.mjs';
-import { ROOT_CONFIG_PATH } from './layout.mjs';
+import { ROOT_CONFIG_PATH, wallDir } from './layout.mjs';
 import { chainProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
 import {
   ALL_ADDRESSES, ANCHOR, ANCHOR_DIR, ANCHOR_FILE, FAMILIES, PROTOS, RULES, WALL_RANGE, EPHEMERAL, anchorText, bootScript, checkWall, loadedRulesProblem, main, otherAddresses,
-  planWall, tokenPath, unreadPath, waitForFirstRun, wallLabel, wallPlistPath, wallDir,
+  planWall, tokenPath, unreadPath, waitForFirstRun, wallLabel, wallPlistPath,
   RECHECK_EVERY_S, STATUS_FILE, STATUS_VERSION, WALL_CHECK_JOB, WALL_SCRIPT, WHY_CHARS, WHY_MAX, anchorSha256, parseStatus, statusOf, statusText,
   wallCheckPlist, WAY_OUT_TEXT, LISTENER, CLIENT, ephemeralProblem, rangeListenersProblem, SETTINGS_ROWS, expectedRows, ownAddresses, trafficChecks,
 } from './builder-wall.mjs';
