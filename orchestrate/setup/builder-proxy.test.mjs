@@ -1,20 +1,25 @@
 // builder-proxy.test.mjs — the builder's allow-list proxy (wall v2), with real local sockets on random ports.
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
 import { join } from 'node:path';
 import { writeFileSync, utimesSync } from 'node:fs';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { PROXY_PORTS, inRange } from '../shared/builder-ports.mjs';
-import { ALLOWED_PORTS, BUILDER_PROXY_JOB, DENY, LISTEN_HOSTS, PORT_LIST, builderProxyPlist, createProxy, fileLists, hostOf, listsFrom, main, proxyListenRows, publicAddress, serve } from './builder-proxy.mjs';
+import { TUNNEL_PORTS, HTTP_PORTS, BUILDER_PROXY_JOB, DENY, LISTEN_HOSTS, PORT_LIST, builderProxyPlist, createProxy, fileLists, hostOf, listsFrom, main, proxyListenRows, publicAddress, serve } from './builder-proxy.mjs';
 
 const PUBLIC = '93.184.216.34';
 const SECRET = 'hunter2-s3cr3t-value';
+// #617 r2 m3: every server and socket a test opens is closed at the end, so a failed assertion (which skips its test's
+// own close) reports at once instead of holding the file open until the runner's own limit.
+const OPEN = new Set();
+const keep = (x) => { OPEN.add(x); x.once?.('close', () => OPEN.delete(x)); return x; };
+after(() => { for (const x of OPEN) { if (x instanceof net.Server) x.close(); else x.destroy?.(); } });
 
 /** An upstream on 127.0.0.1:random that records what it got and echoes it back (after a fixed greeting for plain HTTP). */
 async function upstream({ http = false, hold = false } = {}) {
   const got = []; let conns = 0;
-  const s = net.createServer((c) => { conns += 1; c.on('data', (d) => { got.push(d); if (hold) return; if (http) c.end('HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok'); else c.write(d); }); c.on('error', () => {}); });
+  const s = keep(net.createServer((c) => { keep(c); conns += 1; c.on('data', (d) => { got.push(d); if (hold) return; if (http) c.end('HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok'); else c.write(d); }); c.on('error', () => {}); }));
   await new Promise((r) => s.listen(0, '127.0.0.1', r));
   return { port: s.address().port, got: () => Buffer.concat(got).toString('latin1'), conns: () => conns, close: () => s.close() };
 }
@@ -23,7 +28,8 @@ async function upstream({ http = false, hold = false } = {}) {
 async function proxy({ up, list = ['allowed.example.com'], answers = [{ address: PUBLIC }], ...opts } = {}) {
   const logs = [];
   const s = createProxy({ allowed: () => list, log: (o) => logs.push(o), port: 47000, lookup: async () => answers,
-    connect: () => net.connect({ host: '127.0.0.1', port: up?.port ?? 1 }), ...opts });
+    connect: () => keep(net.connect({ host: '127.0.0.1', port: up?.port ?? 1 })), ...opts });
+  keep(s); s.on('connection', keep);
   await new Promise((r) => s.listen(0, '127.0.0.1', r));
   return { port: s.address().port, logs, close: () => new Promise((r) => s.close(r)), server: s };
 }
@@ -31,7 +37,7 @@ async function proxy({ up, list = ['allowed.example.com'], answers = [{ address:
 /** Send `parts` (each written in turn, a short pause between), read until the far end closes or `ms` passes. */
 function ask(port, parts, { ms = 400, host = '127.0.0.1' } = {}) {
   return new Promise((resolve) => {
-    const c = net.connect({ host, port }); const got = []; let i = 0;
+    const c = keep(net.connect({ host, port })); const got = []; let i = 0;
     const next = () => { if (i < parts.length) { c.write(parts[i]); i += 1; setTimeout(next, 30); } };
     c.on('connect', next); c.on('data', (d) => got.push(d)); c.on('error', () => {});
     const end = () => { clearTimeout(t); c.destroy(); resolve(Buffer.concat(got)); };
@@ -53,10 +59,10 @@ test('the ports: both of the proxy\'s in the builder\'s range, one list each, on
   for (const p of Object.values(PROXY_PORTS)) assert.ok(inRange(p), String(p));
   assert.deepEqual(PORT_LIST, { [PROXY_PORTS.session]: 'session', [PROXY_PORTS.install]: 'install' });
   assert.deepEqual([...LISTEN_HOSTS], ['127.0.0.1', '::1']);
-  assert.deepEqual([...ALLOWED_PORTS], [22, 80, 443]);
+  assert.deepEqual([...TUNNEL_PORTS], [22, 443]); assert.deepEqual([...HTTP_PORTS], [80]);
 });
 
-test('CONNECT to a listed host reaches it; the log says allow, the host and the bytes', async () => {
+test('CONNECT to a listed host reaches it; the log says allow, the host and the bytes', { timeout: 20_000 }, async () => {
   const up = await upstream(); const p = await proxy({ up });
   const { out, log: l } = await via(p, ['CONNECT allowed.example.com:443 HTTP/1.1\r\nHost: allowed.example.com:443\r\n\r\n', 'ping']);
   assert.match(out.toString('latin1'), /^HTTP\/1\.1 200 Connection Established\r\n\r\nping$/);
@@ -66,7 +72,7 @@ test('CONNECT to a listed host reaches it; the log says allow, the host and the 
   await p.close(); up.close();
 });
 
-test('CONNECT refusals: not listed, an IP address, user information, another port, a non-public DNS answer; nothing reaches the upstream', async () => {
+test('CONNECT refusals: not listed, an IP address, user information, another port, a non-public DNS answer; nothing reaches the upstream', { timeout: 20_000 }, async () => {
   const up = await upstream();
   const cases = [
     ['CONNECT other.example.com:443 HTTP/1.1', 'not-listed', {}],
@@ -94,7 +100,7 @@ test('CONNECT refusals: not listed, an IP address, user information, another por
   up.close();
 });
 
-test('plain HTTP (absolute form): sent on in origin form; Proxy-Authorization never passed on and never logged; nor the path', async () => {
+test('plain HTTP (absolute form): sent on in origin form; Proxy-Authorization never passed on and never logged; nor the path', { timeout: 20_000 }, async () => {
   const up = await upstream({ http: true }); const p = await proxy({ up });
   const { out, log: l } = await via(p, [`GET http://allowed.example.com/secret-path?token=${SECRET} HTTP/1.1\r\nHost: allowed.example.com\r\nProxy-Authorization: Basic ${SECRET}\r\nProxy-Connection: keep-alive\r\nAccept: */*\r\n\r\n`]);
   assert.match(out.toString('latin1'), /^HTTP\/1\.1 200 OK/);
@@ -117,7 +123,7 @@ test('plain HTTP (absolute form): sent on in origin form; Proxy-Authorization ne
   await p.close(); up.close();
 });
 
-test('#617 r1 M2 plain HTTP: a Host that is not the URL\'s own is refused, a second Host too; :80 and case are the same host; the upstream gets the URL\'s Host', async () => {
+test('#617 r1 M2 plain HTTP: a Host that is not the URL\'s own is refused, a second Host too; :80 and case are the same host; the upstream gets the URL\'s Host', { timeout: 20_000 }, async () => {
   const up = await upstream({ http: true }); const p = await proxy({ up });
   for (const head of [
     'GET http://allowed.example.com/x HTTP/1.1\r\nHost: evil.example.net\r\n\r\n',
@@ -140,7 +146,7 @@ test('#617 r1 M2 plain HTTP: a Host that is not the URL\'s own is refused, a sec
   await p.close(); up.close();
 });
 
-test('#617 r1 M2 plain HTTP: one request per connection; a pipelined second one (same packet or later) refuses and never goes up; a chunked body refuses', async () => {
+test('#617 r1 M2 plain HTTP: one request per connection; a pipelined second one (same packet or later) refuses and never goes up; a chunked body refuses', { timeout: 20_000 }, async () => {
   // An upstream that does not answer, so the connection is still open when the client's next bytes come.
   const up = await upstream({ hold: true }); const p = await proxy({ up });
   const first = 'GET http://allowed.example.com/one HTTP/1.1\r\nHost: allowed.example.com\r\n\r\n';
@@ -164,7 +170,40 @@ test('#617 r1 M2 plain HTTP: one request per connection; a pipelined second one 
   await p.close(); up.close();
 });
 
-test('SOCKS5 on the same port: a listed name reaches it (hello and request apart, or together); refusals answer as SOCKS', async () => {
+test('#617 r2 M1: a tunnel (CONNECT or SOCKS) reaches only 22 and 443; port 80 only by the checked plain-HTTP path, so a smuggled Host or a pipelined request never goes up', { timeout: 20_000 }, async () => {
+  const up = await upstream(); const p = await proxy({ up });
+  const smuggled = 'GET / HTTP/1.1\r\nHost: evil.example.net\r\n\r\nGET /2 HTTP/1.1\r\nHost: other.example.org\r\n\r\n';
+  const c = await via(p, ['CONNECT allowed.example.com:80 HTTP/1.1\r\nHost: allowed.example.com:80\r\n\r\n', smuggled]);
+  assert.match(c.out.toString('latin1'), /^HTTP\/1\.1 403 /); assert.equal(c.log.why, 'bad-port');
+  const s = await via(p, [socksHello, socksName('allowed.example.com', 80), smuggled]);
+  assert.deepEqual([...s.out.subarray(0, 4)], [5, 0, 5, 2]); assert.equal(s.log.why, 'bad-port');
+  // Plain HTTP to another port than 80 is refused too (the auditor's absolute form with :443).
+  const h = await via(p, ['GET http://allowed.example.com:443/ HTTP/1.1\r\nHost: allowed.example.com:443\r\n\r\n']);
+  assert.match(h.out.toString('latin1'), /^HTTP\/1\.1 403 /); assert.equal(h.log.why, 'bad-port');
+  assert.equal(up.conns(), 0); assert.equal(up.got(), '');
+  await p.close(); up.close();
+});
+
+test('#617 r2 m1 plain HTTP: a lone CR or LF, a folded line (space or tab first) and a field name that is not token characters are refused', { timeout: 20_000 }, async () => {
+  const up = await upstream({ hold: true }); const p = await proxy({ up });
+  for (const [name, parts] of [
+    ['a bare LF hiding Transfer-Encoding', ['POST http://allowed.example.com/ HTTP/1.1\r\nHost: allowed.example.com\r\nX: a\nTransfer-Encoding: chunked\r\nContent-Length: 60\r\n\r\n', '0\r\n\r\nGET /x HTTP/1.1\r\nHost: evil.example.net\r\nX: 123456\r\n\r\n']],
+    ['a lone CR', ['GET http://allowed.example.com/ HTTP/1.1\r\nHost: allowed.example.com\rX: y\r\n\r\n']],
+    ['a space continuation', ['GET http://allowed.example.com/ HTTP/1.1\r\nHost: allowed.example.com\r\n evil.example.net\r\n\r\n']],
+    ['a tab continuation', ['GET http://allowed.example.com/ HTTP/1.1\r\n\tHost: evil.example.net\r\n\r\n']],
+    ['a space before the colon', ['GET http://allowed.example.com/ HTTP/1.1\r\nHost : evil.example.net\r\n\r\n']],
+    ['a doubled Content-Length, one with a space', ['POST http://allowed.example.com/ HTTP/1.1\r\nHost: allowed.example.com\r\nContent-Length: 5\r\nContent-Length : 5\r\n\r\nhello']],
+    ['Transfer_Encoding (read as Transfer-Encoding by some servers)', ['POST http://allowed.example.com/ HTTP/1.1\r\nHost: allowed.example.com\r\nTransfer_Encoding: chunked\r\nContent-Length: 3\r\n\r\nabc']],
+    ['a field name with a bracket', ['GET http://allowed.example.com/ HTTP/1.1\r\nHost: allowed.example.com\r\nX[1]: y\r\n\r\n']],
+  ]) {
+    const { out, log: l } = await via(p, parts);
+    assert.match(out.toString('latin1'), /^HTTP\/1\.1 400 /, name); assert.equal(l.why, 'bad-request', name);
+  }
+  assert.equal(up.conns(), 0);
+  await p.close(); up.close();
+});
+
+test('SOCKS5 on the same port: a listed name reaches it (hello and request apart, or together); refusals answer as SOCKS', { timeout: 20_000 }, async () => {
   const up = await upstream(); const p = await proxy({ up });
   for (const parts of [[socksHello, socksName('allowed.example.com', 22), 'SSH-2.0-x'], [Buffer.concat([socksHello, socksName('allowed.example.com', 22)]), 'SSH-2.0-x']]) {
     const { out, log } = await via(p, parts);
@@ -190,7 +229,7 @@ test('SOCKS5 on the same port: a listed name reaches it (hello and request apart
   await p.close(); up.close();
 });
 
-test('limits: a head past MAX_HEAD, too many at once, a client that never asks', async () => {
+test('limits: a head past MAX_HEAD, too many at once, a client that never asks', { timeout: 20_000 }, async () => {
   const up = await upstream();
   const p = await proxy({ up, maxHead: 64, maxConnections: 1, handshakeMs: 150 });
   const big = await via(p, [`CONNECT allowed.example.com:443 HTTP/1.1\r\nX: ${'a'.repeat(200)}\r\n\r\n`]);
@@ -236,7 +275,7 @@ test('fileLists: read again when the file changes; unreadable or broken is an em
   assert.deepEqual(fileLists(join(dir, 'missing.json'))().session, []);
 });
 
-test('end to end from the config file: a rules host the product does not name is refused at the session port', async () => {
+test('end to end from the config file: a rules host the product does not name is refused at the session port', { timeout: 20_000 }, async () => {
   const dir = tempDir('orch-proxy-'); const f = join(dir, 'worker-runner.json');
   writeFileSync(f, JSON.stringify({ products: { a: { render: { product: { hosts: ['github.com'] }, rulesHosts: ['github.com', 'example.com'], registryHosts: ['registry.npmjs.org'] } } } }));
   const up = await upstream(); const lists = fileLists(f);
@@ -265,7 +304,7 @@ test('hostOf and publicAddress', () => {
   for (const a of ['93.184.217.1', '2606:4700:11::1', '8.8.8.8']) assert.ok(publicAddress(a, { ifaces }), a);
 });
 
-test('serve listens on both loopback addresses for each port; main refuses root and a missing config', async () => {
+test('serve listens on both loopback addresses for each port; main refuses root and a missing config', { timeout: 20_000 }, async () => {
   const servers = await serve({ configPath: '/nonexistent.json', ports: { 0: 'session' }, log: () => {} });
   assert.deepEqual(servers.map((s) => s.address().address).sort(), ['127.0.0.1', '::1']);
   await Promise.all(servers.map((s) => new Promise((r) => s.close(r))));
@@ -287,7 +326,7 @@ test('the proxy\'s job: as the builder, umask 077, no signal debugger, the copy\
   assert.match(t, /<key>RunAtLoad<\/key><true\/>/);
 });
 
-test('daemons: the proxy\'s job is on exactly with the worker runner, before the wall\'s check job; a loop, so alive is the check', async () => {
+test('daemons: the proxy\'s job is on exactly with the worker runner, before the wall\'s check job; a loop, so alive is the check', { timeout: 20_000 }, async () => {
   const { jobsFor, onlyJobs, OPTIONAL_JOBS, runRows } = await import('./daemons.mjs');
   const on = { label: 'com.example.orch', base: '/opt/orch', owner: 'joe', workerRunner: { product: 'alpha' } };
   const off = { ...on, workerRunner: undefined };

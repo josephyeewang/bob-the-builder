@@ -21,7 +21,9 @@
 //        a socket in R that is not the builder's gets nothing: so the builder reaches only its own listeners in R
 //   4. block return out quick on ! lo0 proto { tcp udp } from any to self user <b>   (kept from v1)
 // No rule names a family, so IPv4 and IPv6 (127.0.0.1 and ::1, 0.0.0.0 and ::) are covered alike. A connect to one of this
-// Mac's other addresses goes through lo0 too (the read-back probes one); rule 4 covers it off lo0 all the same.
+// Mac's other addresses goes through lo0 too (the read-back probes one); rule 4 covers it off lo0 all the same. pf turns
+// `self` into the Mac's addresses when the rules load: after an address changes, `check` fails (safe) on rule 4 until
+// the wall's job loads the rules again.
 // #617 r1 M1: the first v2 had a fifth rule, a `pass` for builder UDP from R to any ephemeral port, so a builder UDP
 // server could answer. It let a builder socket in R hold a two-way UDP conversation with any user's socket on an
 // ephemeral port (netstat lists them to anyone, so nothing had to be guessed). It is gone (the lead's ruling).
@@ -595,7 +597,7 @@ export async function waitForFirstRun(io, cfg, { limitMs = FIRST_RUN_WAIT_MS, st
  */
 export async function trafficChecks(cfg, net, other = net.addresses().slice(0, 1)) {
   const out = [];
-  if (!other.length) out.push({ ok: true, what: 'this Mac has no address but loopback, so only 127.0.0.1 and ::1 were probed' });
+  if (!other.length) out.push({ ok: true, what: 'this Mac has no address but loopback (and link-local), so only 127.0.0.1 and ::1 were probed' });
   // [what, the address probed, the address the listeners bind]: a service bound to every address (`*` or `::`) is
   // reached through loopback too, so it is probed as its own place.
   const places = [...FAMILIES.map(([f, h]) => [f, h, h]), ...ALL_ADDRESSES, ...other.map((a) => [`this Mac's own address`, a, a])];
@@ -699,10 +701,16 @@ if (proto === 'tcp') { const c = require('net').connect(port, host, () => say('o
 else { let tries = 0; const open = () => { const s = require('dgram').createSocket(host.includes(':') ? 'udp6' : 'udp4'); let bound = false; s.on('message', (m) => say(String(m) === 'pong' ? 'ok' : 'error: odd reply')); s.on('error', (e) => { if (!bound && e.code === 'EADDRINUSE' && lo && (tries += 1) < 50) { s.close(); return open(); } say(e.code === 'ECONNREFUSED' ? 'refused' : 'error: ' + e.code); }); s.bind(lo ? lo + Math.floor(Math.random() * (hi - lo + 1)) : 0, () => { bound = true; s.connect(port, host, () => s.send('ping')); }); }; open(); }`;
 
 const ENV = Object.freeze({ PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LC_ALL: 'C' });
-/** One address of this Mac that is not loopback (IPv4, not link-local), for the probe through it (#556 r1 m4). */
+/**
+ * One address of this Mac that is not loopback nor link-local, for the probe through it (#556 r1 m4): an IPv4 one if
+ * there is one, else an IPv6 one (#617 r2: a Mac with only IPv6 beyond loopback is probed through it too).
+ */
 export function otherAddresses(ifaces = networkInterfaces()) {
-  for (const list of Object.values(ifaces)) for (const a of list ?? []) if (!a.internal && a.family === 'IPv4' && !a.address.startsWith('169.254.')) return [a.address];
-  return [];
+  const all = Object.values(ifaces ?? {}).flatMap((list) => list ?? []).filter((a) => a && !a.internal);
+  const four = all.find((a) => (a.family === 'IPv4' || a.family === 4) && !a.address.startsWith('169.254.'));
+  if (four) return [four.address];
+  const six = all.find((a) => (a.family === 'IPv6' || a.family === 6) && !/^fe[89ab]/i.test(a.address) && !a.address.includes('%'));
+  return six ? [six.address] : [];
 }
 export function realNet({ node = PROBE_NODE } = {}) {
   const as = (user) => ['-n', '-H', '-u', user, node];

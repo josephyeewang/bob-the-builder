@@ -683,14 +683,14 @@ export function machineWideSettings({ node, hooksDir, snapshot }) {
   return { [S.hooks]: { [E.preToolUse]: [{ [H.matcher]: '*', [H.hooks]: [{ [H.type]: 'command', [H.command]: command, [H.timeout]: HOOK_TIMEOUT, [H.onFailure]: 'block' }] }] } };
 }
 
-/** Writes the role file (atomically), reads it back from disk and checks it. */
-export function writeRoleSettings(file, settings, { profile } = {}) {
+/** Writes the role file (atomically), reads it back from disk and checks it, with the phase when given (its proxy port). */
+export function writeRoleSettings(file, settings, { profile, phase = null } = {}) {
   const text = `${JSON.stringify(settings, null, 2)}\n`;
   const tmp = join(dirname(file), `.${basename(file)}.tmp`);
   writeFileSync(tmp, text, { mode: 0o644 });
   renameSync(tmp, file);
   let back; try { back = JSON.parse(readFileSync(file, 'utf8')); } catch { return refuse('role settings did not read back'); }
   if (JSON.stringify(back) !== JSON.stringify(settings)) return refuse('role settings read back differently');
-  const c = checkSettings(back, { profile });
+  const c = checkSettings(back, { profile, phase });
   return c.ok ? { ok: true, file, settings: back } : c;
 }

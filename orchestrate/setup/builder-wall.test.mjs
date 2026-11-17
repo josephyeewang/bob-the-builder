@@ -556,11 +556,15 @@ test('R-0b-179 (r1 m4): one address of this Mac that is not loopback is probed; 
   const lone = fakeNet(w.pf, { addresses: [] });
   const rows = await checkWall(w.mac, w.cfg, { net: lone });
   assert.deepEqual(fails(rows), []);
-  assert.ok(rows.some((r) => /no address but loopback, so only 127\.0\.0\.1 and ::1 were probed/.test(r.what)));
+  assert.ok(rows.some((r) => /no address but loopback \(and link-local\), so only 127\.0\.0\.1 and ::1 were probed/.test(r.what)));
   assert.equal(lone.log.some((l) => l.endsWith(LAN)), false);
   // The real lookup: the first IPv4 address that is not internal or link-local.
   assert.deepEqual(otherAddresses({ lo0: [{ address: '127.0.0.1', family: 'IPv4', internal: true }], en0: [{ address: 'fe80::1', family: 'IPv6', internal: false }, { address: '169.254.3.4', family: 'IPv4', internal: false }, { address: '10.0.0.7', family: 'IPv4', internal: false }] }), ['10.0.0.7']);
   assert.deepEqual(otherAddresses({ lo0: [{ address: '127.0.0.1', family: 'IPv4', internal: true }] }), []);
+  // #617 r2: with no IPv4 address beyond loopback, an IPv6 one (not link-local) is probed.
+  assert.deepEqual(otherAddresses({ lo0: [{ address: '::1', family: 'IPv6', internal: true }], en0: [{ address: 'fe80::1%en0', family: 'IPv6', internal: false }, { address: '2001:db8::5', family: 'IPv6', internal: false }] }), ['2001:db8::5']);
+  assert.deepEqual(otherAddresses({ en0: [{ address: 'fe80::1', family: 'IPv6', internal: false }, { address: '169.254.1.1', family: 'IPv4', internal: false }] }), []);
+  assert.deepEqual(otherAddresses({ en0: [{ address: '2001:db8::5', family: 'IPv6', internal: false }], en1: [{ address: '192.168.1.9', family: 'IPv4', internal: false }] }), ['192.168.1.9']);
 });
 
 test('R-0b-179 (r1 m2, m3): every printed word is checked: keep state, no quick, a group, a family on a rule that is not self, and a qualifier more all refuse', async () => {

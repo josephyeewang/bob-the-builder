@@ -26,14 +26,18 @@
 // session is asking, so one product's session may reach another product's listed hosts (all are on the rules' list).
 //
 // What it refuses: a host not on the list (exact match, lowercase), an IP address instead of a name, a name with user
-// information (user:pass@), a port other than ALLOWED_PORTS, a name whose DNS answer holds a loopback, private,
+// information (user:pass@), a tunnel (CONNECT or SOCKS) to a port other than TUNNEL_PORTS (22, 443) or plain HTTP to one
+// other than HTTP_PORTS (80), a name whose DNS answer holds a loopback, private,
 // link-local, multicast, NAT64 (64:ff9b::/96), IPv4-compatible (::/96) or otherwise non-public address, or one of this
 // Mac's own addresses or networks (os.networkInterfaces, read at each lookup), so an allowed name can't be pointed back
 // into the Mac or its LAN; and any SOCKS command but CONNECT. It connects to the address it checked, never a second
 // lookup. Proxy-Authorization and Proxy-Connection headers are dropped, never passed on and never logged.
-// Plain HTTP (#617 r1 M2): a Host header that is not the URL's own host[:port] is refused (the upstream obeys Host, not
-// the URL), and a connection carries ONE request: its body is Content-Length bytes, a chunked body is refused, and a
-// byte past the body (a pipelined second request) refuses the connection before it goes up.
+// Plain HTTP (#617 r1 M2, r2): port 80 is reached only this way, never by a tunnel. A Host header that is not the URL's
+// own host[:port] is refused (the upstream obeys Host, not the URL), and so is a head with a lone CR or LF, a line
+// starting with a space or tab (a folded line), or a field name that is not plain token characters followed by its
+// colon. A connection carries ONE request: its body is Content-Length bytes, a chunked body is refused, and a byte past
+// the body (a pipelined second request) refuses the connection before it goes up. SOCKS clients wanting plain HTTP must
+// use the HTTP proxy (the same port).
 // What it can't stop: inside a CONNECT tunnel the TLS is the client's, so a client may ask a listed name's server (a
 // shared CDN, say) for another site by the TLS server name or the inner Host (domain fronting). Claude Code's own
 // proxy has the same limit; only a proxy that ends the TLS could see it.
@@ -63,8 +67,15 @@ export const BUILDER_PROXY_JOB = 'builder-proxy';
 export const BUILDER_PROXY_SCRIPT = 'setup/builder-proxy.mjs';
 /** Where it listens: both loopback addresses, never a wider one. */
 export const LISTEN_HOSTS = Object.freeze(['127.0.0.1', '::1']);
-/** Destination ports a shell may reach: ssh (git), http, https. */
-export const ALLOWED_PORTS = Object.freeze([22, 80, 443]);
+/**
+ * Destination ports a shell may reach. A tunnel (CONNECT or SOCKS) carries the client's bytes unread, so it goes only to
+ * ssh (git) and https; http (80) goes only through the plain-HTTP path, whose request head is checked (#617 r2 M1: a
+ * CONNECT or SOCKS tunnel to port 80 passed a smuggled Host and pipelined requests on unread).
+ */
+export const TUNNEL_PORTS = Object.freeze([22, 443]);
+export const HTTP_PORTS = Object.freeze([80]);
+/** A request-head field name: HTTP's token characters, the colon right after it (no space, no folded line). */
+const FIELD = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+:/;
 export const MAX_CONNECTIONS = 64;
 export const MAX_HEAD = 16 * 1024;
 export const HANDSHAKE_MS = 10_000;
@@ -154,9 +165,10 @@ const connectTo = ({ address, port }) => net.connect({ host: address, port });
 
 /**
  * One proxy server. `allowed()` → the list of host names (read at each connection); `log(line)` takes one JSON object.
- * Ports for tests: lookup(host) → [{ address }], connect({ address, port, host }) → a socket, ports (ALLOWED_PORTS).
+ * Ports for tests: lookup(host) → [{ address }], connect({ address, port, host }) → a socket, tunnelPorts (TUNNEL_PORTS),
+ * httpPorts (HTTP_PORTS).
  */
-export function createProxy({ allowed, log, port = 0, lookup = lookupAll, connect = connectTo, ports = ALLOWED_PORTS, maxConnections = MAX_CONNECTIONS,
+export function createProxy({ allowed, log, port = 0, lookup = lookupAll, connect = connectTo, tunnelPorts = TUNNEL_PORTS, httpPorts = HTTP_PORTS, maxConnections = MAX_CONNECTIONS,
   maxHead = MAX_HEAD, handshakeMs = HANDSHAKE_MS, idleMs = IDLE_MS, maxBytes = MAX_BYTES }) {
   let open = 0;
   const server = net.createServer((client) => {
@@ -181,8 +193,9 @@ export function createProxy({ allowed, log, port = 0, lookup = lookupAll, connec
     const R431 = 'HTTP/1.1 431 Request Header Fields Too Large\r\nConnection: close\r\nContent-Length: 0\r\n\r\n';
 
     // A name and port asked for → checked, then the upstream socket; `after(up)` sends what is owed before both pipe.
-    // `upward(d, up)`: how a client's bytes go up once connected; by default all of them (a tunnel).
-    const reach = async (rawHost, rawPort, refuse, after, upward = (d, up) => up.write(d)) => {
+    // `ports`: the ports this way may reach. `upward(d, up)`: how a client's bytes go up once connected; by default all of
+    // them (a tunnel).
+    const reach = async (rawHost, rawPort, ports, refuse, after, upward = (d, up) => up.write(d)) => {
       rec.host = logHost(rawHost);
       const h = hostOf(rawHost); if (h.deny) return deny(h.deny, refuse);
       const p = Number(rawPort); if (!ports.includes(p)) return deny('bad-port', refuse);
@@ -212,6 +225,8 @@ export function createProxy({ allowed, log, port = 0, lookup = lookupAll, connec
       if (end < 0 || end > maxHead) return buf.length > maxHead ? deny('too-big', R431) : undefined;
       stop();
       const head = buf.subarray(0, end).toString('latin1'); const rest = buf.subarray(end + 4);
+      // #617 r2 m1: CR and LF only as a pair; no folded line; each field name plain token characters, its colon right after.
+      if (/\r(?!\n)|(?<!\r)\n/.test(head)) return deny('bad-request', R400);
       const [line, ...fields] = head.split('\r\n');
       const m = /^([A-Z]{1,16}) (\S+) HTTP\/1\.[01]$/.exec(line);
       if (!m) return deny('bad-request', R400);
@@ -220,16 +235,18 @@ export function createProxy({ allowed, log, port = 0, lookup = lookupAll, connec
         if (target.includes('@')) return deny('userinfo', R403);
         const a = /^(\[[0-9a-fA-F:.]+\]|[^:[\]]+):(\d{1,5})$/.exec(target);
         if (!a) return deny('bad-request', R400);
-        return reach(a[1].replace(/^\[|\]$/g, ''), a[2], R403, (up) => { client.write('HTTP/1.1 200 Connection Established\r\n\r\n'); if (rest.length) { rec.up += rest.length; up.write(rest); } });
+        return reach(a[1].replace(/^\[|\]$/g, ''), a[2], tunnelPorts, R403, (up) => { client.write('HTTP/1.1 200 Connection Established\r\n\r\n'); if (rest.length) { rec.up += rest.length; up.write(rest); } });
       }
       // Plain HTTP, absolute form only (http://host[:port]/path): sent on in origin form, as ONE request, the proxy's headers
       // dropped. The upstream reads its Host header, not the URL, so a Host that is not the URL's own is refused (#617 r1
       // M2: a listed name in the URL with another site in Host). One request per connection: its body is Content-Length
       // bytes (no chunked body), and a byte past it (a second, pipelined request) refuses the connection, never sent on.
       if (!/^http:\/\//i.test(target)) return deny('bad-request', R400);
+      if (!fields.every((f) => FIELD.test(f))) return deny('bad-request', R400);
       if (/^http:\/\/[^/?#]*@/i.test(target)) return deny('userinfo', R403);
       let u; try { u = new URL(target); } catch { return deny('bad-request', R400); }
-      const named = (k) => fields.filter((f) => new RegExp(`^${k}\\s*:`, 'i').test(f)).map((f) => f.slice(f.indexOf(':') + 1).trim());
+      // A name with _ for - counts as that name too (some servers read Transfer_Encoding as Transfer-Encoding).
+      const named = (k) => fields.filter((f) => new RegExp(`^${k.replace(/-/g, '[-_]')}:`, 'i').test(f)).map((f) => f.slice(f.indexOf(':') + 1).trim());
       const hosts = named('host');
       if (hosts.length > 1 || (hosts.length === 1 && hosts[0].toLowerCase().replace(/\.(?=:|$)/, '').replace(/:80$/, '') !== u.host)) { rec.host = logHost(u.hostname); return deny('host-mismatch', R403); }
       if (named('transfer-encoding').length) return deny('bad-request', R400);
@@ -238,13 +255,13 @@ export function createProxy({ allowed, log, port = 0, lookup = lookupAll, connec
       let left = lengths.length ? Number(lengths[0]) : 0;
       if (rest.length > left) { rec.host = logHost(u.hostname); return deny('second-request', R400); }
       left -= rest.length;
-      const kept = fields.filter((f) => !/^(host|proxy-authorization|proxy-connection|connection|keep-alive)\s*:/i.test(f));
+      const kept = fields.filter((f) => !/^(host|proxy[-_]authorization|proxy[-_]connection|connection|keep[-_]alive):/i.test(f));
       const out = Buffer.concat([Buffer.from(`${method} ${u.pathname}${u.search} HTTP/1.1\r\n${[`Host: ${u.host}`, ...kept, 'Connection: close'].join('\r\n')}\r\n\r\n`, 'latin1'), rest]);
       const oneBody = (d, up) => {
         if (d.length > left) { if (left) up.write(d.subarray(0, left)); left = 0; kill('second-request'); return; }
         left -= d.length; up.write(d);
       };
-      return reach(u.hostname.replace(/^\[|\]$/g, ''), u.port || '80', R403, (up) => { rec.up += out.length; up.write(out); }, oneBody);
+      return reach(u.hostname.replace(/^\[|\]$/g, ''), u.port || '80', httpPorts, R403, (up) => { rec.up += out.length; up.write(out); }, oneBody);
     };
 
     // SOCKS5 (RFC 1928): no authentication, CONNECT, a domain name (socks5h) only.
@@ -264,7 +281,7 @@ export function createProxy({ allowed, log, port = 0, lookup = lookupAll, connec
       const n = buf[4]; if (buf.length < 7 + n) return undefined;
       const name = buf.subarray(5, 5 + n).toString('latin1'); const p = buf.readUInt16BE(5 + n); const rest = buf.subarray(7 + n);
       stop();
-      return reach(name, String(p), fail(2), (up) => { client.write(fail(0)); if (rest.length) { rec.up += rest.length; up.write(rest); } });
+      return reach(name, String(p), tunnelPorts, fail(2), (up) => { client.write(fail(0)); if (rest.length) { rec.up += rest.length; up.write(rest); } });
     };
 
     const onData = (chunk) => {

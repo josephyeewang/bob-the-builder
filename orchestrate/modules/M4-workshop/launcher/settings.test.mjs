@@ -272,6 +272,10 @@ test('the role file is written, read back from disk and checked', () => {
   assert.deepEqual(JSON.parse(readFileSync(f, 'utf8')), s);
   const bad = structuredClone(s); bad[S.sandbox][S.failIfUnavailable] = false;
   assert.match(writeRoleSettings(f, bad, { profile: DESIGN_PROFILES.worker }).reason, /failIfUnavailable/);
+  // #617 r2 m2: the copy read back is checked with the phase, so a proxy port that is not the phase's own refuses.
+  const proxied = render('worker', { builderProxy: true, phase: 'session' }).settings;
+  assert.equal(writeRoleSettings(f, proxied, { profile: DESIGN_PROFILES.worker, phase: 'session' }).ok, true);
+  assert.match(writeRoleSettings(f, proxied, { profile: DESIGN_PROFILES.worker, phase: 'install' }).reason ?? '', /is not the install phase's/);
   assert.equal(hasShell(DESIGN_PROFILES.lead), false);
 });
 

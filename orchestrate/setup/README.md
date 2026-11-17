@@ -527,13 +527,17 @@ for a session's shell, **47001** for a worker's install step. Every role file th
 at it (`httpProxyPort` and `socksProxyPort`, both the same port; one port serves HTTP and SOCKS5). It lets through only
 the hosts the session's own settings allow, read from the installed `worker-runner.json` the same way the settings read
 them (`render-settings.mjs` `phaseHosts`): the session port the products' hosts, the install port those plus the registry
-hosts. It refuses any other host, an IP address in place of a name, a name with a user name or password in it, ports
-other than 22, 80 and 443, and a name whose address is on this Mac or a private network. It never passes on or writes down
+hosts. It refuses any other host, an IP address in place of a name, a name with a user name or password in it, and a
+name whose address is on this Mac or a private network. Ports: a tunnel (an `https://` CONNECT or any SOCKS request) may
+go only to 443 or 22 (git over ssh); port 80 is reached only by a plain `http://` request through the HTTP side, whose
+request is checked. So a SOCKS client that wants plain HTTP must use the HTTP proxy instead (the same port). It never passes on or writes down
 a proxy password, and its log (`<base>/logs/builder-proxy.out.log`) has only the time, port, host, allow or deny, and
 bytes; why it stopped or would not start goes to `<base>/logs/builder-proxy.err.log`. It caps connections at 64 at once,
 the request head at 16 KB, and each connection at 2 GB each way. A name whose address is one of the Mac's own, or on a
 network the Mac is on, is refused too. Plain `http://` requests: the `Host` line must name the same host as the address
 (or the request is refused), and one connection carries one request (a second one sent on it is refused, never passed on).
+A request head with a lone line-break character, a line that starts with a space or tab, or a field name that is not
+plain letters, digits and the usual punctuation followed straight by its colon is refused too.
 - **What it can't stop (domain fronting).** For `https://` the proxy only opens a tunnel to a listed name; the encrypted
   request inside is the program's own. On a shared delivery network (a CDN) a program can open the tunnel to a listed
   name and ask, inside, for another site served by the same network. Claude Code's own proxy has the same limit; only a
