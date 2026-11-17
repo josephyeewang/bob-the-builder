@@ -12,9 +12,9 @@ const PUBLIC = '93.184.216.34';
 const SECRET = 'hunter2-s3cr3t-value';
 
 /** An upstream on 127.0.0.1:random that records what it got and echoes it back (after a fixed greeting for plain HTTP). */
-async function upstream({ http = false } = {}) {
+async function upstream({ http = false, hold = false } = {}) {
   const got = []; let conns = 0;
-  const s = net.createServer((c) => { conns += 1; c.on('data', (d) => { got.push(d); if (http) c.end('HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok'); else c.write(d); }); c.on('error', () => {}); });
+  const s = net.createServer((c) => { conns += 1; c.on('data', (d) => { got.push(d); if (hold) return; if (http) c.end('HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok'); else c.write(d); }); c.on('error', () => {}); });
   await new Promise((r) => s.listen(0, '127.0.0.1', r));
   return { port: s.address().port, got: () => Buffer.concat(got).toString('latin1'), conns: () => conns, close: () => s.close() };
 }
@@ -117,6 +117,53 @@ test('plain HTTP (absolute form): sent on in origin form; Proxy-Authorization ne
   await p.close(); up.close();
 });
 
+test('#617 r1 M2 plain HTTP: a Host that is not the URL\'s own is refused, a second Host too; :80 and case are the same host; the upstream gets the URL\'s Host', async () => {
+  const up = await upstream({ http: true }); const p = await proxy({ up });
+  for (const head of [
+    'GET http://allowed.example.com/x HTTP/1.1\r\nHost: evil.example.net\r\n\r\n',
+    'GET http://allowed.example.com/x HTTP/1.1\r\nHost: allowed.example.com:8080\r\n\r\n',
+    'GET http://allowed.example.com/x HTTP/1.1\r\nHost: allowed.example.com\r\nHost: evil.example.net\r\n\r\n',
+    'GET http://allowed.example.com/x HTTP/1.1\r\nhost:evil.example.net\r\n\r\n',
+  ]) {
+    const { out, log: l } = await via(p, [head]);
+    assert.match(out.toString('latin1'), /^HTTP\/1\.1 403 /, head);
+    assert.equal(l.verdict, 'deny', head); assert.equal(l.why, 'host-mismatch', head); assert.ok(DENY.includes(l.why));
+  }
+  assert.equal(up.conns(), 0, 'nothing reached the upstream');
+  for (const host of ['allowed.example.com:80', 'ALLOWED.example.com', 'allowed.example.com.', null]) {
+    const n = up.got().length;
+    const { log: l } = await via(p, [`GET http://allowed.example.com/x HTTP/1.1\r\n${host === null ? '' : `Host: ${host}\r\n`}\r\n`]);
+    assert.equal(l.verdict, 'allow', String(host));
+    const sent = up.got().slice(n);
+    assert.equal((sent.match(/\r\nHost: /g) ?? []).length, 1, String(host)); assert.match(sent, /\r\nHost: allowed\.example\.com\r\n/, String(host));
+  }
+  await p.close(); up.close();
+});
+
+test('#617 r1 M2 plain HTTP: one request per connection; a pipelined second one (same packet or later) refuses and never goes up; a chunked body refuses', async () => {
+  // An upstream that does not answer, so the connection is still open when the client's next bytes come.
+  const up = await upstream({ hold: true }); const p = await proxy({ up });
+  const first = 'GET http://allowed.example.com/one HTTP/1.1\r\nHost: allowed.example.com\r\n\r\n';
+  const second = 'GET /second HTTP/1.1\r\nHost: evil2.example.net\r\n\r\n';
+  // In one packet: refused before anything goes up.
+  const a = await via(p, [first + second]);
+  assert.match(a.out.toString('latin1'), /^HTTP\/1\.1 400 /); assert.equal(a.log.why, 'second-request'); assert.equal(up.conns(), 0);
+  // A body of Content-Length bytes goes up whole; a byte past it (a later packet) refuses, and the second request never goes up.
+  const post = 'POST http://allowed.example.com/p HTTP/1.1\r\nHost: allowed.example.com\r\nContent-Length: 5\r\n\r\n';
+  const b = await via(p, [post + 'ab', 'cde' + second], { ms: 600 });
+  assert.equal(b.log.verdict, 'deny'); assert.equal(b.log.why, 'second-request');
+  assert.match(up.got(), /\r\n\r\nab(cde)?$/); assert.doesNotMatch(up.got(), /second|evil2/);
+  // Pipelined in a later packet with no body: refused; only the first went up.
+  const n = up.got().length;
+  const c = await via(p, [first, second], { ms: 600 });
+  assert.equal(c.log.why, 'second-request'); assert.doesNotMatch(up.got().slice(n), /second|evil2/);
+  for (const head of ['POST http://allowed.example.com/p HTTP/1.1\r\nHost: allowed.example.com\r\nTransfer-Encoding: chunked\r\n\r\n',
+    'POST http://allowed.example.com/p HTTP/1.1\r\nHost: allowed.example.com\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\n']) {
+    const d = await via(p, [head]); assert.match(d.out.toString('latin1'), /^HTTP\/1\.1 400 /, head); assert.equal(d.log.why, 'bad-request', head);
+  }
+  await p.close(); up.close();
+});
+
 test('SOCKS5 on the same port: a listed name reaches it (hello and request apart, or together); refusals answer as SOCKS', async () => {
   const up = await upstream(); const p = await proxy({ up });
   for (const parts of [[socksHello, socksName('allowed.example.com', 22), 'SSH-2.0-x'], [Buffer.concat([socksHello, socksName('allowed.example.com', 22)]), 'SSH-2.0-x']]) {
@@ -209,6 +256,13 @@ test('hostOf and publicAddress', () => {
   for (const [h, why] of [['1.2.3.4', 'ip-literal'], ['[::1]', 'ip-literal'], ['::ffff:127.0.0.1', 'ip-literal'], ['a@b.com', 'userinfo'], ['localhost', 'bad-request'], ['a_b.com', 'bad-request'], ['', 'bad-request']]) assert.equal(hostOf(h).deny, why, h);
   for (const a of ['8.8.8.8', PUBLIC, '2606:4700::1111']) assert.ok(publicAddress(a), a);
   for (const a of ['127.0.0.1', '10.0.0.1', '172.20.1.1', '192.168.1.1', '169.254.1.1', '100.64.0.1', '0.0.0.0', '224.0.0.1', '::1', '::', 'fe80::1', 'fd00::1', '::ffff:8.8.8.8', 'ff02::1', 'x']) assert.ok(!publicAddress(a), a);
+  // #617 r1 m4: NAT64 (64:ff9b::/96) and IPv4-compatible (::/96) forms of a public address are not public either.
+  for (const a of ['64:ff9b::808:808', '64:ff9b::5db8:d822', '::808:808', '::5db8:d822']) assert.ok(!publicAddress(a), a);
+  // This Mac's own address and the networks it sits on, even public ones, are refused; an address beyond them is not.
+  const ifaces = { en0: [{ address: '93.184.216.10', family: 'IPv4', cidr: '93.184.216.10/24', internal: false }, { address: '2606:4700:10::5', family: 'IPv6', cidr: '2606:4700:10::5/64', internal: false }],
+    utun3: [{ address: 'fe80::1%utun3', family: 'IPv6', cidr: 'fe80::1/64' }] };
+  for (const a of [PUBLIC, '93.184.216.10', '2606:4700:10::99', '2606:4700:10::5']) assert.ok(!publicAddress(a, { ifaces }), a);
+  for (const a of ['93.184.217.1', '2606:4700:11::1', '8.8.8.8']) assert.ok(publicAddress(a, { ifaces }), a);
 });
 
 test('serve listens on both loopback addresses for each port; main refuses root and a missing config', async () => {

@@ -561,6 +561,14 @@ test('L881: the shell\'s write wall between sessions: the only added folders are
   assert.match(ports(undefined, PROXY_PORTS.session).reason ?? '', /differ/);
   assert.match(ports(PROXY_PORTS.session, PROXY_PORTS.install).reason ?? '', /differ/);
   for (const p of Object.values(PROXY_PORTS)) assert.equal(ports(p, p).ok, true, `the proxy's port ${p}`);
+  // #617 r1 m3: with the phase known, the port must be that phase's own; a save names none.
+  const withPorts = (port) => { const c = structuredClone(render('worker').settings); c[S.sandbox][S.network][S.httpProxyPort] = port; c[S.sandbox][S.network][S.socksProxyPort] = port; return c; };
+  for (const [phase, port] of Object.entries(PROXY_PORTS)) {
+    assert.equal(checkSettings(withPorts(port), { profile: DESIGN_PROFILES.worker, phase }).ok, true, `${phase} ${port}`);
+    const other = Object.values(PROXY_PORTS).find((x) => x !== port);
+    assert.match(checkSettings(withPorts(other), { profile: DESIGN_PROFILES.worker, phase }).reason ?? '', new RegExp(`proxy port ${other} is not the ${phase} phase's \\(${port}\\)`));
+  }
+  assert.match(checkSettings(withPorts(PROXY_PORTS.session), { profile: DESIGN_PROFILES.worker, phase: 'save' }).reason ?? '', /is not the save phase's \(none\)/);
   for (const k of WIDENING_FILESYSTEM) assert.match(drift((c) => { c[S.sandbox][S.filesystem][k] = true; }).reason ?? '', new RegExp(`filesystem holds ${k};`), `filesystem ${k}`);
   // excludedCommands and filesystem.disabled by name (2.1.316 recheck m1, L1033): either one lets commands out of the sandbox.
   assert.match(drift((c) => { c[S.sandbox][S.excludedCommands] = ['git']; }).reason ?? '', /role settings hold excludedCommands/, 'excludedCommands');

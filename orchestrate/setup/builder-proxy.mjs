@@ -27,18 +27,27 @@
 //
 // What it refuses: a host not on the list (exact match, lowercase), an IP address instead of a name, a name with user
 // information (user:pass@), a port other than ALLOWED_PORTS, a name whose DNS answer holds a loopback, private,
-// link-local, multicast or otherwise non-public address (so an allowed name can't be pointed back into the Mac), and
-// any SOCKS command but CONNECT. It connects to the address it checked, never a second lookup. Proxy-Authorization and
-// Proxy-Connection headers are dropped, never passed on and never logged.
+// link-local, multicast, NAT64 (64:ff9b::/96), IPv4-compatible (::/96) or otherwise non-public address, or one of this
+// Mac's own addresses or networks (os.networkInterfaces, read at each lookup), so an allowed name can't be pointed back
+// into the Mac or its LAN; and any SOCKS command but CONNECT. It connects to the address it checked, never a second
+// lookup. Proxy-Authorization and Proxy-Connection headers are dropped, never passed on and never logged.
+// Plain HTTP (#617 r1 M2): a Host header that is not the URL's own host[:port] is refused (the upstream obeys Host, not
+// the URL), and a connection carries ONE request: its body is Content-Length bytes, a chunked body is refused, and a
+// byte past the body (a pipelined second request) refuses the connection before it goes up.
+// What it can't stop: inside a CONNECT tunnel the TLS is the client's, so a client may ask a listed name's server (a
+// shared CDN, say) for another site by the TLS server name or the inner Host (domain fronting). Claude Code's own
+// proxy has the same limit; only a proxy that ends the TLS could see it.
 //
 // Limits: MAX_CONNECTIONS at once, MAX_HEAD bytes of request head, HANDSHAKE_MS to finish asking, IDLE_MS of silence,
-// MAX_BYTES each way per connection. The log is one JSON line per connection: time, port, host, allow or deny (with a
-// fixed reason word), bytes up and down. Nothing else: no path, header, address or credential.
+// MAX_BYTES each way per connection. The log is one JSON line per connection on standard output, which launchd keeps as
+// <logDir>/builder-proxy.out.log: time, port, host, allow or deny (with a fixed reason word), bytes up and down. Nothing
+// else: no path, header, address or credential. Why it stopped or would not start goes to <logDir>/builder-proxy.err.log.
 //
 // Run: node builder-proxy.mjs --config <installRoot>/worker-runner.json (as the builder; it refuses root).
 
 import net from 'node:net';
 import dns from 'node:dns';
+import { networkInterfaces } from 'node:os';
 import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -63,7 +72,7 @@ export const IDLE_MS = 5 * 60_000;
 export const MAX_BYTES = 2 * 1024 ** 3;
 /** The fixed reason words a deny is logged with. */
 export const DENY = Object.freeze(['not-listed', 'ip-literal', 'userinfo', 'bad-port', 'bad-request', 'not-public', 'dns-failed',
-  'socks-auth', 'socks-command', 'too-many', 'too-big', 'timeout', 'connect-failed', 'no-list']);
+  'socks-auth', 'socks-command', 'too-many', 'too-big', 'timeout', 'connect-failed', 'no-list', 'host-mismatch', 'second-request']);
 
 
 // Addresses a listed name must never resolve to: the Mac itself, the local networks, and anything not unicast-public.
@@ -72,9 +81,34 @@ export const DENY = Object.freeze(['not-listed', 'ip-literal', 'userinfo', 'bad-
 const BLOCKED4 = new net.BlockList(); const BLOCKED6 = new net.BlockList();
 for (const [a, p] of [['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8], ['169.254.0.0', 16], ['172.16.0.0', 12],
   ['192.0.0.0', 24], ['192.0.2.0', 24], ['192.168.0.0', 16], ['198.18.0.0', 15], ['198.51.100.0', 24], ['203.0.113.0', 24], ['224.0.0.0', 4], ['240.0.0.0', 4]]) BLOCKED4.addSubnet(a, p, 'ipv4');
-for (const [a, p] of [['::', 128], ['::1', 128], ['::ffff:0:0', 96], ['64:ff9b:1::', 48], ['100::', 64], ['2001:db8::', 32], ['fc00::', 7], ['fe80::', 10], ['fec0::', 10], ['ff00::', 8]]) BLOCKED6.addSubnet(a, p, 'ipv6');
-/** True when `address` is a public unicast address (an IPv4-mapped IPv6 address never is: ask for the IPv4 one). */
-export const publicAddress = (address) => { const f = net.isIP(String(address ?? '')); return f === 4 ? !BLOCKED4.check(address, 'ipv4') : f === 6 ? !BLOCKED6.check(address, 'ipv6') : false; };
+for (const [a, p] of [['::', 96], ['::1', 128], ['::ffff:0:0', 96], ['64:ff9b::', 96], ['64:ff9b:1::', 48], ['100::', 64], ['2001:db8::', 32], ['fc00::', 7], ['fe80::', 10], ['fec0::', 10], ['ff00::', 8]]) BLOCKED6.addSubnet(a, p, 'ipv6');
+/**
+ * This Mac's own addresses and the networks they sit on (#617 r1 m4), read at each call (an interface comes and goes):
+ * a public address of the Mac's, or a public network it is on, is the Mac or its neighbours all the same.
+ */
+export function ownNetworks(ifaces = networkInterfaces()) {
+  const four = new net.BlockList(); const six = new net.BlockList();
+  for (const list of Object.values(ifaces ?? {})) for (const a of list ?? []) {
+    const fam = a?.family === 'IPv4' || a?.family === 4 ? 'ipv4' : a?.family === 'IPv6' || a?.family === 6 ? 'ipv6' : null;
+    const addr = String(a?.address ?? '').replace(/%.*$/, '');
+    if (!fam || net.isIP(addr) !== (fam === 'ipv4' ? 4 : 6)) continue;
+    const bits = Number(String(a?.cidr ?? '').split('/')[1]);
+    const into = fam === 'ipv4' ? four : six;
+    try { into.addAddress(addr, fam); if (Number.isInteger(bits)) into.addSubnet(addr, bits, fam); } catch { /* an odd entry adds nothing */ }
+  }
+  return { four, six };
+}
+/**
+ * True when `address` is a public unicast address that is not this Mac's own nor on one of its networks (an IPv4-mapped
+ * or NAT64 IPv6 address never is: ask for the IPv4 one). `ifaces`: os.networkInterfaces()'s shape, for the tests.
+ */
+export const publicAddress = (address, { ifaces } = {}) => {
+  const a = String(address ?? ''); const f = net.isIP(a);
+  if (f !== 4 && f !== 6) return false;
+  if (f === 4 ? BLOCKED4.check(a, 'ipv4') : BLOCKED6.check(a, 'ipv6')) return false;
+  const own = ownNetworks(ifaces);
+  return f === 4 ? !own.four.check(a, 'ipv4') : !own.six.check(a, 'ipv6');
+};
 
 /** A host as asked → its lowercase name (one trailing dot dropped), or { deny } with the reason word. */
 export function hostOf(raw) {
@@ -147,7 +181,8 @@ export function createProxy({ allowed, log, port = 0, lookup = lookupAll, connec
     const R431 = 'HTTP/1.1 431 Request Header Fields Too Large\r\nConnection: close\r\nContent-Length: 0\r\n\r\n';
 
     // A name and port asked for → checked, then the upstream socket; `after(up)` sends what is owed before both pipe.
-    const reach = async (rawHost, rawPort, refuse, after) => {
+    // `upward(d, up)`: how a client's bytes go up once connected; by default all of them (a tunnel).
+    const reach = async (rawHost, rawPort, refuse, after, upward = (d, up) => up.write(d)) => {
       rec.host = logHost(rawHost);
       const h = hostOf(rawHost); if (h.deny) return deny(h.deny, refuse);
       const p = Number(rawPort); if (!ports.includes(p)) return deny('bad-port', refuse);
@@ -164,7 +199,7 @@ export function createProxy({ allowed, log, port = 0, lookup = lookupAll, connec
         rec.ok = true; rec.why = null;
         client.setTimeout(idleMs, () => kill(null)); upstream.setTimeout(idleMs, () => kill(null));
         after(upstream);
-        client.on('data', (d) => { rec.up += d.length; if (rec.up > maxBytes) kill('too-big'); else upstream.write(d); });
+        client.on('data', (d) => { rec.up += d.length; if (rec.up > maxBytes) kill('too-big'); else upward(d, upstream); });
         upstream.on('data', (d) => { rec.down += d.length; if (rec.down > maxBytes) kill('too-big'); else client.write(d); });
         client.on('end', () => upstream.end());
         client.resume();
@@ -187,13 +222,29 @@ export function createProxy({ allowed, log, port = 0, lookup = lookupAll, connec
         if (!a) return deny('bad-request', R400);
         return reach(a[1].replace(/^\[|\]$/g, ''), a[2], R403, (up) => { client.write('HTTP/1.1 200 Connection Established\r\n\r\n'); if (rest.length) { rec.up += rest.length; up.write(rest); } });
       }
-      // Plain HTTP, absolute form only (http://host[:port]/path): sent on in origin form, as one request, the proxy's headers dropped.
+      // Plain HTTP, absolute form only (http://host[:port]/path): sent on in origin form, as ONE request, the proxy's headers
+      // dropped. The upstream reads its Host header, not the URL, so a Host that is not the URL's own is refused (#617 r1
+      // M2: a listed name in the URL with another site in Host). One request per connection: its body is Content-Length
+      // bytes (no chunked body), and a byte past it (a second, pipelined request) refuses the connection, never sent on.
       if (!/^http:\/\//i.test(target)) return deny('bad-request', R400);
       if (/^http:\/\/[^/?#]*@/i.test(target)) return deny('userinfo', R403);
       let u; try { u = new URL(target); } catch { return deny('bad-request', R400); }
-      const kept = fields.filter((f) => !/^(proxy-authorization|proxy-connection|connection|keep-alive)\s*:/i.test(f));
-      const out = Buffer.concat([Buffer.from(`${method} ${u.pathname}${u.search} HTTP/1.1\r\n${[...kept, 'Connection: close'].join('\r\n')}\r\n\r\n`, 'latin1'), rest]);
-      return reach(u.hostname.replace(/^\[|\]$/g, ''), u.port || '80', R403, (up) => { rec.up += out.length; up.write(out); });
+      const named = (k) => fields.filter((f) => new RegExp(`^${k}\\s*:`, 'i').test(f)).map((f) => f.slice(f.indexOf(':') + 1).trim());
+      const hosts = named('host');
+      if (hosts.length > 1 || (hosts.length === 1 && hosts[0].toLowerCase().replace(/\.(?=:|$)/, '').replace(/:80$/, '') !== u.host)) { rec.host = logHost(u.hostname); return deny('host-mismatch', R403); }
+      if (named('transfer-encoding').length) return deny('bad-request', R400);
+      const lengths = named('content-length');
+      if (lengths.length > 1 || (lengths.length === 1 && !/^\d{1,12}$/.test(lengths[0]))) return deny('bad-request', R400);
+      let left = lengths.length ? Number(lengths[0]) : 0;
+      if (rest.length > left) { rec.host = logHost(u.hostname); return deny('second-request', R400); }
+      left -= rest.length;
+      const kept = fields.filter((f) => !/^(host|proxy-authorization|proxy-connection|connection|keep-alive)\s*:/i.test(f));
+      const out = Buffer.concat([Buffer.from(`${method} ${u.pathname}${u.search} HTTP/1.1\r\n${[`Host: ${u.host}`, ...kept, 'Connection: close'].join('\r\n')}\r\n\r\n`, 'latin1'), rest]);
+      const oneBody = (d, up) => {
+        if (d.length > left) { if (left) up.write(d.subarray(0, left)); left = 0; kill('second-request'); return; }
+        left -= d.length; up.write(d);
+      };
+      return reach(u.hostname.replace(/^\[|\]$/g, ''), u.port || '80', R403, (up) => { rec.up += out.length; up.write(out); }, oneBody);
     };
 
     // SOCKS5 (RFC 1928): no authentication, CONNECT, a domain name (socks5h) only.
@@ -269,7 +320,7 @@ export function proxyListenRows(io, cfg) {
     for (const w of want) if (!seen.some((x) => x.name === w)) why.push(`nothing listens on ${w}`);
     const other = seen.filter((x) => x.uid !== b.uid); if (other.length) why.push(`${other.map((x) => `${x.name} (uid ${x.uid})`).join(', ')} is not the ${BUILDER} user's`);
     const wide = seen.filter((x) => !want.includes(x.name)); if (wide.length) why.push(`it also listens on ${wide.map((x) => x.name).join(', ')}`);
-    rows.push(why.length ? { ok: false, what, why: `${why.join('; ')}; look in the proxy's log (${join(installPaths(cfg).logDir, `${BUILDER_PROXY_JOB}.err.log`)})` } : { ok: true, what });
+    rows.push(why.length ? { ok: false, what, why: `${why.join('; ')}; look in the proxy's error log (${join(installPaths(cfg).logDir, `${BUILDER_PROXY_JOB}.err.log`)}); its connections are in ${BUILDER_PROXY_JOB}.out.log beside it` } : { ok: true, what });
   }
   return rows;
 }

@@ -505,12 +505,17 @@ const ROLE_SANDBOX_KEYS = Object.freeze({
   [S.network]: [S.allowedDomains, S.strictAllowlist, S.httpProxyPort, S.socksProxyPort],
   [S.filesystem]: [S.denyRead, S.denyWrite],
 });
-/** Null, or why a role file's proxy ports are not the builder proxy's (wall v2): both or neither, the same port, one of PROXY_PORTS. */
-function proxyPortsProblem(network) {
+/**
+ * Null, or why a role file's proxy ports are not the builder proxy's (wall v2): both or neither, the same port, one of
+ * PROXY_PORTS. With `phase` known, the port must be that phase's own (#617 r1 m3: the install port, whose list adds the
+ * registry hosts, in a session's file would widen it), and a save, which reaches no host, names none.
+ */
+export function proxyPortsProblem(network, phase = null) {
   const h = network?.[S.httpProxyPort]; const k = network?.[S.socksProxyPort];
   if (h === undefined && k === undefined) return null;
   if (h !== k) return `the role file's ${S.httpProxyPort} and ${S.socksProxyPort} differ (${h}, ${k}): both must be the builder proxy's one port`;
   if (!Object.values(PROXY_PORTS).includes(h)) return `the role file's proxy port ${JSON.stringify(h)} is not one of the builder proxy's (${Object.values(PROXY_PORTS).join(', ')})`;
+  if (phase !== null && h !== PROXY_PORTS[phase]) return `the role file's proxy port ${h} is not the ${phase} phase's (${PROXY_PORTS[phase] ?? 'none'})`;
   return null;
 }
 // The machine-wide (managed) file's sandbox block: an allow-list of keys, each with its one safe value (#410 r2 M1,
@@ -534,7 +539,7 @@ const MANAGED_SANDBOX = Object.freeze({
   [S.filesystem]: { [S.denyRead]: isTextList, [S.denyWrite]: isTextList },
 });
 /** Why a settings file's sandbox block may widen the shell's reach, or null. */
-function sandboxKeysProblem(obj, machineWide) {
+function sandboxKeysProblem(obj, machineWide, phase = null) {
   const sb = obj?.[S.sandbox];
   if (sb === undefined) return null;
   const who = machineWide ? 'machine-wide' : 'the role file\'s';
@@ -559,7 +564,7 @@ function sandboxKeysProblem(obj, machineWide) {
     const extra = Object.keys(block).filter((k) => !known.includes(k));
     if (extra.length) return `${who} sandbox${part ? ` ${part}` : ''} holds ${extra.join(', ')}; only ${known.join(', ')} may be there`;
   }
-  return proxyPortsProblem(sb[S.network]);
+  return proxyPortsProblem(sb[S.network], phase);
 }
 
 /**
@@ -606,15 +611,16 @@ function ownFoldersProblem(obj) {
 /**
  * Every lock-down field a loaded settings file must (or must not) hold. Run on the rendered file
  * after reading it back from disk, and (as `machineWide: true`) on the machine-wide file, where an
- * excludedCommands entry or an unsandboxed escape refuses every role.
+ * excludedCommands entry or an unsandboxed escape refuses every role. `phase` ('session', 'install' or 'save'), when
+ * the caller knows it: the builder proxy's port must be that phase's (proxyPortsProblem).
  */
-export function checkSettings(obj, { machineWide = false, profile = null } = {}) {
+export function checkSettings(obj, { machineWide = false, profile = null, phase = null } = {}) {
   const sb = obj?.[S.sandbox];
   const p = obj?.[S.permissions];
   if (sb && Object.hasOwn(sb, S.excludedCommands)) return refuse(`${machineWide ? 'machine-wide' : 'role'} settings hold excludedCommands`);
   if (sb && sb[S.allowUnsandboxedCommands] === true) return refuse(`${machineWide ? 'machine-wide' : 'role'} settings allow unsandboxed commands`);
   for (const k of REFUSED_SETTINGS) if (obj && Object.hasOwn(obj, k)) return refuse(`${machineWide ? 'machine-wide' : 'role'} settings hold ${k}`);
-  const widen = sandboxKeysProblem(obj, machineWide);
+  const widen = sandboxKeysProblem(obj, machineWide, phase);
   if (widen) return refuse(widen);
   if (machineWide) {
     // The machine-wide file may add deny rules and hooks, never allow, ask, extra hosts or folders,

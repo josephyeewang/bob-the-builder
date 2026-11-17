@@ -486,7 +486,7 @@ too, so it is a code change, never a config edit.
 
 ## Part 8 — the builder wall (R-0b-179; L1149, L1150, L1193, L1215; v2 2026-11-16)
 
-**What it changes.** As root, it turns on the Mac's packet filter (pf) with five rules of its own. Then the `builder`
+**What it changes.** As root, it turns on the Mac's packet filter (pf) with four rules of its own. Then the `builder`
 user, which runs the worker runner and every worker session, can reach on this Mac only its **own** listeners in its own
 port range, **47000-47999** (one home: `shared/builder-ports.mjs`). It can't reach the owner's dev servers, databases or
 Claude ports, or root's local services, on 127.0.0.1, ::1 or the Mac's own address. Everyone else's traffic is untouched,
@@ -509,10 +509,17 @@ open connections into 47000-47999, and only the builder's own sockets may listen
   it will fail. (The read-back proves this cost is paid, row vii.)
 - Claude Code's own network proxy listens on a port it picks, outside the range, so builder sessions use the builder's
   allow-list proxy instead (below).
-- No other user (the owner included) can use a listener of its own in 47000-47999. `place` refuses while one is there.
-- One UDP gap: a builder program listening in the range may send UDP to any port in the Mac's ephemeral range
-  (49152-65535), so it could send a forged answer to an owner program waiting on a UDP reply, if it guesses that program's
-  port. No TCP is affected, and no listener on a fixed port. `place` refuses if the Mac's ephemeral range has moved.
+- No other user (the owner included) can use a listener of its own in 47000-47999, or even reach it. `place` refuses
+  while one is there; `check` shows a `WARN` row (it fails nothing) if one has started since.
+- Builder UDP on loopback stays inside 47000-47999 **both ways**: a builder program can send UDP only to a port in the
+  range, so a UDP server of the builder's can't answer a program outside it (the owner's, or a builder program on a port
+  the system picked). This was chosen over letting the builder answer (PR #617 review, M1): that rule let a builder
+  program hold a two-way UDP conversation with any user's program on a port the system picked. Nothing the builder needs
+  is lost: the proxy is TCP, and name lookups go to macOS's own resolver over a local file socket, not loopback UDP.
+  `place` refuses if the Mac's ephemeral range (49152-65535) has moved.
+- **Not covered: local file sockets (Unix sockets).** pf sees only network traffic. A builder program running outside
+  Claude Code's sandbox (a worker's install or test step) can connect to any Unix socket whose file it may write, for
+  example a Homebrew Postgres's `/tmp/.s.PGSQL.5432`. Open item for the lead; no code here yet.
 
 **The builder's allow-list proxy** (`builder-proxy.mjs`, setup's `builder-proxy` job, on exactly when the config's
 `workerRunner` entry is). It runs as `builder` and listens on 127.0.0.1 and ::1 at two fixed ports in the range: **47000**
@@ -523,7 +530,14 @@ them (`render-settings.mjs` `phaseHosts`): the session port the products' hosts,
 hosts. It refuses any other host, an IP address in place of a name, a name with a user name or password in it, ports
 other than 22, 80 and 443, and a name whose address is on this Mac or a private network. It never passes on or writes down
 a proxy password, and its log (`<base>/logs/builder-proxy.out.log`) has only the time, port, host, allow or deny, and
-bytes. It caps connections at 64 at once, the request head at 16 KB, and each connection at 2 GB each way.
+bytes; why it stopped or would not start goes to `<base>/logs/builder-proxy.err.log`. It caps connections at 64 at once,
+the request head at 16 KB, and each connection at 2 GB each way. A name whose address is one of the Mac's own, or on a
+network the Mac is on, is refused too. Plain `http://` requests: the `Host` line must name the same host as the address
+(or the request is refused), and one connection carries one request (a second one sent on it is refused, never passed on).
+- **What it can't stop (domain fronting).** For `https://` the proxy only opens a tunnel to a listed name; the encrypted
+  request inside is the program's own. On a shared delivery network (a CDN) a program can open the tunnel to a listed
+  name and ask, inside, for another site served by the same network. Claude Code's own proxy has the same limit; only a
+  proxy that decrypts the traffic could see it.
 - (checked: claude-code 2.1.316; Principle 9, re-check on upgrade) With both ports set, Claude Code starts no proxy
   of its own and no longer filters by `allowedDomains` (it says so: "will never apply"), so this proxy is the filter.
   Setting only one of the two starts Claude Code's own proxy for the other.
@@ -556,9 +570,9 @@ the rules of the script that wrote it, and the worker runner compares them with 
    token folder, the job file, and the job's load. A `refused:` line says why it won't run; with one, nothing would change.
 2. **The real run.** `sudo /usr/local/bin/node <base>/install/orchestrate/setup/builder-wall.mjs place`. It prints a
    `doing:` line per step, then waits up to 15 seconds for the job's first run. Then it reads the wall back, one line per
-   row, and writes the status. **Check:** the exit is 0, and the last row line is `all 77 PASS` (`all 64 PASS` on a Mac
-   with no address but loopback; one row then says only 127.0.0.1 and ::1 were probed). The rows, in order, `<uid>`
-   being `builder`'s:
+   row, and writes the status. **Check:** the exit is 0, and the last row line is `all 75 PASS` (`all 63 PASS` on a Mac
+   with no address but loopback; one row then says only 127.0.0.1 and ::1 were probed). The read-back counts its own
+   rows: one skipped adds a `FAIL  the read-back ran all … of its rows` line. The rows, in order, `<uid>` being `builder`'s:
    - `PASS  the job <label>.builder-wall ran once and finished well (within 15 seconds of loading)`
    - `PASS  /private/etc/pf.anchors/orchestrate.builder is the wall's rules for uid <uid>, root's 0644`
    - `PASS  pf is on (iii)`
@@ -566,15 +580,21 @@ the rules of the script that wrote it, and the worker runner compares them with 
    - `PASS  the main ruleset reaches com.apple/* (iv)`
    - `PASS  com.apple/100.orchestrate.builder holds exactly the wall's rules (iv)`
    - `PASS  the Mac's ephemeral port range is inside 49152-65535, clear of the builder's ports (iv)`
+   - `PASS  no other user's socket listens in the builder user's ports 47000:47999`. This one row may instead be
+     `WARN  … — <the socket, its uid and pid>: the wall cuts it off …`: a program of another user started listening in
+     the range after `place`. It fails nothing (it hurts only that program), but move that program to another port.
    - then, for TCP and for UDP, and for each of `IPv4 (127.0.0.1)`, `IPv6 (::1)`, `IPv4 (127.0.0.1, listening on 0.0.0.0)`,
-     `IPv6 (::1, listening on ::)` and `this Mac's own address (<address>)`, seven rows (`<where>` is e.g. `TCP IPv4 (127.0.0.1)`):
+     `IPv6 (::1, listening on ::)` and `this Mac's own address (<address>)`, seven rows for TCP and six for UDP (`<where>`
+     is e.g. `TCP IPv4 (127.0.0.1)`):
      `PASS  builder reaches its own listener in its ports on <where> (v; the proxy path)`,
      `PASS  the owner reaches its own listener on <where> (ii)`,
-     `PASS  the owner reaches the builder user's listener in its ports on <where> and hears its answer (vi)`,
+     `PASS  the owner reaches the builder user's listener in its ports on <where> and hears its answer (vi)` (TCP only),
      `PASS  the owner still reaches its own listener on <where> after (i) (ii)`,
      `PASS  builder can NOT reach the owner's listener outside its ports on <where> (i)`,
-     `PASS  builder can NOT reach the owner's listener in its ports on <where> (i)` and
-     `PASS  builder can NOT reach its own listener outside its ports on <where> (vii; the documented cost)`.
+     `PASS  builder can NOT reach the owner's listener in its ports on <where> (i)`,
+     `PASS  builder can NOT reach its own listener outside its ports on <where> (vii; the documented cost)`, and for UDP on
+     `IPv4 (127.0.0.1)` and `IPv6 (::1)` one more:
+     `PASS  builder, from a port in its ports, can NOT reach the owner's listener on an ephemeral port on <where> (viii)`.
 
    `place` refuses before changing anything when the Mac's ephemeral port range is not inside 49152-65535, or when a
    program that is not `builder`'s already listens in 47000-47999 (the line names it).
@@ -599,7 +619,8 @@ the rules of the script that wrote it, and the worker runner compares them with 
    and at most 10 minutes old. A `FAIL` line gives the reason the worker runner would hold a start. The status `place`
    wrote passes for 10 minutes on its own, so run this after `daemons load` to see the check job's own status. To recheck
    the wall at any time, run `sudo /usr/local/bin/node <base>/install/orchestrate/setup/builder-wall.mjs check`. It runs
-   the same read-back (`all 76 PASS`, or `all 63 PASS` with no address but loopback), changes no rule, and writes the status.
+   the same read-back (`all 74 PASS`, or `all 62 PASS` with no address but loopback; a `(1 with a WARN)` after it is the
+   row above), changes no rule, and writes the status.
 4. **The way out** (also printed after every run). With `<label>` and `<base>` from the setup config:
    ```
    sudo launchctl bootout system/<label>.builder-wall
