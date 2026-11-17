@@ -107,7 +107,7 @@ import { join } from 'node:path';
 import { networkInterfaces } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { realpathSync } from 'node:fs';
-import { BUILDER, DAEMON_DIR, JOB_PATH, LAUNCHCTL, ROOT_CONFIG_PATH, wallStatusDir, wallStatusPath } from './layout.mjs';
+import { BUILDER, DAEMON_DIR, JOB_PATH, LAUNCHCTL, ROOT_CONFIG_PATH, wallDir, wallStatusDir, wallStatusPath } from './layout.mjs';
 import { readUser } from './users-folders.mjs';
 import { guarded } from './guard.mjs';
 import { realIo, rootProblem } from './mac.mjs';
@@ -139,7 +139,6 @@ export const PROBE_NODE = '/usr/local/bin/node';
 
 export const wallLabel = (cfg) => `${cfg.label}.builder-wall`;
 export const wallPlistPath = (cfg) => join(DAEMON_DIR, `${wallLabel(cfg)}.plist`);
-export const wallDir = (cfg) => join(cfg.base, 'builder-wall');
 export const tokenPath = (cfg) => join(wallDir(cfg), 'pf-token');
 /** What `pfctl -E` said when no token could be read from it: the job stops there rather than take reference after reference. */
 export const unreadPath = (cfg) => join(wallDir(cfg), 'pf-enable-unread');

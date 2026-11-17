@@ -55,6 +55,9 @@ export const BASE_MARKER = '.made-by-setup';
 export const BOB_NEW = '.bob-new';
 export const BOB_OLD = '.bob-old';
 export const baseMarkerPath = (cfg) => join(cfg.base, BASE_MARKER);
+// The builder wall's own folder (its pf token, root's 0700): builder-wall.mjs makes and reads it. Named here so the base's
+// list of what the setup made (install.mjs rootMadeEntries) takes it without loading the wall's module.
+export const wallDir = (cfg) => join(cfg.base, 'builder-wall');
 // The builder wall's status (R-0b-179, L1193): root's wall check writes it after every check, and the worker runner, which
 // runs as the builder and can't ask pf, reads it before every start. Its own folder, root's 0755, so the wall's own folder
 // (builder-wall/, root's 0700) stays closed. Named here, not in builder-wall.mjs, so the worker runner's setup can take it

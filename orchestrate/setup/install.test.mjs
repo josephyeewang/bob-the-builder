@@ -15,7 +15,7 @@ import { NODE, RUNNER_CONFIG, STAMP, UPDATER_CONFIG } from '../modules/M4-worksh
 import { MUST_KEEP, readUpdaterConfig } from '../modules/M4-workshop/launcher/review-updater.mjs';
 import { pinnedBinary } from '../modules/M4-workshop/launcher/hooks-check.mjs';
 import { realIo, writeNewFile } from './mac.mjs';
-import { ROOT_CONFIG_PATH, folderTable, outboxRootPath, watchRulesPath, workerCopiesPath } from './layout.mjs';
+import { ROOT_CONFIG_PATH, folderTable, outboxRootPath, wallDir, wallStatusDir, watchRulesPath, workerCopiesPath, workerRulesDir } from './layout.mjs';
 import { BOOTSTRAP_FILES, LABEL_RE, installPaths, parseInstallConfig, spawnUpdater, updaterCommand, updaterConfigFor } from './install.mjs';
 import { FIRST_RUN_LIMIT_S, JOBS, checkDaemons, jobLogs, jobsFor, list, planLoad, planPlace, plistTexts, startProblems } from './daemons.mjs';
 import { ROBOT_JOB, ROBOT_NO_CONFIG, robotPlist } from './robot-setup.mjs';
@@ -994,6 +994,41 @@ test('L149 m9 P12 the logs folder the jobs make is not a stranger to `check`', a
   assert.ok(rootMadeEntries(w.cfg).includes(installPaths(w.cfg).logDir));
   const strangers = check(w.mac, w.cfg, { alsoKnown: rootMadeEntries(w.cfg) }).filter((r) => !r.ok && /did not make/.test(r.why ?? ''));
   assert.deepEqual(strangers, []);
+});
+
+test('the root jobs\' folders under the base (the wall\'s two, the worker rules\') are no strangers to `check`; a real stranger still FAILs; each entry left out FAILs', async () => {
+  const w = await placed();
+  const did = (rs) => rs.filter((r) => !r.ok && /did not make/.test(r.why ?? ''));
+  const jobs = [wallDir(w.cfg), wallStatusDir(w.cfg), workerRulesDir(w.cfg)];
+  for (const d of jobs) assert.ok(rootMadeEntries(w.cfg).includes(d), d);
+  // Every entry the install and the jobs put directly under the base, there at once, as the jobs leave them (root's).
+  const all = rootMadeEntries(w.cfg, { dispatcher: true });
+  for (const p of all) {
+    assert.equal(dirname(p), BASE, `${p} is directly under the base`);
+    if (existsSync(w.mac.at(p))) continue;
+    if (/\.json$/.test(p)) writeFileSync(w.mac.at(p), '{}\n'); else mkdirSync(w.mac.at(p));
+    w.mac.owners.set(p, { uid: w.mac.rootUid, gid: 0 });
+  }
+  assert.deepEqual(did(check(w.mac, w.cfg, { alsoKnown: all })), []);
+  // Each one left out of the list is named as a stranger: the list, not something else, is what lets it be.
+  for (const p of all) {
+    const named = did(check(w.mac, w.cfg, { alsoKnown: all.filter((x) => x !== p) }));
+    assert.equal(named.length, 1, p); assert.match(named[0].why, new RegExp(`did not make: ${p.split('/').pop().replace(/\./g, '\\.')}$`), p);
+  }
+  // A real stranger beside them still FAILs.
+  mkdirSync(w.mac.at(`${BASE}/stranger`)); w.mac.owners.set(`${BASE}/stranger`, { uid: w.mac.rootUid, gid: 0 });
+  const s = did(check(w.mac, w.cfg, { alsoKnown: all }));
+  assert.equal(s.length, 1); assert.match(s[0].why, /did not make: stranger$/);
+  // The class: every name the setup's code puts directly under the base (join(cfg.base, '<name>') in setup/) is a folder
+  // table row or one of these entries, so a new root job's folder can't be missed again.
+  const known = new Set([...folderTable({ ...w.cfg, products: w.cfg.products.length ? w.cfg.products : ['p'] }).map((r) => r.path), ...all]
+    .filter((p) => dirname(p) === BASE).map((p) => p.slice(BASE.length + 1)));
+  const here = dirname(fileURLToPath(import.meta.url)); const used = new Set();
+  for (const f of readdirSync(here).filter((n) => n.endsWith('.mjs') && !/\.test\.mjs$|test-helper/.test(n))) {
+    for (const m of readFileSync(join(here, f), 'utf8').matchAll(/join\(cfg\.base, '([^'/]+)'/g)) used.add(`${f}: ${m[1]}`);
+  }
+  assert.ok(used.size > 20, `the scan finds the setup's names (${used.size})`);
+  assert.deepEqual([...used].filter((u) => !known.has(u.split(': ')[1])), [], 'a name under the base that neither the folder table nor rootMadeEntries knows');
 });
 
 test('L149 m9 P14 P20 the updater is started with --first and the seed, a fixed PATH and nothing else of the environment — and spawnUpdater really does it', async () => {
