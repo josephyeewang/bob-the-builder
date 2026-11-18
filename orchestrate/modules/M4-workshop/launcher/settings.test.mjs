@@ -8,20 +8,22 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { DESIGN_PROFILES, NEVER_TOOLS, checkProfile, profilePort, fakeProfilePort, sha256, hasShell } from './role-profiles.mjs';
 import { parseSnapshot, readSnapshot, makeSnapshot, snapshotHash, SNAPSHOT_MAX_AGE_MS } from '../hooks/snapshot.mjs';
-import { apart, renderAllowRules, renderRoleSettings, checkSettings, writeRoleSettings, POLICY_HOOKS, HOOK_TIMEOUT, checkRunnerWall, runnerWallDeny, runnerWallDirs, runnerWallShell, bobFolderDeny, bobFolderShell, snapshotWallDeny, snapshotWallShell } from './render-settings.mjs';
+import { apart, phaseHosts, renderAllowRules, renderRoleSettings, checkSettings, writeRoleSettings, POLICY_HOOKS, HOOK_TIMEOUT, checkRunnerWall, runnerWallDeny, runnerWallDirs, runnerWallShell, bobFolderDeny, bobFolderShell, snapshotWallDeny, snapshotWallShell } from './render-settings.mjs';
 import { SETTINGS as S, ENV, HOOK_FIELDS as H, HOOK_EVENTS as E } from './settings-names.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
 import { checkMachineWide } from './env-check.mjs';
 import { REVIEW_ROLES, RUNNER_ROLES } from '../../../shared/review-roles.mjs';
+import { PROXY_PORTS } from '../../../shared/builder-ports.mjs';
 
 const tmp = () => tempDir('orch-set-');
 
-// Sandbox setting names claude 2.1.322 reads (from its own code, #410 r2 M1) that the renderer never writes: each one is
+// Sandbox setting names claude 2.1.316 reads (from its own code, #410 r2 M1; checked: claude-code 2.1.316) that the renderer never writes: each one is
 // refused in a role file and in the machine-wide file. Recheck on every pinned upgrade.
 const WIDENING_TOP = ['enabledPlatforms', 'allowAppleEvents', 'autoAllowBashIfSandboxed', 'enableWeakerNestedSandbox', 'enableWeakerNetworkIsolation',
-  'allowNestedUserNamespaces', 'credentials', 'ripgrep', 'bwrapPath', 'socatPath', 'ignoreViolations', 'tlsTerminate', 'somethingNew'];
-const WIDENING_NETWORK = ['allowUnixSockets', 'allowAllUnixSockets', 'allowLocalBinding', 'allowMachLookup', 'httpProxyPort', 'socksProxyPort'];
-const WIDENING_FILESYSTEM = ['allowWrite', 'allowRead', 'allowManagedReadPathsOnly', 'somethingNew'];
+  'allowNestedUserNamespaces', 'credentials', 'ripgrep', 'bwrapPath', 'socatPath', 'ignoreViolations', 'somethingNew'];
+const WIDENING_NETWORK = ['allowUnixSockets', 'allowAllUnixSockets', 'allowLocalBinding', 'allowMachLookup', 'httpProxyPort', 'socksProxyPort', 'tlsTerminate'];
+const WIDENING_FILESYSTEM = ['allowWrite', 'allowRead', 'allowManagedReadPathsOnly', 'disabled', 'somethingNew'];
+// excludedCommands (top level) has its own refusal, "settings hold excludedCommands", tested by name below (L1033).
 const PATHS = {
   copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/snapshots/rules.json', node: '/w/node', ownerTaps: '/w/owner-taps', reviewAgainConfig: '/w/review-again.json', notes: '/w/notes',
   deny: { proposals: ['/w/proposals'], secrets: ['/w/secrets'], claudeHome: '/h/.claude', ssh: '/h/.ssh', gh: '/h/.config/gh', robotKeys: '/w/keys', record: '/w/record', otherCopies: ['/w/copy2'] },
@@ -138,7 +140,7 @@ test('a worker settings file carries every lock-down field and passes the check'
   assert.equal(s[S.env][ENV.disableUpdates], '1');
   assert.equal(s[S.env][ENV.autoCompactWindow], '300000');
   assert.equal(s[S.disableClaudeAiConnectors], true);
-  assert.deepEqual(s[S.enabledPlugins], {});
+  assert.equal(Object.hasOwn(s, S.enabledPlugins), false, 'no enabledPlugins (L1114): nothing to turn on, and its name is not proven');
   assert.equal(s[S.crossSessionInbound], 'refuse');
   assert.equal(s[S.disableSkillShellExecution], true);
   assert.equal(s[S.disableBundledSkills], true);
@@ -185,6 +187,31 @@ test('an off-list host is refused, not asked; a role with no shell gets no netwo
   assert.deepEqual(inst.settings[S.sandbox][S.network][S.allowedDomains], ['registry.example.com', 'npm.example.org']);
   assert.match(render('reviewer', { phase: 'install' }).reason, /only a worker/);
   assert.match(render('worker', { paths: { ...PATHS, deny: { ...PATHS.deny, otherCopies: ['/w/mirror.git'] } } }).reason, /mirror/);
+});
+
+test('wall v2: a builder session points its shell at the allow-list proxy, the phase\'s own port for HTTP and SOCKS both', () => {
+  const net = (r) => r.settings[S.sandbox][S.network];
+  // Without builderProxy (a session not behind the builder wall): no proxy port, as before.
+  assert.equal(net(render('worker'))[S.httpProxyPort], undefined); assert.equal(net(render('worker'))[S.socksProxyPort], undefined);
+  const sess = net(render('worker', { builderProxy: true }));
+  assert.equal(sess[S.httpProxyPort], PROXY_PORTS.session); assert.equal(sess[S.socksProxyPort], PROXY_PORTS.session);
+  assert.deepEqual(sess[S.allowedDomains], ['registry.example.com'], 'the list stays: claude applies the proxy settings only beside it');
+  const inst = net(render('worker', { builderProxy: true, phase: 'install', registryHosts: ['npm.example.org'] }));
+  assert.equal(inst[S.httpProxyPort], PROXY_PORTS.install); assert.equal(inst[S.socksProxyPort], PROXY_PORTS.install);
+  // No host to reach, or no shell: no port (the proxy would allow nothing anyway).
+  assert.equal(net(render('worker', { builderProxy: true, phase: 'save' }))[S.httpProxyPort], undefined);
+  assert.equal(net(render('worker', { builderProxy: true, product: { ...PRODUCT, hosts: [] } }))[S.httpProxyPort], undefined);
+  assert.equal(net(render('lead', { builderProxy: true }))[S.httpProxyPort], undefined);
+  // What it writes passes the role-file check.
+  assert.equal(checkSettings(render('worker', { builderProxy: true }).settings, { profile: DESIGN_PROFILES.worker }).ok, true);
+});
+
+test('phaseHosts: the one list the settings and the proxy take: product hosts on the rules\' list; install adds registry hosts; save none', () => {
+  assert.deepEqual(phaseHosts({ product: { hosts: ['a.com', 'a.com'] }, rulesHosts: ['a.com', 'b.com'] }), { ok: true, hosts: ['a.com'] });
+  assert.deepEqual(phaseHosts({ product: { hosts: ['a.com'] }, rulesHosts: ['a.com'], registryHosts: ['r.org'], phase: 'install' }).hosts, ['a.com', 'r.org']);
+  assert.deepEqual(phaseHosts({ product: { hosts: ['a.com'] }, rulesHosts: ['a.com'], phase: 'save' }).hosts, []);
+  assert.match(phaseHosts({ product: { hosts: ['c.com'] }, rulesHosts: ['a.com'] }).reason, /not on the rules' allowed list/);
+  assert.match(phaseHosts({ product: { hosts: [] }, registryHosts: ['*.r.org'], phase: 'install' }).reason, /registry host .* not a plain host name/);
 });
 
 test('a planted escape in the machine-wide file refuses every role (R-0b-32)', () => {
@@ -245,6 +272,10 @@ test('the role file is written, read back from disk and checked', () => {
   assert.deepEqual(JSON.parse(readFileSync(f, 'utf8')), s);
   const bad = structuredClone(s); bad[S.sandbox][S.failIfUnavailable] = false;
   assert.match(writeRoleSettings(f, bad, { profile: DESIGN_PROFILES.worker }).reason, /failIfUnavailable/);
+  // #617 r2 m2: the copy read back is checked with the phase, so a proxy port that is not the phase's own refuses.
+  const proxied = render('worker', { builderProxy: true, phase: 'session' }).settings;
+  assert.equal(writeRoleSettings(f, proxied, { profile: DESIGN_PROFILES.worker, phase: 'session' }).ok, true);
+  assert.match(writeRoleSettings(f, proxied, { profile: DESIGN_PROFILES.worker, phase: 'install' }).reason ?? '', /is not the install phase's/);
   assert.equal(hasShell(DESIGN_PROFILES.lead), false);
 });
 
@@ -523,10 +554,29 @@ test('L881: the shell\'s write wall between sessions: the only added folders are
     // With no added folders at all, too (#410 r1 A11).
     assert.match(drift((c) => { delete c[S.permissions][S.additionalDirectories]; c[S.sandbox][S.filesystem][key] = ['/w/outbox-2']; }).reason ?? '', new RegExp(`holds ${key}`), `${key}, no added folders`);
   }
-  // Any sandbox key the renderer does not write (#410 r1 m3), each name claude 2.1.322 reads (#410 r2 m1).
+  // Any sandbox key the renderer does not write (#410 r1 m3), each name claude 2.1.316 reads (#410 r2 m1; checked: claude-code 2.1.316).
   for (const k of WIDENING_TOP) assert.match(drift((c) => { c[S.sandbox][k] = true; }).reason ?? '', new RegExp(`sandbox holds ${k};`), k);
-  for (const k of WIDENING_NETWORK) assert.match(drift((c) => { c[S.sandbox][S.network][k] = ['x']; }).reason ?? '', new RegExp(`network holds ${k};`), `network ${k}`);
+  // The proxy ports (wall v2) are the one exception: a role file may name the builder proxy's port, both keys alike, and nothing else.
+  for (const k of WIDENING_NETWORK.filter((x) => x !== S.httpProxyPort && x !== S.socksProxyPort)) assert.match(drift((c) => { c[S.sandbox][S.network][k] = ['x']; }).reason ?? '', new RegExp(`network holds ${k};`), `network ${k}`);
+  const ports = (h, k) => drift((c) => { if (h !== undefined) c[S.sandbox][S.network][S.httpProxyPort] = h; if (k !== undefined) c[S.sandbox][S.network][S.socksProxyPort] = k; });
+  assert.match(ports('x', 'x').reason ?? '', /is not one of the builder proxy's/);
+  assert.match(ports(8080, 8080).reason ?? '', /proxy port 8080 is not one of the builder proxy's/);
+  assert.match(ports(PROXY_PORTS.session, undefined).reason ?? '', /httpProxyPort and socksProxyPort differ/);
+  assert.match(ports(undefined, PROXY_PORTS.session).reason ?? '', /differ/);
+  assert.match(ports(PROXY_PORTS.session, PROXY_PORTS.install).reason ?? '', /differ/);
+  for (const p of Object.values(PROXY_PORTS)) assert.equal(ports(p, p).ok, true, `the proxy's port ${p}`);
+  // #617 r1 m3: with the phase known, the port must be that phase's own; a save names none.
+  const withPorts = (port) => { const c = structuredClone(render('worker').settings); c[S.sandbox][S.network][S.httpProxyPort] = port; c[S.sandbox][S.network][S.socksProxyPort] = port; return c; };
+  for (const [phase, port] of Object.entries(PROXY_PORTS)) {
+    assert.equal(checkSettings(withPorts(port), { profile: DESIGN_PROFILES.worker, phase }).ok, true, `${phase} ${port}`);
+    const other = Object.values(PROXY_PORTS).find((x) => x !== port);
+    assert.match(checkSettings(withPorts(other), { profile: DESIGN_PROFILES.worker, phase }).reason ?? '', new RegExp(`proxy port ${other} is not the ${phase} phase's \\(${port}\\)`));
+  }
+  assert.match(checkSettings(withPorts(PROXY_PORTS.session), { profile: DESIGN_PROFILES.worker, phase: 'save' }).reason ?? '', /is not the save phase's \(none\)/);
   for (const k of WIDENING_FILESYSTEM) assert.match(drift((c) => { c[S.sandbox][S.filesystem][k] = true; }).reason ?? '', new RegExp(`filesystem holds ${k};`), `filesystem ${k}`);
+  // excludedCommands and filesystem.disabled by name (2.1.316 recheck m1, L1033): either one lets commands out of the sandbox.
+  assert.match(drift((c) => { c[S.sandbox][S.excludedCommands] = ['git']; }).reason ?? '', /role settings hold excludedCommands/, 'excludedCommands');
+  assert.match(drift((c) => { c[S.sandbox][S.filesystem].disabled = true; }).reason ?? '', /filesystem holds disabled;/, 'filesystem disabled');
   for (const part of [S.network, S.filesystem]) for (const v of [[], 'x', null]) {
     assert.match(drift((c) => { c[S.sandbox][part] = v; }).reason ?? '', new RegExp(`sandbox ${part} is not an object`), `${part} ${JSON.stringify(v)}`);
   }
@@ -541,7 +591,7 @@ test('L881: the shell\'s write wall between sessions: the only added folders are
   const noProfile = structuredClone(s); noProfile[S.permissions][S.additionalDirectories].push('/w/outbox-2');
   assert.match(checkSettings(noProfile).reason ?? '', /beyond the session's own outbox/);
   // The machine-wide file (#410 r1 M1, r2 M1, launch check 10): its sandbox block is an allow-list, each key with its
-  // one safe value; every other key claude 2.1.322 reads from it is refused (one case per name, r2 m1).
+  // one safe value; every other key claude 2.1.316 reads from it is refused (one case per name, r2 m1; checked: claude-code 2.1.316).
   const mw = (sb) => checkSettings({ [S.sandbox]: sb }, { machineWide: true });
   assert.equal(mw({ [S.sandboxEnabled]: true, [S.failIfUnavailable]: true, [S.allowUnsandboxedCommands]: false,
     [S.network]: { [S.strictAllowlist]: true, deniedDomains: ['example.com'], allowManagedDomainsOnly: true }, [S.filesystem]: { [S.denyRead]: ['/x'], [S.denyWrite]: ['/y'] } }).ok, true);
@@ -556,6 +606,11 @@ test('L881: the shell\'s write wall between sessions: the only added folders are
     assert.match(mw({ [S.network]: JSON.parse(`{"${k}": {}}`) }).reason ?? '', new RegExp(`machine-wide sandbox network holds ${k};`), `network ${k}`);
   }
   for (const k of WIDENING_FILESYSTEM) assert.match(mw({ [S.filesystem]: { [k]: ['/w'] } }).reason ?? '', new RegExp(`machine-wide sandbox filesystem holds ${k};`), `filesystem ${k}`);
+  // By name (2.1.316 recheck m1, L1033): excludedCommands at the top level, filesystem.disabled, network.tlsTerminate.
+  for (const v of [['git'], [], true]) assert.match(mw({ [S.excludedCommands]: v }).reason ?? '', /machine-wide settings hold excludedCommands/, `excludedCommands ${JSON.stringify(v)}`);
+  for (const v of [true, false]) assert.match(mw({ [S.filesystem]: { disabled: v } }).reason ?? '', /machine-wide sandbox filesystem holds disabled;/, `filesystem disabled ${v}`);
+  assert.match(mw({ [S.network]: { tlsTerminate: true } }).reason ?? '', /machine-wide sandbox network holds tlsTerminate;/, 'network tlsTerminate');
+  assert.match(mw({ tlsTerminate: true }).reason ?? '', /machine-wide sandbox holds tlsTerminate;/, 'tlsTerminate at the top level is refused too');
   // The audit's probe cases as written (r2 M1).
   for (const sb of [{ enabledPlatforms: [] }, { enabledPlatforms: ['linux'], [S.failIfUnavailable]: false }, { allowAppleEvents: true },
     { [S.network]: { allowMachLookup: ['*'] } }, { [S.network]: { httpProxyPort: 8080, socksProxyPort: 1080 } }, { autoAllowBashIfSandboxed: true },

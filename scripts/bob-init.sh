@@ -308,7 +308,8 @@ set -uo pipefail
 INPUT="$(cat)"
 
 # ── Loop guard A: honor stop_hook_active if the harness sets it (avoid re-entrant loops) ──
-if printf '%s' "$INPUT" | grep -q '"stop_hook_active"[[:space:]]*:[[:space:]]*true'; then exit 0; fi
+# (a here-string: "printf | grep -q" under pipefail can fail at random on large input)
+if grep -q '"stop_hook_active"[[:space:]]*:[[:space:]]*true' <<<"$INPUT"; then exit 0; fi
 
 # ── Loop guard B (HARD, docs-independent): bounded retry counter per session ──
 # stop_hook_active is absent from current docs and has propagation bugs, so we ALSO cap retries.

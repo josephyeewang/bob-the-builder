@@ -42,7 +42,7 @@ Claude reads (in parallel where possible):
 - Git log (recent 50 commits — understand development arc)
 - Memory files (if exist)
 - Package/dependency files
-- .env.example or .env (for understanding integrations)
+- Integration names from source/config schemas and documented placeholders; never read secret-bearing environment files.
 
 Output: Structured inventory of what exists
 
@@ -123,6 +123,8 @@ This is the second meaning of "audit" in Bob: A1–A6 is the **macro** audit (do
 ---
 
 **A7.0: Entry — Audit Memory + Panel Selection (always runs first)**
+
+Before selecting lenses, run the learning preflight in `reference/field-learning.md`. Use prior incidents to choose concrete checks and put applicable invariants and scope in the reviewer brief. Apply its stable-grading and repair protocol throughout the audit; repeated rounds diagnose upstream causes rather than trigger a fixed cap.
 
 Before any lens fires, Bob reads `audit-artifacts/audit-history.json` and presents the history-aware entry experience defined in `audit-lenses/_audit-memory.md`:
 

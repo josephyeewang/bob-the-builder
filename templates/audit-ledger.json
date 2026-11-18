@@ -3,6 +3,7 @@
   "project": "{project-name}",
   "note": "Rule 24 / Rule 30(d) ledger — every audit that ran, when, on what class of work, and what it found. Gate-blocks: a phase or gate cannot advance until its required audits ran or are deferred with a reason. Check it with: node \"$(realpath ~/.claude/skills/bob/..)/scripts/audit-ledger-check.mjs\" docs/audit-ledger.json (add --streaks for the five-clean-in-a-row count).",
   "format": {
+    "learning_extension": "Optional top-level learning block; see reference/field-learning.md and templates/learning-record.example.json. Preserve entries. Missing learning records are unassessed.",
     "required_fields": ["audit", "ran", "tier", "class_of_work", "material_found", "material_remaining", "minor", "cosmetic", "auditor_context"],
     "fields": {
       "audit": "what was audited, in one line — the milestone, phase or change (name the PR or commit if there is one).",

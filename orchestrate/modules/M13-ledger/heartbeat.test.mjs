@@ -1036,3 +1036,22 @@ test('#464 r2 m-A: a damaged account row is told as the Record\'s, one notice wi
   assert.match(sensorsAlert(h).at(-1).body, /last wrote who is signed in never/);
   assert.equal(notices(h.gh), before, 'flipping between damaged and never written is one notice');
 });
+
+test('#464 deviation 3 (L1024): each red line answers the status and text it was raised with, so a caller can hold a lasting stop Joe closed', async () => {
+  const h = setup();
+  h.probes.sensorsAlive = async () => alive(40, true, { newestAt: '2026-11-03T09:20:00.000Z' });
+  const first = await h.pass();
+  assert.equal(first.told.sensors, 'opened');
+  assert.equal(first.raised.sensors.status, 'red:sensors:2026-11-03T09:20:00.000Z', 'the status keys the stop');
+  assert.equal(first.raised.sensors.text, sensorsAlert(h)[0].body.split('\n\n---\n')[0], 'the text is the alert\'s own, without the issue footer');
+  assert.ok(!('rules' in first.raised), 'a green line is not raised');
+  h.gh.ownerCloses([...h.gh.issues.entries()].find(([, i]) => i === sensorsAlert(h)[0])[0]);
+  h.tick(10);
+  const closed = await h.pass();
+  assert.equal(closed.told.sensors, 'suppressed', 'Joe closed it while the stop lasts');
+  assert.equal(closed.raised.sensors.status, 'red:sensors:2026-11-03T09:20:00.000Z', 'the same stop, the same status');
+  h.probes.sensorsAlive = async () => alive(1, false);
+  h.tick(10);
+  const back = await h.pass();
+  assert.ok(!('sensors' in back.raised), 'readings back: the Sensors line is not raised');
+});

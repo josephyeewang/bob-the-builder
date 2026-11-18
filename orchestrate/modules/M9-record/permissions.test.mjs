@@ -50,11 +50,14 @@ test('create: only the listed script actors may create each entity', () => {
   }
 });
 
-test('card kinds: each creator makes only its own kinds (R3-M3)', () => {
-  for (const kind of ['ordinary', 'fix', 'exact_reverse', 'lead_daily_card', 'research_copy']) {
-    const makers = Object.entries(CARD_CREATORS).filter(([, ks]) => ks.includes(kind)).map(([a]) => a);
-    assert.equal(makers.length, 1, `${kind} has one creator`);
-    for (const a of [...ACTORS, 'lead', 'worker', 'reviewer']) assert.equal(mayCreateKind(`${a}:S-1`, kind), a === makers[0], `${a} ${kind}`);
+// Each kind has exactly the creators written here; ordinary has two since L1100 (the owner command makes one Tier-2
+// ordinary card on the test product; writer.mjs checkNewCard holds it to the tier and the product).
+const KIND_MAKERS = { ordinary: ['lead', 'owner_command'], fix: ['dispatcher'], exact_reverse: ['dispatcher'], lead_daily_card: ['lead'], research_copy: ['dispatcher'] };
+test('card kinds: each creator makes only its own kinds (R3-M3, L1100)', () => {
+  for (const [kind, want] of Object.entries(KIND_MAKERS)) {
+    const makers = Object.entries(CARD_CREATORS).filter(([, ks]) => ks.includes(kind)).map(([a]) => a).sort();
+    assert.deepEqual(makers, [...want].sort(), `${kind}'s creators`);
+    for (const a of [...ACTORS, 'lead', 'worker', 'reviewer']) assert.equal(mayCreateKind(`${a}:S-1`, kind), want.includes(a), `${a} ${kind}`);
   }
 });
 

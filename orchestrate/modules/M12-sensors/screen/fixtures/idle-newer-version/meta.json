@@ -1,0 +1,26 @@
+{
+  "scenario": "idle-newer-version",
+  "claude_code_version": "2.1.323",
+  "tool": "screen/tools/capture.mjs",
+  "captured_on": "2026-11-13",
+  "label": "idle-newer-version",
+  "cols": 140,
+  "rows": 45,
+  "samples": [
+    {
+      "file": "01.txt",
+      "title": "✳ Claude Code",
+      "after_ms": 0
+    },
+    {
+      "file": "02.txt",
+      "title": "✳ Claude Code",
+      "after_ms": 1009
+    },
+    {
+      "file": "03.txt",
+      "title": "✳ Claude Code",
+      "after_ms": 2021
+    }
+  ]
+}

@@ -7,7 +7,8 @@ import { chmodSync, existsSync, mkdirSync, renameSync, rmSync, statSync, symlink
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { tempDir } from '../shared/test-tmp.mjs';
-import { BASE_MARKER, ORCHESTRATE_READ_ACL, ROOT_CONFIG_PATH, USERS, WORKER_ROLES, baseMarkerPath, folderTable, parseConfig } from './layout.mjs';
+import { BASE_MARKER, ORCHESTRATE_READ_ACL, ROOT_CONFIG_PATH, RULES_READ_ACL, USERS, WORKER_ROLES, baseMarkerPath, dispatcherRulesDir, folderTable, parseConfig } from './layout.mjs';
+import { rulesSnapshotFolderProblem } from '../modules/M11-dispatcher/budget.mjs';
 import { nodeProblemOf, readConfigFile, realIo } from './mac.mjs';
 import { apply, check, plan } from './users-folders.mjs';
 import { proofList } from './proofs.mjs';
@@ -173,6 +174,20 @@ test('m2: every table row\'s parent is root\'s, or the row is a direct child of 
   }
 });
 
+test('L1042 m2 (A16): each product\'s rules folder is orchestrate\'s 0700, read by the review user and the builder only (L1079: the worker runner runs as builder), as the runners demand', () => {
+  const c2 = parseConfig({ ...RAW, products: ['alpha', 'beta'] });
+  for (const prod of c2.products) {
+    const row = folderTable(c2).find((r) => r.path === dispatcherRulesDir(c2, prod));
+    assert.ok(row, prod);
+    assert.equal(row.owner, 'orchestrate', prod);
+    assert.equal(row.mode, 0o700, `${prod}: mode ${row.mode.toString(8)}`);
+    assert.deepEqual(row.acl, [RULES_READ_ACL('user:review'), RULES_READ_ACL('user:builder')], prod);
+    // The runners' own check (M11 budget.mjs) takes a folder made at that mode, so cutover's first read is not refused.
+    const d = join(tempDir('orch-setup-rules-'), 'rules'); mkdirSync(d); chmodSync(d, row.mode);
+    assert.equal(rulesSnapshotFolderProblem(d, process.getuid()), null, prod);
+  }
+});
+
 test('m2 PLANT: a folder swapped for another between the plan and the access-list step → that step refuses (caught by: the inode check in aclOp)', { skip: !isDarwin }, () => {
   const mac = applied(); const w = P(`outboxes/${WORKER_ROLES[0]}`);
   assert.equal(spawnSync('/bin/chmod', ['-h', '-N', mac.at(w)]).status, 0);
@@ -258,7 +273,7 @@ test('L758: every role the review runner starts, the plan reviewer too, has a re
     assert.ok(row, role);
     assert.equal(row.owner, 'review', role);
     assert.equal(row.mode, 0o755, role);
-    assert.ok(names.includes(`${cfg.owner} cannot write ${P(`outboxes/${role}`)}`), role);
+    assert.ok(names.includes(`builder cannot write ${P(`outboxes/${role}`)}`), role);   // L1079: the workers run as builder
     assert.ok(!WORKER_ROLES.includes(role), role);
   }
   assert.ok(RUNNER_ROLES.includes('plan_reviewer'));

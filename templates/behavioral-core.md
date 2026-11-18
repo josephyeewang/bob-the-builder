@@ -36,6 +36,16 @@
 - How does it use past interactions to inform current behavior?
 - What does it forget (and why)?
 
+### Field authority and correction
+
+For fields the system infers or defaults, record their authority separately from stable record identity:
+
+| Field | Original source / default / inference | Explicit user correction | Precedence | When to invalidate or reconsider |
+|---|---|---|---|---|
+| [field] | [origin and uncertainty] | [how corrected] | [which source wins] | [trigger] |
+
+Test a legitimate correction that changes an inferred value while preserving record identity, permissions and history. A generated default is not authored authority; an immutable identifier does not make every attribute immutable.
+
 ## 7. Error Behavior
 - System is uncertain → [behavior]
 - System made a mistake → [behavior]

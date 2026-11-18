@@ -10,7 +10,7 @@ import { stopGroupOf } from './review-runner-main.mjs';
 import { PLAN_REVIEW_ROLE } from '../../../shared/review-roles.mjs';
 import { REVIEW_USER } from './review-user.mjs';
 import { DISPATCHER_USER, dispatcherPlist } from '../../../setup/dispatcher-setup.mjs';
-import { folderTable, parseConfig, USERS, outboxRootPath, storePath, WORKER_ROLES } from '../../../setup/layout.mjs';
+import { BUILDER, folderTable, parseConfig, USERS, outboxRootPath, storePath, WORKER_ROLES } from '../../../setup/layout.mjs';
 import { workerRunnerPlist } from '../../../wiring/runner-job.mjs';
 import { DENY_KEYS } from '../../../wiring/runner-main.mjs';
 
@@ -111,18 +111,18 @@ test('L935 condition: the request id is proof only while no worker shares a uid 
   const base = tempDir('m4-stop-');
   try {
     const cfg = parseConfig({ base, owner: 'joe', products: ['acme'] });
-    // Three Mac users: the runner is review's, the Dispatcher orchestrate's, the workers the owner's.
+    // Mac users: the runner is review's, the Dispatcher orchestrate's, the workers the builder's (L1079), none the owner.
     assert.equal(REVIEW_USER, 'review');
     assert.equal(DISPATCHER_USER, 'orchestrate');
-    assert.ok(USERS.includes(REVIEW_USER) && USERS.includes(DISPATCHER_USER) && !USERS.includes(cfg.owner));
+    assert.ok(USERS.includes(REVIEW_USER) && USERS.includes(DISPATCHER_USER) && USERS.includes(BUILDER) && !USERS.includes(cfg.owner));
     assert.match(dispatcherPlist({ ...cfg, label: 'com.example.t' }), /<key>UserName<\/key>\s*<string>orchestrate<\/string>/);
     const worker = workerRunnerPlist({ label: 'com.example.t.runner', node: '/n/node', script: '/n/runner-main.mjs', config: '/n/c.json', path: '/usr/bin:/bin', logDir: '/n/log', workDir: '/n/w', home: '/n/h' });
-    assert.doesNotMatch(worker, /UserName/, "the worker runner is the owner's own job, so its sessions are the owner's uid");
-    // The review runner's folder is review's, and the workers' outboxes the owner's.
+    assert.match(worker, /<key>UserName<\/key><string>builder<\/string>/, "the worker runner is the builder's job, so its sessions are the builder's uid");
+    // The review runner's folder is review's; the worker runner's roles' outboxes the builder's, the owner's own roles' the owner's.
     const rows = folderTable(cfg);
     assert.ok(rows.some((r) => r.path === join(base, 'review') && r.owner === 'review' && r.mode === 0o755));
     // Flat, or per product for the worker runner's roles (L914).
-    for (const role of WORKER_ROLES) assert.ok(rows.some((r) => (r.path === join(outboxRootPath(cfg), role) || r.path === join(outboxRootPath(cfg), 'acme', role)) && r.owner === 'owner'), role);
+    for (const role of WORKER_ROLES) assert.ok(rows.some((r) => (r.path === join(outboxRootPath(cfg), role) && r.owner === 'owner') || (r.path === join(outboxRootPath(cfg), 'acme', role) && r.owner === BUILDER)), role);
     // The Record is orchestrate's but readable (0755): for a worker the read-deny is the wall, so every product's
     // sessions must have it (the worker runner refuses a config without).
     assert.ok(rows.some((r) => r.path === storePath(cfg, 'acme') && r.owner === 'orchestrate'));

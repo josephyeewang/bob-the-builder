@@ -32,7 +32,7 @@ import { join } from 'node:path';
 import { stillWaiting } from '../../shared/still-waiting.mjs';
 import { activeKind } from '../../shared/asks.mjs';
 import { answerCounts } from '../../shared/approval.mjs';
-import { askStore, writeDoc } from './ask-store.mjs';
+import { askStore, recordRefused, writeDoc } from './ask-store.mjs';
 import { releaseBoxes, releaseSessions } from './binding.mjs';
 import { CLOSE_DUE, closeDecisionPr, closePr, openDecision } from './decision.mjs';
 import { goText, goView, undoPushText } from './go-view.mjs';
@@ -351,7 +351,7 @@ export async function readApprove(ctx, id, { view, catchUps = [] } = {}) {
   const counted = answerCounts(ctx.rules, { ...doc, answer }, { product: ctx.product });
   if (!counted.ok) { ctx.alert({ type: 'approval_not_counted', ask: id, reason: counted.reason }); return { ok: true, counted: false }; }
   const w = writeDoc(ctx.record, 'ask', a, { ...doc, state: 'answered', answer });
-  if (!w.ok) return fail(`the record refused the answer: ${w.reason}`);
+  if (!w.ok) return fail(recordRefused(w.reason));
   return { ok: true, counted: true, head: c.head };
 }
 

@@ -405,13 +405,15 @@ function prOf(rec, head) {
  * request matching session, head and rev (refusal 11). The request goes through the start gate as kind 'merge', so
  * red holds it unless red_runs lists merges, and no Tier-1 production change is requested above the usage line or
  * while usage is unknown. An undo (exact_reverse) card's request goes as 'undo_merge', which no band holds (R-0b-68),
- * even when this pass has no bands (`startsHeld`, a reason): then every other request is held (L31).
+ * even when this pass has no bands (`startsHeld`, a reason): then every other request is held (L31). `homeUnknown` (a
+ * reason: host.lock's copy can't be trusted, L1048) holds every request, an undo's too: a merge asked for from a Mac
+ * that isn't home is the double action the single-host rule stops.
  * `session_id` is the worker session that made the head (its launch record); `pr` is Sensors' reading for the head.
  * The review itself is not read here (L72): the Record lets a card into verified or approved only with a passing
  * verdict for the head it has now, counted from the review sessions' own files (M9 verdictFor), and the Merge Gate
  * counts them again. The Record's verdict rows are not proof, so the Dispatcher does not read them.
  */
-export function requestMerges({ rec, rules, now, b, running = [], startsHeld = null, missing = [], alert }) {
+export function requestMerges({ rec, rules, now, b, running = [], startsHeld = null, homeUnknown = null, missing = [], alert }) {
   // No quiet default (L116 m4): a card sent to Joe is told through this alert, so a caller must give one.
   if (typeof alert !== 'function') throw new TypeError('requestMerges needs an alert');
   const done = [];
@@ -446,6 +448,7 @@ export function requestMerges({ rec, rules, now, b, running = [], startsHeld = n
     const again = rec.list('merge_request').some((q) => q.doc?.card === id);
     // An undo is never held by the band (audit 0b-6 r2 MAT-4, L31): it is the way out of a bad change.
     // When this pass has no bands (an outage, or the main pass failed), only undos are requested.
+    if (homeUnknown) { done.push([id, `merge request held: ${homeUnknown}`]); continue; }
     if (startsHeld && doc.kind !== 'exact_reverse') { done.push([id, `merge request held: ${startsHeld}`]); continue; }
     const g = startGate({ rules, rec, card: { id, ...doc }, kind: doc.kind === 'exact_reverse' ? 'undo_merge' : 'merge', product: doc.product, b, running });
     if (!g.ok) { if (g.missing) missing.push(g.missing); done.push([id, `merge request held: ${g.reason}`]); continue; }

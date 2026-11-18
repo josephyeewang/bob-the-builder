@@ -1,0 +1,7 @@
+{
+  "name": "quality-app",
+  "private": true,
+  "type": "module",
+  "main": "server.mjs",
+  "scripts": { "start": "node server.mjs" }
+}

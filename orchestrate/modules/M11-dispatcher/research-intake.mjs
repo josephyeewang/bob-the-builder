@@ -43,7 +43,7 @@
 import { move } from './moves.mjs';
 import { researchBrief, researchFileName, researchPath, landResearch, RESEARCH_ID } from '../M2-approvals/research-ask.mjs';
 import { goFreeOn, GO_FREE_KEY } from '../M9-record/ready.mjs';
-import { REPORT_CHANGED } from '../M4-workshop/git/push.mjs';
+import { PUSH_RETRY_MS as RETRY_MS, REPORT_CHANGED } from '../M4-workshop/git/push.mjs';
 import { tellThen, dropCause, isQueued } from './alerts.mjs';
 import { HOLD_FACT, putFact, writeLaunch, holdAlert, clearHold } from './pass.mjs';
 import { hostname } from 'node:os';
@@ -57,8 +57,8 @@ export const RESEARCH_TIER = 2;
 export const RESEARCH_MODULE = 'docs';
 /** M10's push_branch denies a card with no lane; a copy lands in docs/, the docs lane's. */
 export const RESEARCH_LANE = 'docs';
-/** How long a refused copy rests before the next try: each try reads GitHub. */
-export const RETRY_MS = 15 * 60_000;
+/** How long a refused copy rests before the next try: each try reads GitHub. push.mjs's PUSH_RETRY_MS (one home, I7). */
+export { RETRY_MS };
 export const RESEARCH_OFF = `research copies are off: the rules don't set ${GO_FREE_KEY}.research_copy to true`;
 /** Whether the tick runs researchCopyPass. Not yet (L410): a landed report is then told once that nothing copies it. */
 export const COPY_WIRED = false;

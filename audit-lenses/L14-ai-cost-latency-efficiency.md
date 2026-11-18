@@ -90,6 +90,8 @@ Per Anthropic + industry data: enabling prompt caching alone typically cuts cost
    - User-facing budget per call (what's tolerable?).
    - Gap analysis.
 
+**Primary completion before optional polish:** trace the operation's shared absolute deadline across primary work, optional enrichment, retries and fallbacks; reserve enough time to persist the required result. A fallback spends only the remaining budget, not a fresh full timeout. Test a hanging optional provider, slow/disconnected stream consumer and notification backpressure: required work must still save, and committed results must remain retrievable without live progress delivery. Count returned attempts even when parsing rejects their output. Fast first output does not prove reliable completion.
+
 9. **Circuit breaker check.** Is there a kill switch / cost-per-minute alarm if usage spikes (LLM10 protection + cost runaway)?
 
 ## Check questions

@@ -54,6 +54,7 @@ test('L643: the steps run in the rehearsed order b, a, a2, c, d, and every one i
     if (c.kind === 'step') assert.equal(parseArgs([...c.args, '--dry-run']).dry, true, `${c.name} has a dry run`);
     else assert.throws(() => parseArgs([...c.args, '--dry-run']), /does not apply/, `${c.name} is read only`);
     if (c.args[0] === 'daemons') assert.deepEqual(o.jobs ?? [o.only], ['watch-only'], `${c.name} is for the watch job only`);
+    if (c.args[0] === 'check-install') assert.equal(o.watchOnly, true, `${c.name} checks only what the watch job uses (L1026)`);
   }
   const app = parseArgs(calls[0].args);
   assert.deepEqual(app.app, { id: '5635934', installation: '179103836', keyFile: ['watch-app', 'pem'].join('.') });

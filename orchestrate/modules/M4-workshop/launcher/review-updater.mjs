@@ -64,7 +64,8 @@ export const GIT_MS = 300_000;
 // The runner's config keys that name something in the copy (L75 m-4), each checked in the new copy before the flip.
 // The claude program and the hooks may be copy items, which `keep` must carry over or the first update would drop them;
 // the wiring and the budget module must be the copy's own code files from main (L132 M-1, install-check RUNNER_MODULES).
-export const RUNNER_NAMES = Object.freeze(['wiring', 'budget', 'claudeBin', 'hooksDir']);
+// The bob step's Bob file list (bobManifest) is a copy item too, which the bob step adds to keep (L1035 m1).
+export const RUNNER_NAMES = Object.freeze(['wiring', 'budget', 'claudeBin', 'hooksDir', 'bobManifest']);
 // The link naming the copy the last update replaced (L75 (a)), `<installRoot>.prev`, root's, beside the copy. Only
 // root writes in that folder, so it is root's doing. It only keeps that folder from being removed; nothing is ever put
 // in place from it.

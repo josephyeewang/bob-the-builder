@@ -19,6 +19,7 @@ import { ACCOUNT_NAMES, accountEnv } from './accounts.mjs';
 import { startGate } from '../../M11-dispatcher/gate.mjs';
 import { rulesWith, recWith } from '../../M11-dispatcher/fixtures.test-helper.mjs';
 import { reviewChecks, launchReview, sessionArgs, spawnClaude, smokeFiles, smokeCommand, GATE_KIND, FIRST_ROUND_EFFORT, SEND_BACK_EFFORT } from './review-launch.mjs';
+import { sourcesProblem } from './readback.mjs';
 
 const PIN = '2.1.300';
 const ME = process.getuid();
@@ -224,10 +225,10 @@ test('M-3 checks 9 and 10: no key in the session\'s environment; the machine-wid
   const gone = join(w.root, 'gone.json');
   assert.match((await port({ ...w.x, machineWide: gone, managedReaders: { ...w.x.managedReaders, claudeFile: gone } }, 10)).reason, /missing or not JSON/);
   // Any machineWide but the fixed file refuses (L909).
-  assert.match((await port({ ...w.x, machineWide: gone }, 10)).reason, /^machine-wide settings must be .*managed\.json, not .*gone\.json: claude 2\.1\.322 reads only that file$/);
+  assert.match((await port({ ...w.x, machineWide: gone }, 10)).reason, /^machine-wide settings must be .*managed\.json, not .*gone\.json: claude 2\.1\.316 reads only that file$/);
   // With no readers handed in, port 10 checks against claude's own fixed file: refused before anything is read, on any Mac.
   const { managedReaders: _r, ...bare } = w.x;
-  assert.match((await port({ ...bare, machineWide: gone }, 10)).reason, /^machine-wide settings must be \/Library\/Application Support\/ClaudeCode\/managed-settings\.json, not .*gone\.json: claude 2\.1\.322 reads only that file$/);
+  assert.match((await port({ ...bare, machineWide: gone }, 10)).reason, /^machine-wide settings must be \/Library\/Application Support\/ClaudeCode\/managed-settings\.json, not .*gone\.json: claude 2\.1\.316 reads only that file$/);
   writeFileSync(w.x.machineWide, JSON.stringify({ [S.hooks]: {} }));
   assert.match((await port(w.x, 10)).reason, /not in force/);
 });
@@ -354,7 +355,9 @@ test('R-0b-163 planted: the session starts with --settings naming the runner\'s 
   const at = args.flatMap((a, i) => (a === F.settings ? [i] : []));
   assert.equal(at.length, 1, '--settings appears exactly once');
   assert.equal(args[at[0] + 1], '/r/settings/S-1.json');
-  for (const other of ['--setting-sources', '--add-dir', '--dangerously-skip-permissions', '--allowedTools', '--allowed-tools']) assert.equal(args.includes(other), false, `no ${other}`);
+  // The one settings-sources limit the read-back accepts, and no other form (L1093, L1109).
+  assert.equal(sourcesProblem(args), null);
+  for (const other of ['--add-dir', '--dangerously-skip-permissions', '--allowedTools', '--allowed-tools']) assert.equal(args.includes(other), false, `no ${other}`);
   assert.equal(args[args.indexOf(F.sessionId) + 1], 'S-1', 'claude takes the runner\'s session id, so the pid check finds it');
   assert.equal(args[args.indexOf(F.tools) + 1], DESIGN_PROFILES.reviewer.tools.join(','));
   assert.equal(args[args.indexOf(F.permissionMode) + 1], DESIGN_PROFILES.reviewer.mode);

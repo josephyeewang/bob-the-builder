@@ -19,7 +19,7 @@ import { openRecord } from '../modules/M9-record/writer.mjs';
 import { FIRST, ENTRY, SAMPLE } from '../modules/M10-rules/first-cutover.test-helper.mjs';
 import { ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
 import { LAST_PASS_FACT, STEPS, STEP_ERROR_FACT, runTick } from '../modules/M11-dispatcher/tick.mjs';
-import { wire, notWiredText, refusing, checkConfig, PORT_GROUPS, TICK_PORTS } from './dispatcher-wiring.mjs';
+import { wire, notWiredText, refusing, checkConfig, CONFIG_KEYS, OPTIONAL_CONFIG_KEYS, PORT_GROUPS, TICK_PORTS } from './dispatcher-wiring.mjs';
 import { fakeAlert } from '../test/fake-alert.test-helper.mjs';
 import { CLEANUP_PORTS, NOT_WIRED_CLEANUP, NOT_WIRED_WORKER, cleanupProblem, workerPorts } from './worker-ports.mjs';
 import { NOT_WIRED_REVIEW, reviewPorts } from './review-ports.mjs';
@@ -27,6 +27,9 @@ import { NOT_WIRED_PHONE, phonePorts } from './phone-ports.mjs';
 import { fakeGitHubFetch, blobOf } from './fake-github.test-helper.mjs';
 import { reviewConfig } from './review-ports.test-helper.mjs';
 import { tempDir } from '../shared/test-tmp.mjs';
+import { limitedSync } from '../modules/M11-dispatcher/sync-limit.mjs';
+import { readRulesSnapshot } from '../modules/M11-dispatcher/budget.mjs';
+import { FETCH_GRACE_MS } from '../modules/M10-rules/reader.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const MAIN = join(here, '..', 'modules', 'M11-dispatcher', 'main.mjs');
@@ -60,9 +63,9 @@ const NW = (port) => notWiredText(port);
 // uid + 1), since the Dispatcher's own user may not be it, so the runner's status here is not that user's and the limits
 // step fails with exactly that. The in-process test below pins limits 'ok' on the healthy path. The lead checks this line.
 const NOT_REVIEW_USERS = "no review was asked for: the review runner's folder is not owned by the review user";
-// The worker runner is the owner's (workerUid, host.lock's stand-in uid): the test's runner folder is this user's, so its
+// The worker runner is the builder's (workerUid, L1079, a stand-in uid): the test's runner folder is this user's, so its
 // status is never trusted, and every step that reads it fails with exactly that (L925: "not known", never a list).
-const NOT_THE_RUNNERS = "the worker runner's folder is not owned by the owner's user";
+const NOT_THE_RUNNERS = "the worker runner's folder is not owned by the worker runner's user (workerUid)";
 const EXPECTED_STEPS = Object.freeze({
   stops: NOT_THE_RUNNERS, undo: 'ok', 'undo-starts': NOT_THE_RUNNERS, outage: NOT_THE_RUNNERS, intake: NOT_THE_RUNNERS, proposals: NW('proposals'), research: 'ok', leads: NW('leads'), approvals: 'ok', 'plan-go': 'ok',
   pass: NOT_THE_RUNNERS, limits: NOT_REVIEW_USERS, merges: 'ok', waits: 'ok', 'lost-cards': 'ok', 'stuck-cards': 'ok', phone: 'ok', cleanup: NW(`cleanup.${NOT_WIRED_CLEANUP[0]}`),
@@ -186,6 +189,22 @@ test('A2: each review and worker path must be absolute, and present', () => {
   assert.equal(checkConfig(w.config), w.config, 'the whole config passes');
 });
 
+// L1041: hostLockStamp, the owner's copier's stamp, is the one optional key: absent, the config is as before; given, it
+// must be an absolute path and not host.lock's copy itself. Any other list (the robot's) still refuses it.
+test('L1041: checkConfig takes an optional absolute hostLockStamp, refuses a relative one or the copy itself, and only for the Dispatcher', () => {
+  const w = world();
+  assert.deepEqual(OPTIONAL_CONFIG_KEYS, ['hostLockStamp']);
+  assert.equal(CONFIG_KEYS.includes('hostLockStamp'), false, 'not required: setup without a copier still writes a whole config');
+  assert.equal(checkConfig(w.config).hostLockStamp, undefined, 'absent: the config passes as before');
+  const stamp = `${w.config.hostLockPath}.copied`;
+  assert.equal(checkConfig({ ...w.config, hostLockStamp: stamp }).hostLockStamp, stamp);
+  for (const bad of ['host.lock.copied', '', 7, null, ['/x']]) {
+    assert.throws(() => checkConfig({ ...w.config, hostLockStamp: bad }), { message: 'config: hostLockStamp must be an absolute path when given' }, JSON.stringify(bad));
+  }
+  assert.throws(() => checkConfig({ ...w.config, hostLockStamp: w.config.hostLockPath }), /hostLockStamp must be the copier's stamp, not host\.lock's copy itself/);
+  assert.throws(() => checkConfig({ ...w.config, hostLockStamp: stamp }, { keys: [...CONFIG_KEYS] }), /config: unknown key hostLockStamp/, 'another key list: not optional');
+});
+
 // L805 m1: a host.lock owner that can't be right stops the start before anything is made: no approvals folder, no Record.
 test('L805 m1: wire() refuses a bad hostLockUid before it makes the approvals folders or opens the Record', async () => {
   const me = process.getuid();
@@ -203,16 +222,18 @@ test('L805 m1: wire() refuses a bad hostLockUid before it makes the approvals fo
   assert.equal(existsSync(rev.config.approvalsStateDir), false);
 });
 
-// L943 m3: the worker runner's user (workerUid) must be a Mac user id and host.lock's owner's, checked with the config,
-// before wire() makes a folder, opens the Record or reads GitHub.
-test('L943 m3: checkConfig and wire() refuse a workerUid that is not a safe integer equal to hostLockUid, before anything is made', async () => {
+// L943 m3, L1079 (I1): the worker runner's user (workerUid) must be a Mac user id that is the builder's: not root, not
+// host.lock's owner (the owner's), not the Dispatcher's, not review's; checked with the config, before wire() makes a
+// folder, opens the Record or reads GitHub.
+test('L943 m3, L1079: checkConfig and wire() refuse a workerUid that is not a Mac user id, or is the owner\'s, before anything is made', async () => {
   const base = world();
   const owner = base.config.hostLockUid;
-  assert.equal(checkConfig(base.config).workerUid, owner, 'the test world\'s workerUid is the owner\'s');
-  for (const uid of [owner + 1, String(owner), owner + 0.5, -1, null, undefined, 2 ** 53]) {
+  assert.notEqual(checkConfig(base.config).workerUid, owner, 'the test world\'s workerUid is the builder\'s, not the owner\'s');
+  const notId = /config: workerUid must be the builder user's Mac user id \(L1079\), not root's/;
+  for (const [uid, re] of [[owner, /config: workerUid is the owner's Mac user id \(hostLockUid\)/], [process.getuid(), /config: workerUid is the Dispatcher's own user/],
+    ...[String(owner), owner + 0.5, -1, 0, null, undefined, 2 ** 53].map((u) => [u, notId])]) {
     const w = world({ extra: { workerUid: uid } });
     if (uid === undefined) delete w.config.workerUid;
-    const re = /config: workerUid must be the owner's Mac user id, hostLockUid's: the worker runner runs as the owner/;
     assert.throws(() => checkConfig(w.config), re, String(uid));
     let fetched = 0;
     await assert.rejects(wire(w.config, { log: () => {}, fetchFn: (...a) => { fetched++; return fakeGitHubFetch(w.fake)(...a); } }), re, String(uid));
@@ -273,7 +294,8 @@ test('the seam: each port has one home; a port file gets ctx and fills its ports
 
   const seen = [];
   const opts = { fetchFn: fakeGitHubFetch(w.fake), log: () => {} };
-  const filled = await wire(w.config, { ...opts, limitedSync: 'the sync', groups: rest(['sessions', 'hostLock', 'launch', 'probe', 'board'],
+  const made = [];
+  const filled = await wire(w.config, { ...opts, limitedSync: (sp) => { made.push(sp); return 'the sync'; }, spawnSync: 'a spawnSync', groups: rest(['sessions', 'hostLock', 'launch', 'probe', 'board'],
     { notWired: ['launch', 'probe'], build: (ctx) => { seen.push(ctx); return { sessions: 'a real port' }; } },
     { notWired: ['board'], build: () => ({ hostLock: 'another' }) }) });
   assert.deepEqual([filled.ports.sessions, filled.ports.hostLock], ['a real port', 'another']);
@@ -286,9 +308,36 @@ test('the seam: each port has one home; a port file gets ctx and fills its ports
   assert.deepEqual(Object.keys(seen[0].gh).sort(), ['get', 'post']);
   await assert.rejects(seen[0].gh.post('/repos/o/r/pulls', {}), /only write-shaped/);
   await assert.rejects(seen[0].gh.get('/user'), /only repository reads/);
-  assert.equal(seen[0].limitedSync, 'the sync');
+  assert.equal(seen[0].limitedSync, 'the sync', 'ctx holds the runner the maker made, not the maker (L1180)');
+  assert.deepEqual(made, ['a spawnSync'], 'made once, with the spawnSync given');
   assert.equal(seen[0].rec, filled.rec);
   assert.equal(seen[0].rules, filled.rules);
+});
+
+// L1180: main.mjs hands wire() limitedSync's maker. The ports that run commands get the runner it makes, so their run
+// call succeeds; before, ctx held the maker, so on a real Mac every filesOf threw and hostLock always read "not known".
+test('L1180: through wire() with the real limitedSync maker, filesOf and hostLock run their commands', async () => {
+  const w = world();
+  const calls = [];
+  const spawnSync = (cmd, args, o) => {
+    calls.push([cmd, args]);
+    assert.equal(o.shell, false);
+    assert.ok(o.timeout > 0, 'held to a time limit');
+    if (args.includes('diff-tree')) return { status: 0, stdout: 'a.txt\0b/c.txt\0' };
+    if (args.includes('config')) return { status: 0, stdout: '' };
+    if (args[0] === '-e') return { status: 0, stdout: JSON.stringify({ text: 'host: the-mini\n' }) };
+    return { status: 1, stdout: '' };
+  };
+  const { ports } = await wire(w.config, { log: () => {}, fetchFn: fakeGitHubFetch(w.fake), limitedSync, spawnSync });
+  assert.deepEqual(ports.filesOf(COMMIT), ['a.txt', 'b/c.txt']);
+  assert.ok(calls.some(([cmd, a]) => cmd === '/usr/bin/env' && a.includes('diff-tree') && a.includes(COMMIT)), 'filesOf ran git through the runner');
+  assert.equal(ports.hostLock(), 'host: the-mini\n');
+  assert.ok(calls.some(([cmd, a]) => cmd === process.execPath && a.includes(w.config.hostLockPath)), 'hostLock ran its reader through the runner');
+  // Given no maker, the ports say so rather than read as "no host" or an empty list.
+  const none = world();
+  const bare = await wire(none.config, { log: () => {}, fetchFn: fakeGitHubFetch(none.fake) });
+  assert.throws(() => bare.ports.filesOf(COMMIT), /given no limitedSync/);
+  assert.throws(() => bare.ports.hostLock(), /given no limitedSync/);
 });
 
 // Every way a port can lose its one home stops a start: the groups the wiring is given, what stops it, the port it names.
@@ -410,6 +459,93 @@ test('R-0b-162 A: the wired rules know the role files, and refuse a start that n
   const ed = rules.may('start_session', { product: P, role: 'worker', tier: 2, editing: true });
   assert.equal(ed.decision, 'deny');
   assert.match(ed.reason, new RegExp(notWiredText('running').replace(/[()]/g, '\\$&')));
+});
+
+// Launch check 12's rules for the runners (L1001): each pass (one wire) with usable rules writes the snapshot again.
+function snapshotWorld() {
+  const w = world();
+  const dir = w.f('products-rules'); mkdirSync(dir, { mode: 0o700 }); chmodSync(dir, 0o700);
+  const file = join(dir, 'dispatcher-rules.json');
+  w.approve([blobOf(FIRST)]);
+  return { w, dir, file, config: { ...w.config, rulesSnapshotFile: file } };
+}
+
+test('L1001: two passes with no rules change both write check 12\'s snapshot; a pass with no usable rules leaves it to go stale', async () => {
+  const s = snapshotWorld();
+  let t = Date.now();
+  const logs = [];
+  const opts = (fetchFn = fakeGitHubFetch(s.w.fake)) => ({ log: (x) => logs.push(x), fetchFn, now: () => t });
+  await wire(s.config, opts());
+  const a = readRulesSnapshot(s.file, { uid: process.getuid(), now: t });
+  assert.equal(a.ok, true, `${a.reason}\n${logs.join('\n')}`);
+  assert.deepEqual(Object.keys(a.rules), [P]);
+  assert.equal(a.rules[P].text, FIRST);
+  assert.equal(a.rules[P].commit, COMMIT);
+  assert.equal(a.rules[P].blob, blobOf(FIRST));
+  const ino = lstatSync(s.file).ino;
+  t += 60_000;
+  await wire(s.config, opts());
+  const b = readRulesSnapshot(s.file, { uid: process.getuid(), now: t });
+  assert.equal(b.writtenAt, new Date(t).toISOString(), 'the second pass wrote it again');
+  // Nothing changed but the fetch, which this pass made again (the runners' grace counts from it, L1001 review M2).
+  const noFetch = (r) => Object.fromEntries(Object.entries(r).map(([p, { fetched_at: _f, ...x }]) => [p, x]));
+  assert.deepEqual(noFetch(b.rules), noFetch(a.rules), 'with nothing changed');
+  assert.equal(a.rules[P].fetched_at, new Date(t - 60_000).toISOString());
+  assert.equal(b.rules[P].fetched_at, new Date(t).toISOString(), 'the fetch time is the second pass\'s');
+  assert.notEqual(lstatSync(s.file).ino, ino);
+  // GitHub can't be reached this launch: the reader has no fetch in its grace, so its rules are deny_all, and no write.
+  const before = readFileSync(s.file, 'utf8');
+  t += 60_000;
+  await wire(s.config, opts(async () => { throw new Error('offline'); }));
+  assert.equal(readFileSync(s.file, 'utf8'), before, 'not written');
+  assert.equal(readRulesSnapshot(s.file, { uid: process.getuid(), now: t }).ok, true, 'still inside the grace');
+  assert.match(readRulesSnapshot(s.file, { uid: process.getuid(), now: t - 60_000 + FETCH_GRACE_MS + 1 }).reason, /is stale/);
+  assert.ok(!queued(readRecord(s.w)).some((x) => /check 12's rules/.test(x)), 'rules not usable are the reader\'s to tell, not a write failure');
+  // PR-2 r2 M1: the rules file deleted (GitHub answers 404): the Dispatcher refuses now, so the snapshot is removed and the
+  // runners refuse at once, not after the grace.
+  t += 60_000;
+  await wire(s.config, opts());
+  assert.equal(readRulesSnapshot(s.file, { uid: process.getuid(), now: t }).ok, true, 'reachable again: written');
+  const gone = fakeGitHubFetch(s.w.fake);
+  await wire(s.config, opts(async (url, init) => (/\/contents\//.test(new URL(url).pathname) ? { status: 404, json: async () => ({}) } : gone(url, init))));
+  assert.equal(existsSync(s.file), false, logs.join('\n'));
+  assert.match(readRulesSnapshot(s.file, { uid: process.getuid(), now: t }).reason, /is missing/);
+  assert.ok(logs.some((l) => /so the rules snapshot is removed: the runners refuse at once/.test(l)), logs.join('\n'));
+  // One that can't be removed is logged and queued.
+  mkdirSync(s.file); writeFileSync(join(s.file, 'x'), 'y');
+  await wire(s.config, opts(async (url, init) => (/\/contents\//.test(new URL(url).pathname) ? { status: 404, json: async () => ({}) } : gone(url, init))));
+  assert.ok(queued(readRecord(s.w)).some((x) => /^check 12's rules for the runners could not be kept: .*could not be removed or emptied \(.*\): the runners may use it for up to 300 s from its last fetch$/.test(x)), queued(readRecord(s.w)).join('\n'));
+});
+
+test('L1002: a snapshot folder others can read stops the write, which is logged and queued; the pass still runs', async () => {
+  const s = snapshotWorld();
+  chmodSync(s.dir, 0o750);
+  const logs = [];
+  await wire(s.config, { log: (x) => logs.push(x), fetchFn: fakeGitHubFetch(s.w.fake) });
+  assert.ok(!existsSync(s.file));
+  assert.match(logs.join('\n'), /dispatcher: the rules snapshot's folder .* can be read or written by group or others/);
+  assert.ok(queued(readRecord(s.w)).some((x) => /^check 12's rules for the runners could not be kept: the rules snapshot's folder .*, so nothing is written there, and the runners refuse it$/.test(x)), queued(readRecord(s.w)).join('\n'));
+  assert.throws(() => checkConfig({ ...s.config, rulesSnapshotFile: 'rel.json' }), /rulesSnapshotFile must be an absolute path/);
+});
+
+test('L1042 m1: a pass whose rules are usable but whose write fails drops the last snapshot, and tells Joe once in plain words', async () => {
+  const s = snapshotWorld();
+  const logs = [];
+  await wire(s.config, { log: (x) => logs.push(x), fetchFn: fakeGitHubFetch(s.w.fake) });
+  assert.equal(readRulesSnapshot(s.file, { uid: process.getuid() }).ok, true, logs.join('\n'));
+  // The folder takes no new file: the write fails while the rules are usable, so the old snapshot is emptied in place.
+  chmodSync(s.dir, 0o500);
+  try { await wire(s.config, { log: (x) => logs.push(x), fetchFn: fakeGitHubFetch(s.w.fake) }); } finally { chmodSync(s.dir, 0o700); }
+  assert.equal(readFileSync(s.file, 'utf8'), '', logs.join('\n'));
+  assert.match(readRulesSnapshot(s.file, { uid: process.getuid() }).reason, /is not JSON/);
+  const told = queued(readRecord(s.w)).filter((x) => /^check 12's rules/.test(x));
+  assert.deepEqual(told.length, 1, told.join('\n'));
+  // c1: one consequence, said once.
+  assert.match(told[0], /^check 12's rules for the runners could not be kept: the rules snapshot could not be written \(EACCES\); the rules snapshot could not be removed \(EACCES\), so it is emptied instead: the runners refuse at once, and a later pass removes it$/);
+  assert.equal(told[0].match(/stale/g), null);
+  // The next pass, the folder right again, writes it.
+  await wire(s.config, { log: (x) => logs.push(x), fetchFn: fakeGitHubFetch(s.w.fake) });
+  assert.equal(readRulesSnapshot(s.file, { uid: process.getuid() }).ok, true, logs.join('\n'));
 });
 
 test('L270: the approvals port answers this product with its state folder; its GitHub writes and copies refuse', async () => {

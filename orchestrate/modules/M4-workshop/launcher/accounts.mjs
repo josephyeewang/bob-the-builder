@@ -1,11 +1,18 @@
 // The account switch (R-1-89): two Claude accounts on one Mac user, each with its own sign-in folder.
 //
-// How Claude Code keeps them apart (checked 31 Oct 2026 against CLI 2.1.316; a capability claim, re-check on an
+// How Claude Code keeps them apart (checked 31 Oct 2026 against CLI 2.1.316, checked: claude-code 2.1.316; a
+// capability claim, re-check on an
 // upgrade): `CLAUDE_CONFIG_DIR` names the folder Claude Code reads. The macOS Keychain sign-in is keyed to that folder,
 // and so are its settings file `.claude.json` and its list of background sessions. Account `a` is the folder Claude
 // Code uses when the variable is not set (`~/.claude`, with `.claude.json` in the home folder), so it runs with the
-// variable unset, exactly as today; account `b` is a second folder (`~/.claude-b`). A long-lived token
-// (`CLAUDE_CODE_OAUTH_TOKEN`) is not used: it can't start Remote Control, so the Front Door would break.
+// variable unset, exactly as today; account `b` is a second folder (`~/.claude-b`). This holds for the owner's sessions,
+// which sign in through the owner's login Keychain: for them a long-lived token (`CLAUDE_CODE_OAUTH_TOKEN`) is not used,
+// since it can't start Remote Control, so the Front Door would break. (The review user never logs in to macOS either;
+// how its sessions sign in is not settled by this note.) The worker (builder) sessions are the
+// exception (L1261): the builder user never logs in to macOS, so it has no login Keychain and `/login` fails there; its
+// sessions sign in with a long-lived token the owner makes (`claude setup-token`) and root saves in a file only builder
+// reads (setup.mjs builder-signin; wiring/builder-signin.mjs). For them the account switch below does not apply: they
+// run in account a's folder on whichever account made the token.
 //
 // The second folder shares everything but the sign-in: hooks, settings (and the local allow rules), skills, agents,
 // slash commands, plugins, key bindings, the global instructions and the projects folder (memory, transcripts) are

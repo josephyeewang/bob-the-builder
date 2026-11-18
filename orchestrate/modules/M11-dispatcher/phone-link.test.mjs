@@ -19,7 +19,7 @@ function world({ outcome = 'sent', restartOk = true, minibaseOk = true, alert = 
     restartFrontDoor: async () => { calls.restarts += 1; return restartOk ? { ok: true } : { ok: false, reason: 'did not start' }; },
     startMinibase: async () => { calls.minibase += 1; return minibaseOk ? { ok: true } : { ok: false, reason: 'no' }; },
   };
-  const step = (min, rules = rulesWith()) => withAlerts(rec, T0 + min * MIN, alert ?? ((t) => calls.alerts.push(t)), (a) => phoneLinkStep({ rec, rules, now: T0 + min * MIN, ...ports, alert: a }));
+  const step = (min, rules = rulesWith(), more = {}) => withAlerts(rec, T0 + min * MIN, alert ?? ((t) => calls.alerts.push(t)), (a) => phoneLinkStep({ rec, rules, now: T0 + min * MIN, ...ports, ...more, alert: a }));
   // one reading of every sensor at minute `min`
   const read = (min, { net = true, fd = true, mb = true } = {}) => { fact(FACTS.network, net, min); fact(FACTS.reachable, fd, min); fact(FACTS.minibase, mb, min); };
   const diary = () => rec.read('fact', 'phone-link-note')?.rev ?? 0;
@@ -95,6 +95,21 @@ test('L15: refused and unreachable for 10 min -> Front Door restarted, one diary
   assert.equal(w.diary(), 1);
   assert.match(w.rec.read('fact', 'phone-link-note').doc.text, /restarted under its fixed name/);
   assert.equal(w.calls.alerts.length, 0);
+});
+
+// L1048: while which Mac is home is not known (the tick's startsHeld), a Front Door refused for too long is not restarted
+// and nothing is marked as tried, so the first pass after the hold restarts it; the reconnect sends before it still go.
+test('L1048: refused and unreachable for 10 min while home is unknown -> no restart until the hold ends', async () => {
+  const w = world({ outcome: 'suppressed_awaiting_user' });
+  const held = { startsHeld: 'which Mac is home is not known' };
+  const out = [];
+  for (let m = 0; m <= 12; m += 1) { w.read(m, { fd: false }); out.push(...(await w.step(m, rulesWith(), held))); }
+  assert.ok(w.calls.sent.length > 0, 'the reconnect sends still go');
+  assert.equal(w.calls.restarts, 0);
+  assert.ok(out.includes('Front Door restart held: which Mac is home is not known'), out.join(' | '));
+  w.read(13, { fd: false });
+  assert.ok((await w.step(13)).includes('Front Door restarted'));
+  assert.equal(w.calls.restarts, 1);
 });
 
 test('L15: not yet 10 min refused -> no restart', async () => {
@@ -465,3 +480,48 @@ test('L354 item 2: a clear the Record refuses is in the step\'s answer', async (
 
 // L778: the caller hazards of the phone ports, written into the contract; each is a test owed once the ports are wired.
 test.todo('L778: a frontDoorAlive, send or startMinibase port that throws fails the phone step, and a throwing startMinibase is tried again with no 5-minute wait (the calls have no try)');
+
+// I3 (L1157): each phone-link hold is told at once, quiet for the rest of the day, and told again a day on while it still
+// lasts (shared stillWaiting); the mark is the fact's `told` field, { told_at }.
+const DAY = 24 * 60;
+const count = (w, re) => w.calls.alerts.filter((a) => re.test(a)).length;
+
+test('I3: a Front Door that stays gone and keeps failing to restart is told at once, quiet within the day, and told again a day on', async () => {
+  const w = world({ restartOk: false });
+  const gone = { frontDoorAlive: () => false };
+  // Tried at most every 5 minutes, so the quiet try is 5 minutes before the day is out.
+  for (const m of [0, DAY - 5, DAY]) { w.read(m); await w.step(m, rulesWith(), gone); }
+  assert.equal(w.calls.restarts, 3);
+  assert.equal(count(w, /did not restart/), 2, 'told at 0 and a day on, not at DAY - 5');
+  assert.equal(typeof w.rec.read('fact', FD_RESTART_FACT).doc.told?.told_at, 'string');
+});
+
+test('I3 control: a failed Front Door restart is told once inside the day, however often it is tried', async () => {
+  const w = world({ restartOk: false });
+  for (let m = 0; m < DAY; m += 5) { w.read(m); await w.step(m, rulesWith(), { frontDoorAlive: () => false }); }
+  assert.ok(w.calls.restarts > 200);
+  assert.equal(count(w, /did not restart/), 1);
+});
+
+test('I3: a Front Door on another account that won\'t stop is told at once, quiet within the day, and told again a day on', async () => {
+  const w = world();
+  const stray = { frontDoorAlive: () => true, strayFrontDoor: async () => ({ ok: false, stopped: [], reason: 'denied' }) };
+  for (const m of [0, 5, DAY - 5]) { w.read(m); await w.step(m, rulesWith(), stray); }
+  assert.equal(count(w, /may still run on the other account/), 1, 'quiet within the day');
+  w.read(DAY); await w.step(DAY, rulesWith(), stray);
+  assert.equal(count(w, /may still run on the other account/), 2, 'told again a day on');
+});
+
+test('I3: a phone link that stays down is told after 3 failed tries, quiet within the day, and told again a day on', async () => {
+  const w = world();
+  const tell = /tries to reconnect it failed/;
+  // A reading and a pass every 5 minutes: sends at 5, 10, 15, 20, ...; the fourth send (20) is the third failure.
+  for (let m = 0; m <= 20; m += 5) { w.read(m, { fd: false }); await w.step(m); }
+  assert.equal(count(w, tell), 1);
+  for (let m = 25; m < 20 + DAY; m += 5) { w.read(m, { fd: false }); await w.step(m); }
+  assert.equal(count(w, tell), 1, 'quiet within the day');
+  w.read(20 + DAY, { fd: false }); await w.step(20 + DAY);
+  assert.equal(count(w, tell), 2, 'told again a day on');
+  w.read(25 + DAY, { fd: true }); await w.step(25 + DAY);
+  assert.equal(w.rec.read('fact', LINK_FACT).doc.told, false, 'cleared when the link comes back');
+});

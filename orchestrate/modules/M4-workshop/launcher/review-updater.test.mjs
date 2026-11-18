@@ -695,8 +695,11 @@ test('L73 point 7(b): the stamp alert\'s "since" is when the updater first saw m
   assert.equal(nextMainSeen({ commit: main4, since: 1_000, installed: a, checked_at: 2_000 }, { commit: main4, installed: a, now: 3_000 }).since, 1_000);
 });
 
+// R-0b-179: safe-git loads shared/secret-guard.mjs (the runtime guard), which imports only Node's own, so the updater's set
+// names it; paths are from orchestrate/ so a file outside M4-workshop reads plainly.
 test('L73 point 5, L75 c-1: root runs only two small module sets, the updater\'s and the account copy\'s, which import nothing but Node\'s own', () => {
   const here = dirname(fileURLToPath(import.meta.url));
+  const orch = resolve(here, '../../..');
   const set = (entry) => {
   const found = new Set();
   const visit = (file) => {
@@ -716,10 +719,11 @@ test('L73 point 5, L75 c-1: root runs only two small module sets, the updater\'s
     }
   };
   visit(join(here, entry));
-  return [...found].map((f) => f.slice(dirname(here).length + 1)).sort();
+  return [...found].map((f) => f.slice(orch.length + 1)).sort();
   };
-  assert.deepEqual(set('review-updater.mjs'), ['git/safe-git.mjs', 'launcher/install-check.mjs', 'launcher/review-updater.mjs']);
-  assert.deepEqual(set('accounts.mjs'), ['launcher/accounts.mjs', 'launcher/install-check.mjs']);
+  const M4 = 'modules/M4-workshop/';
+  assert.deepEqual(set('review-updater.mjs'), [`${M4}git/safe-git.mjs`, `${M4}launcher/install-check.mjs`, `${M4}launcher/review-updater.mjs`, 'shared/secret-guard.mjs']);
+  assert.deepEqual(set('accounts.mjs'), [`${M4}launcher/accounts.mjs`, `${M4}launcher/install-check.mjs`]);
 });
 
 test('L73 point 7(c): the access-list reader, on both systems\' ls output, and failing closed', () => {
@@ -939,7 +943,7 @@ test('L75 m-3: on a Mac, the developer folder /usr/bin/git hands over to, its gi
   assert.equal(gitToolsProblem('/usr/bin/git', { ...opts, run: xs(join(root, 'dev-link')) }), null);
 });
 
-test('L75 m-4, L132 M-1: a new copy must hold what the runner\'s config names in it (wiring, budget, claude, the hooks), or the update is refused', async () => {
+test('L75 m-4, L132 M-1: a new copy must hold what the runner\'s config names in it (wiring, budget, claude, the hooks, the Bob file list), or the update is refused', async () => {
   const w = await world();
   // The wiring and the budget module must be the copy's own code files from main, under modules/ or shared/ (L132
   // M-1): a copy item is refused before the flip, even one `keep` carries, and so is one main does not hold.
@@ -982,6 +986,11 @@ test('L75 m-4, L132 M-1: a new copy must hold what the runner\'s config names in
   writeFileSync(join(w.keepSeed, RUNNER_CONFIG), `${JSON.stringify({ wiring: wired, claudeBin: '/usr/local/bin/claude', hooksDir: join(w.installRoot, 'hooks') })}\n`);
   const r = await updateOnce(w.c, { ...w.o, first: w.keepSeed });
   assert.match(r.reason, /the new copy was not made \(the new copy has no hooks, the runner's hooksDir: keep must hold hooks\)/);
+  assert.equal(existsSync(w.installRoot), false);
+  assert.deepEqual(leftovers(w), []);
+  // L1035 m1: the bob step's Bob file list, named by the config and not kept, is refused the same way (it is a copy item).
+  writeFileSync(join(w.keepSeed, RUNNER_CONFIG), `${JSON.stringify({ wiring: wired, claudeBin: '/usr/local/bin/claude', bobManifest: join(w.installRoot, 'bob-manifest.json') })}\n`);
+  assert.match((await updateOnce(w.c, { ...w.o, first: w.keepSeed })).reason, /the new copy was not made \(the new copy has no bob-manifest\.json, the runner's bobManifest: keep must hold bob-manifest\.json\)/, 'planted: bobManifest left out of RUNNER_NAMES');
   assert.equal(existsSync(w.installRoot), false);
   assert.deepEqual(leftovers(w), []);
   writeFileSync(join(w.keepSeed, RUNNER_CONFIG), `${JSON.stringify({ wiring: wired, claudeBin: join(w.installRoot, 'claude', 'bin') })}\n`);

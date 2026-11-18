@@ -6,7 +6,7 @@
 #   a   watch-app: name the watcher App and the rules pin in root's config
 #   a2  watch-rules: the rules copy in place (checked against the pin first) put back as root's 0644 copy
 #   c   daemons place, then load, for the watch job only
-#   d   check-watch-rules, check-install, daemons check --only watch-only
+#   d   check-watch-rules, check-install --watch-only, daemons check --only watch-only
 # then it starts one watch pass and shows the end of the job's logs, with a count of HTTP 403 answers.
 #
 # Steps a to d run from the copy step b installed: run from anywhere else (the first run comes from outside, since the
@@ -106,7 +106,7 @@ step c-place daemons place --only watch-only
 step c-load daemons load --only watch-only
 
 check d-rules check-watch-rules
-check d-install check-install
+check d-install check-install --watch-only
 check d-job daemons check --only watch-only
 
 say "one watch pass"

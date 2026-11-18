@@ -28,14 +28,13 @@ import { isAbsolute, join, posix, relative } from 'node:path';
 import { UPDATER_CONFIG, currentCopy } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { readUpdaterConfig } from '../modules/M4-workshop/launcher/review-updater.mjs';
 import { foldKey } from '../shared/plan-fingerprint.mjs';
-import { bobPath } from './layout.mjs';
-import { installPaths } from './install.mjs';
+import { BOB_NEW, BOB_OLD, bobPath } from './layout.mjs';
+import { NOT_THE_LINK, installPaths } from './install.mjs';
 import { readUser } from './users-folders.mjs';
 
 export const BOB_MANIFEST = 'bob-manifest.json';
 export const BOB_COMMIT = 'bob-commit.txt';
-export const BOB_NEW = '.bob-new';
-export const BOB_OLD = '.bob-old';
+export { BOB_NEW, BOB_OLD };   // defined in layout.mjs, where the setup check names them too (L1035 c4)
 const ADDING = '.adding';
 // The review runner reads the list whole, up to its own cap (review-runner-main.mjs MAX_CARD_BYTES): a longer one it refuses.
 export const MAX_MANIFEST_BYTES = 1024 * 1024;
@@ -224,7 +223,7 @@ export function planBob(io, cfg, { from, commit, git }) {
   const P = installPaths(cfg);
   const cur = currentCopy(io.at(P.installRoot), { owner: io.rootUid });
   if (cur.missing) problems.push(`${P.installRoot} is not installed yet: run install first`);
-  else if (cur.problem || !cur.link) problems.push(`${P.installRoot}: ${cur.problem ?? 'is a plain folder, not the link the updater flips'}`);
+  else if (cur.problem || !cur.link) problems.push(`${P.installRoot}: ${cur.problem ?? NOT_THE_LINK}`);
   const orch = readUser(io, 'orchestrate');
   if (!orch?.exists || !Number.isInteger(orch.uid) || orch.uid <= 0) problems.push('the Mac user orchestrate (the Bob folder\'s owner) was not found; run users-folders first');
   if (problems.length) return { ops: [], problems: problems.map((p) => `${p}. Nothing was changed`), installed: false };

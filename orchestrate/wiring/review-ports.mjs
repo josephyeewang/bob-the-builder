@@ -116,13 +116,16 @@ export function planRows({ gh, entry, rec }) {
 // One git call of filesOf's: under limitedSync's limit, a cleared environment (safe-git's), from git's private home.
 export const FILES_OF_MS = 20_000;
 
+/** One of filesOf's git calls: `env -i K=V … git`, so each K=V is on env's command line (secret-guard refuses a secret there). */
+export const envGit = (run, env, args) => run('/usr/bin/env', ['-i', ...Object.entries(env).map(([k, v]) => `${k}=${v}`), 'git', '--no-pager', ...args], { timeoutMs: FILES_OF_MS, cwd: env.HOME });
+
 /**
  * filesOf for the mirror at `mirror` (this user's, `uid`). `run` is limitedSync's runner. safe-git's git() is async, so
  * its repository check is run here in the same steps (repoConfigFiles, then each config file read without includes and
  * held to inertSetting), and git gets safe-git's environment and no-program flags.
  */
 export function mirrorFilesOf({ mirror, uid, run }) {
-  const git = (env, args) => run('/usr/bin/env', ['-i', ...Object.entries(env).map(([k, v]) => `${k}=${v}`), 'git', '--no-pager', ...args], { timeoutMs: FILES_OF_MS, cwd: env.HOME });
+  const git = (env, args) => envGit(run, env, args);
   return (sha) => {
     if (typeof run !== 'function') throw new Error('filesOf: the wiring was given no limitedSync to run git with');
     if (typeof sha !== 'string' || !SHA.test(sha)) throw new Error(`filesOf: ${JSON.stringify(String(sha)).slice(0, 60)} is not a commit id`);
@@ -183,8 +186,8 @@ export function mainSeen({ installRoot, now, owner = 0, top = '/' }) {
  * The review runner's ports, from the config's review keys (dispatcher-wiring.mjs). `selfUid` is the Dispatcher's own
  * user; a test stands in for it, since a test can't make files another user owns. The review user must be neither the
  * Dispatcher's nor the Record owner's (ownerUid, orchestrate's uid): either could then write the status that says a
- * reviewer runs (L668, L674). Nor may it be Joe's (the workers' user, L238): that uid is the config's hostLockUid and
- * workerUid, and worker-ports.mjs refuses a hostLockUid equal to reviewUid, and a workerUid that is not hostLockUid.
+ * reviewer runs (L668, L674). Nor may it be Joe's (the config's hostLockUid) or the builder's (workerUid, the workers'
+ * user since L1079): worker-ports.mjs refuses a hostLockUid equal to reviewUid, and a workerUid equal to either.
  */
 export function reviewRunner({ config: c, now, owner = 0, top = '/', selfUid = process.getuid() }) {
   if (!Number.isSafeInteger(c.reviewUid) || c.reviewUid < 0) throw new Error('config: reviewUid must be a Mac user id');

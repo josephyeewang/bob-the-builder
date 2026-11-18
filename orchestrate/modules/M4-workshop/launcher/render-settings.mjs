@@ -12,8 +12,9 @@ import { SETTINGS as S, HOOK_FIELDS as H, HOOK_EVENTS as E, ENV, REFUSED_SETTING
 import { hasShell, DESIGN_PROFILES, shadowKindsFor, OUTBOX_FILE } from './role-profiles.mjs';
 import { REVIEW_ROLES, RUNNER_ROLES } from '../../../shared/review-roles.mjs';
 import { noteInOutbox } from '../hooks/compact-note.mjs';
-import { inside } from '../hooks/lib.mjs';
+import { inside, MACHINE_WIDE_WAY_OUT } from '../hooks/lib.mjs';
 import { foldKey } from '../../../shared/plan-fingerprint.mjs';
+import { PROXY_PORTS } from '../../../shared/builder-ports.mjs';
 
 // Two folders apart, neither inside the other, without regard to case (#410 r1 m2, r2 m3): the Mac's disk ignores
 // case, so refusing more is safe. The one rule for every "apart" check here and in hooks-check.mjs.
@@ -54,7 +55,23 @@ export const COMPACT_HOOKS = Object.freeze([
 const refuse = (reason) => ({ ok: false, reason });
 // One declared command: no wildcards, no shell joiners or substitutions, no newlines.
 const BAD_COMMAND = /[*?\n\r;&|`<>]|\$\(|:\s*\*\s*$|^\s|\s$/;
-const HOST = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
+export const HOST = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
+
+/**
+ * The hosts a session's shell may reach in a phase: the product's hosts, each a plain host name on the rules' allowed
+ * list; in the install phase the registry hosts too; in the save phase none. The one reading of them: the role file's
+ * allowedDomains and the builder's allow-list proxy (setup/builder-proxy.mjs, wall v2) both take it from here, so the
+ * proxy can't allow a host the settings would not. → { ok: true, hosts } | { ok: false, reason }.
+ */
+export function phaseHosts({ product = {}, rulesHosts = [], registryHosts = [], phase = 'session' }) {
+  const hosts = [...new Set(product?.hosts ?? [])];
+  for (const h of hosts) {
+    if (!HOST.test(h)) return refuse(`host "${h}" is not a plain host name`);
+    if (!rulesHosts.includes(h)) return refuse(`host "${h}" is not on the rules' allowed list`);
+  }
+  for (const h of registryHosts) if (!HOST.test(h)) return refuse(`registry host "${h}" is not a plain host name`);
+  return { ok: true, hosts: phase === 'install' ? [...new Set([...hosts, ...registryHosts])] : phase === 'save' ? [] : hosts };
+}
 
 /** Exact allow rules from product_profile.commands ({ key: 'exact command' }), keyed for the diary. */
 export function renderAllowRules(commands = {}) {
@@ -136,13 +153,35 @@ export function hooksSnapshot(settings) {
     for (const m of Array.isArray(list) ? list : []) for (const h of m?.[H.hooks] ?? []) {
       const c = h?.[H.command];
       if (typeof c !== 'string') continue;
-      const words = c.match(/--snapshot\b/g) ?? [];
+      const words = c.match(/--snapshot(?![\w-])/g) ?? [];
       const w = c.match(/ --snapshot (\S+)/);
       if (words.length !== 1 || !w) return null;
       seen.add(w[1]);
     }
   }
   return seen.size === 1 ? [...seen][0] : null;
+}
+
+/**
+ * The one owner every hook takes its snapshot from (L1226): ` --snapshot-owner <uid>`, once per hook, the same in every
+ * hook. → the uid; undefined when no hook names one (the review roles', read as before); null when the hooks differ, one
+ * names it twice, or it is not a uid (so a check that wants one owner refuses).
+ */
+export function hooksSnapshotOwner(settings) {
+  const seen = new Set();
+  for (const list of Object.values(settings?.[S.hooks] ?? {})) {
+    for (const m of Array.isArray(list) ? list : []) for (const h of m?.[H.hooks] ?? []) {
+      const c = h?.[H.command];
+      if (typeof c !== 'string') continue;
+      const words = c.match(/--snapshot-owner(?![\w-])/g) ?? [];
+      // #610 r2 c2: the uid ends at a space or at the command's end, whatever follows it.
+      const w = c.match(/ --snapshot-owner (0|[1-9]\d{0,9})(?= |$)/);
+      if (words.length > 1 || (words.length === 1 && !w)) return null;
+      seen.add(w ? Number(w[1]) : undefined);
+    }
+  }
+  if (seen.size > 1) return null;
+  return seen.size ? [...seen][0] : undefined;
 }
 
 /**
@@ -230,7 +269,9 @@ export function checkRunnerWall({ settings, workerRunner, paths, realpath = (p) 
 
 /**
  * paths: { copy, outbox, hooksDir, snapshot, node, deny: { secrets: [], claudeHome, ssh, gh, robotKeys, record, otherCopies: [], proposals: [] },
- *          bobFolder?, reviewWalls?, notes?, workerRunner?, ownerTaps? }
+ *          bobFolder?, reviewWalls?, notes?, workerRunner?, ownerTaps?, snapshotOwner? }
+ * snapshotOwner: the uid whose alone the snapshot must be (L1226; the worker runner gives 0): each hook gets
+ * `--snapshot-owner <uid>`. Left out (the review roles): none, read as before.
  * workerRunner { requestsDir, statusFile }: the worker runner's two paths (lane 4's owner-ports.mjs names, L751). The
  * workers run as the runner's own Mac user, so the owner check can't tell the runner's status from one a worker wrote:
  * when given, for every role but a reviewer or auditor, its requests folder and its status file's folder are denied to
@@ -248,7 +289,8 @@ export function checkRunnerWall({ settings, workerRunner, paths, realpath = (p) 
  * reviewWalls { outboxRoot, runnerRoot }: needed for a reviewer or auditor (L66 M3), refused without. runnerRoot is the
  * review runner's folder (its config's `root`).
  * product: { commands, hosts }         rulesHosts: the rules' allowed hosts; registryHosts: allowed during install only
- * phase: 'session' | 'install'
+ * phase: 'session' | 'install' | 'save'. 'save' (L991 M1) is the save-work job's: the session's walls with the network off
+ * (no host at all); the job runs in the copy's .git (wiring/runner-locked.mjs), so it writes there and in the outbox only.
  * realpath, lstat: how the snapshot folder's real path is read (L921), the disk's by default. A folder not made yet is
  * resolved through the nearest folder above it that is there (nearestReal), and walled in that spelling too: a role the
  * worker runner does not start (the Lead, the Front Door, the rooms) gets no launch-time pass (checkRunnerWall), so the
@@ -260,19 +302,23 @@ export function checkRunnerWall({ settings, workerRunner, paths, realpath = (p) 
  * review roles runs as Joe's Mac user (L238), which can read Joe's proposals folders, so the settings are the wall. Required, and not empty (L746), for every role but a
  * reviewer or auditor, which runs as the `review` user the folders already shut out (the setup read-back proves it).
  */
-export function renderRoleSettings({ role, profile, paths, product = {}, rulesHosts = [], registryHosts = [], phase = 'session', productionFiles, proposalOutboxes, realpath = (p) => realpathSync.native(p), lstat = (p) => lstatSync(p) }) {
+export function renderRoleSettings({ role, profile, paths, product = {}, rulesHosts = [], registryHosts = [], phase = 'session', builderProxy = false, productionFiles, proposalOutboxes, realpath = (p) => realpathSync.native(p), lstat = (p) => lstatSync(p) }) {
   if (!DESIGN_PROFILES[role]) return refuse(`no such role "${role}"`);
-  if (phase !== 'session' && phase !== 'install') return refuse('bad phase');
+  if (phase !== 'session' && phase !== 'install' && phase !== 'save') return refuse('bad phase');
   if (phase === 'install' && role !== 'worker') return refuse('only a worker has an install step');
+  if (phase === 'save' && role !== 'worker') return refuse('only a worker has a save step');
   const shell = hasShell(profile);
 
   // Network: only hosts the rules allow. An off-list host is refused, never asked.
-  const hosts = [...new Set(product.hosts ?? [])];
-  for (const h of hosts) {
-    if (!HOST.test(h)) return refuse(`host "${h}" is not a plain host name`);
-    if (!rulesHosts.includes(h)) return refuse(`host "${h}" is not on the rules' allowed list`);
-  }
-  const allowedDomains = phase === 'install' ? [...hosts, ...registryHosts] : hosts;
+  const net = phaseHosts({ product, rulesHosts, registryHosts, phase });
+  if (!net.ok) return net;
+  const allowedDomains = net.hosts;
+  // A builder session (wall v2): its shell's traffic goes to the allow-list proxy in the builder's ports, the phase's own
+  // port for HTTP and SOCKS both (Claude Code 2.1.316 starts its own proxy unless BOTH are set; checked: claude-code
+  // 2.1.316, re-check on upgrade). With them set Claude Code does not filter by allowedDomains (it logs that the list
+  // "will never apply"); the proxy does, from phaseHosts above. A shell with no host to reach (the save, a role with no
+  // shell) gets no port: Claude Code's own proxy then starts with an empty list, on a port the wall cuts the shell off from.
+  const proxy = builderProxy && shell && allowedDomains.length && phase !== 'save' ? PROXY_PORTS[phase] : null;
 
   let allow = [];
   if (shell && role === 'worker') {
@@ -311,9 +357,9 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
   const deny = denyPaths.flatMap(denyPair);
   // Outbox: no dot-names, no sub-folders' dot-names.
   const ob = abs(paths.outbox);
-  // The Write(...) rules here and below are unmatched on claude 2.1.322: it warns that only Edit(path) rules meet
+  // The Write(...) rules here and below are unmatched on claude 2.1.316 (the pin) and 2.1.322: it warns that only Edit(path) rules meet
   // file permission checks, and Edit(...) covers every file-writing tool. Kept in case a later version matches them
-  // (a capability note: recheck on each pinned upgrade).
+  // (a capability note: recheck on each pinned upgrade). 2.1.316's own text says the same (checked: claude-code 2.1.316).
   deny.push(`Write(/${ob}/.*)`, `Edit(/${ob}/.*)`, `Write(/${ob}/**/.*)`, `Edit(/${ob}/**/.*)`);
   if (profile.setupFileRefusals) {
     for (const pat of ['//**/.claude/**', '//**/.mcp.json', '//**/SKILL.md']) deny.push(`Read(${pat})`, `Edit(${pat})`, `Write(${pat})`);
@@ -348,6 +394,10 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
   for (const p of [paths.node, paths.hooksDir, paths.outbox, paths.snapshot, paths.copy, paths.notes]) {
     if (p !== undefined && (typeof p !== 'string' || !p.startsWith('/') || /[^A-Za-z0-9._/-]/.test(p))) return refuse(`path "${p}" is not a plain absolute path`);
   }
+  // The snapshot's owner (L1226), when given: every hook reads the snapshot only when it is that uid's alone (hooks lib.mjs
+  // --snapshot-owner). The worker runner gives 0, root's worker-rules job's; the review roles give none and read as before.
+  const ownerArg = paths.snapshotOwner === undefined ? '' : ` --snapshot-owner ${paths.snapshotOwner}`;
+  if (paths.snapshotOwner !== undefined && !(Number.isSafeInteger(paths.snapshotOwner) && paths.snapshotOwner >= 0 && paths.snapshotOwner <= 9_999_999_999)) return refuse('the snapshot\'s owner is not a uid');
   // Where the compaction note goes (L101): the outbox only for a role with a -compact- kind; any other role names its
   // notes folder, apart from the outbox, neither inside the other.
   let notesArg = '';
@@ -409,7 +459,7 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
   const kindsArg = profile.outbox.length ? ` --kinds ${profile.outbox.join(',')}` : '';
   const filesArg = files.length ? ` --files ${files.join(',')}` : '';
   const hookCmd = (name, extra = '') =>
-    `${paths.node} ${join(paths.hooksDir, `${name}.mjs`)} --role ${role} --outbox ${paths.outbox} --snapshot ${paths.snapshot}${kindsArg}${filesArg}${notKinds}${copyArg}${extra}${HOOK_FAILS_CLOSED}`;
+    `${paths.node} ${join(paths.hooksDir, `${name}.mjs`)} --role ${role} --outbox ${paths.outbox} --snapshot ${paths.snapshot}${ownerArg}${kindsArg}${filesArg}${notKinds}${copyArg}${extra}${HOOK_FAILS_CLOSED}`;
   const hooks = { [E.preToolUse]: [] };
   for (const [name, matcher] of Object.entries(POLICY_HOOKS)) {
     hooks[E.preToolUse].push({ [H.matcher]: matcher, [H.hooks]: [{ [H.type]: 'command', [H.command]: hookCmd(name), [H.timeout]: HOOK_TIMEOUT, [H.onFailure]: 'block' }] });
@@ -424,19 +474,22 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
       [S.allow]: allow,
       [S.deny]: deny,
       [S.ask]: [],
-      [S.additionalDirectories]: [paths.outbox, ...(paths.bobFolder ? [paths.bobFolder] : [])],
+      // The save (L991 M1) reaches its outbox only: the Bob folder is not one of its folders.
+      [S.additionalDirectories]: [paths.outbox, ...(paths.bobFolder && phase !== 'save' ? [paths.bobFolder] : [])],
     },
     [S.sandbox]: {
       [S.sandboxEnabled]: true,
       [S.failIfUnavailable]: true,
       [S.allowUnsandboxedCommands]: false,
-      [S.network]: { [S.allowedDomains]: allowedDomains, [S.strictAllowlist]: true },
+      [S.network]: { [S.allowedDomains]: allowedDomains, [S.strictAllowlist]: true, ...(proxy ? { [S.httpProxyPort]: proxy, [S.socksProxyPort]: proxy } : {}) },
       [S.filesystem]: { [S.denyRead]: [...denyPaths, ...runnerDirs], [S.denyWrite]: [`${paths.outbox}/.*`, `${paths.outbox}/**/.*`, ...(paths.bobFolder ? bobFolderShell(paths.bobFolder) : []), ...runnerDirs.flatMap(runnerWallShell), ...snapDirs.flatMap(snapshotWallShell), ...walls] },
     },
     [S.hooks]: hooks,
     [S.env]: { [ENV.autoCompactWindow]: String(profile.compactWindow), [ENV.disableUpdates]: '1' },
     [S.disableClaudeAiConnectors]: true,
-    [S.enabledPlugins]: {},
+    // No enabledPlugins (L1114): an empty map turns nothing on, `--setting-sources ""` loads no file that could turn a
+    // plugin on, and launch check 6 refuses a start whose start message lists a plugin. Its behaviour proof is R-0b-178,
+    // before it comes back. checkSettings below still refuses a role file that turns one on.
     [S.crossSessionInbound]: 'refuse',
     [S.disableSkillShellExecution]: true,
     [S.disableBundledSkills]: true,
@@ -449,12 +502,25 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
 // under filesystem, network.allowUnixSockets or enableWeakerNestedSandbox, could widen what the shell reaches.
 const ROLE_SANDBOX_KEYS = Object.freeze({
   '': [S.sandboxEnabled, S.failIfUnavailable, S.allowUnsandboxedCommands, S.network, S.filesystem],
-  [S.network]: [S.allowedDomains, S.strictAllowlist],
+  [S.network]: [S.allowedDomains, S.strictAllowlist, S.httpProxyPort, S.socksProxyPort],
   [S.filesystem]: [S.denyRead, S.denyWrite],
 });
+/**
+ * Null, or why a role file's proxy ports are not the builder proxy's (wall v2): both or neither, the same port, one of
+ * PROXY_PORTS. With `phase` known, the port must be that phase's own (#617 r1 m3: the install port, whose list adds the
+ * registry hosts, in a session's file would widen it), and a save, which reaches no host, names none.
+ */
+export function proxyPortsProblem(network, phase = null) {
+  const h = network?.[S.httpProxyPort]; const k = network?.[S.socksProxyPort];
+  if (h === undefined && k === undefined) return null;
+  if (h !== k) return `the role file's ${S.httpProxyPort} and ${S.socksProxyPort} differ (${h}, ${k}): both must be the builder proxy's one port`;
+  if (!Object.values(PROXY_PORTS).includes(h)) return `the role file's proxy port ${JSON.stringify(h)} is not one of the builder proxy's (${Object.values(PROXY_PORTS).join(', ')})`;
+  if (phase !== null && h !== PROXY_PORTS[phase]) return `the role file's proxy port ${h} is not the ${phase} phase's (${PROXY_PORTS[phase] ?? 'none'})`;
+  return null;
+}
 // The machine-wide (managed) file's sandbox block: an allow-list of keys, each with its one safe value (#410 r2 M1,
 // L894). Every other key is refused, at the top level, under network and under filesystem. A capability note, checked
-// against claude 2.1.322's own code: it reads managed sandbox keys that widen the sandbox or turn it off
+// against the bundled code of claude 2.1.316 (the pin; checked: claude-code 2.1.316) and 2.1.322: it reads managed sandbox keys that widen the sandbox or turn it off
 // (enabledPlatforms, read from the managed tier only, where a list without this platform switches the sandbox off and
 // cancels the role's failIfUnavailable; allowAppleEvents, network.allowMachLookup, the proxy ports,
 // autoAllowBashIfSandboxed, enableWeakerNetworkIsolation, failIfUnavailable: false, filesystem.allowWrite and more).
@@ -473,7 +539,7 @@ const MANAGED_SANDBOX = Object.freeze({
   [S.filesystem]: { [S.denyRead]: isTextList, [S.denyWrite]: isTextList },
 });
 /** Why a settings file's sandbox block may widen the shell's reach, or null. */
-function sandboxKeysProblem(obj, machineWide) {
+function sandboxKeysProblem(obj, machineWide, phase = null) {
   const sb = obj?.[S.sandbox];
   if (sb === undefined) return null;
   const who = machineWide ? 'machine-wide' : 'the role file\'s';
@@ -498,14 +564,15 @@ function sandboxKeysProblem(obj, machineWide) {
     const extra = Object.keys(block).filter((k) => !known.includes(k));
     if (extra.length) return `${who} sandbox${part ? ` ${part}` : ''} holds ${extra.join(', ')}; only ${known.join(', ')} may be there`;
   }
-  return null;
+  return proxyPortsProblem(sb[S.network], phase);
 }
 
 /**
  * The shell's write wall between sessions (L880, L881). The sandbox lets a shell write only its working folder (the
  * code copy), a per-user temp folder and the added folders, so a session's own outbox must be the only added folder
  * it writes: a sibling's outbox, one of the same product included, then can't be written, renamed or deleted (shown
- * on claude 2.1.322 with worker settings: touch, mv and rm in a sibling's outbox all refused). The only other added
+ * on claude 2.1.322 with worker settings: touch, mv and rm in a sibling's outbox all refused; checked: claude-code
+ * 2.1.322, open until 2027-01-20 (R-0b-176), which runs worker settings on the pin). The only other added
  * folder may be the Bob folder, read-only to the tools and walled from the shell. The outbox is the one every
  * hook is told (--outbox). → the reason, or null.
  */
@@ -544,15 +611,16 @@ function ownFoldersProblem(obj) {
 /**
  * Every lock-down field a loaded settings file must (or must not) hold. Run on the rendered file
  * after reading it back from disk, and (as `machineWide: true`) on the machine-wide file, where an
- * excludedCommands entry or an unsandboxed escape refuses every role.
+ * excludedCommands entry or an unsandboxed escape refuses every role. `phase` ('session', 'install' or 'save'), when
+ * the caller knows it: the builder proxy's port must be that phase's (proxyPortsProblem).
  */
-export function checkSettings(obj, { machineWide = false, profile = null } = {}) {
+export function checkSettings(obj, { machineWide = false, profile = null, phase = null } = {}) {
   const sb = obj?.[S.sandbox];
   const p = obj?.[S.permissions];
   if (sb && Object.hasOwn(sb, S.excludedCommands)) return refuse(`${machineWide ? 'machine-wide' : 'role'} settings hold excludedCommands`);
   if (sb && sb[S.allowUnsandboxedCommands] === true) return refuse(`${machineWide ? 'machine-wide' : 'role'} settings allow unsandboxed commands`);
   for (const k of REFUSED_SETTINGS) if (obj && Object.hasOwn(obj, k)) return refuse(`${machineWide ? 'machine-wide' : 'role'} settings hold ${k}`);
-  const widen = sandboxKeysProblem(obj, machineWide);
+  const widen = sandboxKeysProblem(obj, machineWide, phase);
   if (widen) return refuse(widen);
   if (machineWide) {
     // The machine-wide file may add deny rules and hooks, never allow, ask, extra hosts or folders,
@@ -597,14 +665,32 @@ export function checkSettings(obj, { machineWide = false, profile = null } = {})
   return { ok: true };
 }
 
-/** Writes the role file (atomically), reads it back from disk and checks it. */
-export function writeRoleSettings(file, settings, { profile } = {}) {
+// The paths a machine-wide hook command may carry: plain path letters only, since claude runs the command in a shell (L1031).
+// The machine-wide hook's end (L1044 M2): exit 2 whatever went wrong, as HOOK_FAILS_CLOSED, and when the guard could not run at
+// all (its script missing, node failing: any exit but its own block's 2) the way out is said too, since then the guard never
+// printed it. A block by the guard (exit 2) says its own reason and no more.
+if (MACHINE_WIDE_WAY_OUT.includes("'")) throw new Error('the machine-wide way out must hold no single quote: the hook command quotes it');
+export const MACHINE_WIDE_FAILS_CLOSED = ` || { [ $? -eq 2 ] || echo 'the machine-wide guard could not run; ${MACHINE_WIDE_WAY_OUT}' >&2; exit 2; }`;
+const PLAIN_ABS = /^\/[A-Za-z0-9._/-]+$/;
+/**
+ * The machine-wide settings (L1031): one PreToolUse hook on every tool, the production-write guard in its machine-wide
+ * form, failing closed like a role file's. Nothing else: check 10 refuses allow rules, modes, folders and variables there.
+ * `node`, `hooksDir` and `snapshot` must be plain absolute paths (the command runs in a shell); else this throws.
+ */
+export function machineWideSettings({ node, hooksDir, snapshot }) {
+  for (const [k, v] of Object.entries({ node, hooksDir, snapshot })) if (!(typeof v === 'string' && PLAIN_ABS.test(v) && !v.split('/').includes('..'))) throw new Error(`machineWideSettings: ${k} must be a plain absolute path (letters, digits, . _ - /)`);
+  const command = `${node} ${join(hooksDir, 'production-write-guard.mjs')} --machine-wide --snapshot ${snapshot}${MACHINE_WIDE_FAILS_CLOSED}`;
+  return { [S.hooks]: { [E.preToolUse]: [{ [H.matcher]: '*', [H.hooks]: [{ [H.type]: 'command', [H.command]: command, [H.timeout]: HOOK_TIMEOUT, [H.onFailure]: 'block' }] }] } };
+}
+
+/** Writes the role file (atomically), reads it back from disk and checks it, with the phase when given (its proxy port). */
+export function writeRoleSettings(file, settings, { profile, phase = null } = {}) {
   const text = `${JSON.stringify(settings, null, 2)}\n`;
   const tmp = join(dirname(file), `.${basename(file)}.tmp`);
   writeFileSync(tmp, text, { mode: 0o644 });
   renameSync(tmp, file);
   let back; try { back = JSON.parse(readFileSync(file, 'utf8')); } catch { return refuse('role settings did not read back'); }
   if (JSON.stringify(back) !== JSON.stringify(settings)) return refuse('role settings read back differently');
-  const c = checkSettings(back, { profile });
+  const c = checkSettings(back, { profile, phase });
   return c.ok ? { ok: true, file, settings: back } : c;
 }

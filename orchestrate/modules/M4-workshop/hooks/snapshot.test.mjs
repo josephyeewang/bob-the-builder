@@ -32,9 +32,9 @@ test('a stale snapshot is refused with a reason that says what it means and what
   const r = parseSnapshot(makeSnapshot(RULES, new Date(now - 312_000)), { now });
   assert.equal(r.ok, false);
   assert.equal(r.reason, 'rules snapshot is stale (312 s old, the limit is 300 s), so every call is refused until it is rewritten; '
-    + 'the loop rewrites it every pass for its own sessions, and the worker runner for a worker session it started '
-    + '(keepSnapshotFresh), so a stale one means whichever wrote it has stopped, or a run that wrote its own snapshot '
-    + 'outlasted it (keep it fresh with keepSnapshotFresh)');
+    + 'the loop rewrites it every pass for its own sessions, and root\'s worker-rules job every minute for the worker '
+    + 'sessions while the worker runner runs (is it loaded? setup.mjs daemons check), so a stale one means whichever wrote '
+    + 'it has stopped, or a run that wrote its own snapshot outlasted it (keep it fresh with keepSnapshotFresh)');
   assert.equal(r.reason, staleReason(312_000));
   // The limit is not loosened: one millisecond past it is stale, at it is fresh.
   assert.equal(parseSnapshot(makeSnapshot(RULES, new Date(now - SNAPSHOT_MAX_AGE_MS - 1)), { now }).ok, false);

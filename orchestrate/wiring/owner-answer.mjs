@@ -15,7 +15,7 @@
 // It never holds an email address, a token or Claude's raw output: only the named fields below.
 //
 // Usage comes from `claude -p /usage` (L611, tested 5 Nov 2026 on Claude Code 2.1.318: no model call, 0 tokens, and
-// no open session needed). The report's structured form, `usage_report`, needs a claude.ai sign-in; a setup-token
+// no open session needed; checked: claude-code 2.1.318, open until 2027-01-20 (R-0b-66), a run that uses the sign-in). The report's structured form, `usage_report`, needs a claude.ai sign-in; a setup-token
 // doesn't qualify by default. Its rows are the server's: `session` is the 5-hour window. The week is the HIGHEST weekly
 // row, `weekly_all` or any model's `weekly_scoped` (L728 M2): a plan whose one model is at 100% this week is out for
 // that model, and reading only `weekly_all` would call it green. `week_from` names the row it came from ('weekly_all'
