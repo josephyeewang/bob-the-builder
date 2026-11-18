@@ -13,7 +13,7 @@ import { tempDir } from '../shared/test-tmp.mjs';
 import { ROOT_CONFIG_PATH, wallDir } from './layout.mjs';
 import { chainProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
 import {
-  ALL_ADDRESSES, ANCHOR, ANCHOR_DIR, AUTO_TABLE, tableProblem, ANCHOR_FILE, FAMILIES, PROTOS, RULES, WALL_RANGE, EPHEMERAL, anchorText, bootScript, checkWall, loadedRulesProblem, main, otherAddresses,
+  ALL_ADDRESSES, ANCHOR, ANCHOR_DIR, AUTO_TABLE, RULE_READ_TRIES, tableProblem, ANCHOR_FILE, FAMILIES, PROTOS, RULES, WALL_RANGE, EPHEMERAL, anchorText, bootScript, checkWall, loadedRulesProblem, main, otherAddresses,
   planWall, tokenPath, unreadPath, waitForFirstRun, wallLabel, wallPlistPath,
   RECHECK_EVERY_S, STATUS_FILE, STATUS_VERSION, WALL_CHECK_JOB, WALL_SCRIPT, WHY_CHARS, WHY_MAX, anchorSha256, parseStatus, statusOf, statusText,
   wallCheckPlist, WAY_OUT_TEXT, LISTENER, CLIENT, ephemeralProblem, rangeListenersProblem, SETTINGS_ROWS, expectedRows, ownAddresses, trafficChecks,
@@ -463,6 +463,10 @@ test('wall self table: pf\'s automatic table for `self` counts only once read an
   // FAIL: a network, a negated entry.
   assert.match(String(loadedRulesProblem(text, u, { selfAddresses: own, tables: read(['::1', '2001:db8::/64']) })), /holds 2001:db8::\/64/);
   assert.match(String(loadedRulesProblem(text, u, { selfAddresses: own, tables: read(['::1', '!2001:db8::7']) })), /holds !2001:db8::7/);
+  // FAIL: one of this Mac's own addresses with a short prefix is a network, not that address (only /128 and /32 are one).
+  assert.match(String(loadedRulesProblem(text, u, { selfAddresses: own, tables: read(['::1', '2001:db8::7/64']) })), /holds 2001:db8::7\/64, which is not one/);
+  assert.match(String(loadedRulesProblem(text, u, { selfAddresses: own, tables: read(['::1', '192.168.1.20/24']) })), /holds 192\.168\.1\.20\/24, which is not one/);
+  assert.equal(loadedRulesProblem(text, u, { selfAddresses: own, tables: read(['::1', '192.168.1.20/32']) }), null);
   // FAIL: an empty table, a table that could not be read, no proof supplied at all.
   assert.match(String(loadedRulesProblem(text, u, { selfAddresses: own, tables: read([]) })), /<__automatic_c097741b_0> is empty/);
   assert.match(String(loadedRulesProblem(text, u, { selfAddresses: own, tables: new Map([[T, { error: 'pfctl: Table does not exist.' }]]) })), /could not be read \(pfctl: Table does not exist\.\)/);
@@ -477,9 +481,9 @@ test('wall self table: pf\'s automatic table for `self` counts only once read an
   // FAIL: a proven automatic table in a rule that is not the self rule.
   const elsewhere = [...base, `block return in quick on lo0 proto tcp from any to ${T} port 47000:47999 user != ${u}`].join('\n');
   assert.match(String(loadedRulesProblem(elsewhere, u, { selfAddresses: own, tables: good })), /a line that is not the wall's: block return in quick on lo0 proto tcp from any to <__automatic/);
-  assert.match(String(loadedRulesProblem(base.map((l) => l.replace('from any to any port 47000:47999', `from any to ${T} port 47000:47999`)).join('\n'), u, { selfAddresses: own, tables: good })), /missing the rules? range-in|not the wall's/);
+  assert.match(String(loadedRulesProblem(base.map((l) => l.replace('from any to any port 47000:47999', `from any to ${T} port 47000:47999`)).join('\n'), u, { selfAddresses: own, tables: good })), /is missing the rules range-in \(tcp\), range-in \(udp\) exactly as written/);
   // The table in the from part, not the to part, is another rule.
-  assert.match(String(loadedRulesProblem(text.replaceAll(`from any to ${T}`, `from ${T} to any`), u, { selfAddresses: own, tables: good })), /missing the rules? self|not the wall's/);
+  assert.match(String(loadedRulesProblem(text.replaceAll(`from any to ${T}`, `from ${T} to any`), u, { selfAddresses: own, tables: good })), /holds 2 lines that are not the wall's: block return out quick on ! lo0 inet6 proto tcp from <__automatic_c097741b_0> to any user = 603$/);
   // tableProblem on its own.
   assert.equal(tableProblem(T, good.get(T), own), null);
   assert.match(String(tableProblem(T, { text: '\n  \n' }, own)), /is empty/);
@@ -503,6 +507,26 @@ test('wall self table, end to end: check reads the anchor\'s automatic table thr
   w.pf.tables.set(T, []);
   f = fails(await checkWall(w.mac, w.cfg, { net: w.net }));
   assert.ok(f.some((x) => /\(iv\) — .*is empty/.test(x)), f.join('\n'));
+});
+
+test('wall self table: a reload that renames the table between the reads is read again; one that renames it on every read refuses after RULE_READ_TRIES', async () => {
+  const w = world();
+  assert.deepEqual(fails(await placed(w)), []);
+  let n = 0; const name = () => `__automatic_c097741b_${n}`;
+  const asTable = () => w.pf.anchors.set(ANCHOR, w.pf.anchors.get(ANCHOR).flatMap((l) => (/ to self /.test(l) ? [l.replace(' proto ', ' inet proto ').replace(' to self ', ` to ${LAN} `), l.replace(' proto ', ' inet6 proto ').replace(' to self ', ` to <${name()}> `)] : [l])));
+  const plain = w.pf.anchors.get(ANCHOR);
+  const reload = () => { w.pf.tables.delete(name()); n += 1; w.pf.anchors.set(ANCHOR, plain); asTable(); w.pf.tables.set(name(), ['::1', 'fe80::1']); };
+  asTable(); w.pf.tables.set(name(), ['::1', 'fe80::1']);
+  // The job reloads the anchor right after the check's first read of the rules, once: the table it read is gone.
+  const run = w.pf.run; let reads = 0; let reloadOn = new Set([1]);
+  w.pf.run = (args) => { const r = run(args); if (args.join(' ') === `-a ${ANCHOR} -s rules` && reloadOn.has(reads += 1)) reload(); return r; };
+  assert.deepEqual(fails(await checkWall(w.mac, w.cfg, { net: w.net })), []);
+  assert.equal(reads, 4, 'read, (renamed) read again, then a whole second pass');
+  // A reload after every read of the rules: refused after RULE_READ_TRIES passes, with the last pass's reason.
+  reads = 0; reloadOn = { has: () => true };
+  const f = fails(await checkWall(w.mac, w.cfg, { net: w.net }));
+  assert.equal(reads, 2 * RULE_READ_TRIES);
+  assert.ok(f.some((x) => /\(iv\) — .*could not be read \(pfctl: Table does not exist\.\).*but they changed while being read, 3 times running/.test(x)), f.join('\n'));
 });
 
 test('R-0b-179: a failed read-back takes the wall out again (job unloaded, its file gone, rules emptied, token released)', async () => {

@@ -559,6 +559,33 @@ function tokenHeld(io, cfg) {
   return { tok, refs, held };
 }
 
+/** How many times anchorRulesProblem reads the rules and their tables while the rules keep changing under it. */
+export const RULE_READ_TRIES = 3;
+/**
+ * Null, or why the anchor pf holds is not the wall's rules (iv), read as root. Each table pfctl made inside the anchor (the
+ * self rule's, AUTO_TABLE) is read, so loadedRulesProblem can prove it; a name of any other shape is not read
+ * (loadedRulesProblem refuses it as it stands). The wall's job reloads the anchor every RECHECK_EVERY_S, and a reload may
+ * give a table a new name: so when tables were read, the rules are read again after them, and when they changed the
+ * whole pass is done again, RULE_READ_TRIES times in all; then the last pass's reason stands.
+ */
+function anchorRulesProblem(io, uid, selfAddresses) {
+  let why = null;
+  for (let tries = 1; ; tries += 1) {
+    const a = io.run(PFCTL, ['-a', ANCHOR, '-s', 'rules']);
+    if (a.status !== 0) return `pfctl -a ${ANCHOR} -s rules failed (${said(a)})`;
+    const tables = new Map();
+    for (const name of tablesNamed(a.stdout).filter((n) => AUTO_TABLE.test(n))) {
+      const t = io.run(PFCTL, ['-a', ANCHOR, '-t', name.slice(1, -1), '-T', 'show']);
+      tables.set(name, t.status === 0 ? { text: t.stdout } : { error: said(t) });
+    }
+    why = loadedRulesProblem(a.stdout, uid, { selfAddresses, tables });
+    if (!tables.size) return why;
+    const again = io.run(PFCTL, ['-a', ANCHOR, '-s', 'rules']);
+    if (again.status === 0 && again.stdout === a.stdout) return why;
+    if (tries >= RULE_READ_TRIES) return `${why ?? 'the rules read as the wall\'s'}, but they changed while being read, ${RULE_READ_TRIES} times running`;
+  }
+}
+
 /**
  * The settings half (iii, iv): [{ ok, what, why?, warn? }], always SETTINGS_ROWS of them. Reads only, as root. The wiring
  * PR's gate runs it before every builder session. `selfAddresses`: loadedRulesProblem's. A row with `warn` is ok (it
@@ -582,15 +609,7 @@ export function settingsChecks(io, cfg, uid, { selfAddresses } = {}) {
   const main = io.run(PFCTL, ['-s', 'rules']);
   item(main.status === 0 && /^anchor "com\.apple\/\*"/m.test(main.stdout), 'the main ruleset reaches com.apple/* (iv)',
     main.status !== 0 ? `pfctl -s rules failed (${said(main)})` : 'the main ruleset has no anchor "com.apple/*", so the wall\'s anchor is never read (macOS\'s own /etc/pf.conf has it; something replaced the main ruleset)');
-  const a = io.run(PFCTL, ['-a', ANCHOR, '-s', 'rules']);
-  // Each table pfctl made inside the anchor (the self rule's, AUTO_TABLE) is read here, so loadedRulesProblem can prove it.
-  // A name of any other shape is not read: loadedRulesProblem refuses it as it stands.
-  const tables = new Map();
-  if (a.status === 0) for (const name of tablesNamed(a.stdout).filter((n) => AUTO_TABLE.test(n))) {
-    const t = io.run(PFCTL, ['-a', ANCHOR, '-t', name.slice(1, -1), '-T', 'show']);
-    tables.set(name, t.status === 0 ? { text: t.stdout } : { error: said(t) });
-  }
-  const why = a.status !== 0 ? `pfctl -a ${ANCHOR} -s rules failed (${said(a)})` : loadedRulesProblem(a.stdout, uid, { selfAddresses: selfAddresses ?? ownAddresses(), tables });
+  const why = anchorRulesProblem(io, uid, selfAddresses ?? ownAddresses());
   item(why === null, `${ANCHOR} holds exactly the wall's rules (iv)`, why);
   const eph = ephemeralProblem(io);
   item(eph === null, `the Mac's ephemeral port range is inside ${EPHEMERAL.first}-${EPHEMERAL.last}, clear of the builder's ports (iv)`, eph);
