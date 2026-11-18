@@ -340,7 +340,7 @@ test('L87 M-2: the handoff template in the Lead\'s wording is the reader\'s shap
   assert.ok(HANDOFF_WORDING.includes('- queued: <the request>'));
 });
 
-test('L87 M-2 (c): hand-typed notes a Lead might write: handoffProblem refuses those that don\'t read (the vet and the stop wait for #68)', () => {
+test('L87 M-2 (c): hand-typed notes a Lead might write: handoffProblem refuses those that don\'t read (the composed vet: M11 lead-restart.test.mjs)', () => {
   const good = '# Lead handoff\n\n## Claim\nLead of notes-app, session S-7\n\n## Open card\nC-3\n\n## Next step\nsend C-4\n\n## Decisions\n- export format: Markdown only (decided 1 Nov)\n\n## Messages\n- queued: ask the owner about pricing\n';
   assert.equal(handoffProblem(good), null);
   for (const bad of [
