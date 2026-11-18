@@ -17,10 +17,10 @@ import { folderProblem } from '../../M11-dispatcher/proposals-intake.mjs';
 import { SETTLE_MS as INTAKE_SETTLE_MS } from '../../M11-dispatcher/proposals-intake.mjs';
 import { researchCopyProblem } from '../../M6-merge-gate/refusals.mjs';
 import { refusedPath } from './push-refusals.mjs';
-import { DO_PLANE_TOML, RULES_VERSION, scanSecrets } from './gitleaks.mjs';
+import { DO_PLANE_TOML, RULES_VERSION, runScanner, scanSecrets } from './gitleaks.mjs';
 import { crc32 } from './binary-files.mjs';
 import { chunk, makePng, ihdr } from './png-fixture.mjs';
-import { startGate, factId, vercelFact } from './start-gate.mjs';
+import { startGate, factId, vercelFact, NO_VERCEL } from './start-gate.mjs';
 import { drainedPort } from '../../../wiring/runner-ports.mjs';
 import { memoryRecord } from '../../../shared/record.mjs';
 import { timeLimits } from '../../M11-dispatcher/merges.mjs';
@@ -1176,6 +1176,8 @@ test('L274 (6): the same bytes pushed twice answer the recorded push: no second 
   const broke = await w.pushP({ product: PRODUCT, card: 'C-1' }, { rules: { ...w.ports.rules, get: () => { throw new Error('rules broke'); } } });
   assert.equal(broke.ok, false);
   assert.match(w.record.read('fact', id).doc.last_refusal.reason, /rules broke/);
+  // #536 r2 Q22: a refusal that may pass by itself (a throw, not a Refusal) keeps its retry on the last refusal.
+  assert.equal(w.record.read('fact', id).doc.last_refusal.retry, true);
   // So does the shortcut's read of the push fact, when it throws (once, here): it answers, never throws (L344).
   let throws = 1;
   const factBroke = await w.pushP({ product: PRODUCT, card: 'C-1' }, { record: view((e, i) => { if (e === 'fact' && i === id && throws-- > 0) throw new Error('record broke'); return w.record.read(e, i); }) });
@@ -1664,6 +1666,23 @@ test('L325 m4: the branch already at this tip is an answer of ok, and a pushed f
   const look = await w.pushP({ product: PRODUCT, card: 'C-1' }, { look: true, ...noFact });
   assert.equal(look.ok, false);
   assert.match(look.reason, /no new commits/);
+});
+
+test('#536 r2 Minor 5: a push whose fact could not be written answers try again, never done; one the Record already holds is done', async () => {
+  const w = await world();
+  const sha256 = await docChange(w);
+  const id = `push.C-1.p-${sha256.slice(0, 12)}`;
+  for (const write of [() => ({ ok: false, reason: 'the disk is full' }), () => { throw new Error('the disk is full'); }]) {
+    const r = await w.pushP({ product: PRODUCT, card: 'C-1' }, { record: { ...w.record, write } });
+    assert.equal(r.ok, false);
+    assert.equal(r.retry, true);
+    assert.match(r.reason, /^the push was made, but its record could not be written \(the disk is full\)/);
+    assert.equal(w.record.read('fact', id), null);
+  }
+  // The rerun finds the branch there and records it.
+  const r = await w.pushP({ product: PRODUCT, card: 'C-1' });
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(w.record.read('fact', id).doc.result, 'pushed');
 });
 
 test('L325 m5: a rename over the bundle after the open pushes what was opened', async () => {
@@ -2309,4 +2328,107 @@ test('L570: no Vercel project in the rules is said as that, for a fact naming no
   assert.match(call(at(doc('prj_2', true)), 'prj_1').reason, /for another project/);
   assert.match(call(at(doc(null, false)), 'prj_1').reason, /for another project/);
   assert.equal(call(at(doc('prj_1', true)), 'prj_1').ok, true);
+});
+
+test('L1081: exactly `none` in the rules holds both Vercel facts with no fact read; only that exact word', () => {
+  const now = Date.parse('2026-11-05T12:00:00Z');
+  assert.equal(NO_VERCEL, 'none');
+  const unread = { read: () => { throw new Error('no Vercel fact may be read for a product with none'); } };
+  for (const kind of ['vercel_skip', 'vercel_env']) {
+    assert.deepEqual(vercelFact({ record: unread, kind, product: PRODUCT, vercelProject: 'none', now }), { ok: true }, kind);
+    // Near misses are project names like any other: with no fact naming them, the gate stays shut.
+    for (const near of ['None', 'NONE', ' none', 'none ', 'none\n', 'no', 'null']) {
+      const r = vercelFact({ record: { read: () => null }, kind, product: PRODUCT, vercelProject: near, now });
+      assert.equal(r.ok, false, JSON.stringify(near));
+      assert.match(r.reason, /no fact yet/, JSON.stringify(near));
+    }
+    // Missing or empty still shuts as before (I1).
+    for (const missing of [undefined, null, '']) assert.match(vercelFact({ record: unread, kind, product: PRODUCT, vercelProject: missing, now }).reason, /rules name no Vercel project/);
+  }
+});
+
+test('#519 m1: on the whole gate, `none` opens facts 3 and 4 only; facts 1 and 2 still shut it, each with its own reason', async () => {
+  const w = await world();
+  const now = Date.now();
+  const goodRun = { ...w.run, run_at: new Date(now - 1000).toISOString() };
+  const unread = { read: () => { throw new Error('no Vercel fact may be read for a product with none'); } };
+  const gate = async (over) => {
+    const issues = [];
+    const r = await startGate({ product: PRODUCT, mirror: w.mirror, record: unread, readRun: async () => goodRun, workflowPath: WF, workflowRule: async () => ({ ok: true }), vercelProject: NO_VERCEL, cache: {}, issues: { upsert: async (i) => { issues.push(i); } }, now, ...over });
+    return { r, issues };
+  };
+  // Positive control: facts 1 and 2 hold, so `none` opens the gate with no Vercel fact read.
+  const open = await gate({});
+  assert.equal(open.r.ok, true, open.r.reason);
+  // (a) Fact 1 fails: the gate shuts with fact 1's reason, once.
+  const one = await gate({ readRun: async () => ({ ...goodRun, steps: [{ product: PRODUCT, conclusion: 'failure' }] }) });
+  assert.equal(one.r.ok, false);
+  assert.match(one.r.reason, /does not show this repo's Actions default as read-only/);
+  assert.equal(one.issues.length, 1);
+  // (b) Fact 2 fails: the gate shuts with fact 2's reason, once.
+  const two = await gate({ workflowRule: async () => ({ ok: false, reason: 'writes with a broad key' }) });
+  assert.equal(two.r.ok, false);
+  assert.match(two.r.reason, /on main fails the workflow audit rule: writes with a broad key/);
+  assert.equal(two.issues.length, 1);
+});
+
+test('#519 m1: a push whose rules name no Vercel project is refused at the gate; nothing stands in for `none`', async () => {
+  const w = await world();
+  await w.commit('work', (c) => writeFileSync(join(c, 'a.txt'), 'a\n'));
+  await w.bundle();
+  // Facts 1 and 2 hold in this world, so only push.mjs's own read of the rules value decides: a default there opens it.
+  w.values['product.vercel_project'] = undefined;
+  await refusedAndUntouched(w, /^the start gate is shut: the rules name no Vercel project/);
+  assert.equal(w.issues.length, 1);
+});
+
+test('#536 r1 m1: the whole secret scan has one time limit; a scan of many commits refuses at it, never runs one limit per run', async () => {
+  const s = makeFakeScanner(tmp());
+  s.setMode('slow');
+  const w = await pushWorld({ root: tmp() });
+  const sha = (await gitOk(['rev-parse', 'refs/heads/main'], { gitDir: w.mirror })).trim();
+  const messages = Array.from({ length: 6 }, (_, i) => [sha, `message ${i}`]);
+  // Control: with room, every run is made and the scan is clean.
+  const all = await scanSecrets({ setup: s.setup, testPin: scannerPinOf(s.setup.bin), mirror: w.mirror, shas: [sha], messages, privateDir: tmp(), budgetMs: 60_000 });
+  assert.deepEqual(all, { ok: true, binaries: [] });
+  // Each run takes 400 ms: a 1.2 s limit is spent after a few, and the scan says so instead of going on.
+  const t0 = Date.now();
+  const r = await scanSecrets({ setup: s.setup, testPin: scannerPinOf(s.setup.bin), mirror: w.mirror, shas: [sha], messages, privateDir: tmp(), budgetMs: 1_200 });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /the secret scan ran past its 1 s limit/);
+  assert.ok(Date.now() - t0 < 1_200 + 2_000, 'stopped near its limit');
+  // A limit spent before the first run starts none.
+  const before = s.calls().split('\n').filter(Boolean).length;
+  const none = await scanSecrets({ setup: s.setup, testPin: scannerPinOf(s.setup.bin), mirror: w.mirror, shas: [sha], messages, privateDir: tmp(), budgetMs: 0 });
+  assert.match(none.reason, /ran past its 0 s limit/);
+  assert.equal(s.calls().split('\n').filter(Boolean).length, before, 'no scan run once the limit is spent');
+});
+
+// #536 r2 Q16, Q17: the scan's own runs, through scanSecrets' `run` port; reads counts the clock's reads at each run.
+async function scanRuns(s, w, sha, messages, clockAt) {
+  const runs = [];
+  let reads = 0;
+  const clock = () => { reads += 1; return clockAt(reads); };
+  const run = (bin, args, opts) => { runs.push({ kind: args[0], timeoutMs: opts.timeoutMs, reads }); return runScanner(bin, args, opts); };
+  const [, blob, path] = /^\S+ blob ([0-9a-f]{40})\t(.+)$/m.exec(await gitOk(['ls-tree', sha], { gitDir: w.mirror }));
+  const r = await scanSecrets({ setup: s.setup, testPin: scannerPinOf(s.setup.bin), mirror: w.mirror, shas: [sha], blobs: [{ id: blob, path }], messages, privateDir: tmp(), budgetMs: 60_000, clock, run });
+  return { r, runs };
+}
+
+test('#536 r2 Q16, Q17: no run starts once the budget is spent (the file scan too), and each message run gets only what is left', async () => {
+  const s = makeFakeScanner(tmp());
+  const w = await pushWorld({ root: tmp() });
+  const sha = (await gitOk(['rev-parse', 'refs/heads/main'], { gitDir: w.mirror })).trim();
+  const messages = [[sha, 'message one'], [sha, 'message two']];
+  // Q17: 5 s left at every read after the first: each run is given 5 s, never the scanner's whole limit.
+  const five = await scanRuns(s, w, sha, messages, (n) => (n === 1 ? 0 : 55_000));
+  assert.deepEqual(five.r, { ok: true, binaries: [] });
+  assert.deepEqual(five.runs.map((x) => x.kind), ['git', 'dir', 'stdin', 'stdin']);
+  for (const x of five.runs) assert.equal(x.timeoutMs, 5_000, x.kind);
+  // Q16: the budget spent just before the file scan's run: it is not started, and the scan says so.
+  const at = five.runs.find((x) => x.kind === 'dir').reads;   // the read that gave the file scan its time
+  const cut = await scanRuns(s, w, sha, messages, (n) => (n === 1 ? 0 : n >= at - 1 ? 60_001 : 1_000));
+  assert.equal(cut.r.ok, false);
+  assert.match(cut.r.reason, /ran past its 60 s limit/);
+  assert.deepEqual(cut.runs.map((x) => x.kind), ['git'], 'no run after the budget is spent');
 });

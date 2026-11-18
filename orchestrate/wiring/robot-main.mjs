@@ -30,28 +30,32 @@ import { takePassLock } from '../modules/M11-dispatcher/pass-lock.mjs';
 import { holdAlert } from '../modules/M11-dispatcher/pass.mjs';
 import { outbox } from '../modules/M11-dispatcher/alerts.mjs';
 import { tellStoreStopped } from '../modules/M13-ledger/store-stopped.mjs';
-import { ROBOT_PASSES, robotChannel } from './robot-wiring.mjs';
+import { ROBOT_PASSES, PASS_LIMITS_MS, robotChannel } from './robot-wiring.mjs';
 
 export const PASS_DEADLINE_MS = 120_000;
-export const RUN_DEADLINE_MS = ROBOT_PASSES.length * PASS_DEADLINE_MS + 20_000;
+// A pass with a limit of its own (robot-wiring.mjs PASS_LIMITS_MS: the push, whose one scan alone may take 300 s, L1115)
+// has that limit; every other pass has PASS_DEADLINE_MS. The round's limit is their sum and 20 s.
+export const passLimit = (name, base = PASS_DEADLINE_MS, limits = PASS_LIMITS_MS) => (Object.hasOwn(limits, name) ? limits[name] : base);
+export const RUN_DEADLINE_MS = ROBOT_PASSES.reduce((sum, p) => sum + passLimit(p), 0) + 20_000;
 export const CAUSE = (pass) => `robot-${pass}`;
 
 export const NOT_QUEUED = 'could not be queued';
 
 /**
- * One round: every pass in order, each with its own deadline. → { [pass]: { ok, result } | { ok: false, error, timedOut?,
+ * One round: every pass in order, each with its own deadline (passLimit: `passLimits`' own, else passDeadlineMs). → { [pass]: { ok, result } | { ok: false, error, timedOut?,
  * tell? } }. `tell` says why the owner was NOT told of a failure (the queue refused it, or the queue threw). `hold` is a port
  * for a test only.
  */
-export async function runPasses({ rec, passes, now, passDeadlineMs = PASS_DEADLINE_MS, hold = holdAlert }) {
+export async function runPasses({ rec, passes, now, passDeadlineMs = PASS_DEADLINE_MS, passLimits = PASS_LIMITS_MS, hold = holdAlert }) {
   const res = {};
   const alert = outbox(rec, now());
   for (const name of ROBOT_PASSES) {
     let timer; let timedOut = false;
+    const ms = passLimit(name, passDeadlineMs, passLimits);
     try {
       if (typeof passes[name] !== 'function') throw new Error(`the wiring has no ${name} pass`);
       // unref: a pass that hangs on nothing must not hold the process open; the round's own deadline (main) still runs.
-      const late = new Promise((_, no) => { timer = setTimeout(() => { timedOut = true; no(new Error(`it did not finish within ${passDeadlineMs} ms`)); }, passDeadlineMs); timer.unref?.(); });
+      const late = new Promise((_, no) => { timer = setTimeout(() => { timedOut = true; no(new Error(`it did not finish within ${ms} ms`)); }, ms); timer.unref?.(); });
       const result = await Promise.race([Promise.resolve().then(passes[name]), late]);
       // A pass may refuse by answering { refused } instead of throwing (lane 3's deliverAlertsPass, L242): that is a failed
       // pass, told like a throw, never counted as done, whatever the refusal's type (audit #137 M9).
@@ -113,7 +117,7 @@ const realOf = (p) => { try { return realpathSync(p); } catch { return null; } }
 const SELF = realOf(fileURLToPath(import.meta.url));
 
 // `self`: this script's real path, checked as one of the installed copy's code files (audit #144 m4).
-export async function main(argv, { now = () => Date.now(), log = (s) => process.stderr.write(`${s}\n`), watchdog = false, wireOpts = {}, hold = holdAlert, passDeadlineMs = PASS_DEADLINE_MS, self = SELF, startDog = startWatchdog } = {}) {
+export async function main(argv, { now = () => Date.now(), log = (s) => process.stderr.write(`${s}\n`), watchdog = false, wireOpts = {}, hold = holdAlert, passDeadlineMs = PASS_DEADLINE_MS, passLimits = PASS_LIMITS_MS, self = SELF, startDog = startWatchdog } = {}) {
   let config; let wired;
   let dog = watchdog ? startDog(RUN_DEADLINE_MS + WATCHDOG_MARGIN_MS) : null;
   try {
@@ -151,7 +155,7 @@ export async function main(argv, { now = () => Date.now(), log = (s) => process.
   try {
     if (l.broke) tell('the stopped round', `the last robot job round (taken ${l.broke.taken_at ?? 'at an unknown time'}) was stopped before it finished; this round runs as usual`);
     const late = new Promise((ok) => { timer = setTimeout(() => ok({ late: true }), limit); });
-    const r = await Promise.race([runPasses({ rec, passes, now, hold, passDeadlineMs }), late]);
+    const r = await Promise.race([runPasses({ rec, passes, now, hold, passDeadlineMs, passLimits }), late]);
     if (r.late) {
       log(`robot: the round did not finish within ${limit} ms; exiting so the next start can run`);
       tell('the late round', `a robot job round did not finish within ${limit} ms and was stopped; the next round starts in a minute`);

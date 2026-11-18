@@ -68,8 +68,9 @@ export function parseList(text) {
 /**
  * The list file as it is: { text: null } when there is none, else { text }. One handle, never a link, a plain file of
  * `uid`'s that no one else can write, under 1 MB. Anything else is a throw (a list this can't trust is never written over).
+ * `uids` and `whose` let another root-placed list take more than one owner (products-entry.mjs: root's or orchestrate's).
  */
-export function readListFile(file, { uid }) {
+export function readListFile(file, { uid, uids = [uid], whose = DISPATCHER_USER }) {
   let fd;
   try { fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) {
     if (e?.code === 'ENOENT') return { text: null };
@@ -78,8 +79,8 @@ export function readListFile(file, { uid }) {
   try {
     const st = fstatSync(fd);
     if (!st.isFile()) throw new Error(`${file} is not a plain file`);
-    if (st.uid !== uid) throw new Error(`${file} belongs to uid ${st.uid}, not to ${DISPATCHER_USER}`);
-    if (st.mode & 0o022) throw new Error(`${file} can be written by others than ${DISPATCHER_USER} (mode ${(st.mode & 0o777).toString(8)})`);
+    if (!uids.includes(st.uid)) throw new Error(`${file} belongs to uid ${st.uid}, not to ${whose}`);
+    if (st.mode & 0o022) throw new Error(`${file} can be written by others than ${whose} (mode ${(st.mode & 0o777).toString(8)})`);
     if (st.nlink !== 1) throw new Error(`${file} has another name (a hard link)`);
     const buf = Buffer.alloc(MAX_LIST_BYTES + 1); let n = 0;
     for (;;) { const k = readSync(fd, buf, n, buf.length - n, null); if (k === 0) break; n += k; if (n > MAX_LIST_BYTES) throw new Error(`${file} is over 1 MB`); }

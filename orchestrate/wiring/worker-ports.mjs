@@ -203,12 +203,17 @@ export function hostLockStampProblem(stamp, { now, ownerUid }, io = {}) {
   if (now - at > HOST_LOCK_STAMP_MAX_MS) return `the host.lock copier last ran well at ${when}, ${Math.floor((now - at) / 60_000)} minutes ago (the limit is ${HOST_LOCK_STAMP_MAX_MS / 60_000}), so the copy of host.lock may be old: ${way}`;
   return null;
 }
-/** Why the config's workerUid can't be the worker runner's user, or null: it must be a Mac user id and host.lock's owner's
- * (hostLockUid). The runner is a LaunchAgent of the owner's own user (runner-job.mjs, L896), so one check on hostLockUid
- * covers it (not root, not the Dispatcher's, not the review user's), and a config naming two owners stops at the config
- * check (dispatcher-wiring.mjs checkConfig, before wire() makes a folder; L943 m3) and again at workerPorts. */
-export function workerUidProblem(c) {
-  if (!Number.isSafeInteger(c?.workerUid) || c.workerUid < 0 || c.workerUid !== c.hostLockUid) return "workerUid must be the owner's Mac user id, hostLockUid's: the worker runner runs as the owner";
+/** Why the config's workerUid can't be the worker runner's user, or null. The runner runs as the builder user (L1079,
+ * runner-job.mjs), whose uid setup names (layout.mjs dispatcherKeys, read from the Mac): a Mac user id that is none of
+ * root, the owner's (hostLockUid: a builder session must never be the owner, I1), the Dispatcher's own (selfUid) and the
+ * review user's. Checked at the config check (dispatcher-wiring.mjs checkConfig, before wire() makes a folder; L943 m3)
+ * and again at workerPorts. */
+export function workerUidProblem(c, selfUid) {
+  const w = c?.workerUid;
+  if (!Number.isSafeInteger(w) || w <= 0) return 'workerUid must be the builder user\'s Mac user id (L1079), not root\'s';
+  if (w === c.hostLockUid) return 'workerUid is the owner\'s Mac user id (hostLockUid); the worker runner runs as the builder user, never as the owner (L1079)';
+  if (selfUid !== undefined && w === selfUid) return 'workerUid is the Dispatcher\'s own user; the worker runner runs as the builder user (L1079)';
+  if (c.reviewUid !== undefined && w === c.reviewUid) return 'workerUid is the review user; the worker runner runs as the builder user (L1079)';
   return null;
 }
 
@@ -346,7 +351,7 @@ export function requestsFolderProblem(dir, uid, { lstat = lstatSync, acl = reque
   let st;
   try { st = lstat(dir); } catch (e) { return `${what} can't be read (${e?.code ?? e})`; }
   if (st.isSymbolicLink() || !st.isDirectory()) return `${what} is not a plain folder`;
-  if (st.uid !== uid) return `${what} is not the owner's (workerUid)`;
+  if (st.uid !== uid) return `${what} is not the worker runner's user's (workerUid)`;
   // As the other folder checks (L943 m4): no group or other write, and no access-list entry that lets anyone write but
   // setup's own (orchestrate may only add a file, setup/layout.mjs WORKER_REQUESTS_ACL).
   if (st.mode & 0o022) return `${what} can be written by group or others (mode ${(st.mode & 0o777).toString(8)})`;
@@ -492,8 +497,8 @@ export function workerPorts(ctx, io = {}) {
   // (L763). Root's files and the review user's are not the owner's to name the host with.
   const lockOwner = hostLockOwnerProblem(c.hostLockUid, ctx.selfUid, c.reviewUid);
   if (lockOwner) throw new Error(`config: ${lockOwner}`);
-  // The worker runner's user is host.lock's (L896): workerUidProblem, which checkConfig made first (L943 m3).
-  const workerUid = workerUidProblem(c);
+  // The worker runner's user is the builder user, never the owner's (L1079): workerUidProblem, which checkConfig made first (L943 m3).
+  const workerUid = workerUidProblem(c, ctx.selfUid);
   if (workerUid) throw new Error(`config: ${workerUid}`);
   // A typo would make every request go nowhere: the folder must be there at start (its owner, mode and access list are checked on each write, L943 m4).
   realFolder(c.workerRequestsDir, "the worker runner's requests folder (workerRequestsDir)");

@@ -44,6 +44,7 @@ import { loadMemory, processGroupPorts } from '../../wiring/runner-loop.mjs';
 import { runnerCopy, runnerOutbox, RUNNER_ROLE_OF } from '../../wiring/owner-status.mjs';
 import { CLONE_CONFIG_TEMPLATE } from '../../modules/M4-workshop/git/save-work.mjs';
 import { bundleName } from '../../modules/M4-workshop/git/push.mjs';
+import { configUnreadable, lockRefused, notOwnUser, pinProblem, recordUnwritten } from './before-run.mjs';
 
 export const TEST_REPO = 'orchestrate-test';
 export const STEPS = Object.freeze([
@@ -68,14 +69,13 @@ const notRun = (n, why) => ({ step: n, result: 'NOT RUN', why });
 /** Why the proof must not run, or null. Every input is read by the caller; nothing here touches the disk. */
 export function guardProblem({ c, product, uid, ownDirUid, claudeVersion }) {
   if (!Number.isInteger(uid) || uid === 0) return 'it runs as root (with sudo). Run it as the worker runner\'s own user, without sudo';
-  if (ownDirUid !== uid) return `it runs as uid ${uid}, but the worker runner's own folder ${c?.ownDir} is uid ${ownDirUid}'s. Run it as that user`;
+  const own = notOwnUser({ c, uid, ownDirUid }); if (own) return own;
   if (typeof product !== 'string' || !product) return 'no --product was named. Name the test product';
   const p = Object.hasOwn(c?.products ?? {}, product) ? c.products[product] : null;
   if (!p) return `product ${product} is not in the worker runner's config`;
   if (String(p.repo).split('/')[1] !== TEST_REPO) return `product ${product}'s repository is ${p.repo}, not the test repository (${TEST_REPO}). This proof runs on the test product only`;
   if (typeof c.claudeBin !== 'string' || !c.claudeBin.startsWith('/')) return 'the config names no pinned claude (claudeBin), so nothing can run inside the lock-down';
-  if (typeof c.pin !== 'string') return 'the config names no claude pin (pin)';
-  if (claudeVersion !== c.pin) return `claude is ${claudeVersion ?? 'not readable'}, but the config's pin is ${c.pin}. Run it with the pinned claude`;
+  const pin = pinProblem({ c, claudeVersion }); if (pin) return pin;
   const install = p.render?.product?.commands?.install;
   if (typeof install !== 'string' || !install.trim()) return `product ${product} declares no install command, so check 4 has nothing to run`;
   if (!Array.isArray(p.render?.registryHosts) || !p.render.registryHosts.length) return `product ${product} declares no registry hosts, so step 1 would prove nothing`;
@@ -424,7 +424,7 @@ export async function main(argv, { print = (t) => process.stdout.write(t), uid =
   const fails = (why) => { print(report(STEPS.map(([n]) => notRun(n, why))).text); return 1; };
   // macOS only (L1005): ps -g, pgrep and perl's setsid are read as the Mini's; anywhere else, a named skip, never a run.
   if (platform !== 'darwin') return fails(`SKIP: this proof runs on macOS only (the Mini), not on ${platform}`);
-  let c; try { c = checkRunnerConfig(readRunnerConfig(arg(argv, '--config'), selfPath())); } catch (e) { return fails(`the worker runner's config can't be read (${e?.message ?? e})`); }
+  let c; try { c = checkRunnerConfig(readRunnerConfig(arg(argv, '--config'), selfPath())); } catch (e) { return fails(configUnreadable(e)); }
   const product = arg(argv, '--product');
   let ownDirUid; try { const st = lstatSync(c.ownDir); ownDirUid = st.isDirectory() && !st.isSymbolicLink() ? st.uid : null; } catch { ownDirUid = null; }
   let claudeVersion = null; try { claudeVersion = /^(\d+\.\d+\.\d+)/.exec(execFileSync(c.claudeBin, ['--version'], { encoding: 'utf8', timeout: 30_000 }).trim())?.[1] ?? null; } catch { /* not readable */ }
@@ -439,7 +439,7 @@ export async function main(argv, { print = (t) => process.stdout.write(t), uid =
   const live = (Array.isArray(m?.sessions) ? m.sessions : []).filter((s) => s?.alive === true || (s?.alive !== false && s?.ended !== true));
   if (live.length) return fails(`the worker runner's memory lists ${live.length} session${live.length === 1 ? '' : 's'} that may still run (${live.slice(0, 3).map((s) => s.id).join(', ')}). Run this once none does`);
   const lock = makeLock({ dir: c.ownDir, timeoutMs: 2_000 }); let held;
-  try { held = lock.acquire(); } catch (e) { return fails(/busy/.test(e?.message ?? '') ? 'the worker runner is running. Stop it first, then run this again' : `the worker runner's lock can't be taken (${e?.message ?? e})`); }
+  try { held = lock.acquire(); } catch (e) { return fails(lockRefused(e)); }
   const { results, dir } = await underLock({ lock, held, inputs, run: async (d, log) => {
     let n = 0; const tag = now().toString(36);
     const { stopGroup } = processGroupPorts();
@@ -471,7 +471,7 @@ export async function main(argv, { print = (t) => process.stdout.write(t), uid =
   print(r.text);
   print('Claude Code keeps its own transcripts of the proof\'s sessions in the workers\' home (<its config folder>/projects/); they are left there.\n');
   const evidence = join(homedir(), `runlocked-proof-${new Date(now()).toISOString().replace(/[:.]/g, '-')}.jsonl`);
-  try { writeFileSync(evidence, `${[{ pin: c.pin, product, at: new Date(now()).toISOString(), runs: dir }, ...results].map((x) => JSON.stringify(x)).join('\n')}\n`, { mode: 0o600 }); print(`Written to ${evidence}\n`); } catch (e) { print(`The record of this run could not be written (${e?.code ?? e?.message})\n`); }
+  try { writeFileSync(evidence, `${[{ pin: c.pin, product, at: new Date(now()).toISOString(), runs: dir }, ...results].map((x) => JSON.stringify(x)).join('\n')}\n`, { mode: 0o600 }); print(`Written to ${evidence}\n`); } catch (e) { print(`${recordUnwritten(e)}\n`); }
   return r.ok ? 0 : 1;
 }
 

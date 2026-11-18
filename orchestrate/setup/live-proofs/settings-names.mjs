@@ -78,6 +78,7 @@ import { renderRoleSettings } from '../../modules/M4-workshop/launcher/render-se
 import { FIRST_ROUND_EFFORT, SEND_BACK_EFFORT } from '../../modules/M4-workshop/launcher/review-launch.mjs';
 import { DESIGN_PROFILES } from '../../modules/M4-workshop/launcher/role-profiles.mjs';
 import { RUNNER_ROLES } from '../../shared/review-roles.mjs';
+import { configUnreadable, lockRefused, notOwnUser, pinProblem, recordUnwritten } from './before-run.mjs';
 
 export const PROOF = 'settings-names.mjs';
 export const RUN_MS = 180_000;
@@ -564,6 +565,9 @@ export const TESTS = Object.freeze([
 // Names with no live test yet, and why (L1109: left failing check 0, never assumed).
 export const NOT_TRIED = Object.freeze({
   [S.allowUnsandboxedCommands]: 'no pair here: a command asking to leave the sandbox is a model\'s choice (its break-it test is the review walls proof)',
+  // Wall v2: read in 2.1.316's code, not proven by a pair yet. Its live proof is setup/live-proofs/builder-proxy.mjs.
+  [S.httpProxyPort]: 'no pair yet: a builder session\'s shell going through the allow-list proxy is shown by the live proof builder-proxy.mjs, not by a pair here',
+  [S.socksProxyPort]: 'no pair yet: set with httpProxyPort to the same port; shown with it by the live proof builder-proxy.mjs',
 });
 
 // Names the launcher no longer writes (L1114), shown and not counted. Each comes back only after its proof (R-0b-178).
@@ -801,10 +805,9 @@ export function rolePaths(d, role) {
 /** Why the run must not start, or null. Every input is read by the caller. */
 export function guardProblem({ c, uid, ownDirUid, claudeVersion, account }) {
   if (!Number.isInteger(uid) || uid === 0) return 'it runs as root. Run it as the worker runner\'s own user (sudo -H -u builder …)';
-  if (ownDirUid !== uid) return `it runs as uid ${uid}, but the worker runner's own folder ${c?.ownDir} is uid ${ownDirUid}'s. Run it as that user`;
+  const own = notOwnUser({ c, uid, ownDirUid }); if (own) return own;
   if (typeof c?.claudeBin !== 'string' || !c.claudeBin.startsWith('/')) return 'the config names no pinned claude (claudeBin)';
-  if (typeof c.pin !== 'string') return 'the config names no claude pin (pin)';
-  if (claudeVersion !== c.pin) return `claude is ${claudeVersion ?? 'not readable'}, but the config's pin is ${c.pin}. Run it with the pinned claude`;
+  const pin = pinProblem({ c, claudeVersion }); if (pin) return pin;
   if (!account?.account) return `no account is in use for the sessions (${account?.reason ?? 'no answer'})`;
   return null;
 }
@@ -866,14 +869,14 @@ export function writeReceipt({ home, at, header, lines, outcomes = {}, readback 
  * The end of a run: judges the names, prints a line for each, writes the receipt and prints its path, then the verdict,
  * last. PASS only when every counted name passed and the receipt was written (L1124 m5). → the exit code.
  */
-export function finish({ res, pin, base, home, at, print }) {
-  const lines = judgeNames({ outcomes: res.outcomes, readback: res.readback, version: pin });
+export function finish({ res, pin, base, home, at, print, confirmed = CONFIRMED }) {
+  const lines = judgeNames({ outcomes: res.outcomes, readback: res.readback, version: pin, confirmed });
   const r = report(lines, pin);
   print(r.text);
   if (base) print(`The runs' folders are kept in ${base}.\n`);
   let receipt;
   try { receipt = writeReceipt({ home, at, header: { pin, runs: base ?? null, ok: r.ok, gets: { asked: GETS, sent: res.gets ?? null } }, lines, outcomes: res.outcomes, readback: res.readback }); print(`Written to ${receipt}\n`); } catch (e) {
-    print(`The record of this run could not be written (${e?.code ?? e?.message}), so the run can't be used.\n`);
+    print(`${recordUnwritten(e)}, so the run can't be used.\n`);
     print(`NOT DONE on Claude Code ${pin}: the receipt could not be written${r.ok ? '' : `; ${r.verdict.replace(/^NOT DONE on Claude Code \S+: /, '')}`}\n`);
     return 1;
   }
@@ -916,10 +919,10 @@ export async function main(argv, { print = (t) => process.stdout.write(t), uid =
     const lines = names.map((n) => (REFUSED_SETTINGS.includes(n) ? { name: n, result: 'REFUSED', why: 'not proven: the launcher refuses it' } : Object.hasOwn(NOT_USED, n) ? { name: n, result: 'NOT USED', why: NOT_USED[n] } : notTried(n, why)));
     const r = report(lines, version);
     print(r.text);
-    try { print(`Written to ${writeReceipt({ home, at: now(), header: { pin: version ?? null, runs: null, ok: false, refused: why }, lines })}\n`); } catch (e) { print(`The record of this run could not be written (${e?.code ?? e?.message})\n`); }
+    try { print(`Written to ${writeReceipt({ home, at: now(), header: { pin: version ?? null, runs: null, ok: false, refused: why }, lines })}\n`); } catch (e) { print(`${recordUnwritten(e)}\n`); }
     print(`${r.verdict}\n`); return 1;
   };
-  let c; try { c = d.readConfig(arg(argv, '--config')); } catch (e) { return stop(`the worker runner's config can't be read (${e?.message ?? e})`); }
+  let c; try { c = d.readConfig(arg(argv, '--config')); } catch (e) { return stop(configUnreadable(e)); }
   const ownDirUid = d.ownDirUidOf(c.ownDir);
   if (restoring) {
     // --restore (L1124 m4, L1128 m6): puts back the user settings file of each account folder a cut-off run left a
@@ -943,7 +946,7 @@ export async function main(argv, { print = (t) => process.stdout.write(t), uid =
   if (lstatSync(userFile, { throwIfNoEntry: false })?.isSymbolicLink()) { try { userFile = realpathSync.native(userFile); } catch { return stop(`${userFile} is a link that leads nowhere`, c.pin); } }
   if (backupLeft(userFile)) return stop(`${userFile}${BACKUP_SUFFIX} ${LEFTOVER}: ${restoreCommand(c, argv)}`, c.pin);
   let lock; let held;
-  try { lock = d.makeLock({ dir: c.ownDir, timeoutMs: 2_000 }); held = lock.acquire(); } catch (e) { return stop(/busy/.test(e?.message ?? '') ? 'the worker runner is running. Stop it first, then run this again' : `the worker runner's lock can't be taken (${e?.message ?? e})`, c.pin); }
+  try { lock = d.makeLock({ dir: c.ownDir, timeoutMs: 2_000 }); held = lock.acquire(); } catch (e) { return stop(lockRefused(e), c.pin); }
   let res; let base;
   try {
     // Made inside the try (L1128 m5): a throw here still lets the lock go.
@@ -960,7 +963,7 @@ export async function main(argv, { print = (t) => process.stdout.write(t), uid =
   // A put-back that failed mid-run leaves the backup (L1128 m6): say how to put the file back, in this same run.
   if (backupLeft(userFile)) print(`${userFile} could not be put back during the run; its backup is beside it. To put it back: ${restoreCommand(c, argv)}\n`);
   // The version counts only because claude --version said it before the run (the guard): a name is proven on that pin.
-  return finish({ res, pin: c.pin, base, home, at: now(), print });
+  return finish({ res, pin: c.pin, base, home, at: now(), print, ...(d.confirmed ? { confirmed: d.confirmed } : {}) });
 }
 
 const invoked = (() => { try { return process.argv[1] ? realpathSync.native(process.argv[1]) : null; } catch { return null; } })();

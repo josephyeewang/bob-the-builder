@@ -85,8 +85,9 @@ import { launch } from '../modules/M4-workshop/launcher/launch.mjs';
 import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.mjs';
 import { prepareWorkerCopy } from '../modules/M4-workshop/launcher/worker-copy.mjs';
 import { sessionArgs, spawnClaude } from '../modules/M4-workshop/launcher/review-launch.mjs';
-import { accountInUse } from '../modules/M4-workshop/launcher/accounts.mjs';
+import { accountDir, accountEnv, accountInUse, isSetUp, readAccountFile } from '../modules/M4-workshop/launcher/accounts.mjs';
 import { startEnv } from '../modules/M4-workshop/launcher/env-check.mjs';
+import { SIGNIN_TOKEN_VAR, readSigninFile } from './builder-signin.mjs';
 import { readCardFile } from '../modules/M4-workshop/launcher/review-runner-main.mjs';
 import { createSaveWork } from '../modules/M4-workshop/git/save-work.mjs';
 import { cardBranch } from '../modules/M4-workshop/git/branch.mjs';
@@ -246,7 +247,7 @@ export function saveWorkPort({ mirrorOf, runLocked, settingsDir, make = createSa
  * The session's environment (#463 r1 m6): the one form, for the start and the lock-down runner, built by the launcher's
  * one check (R-0b-156 startEnv: the allow-list). → { ok: true, env } | { ok: false, reason }.
  */
-export const sessionEnv = (c, who, base = process.env) => startEnv(base, { path: c.path, extra: { ...who.env, HOME: c.home } });
+export const sessionEnv = (c, who, base = process.env) => startEnv(base, { path: c.path, extra: { ...who.env, HOME: c.home }, allowSigninToken: who?.signinToken === true });
 
 /** pauseLead({ product }): not wired (see the top of this file). */
 export const pauseLeadPort = () => async () => notWired('the Lead\'s wrap-up needs the activity tracker\'s feed, which the runner does not have yet');
@@ -404,7 +405,7 @@ export function liveWallProblem(live, product, places, read) {
  * or the reason claude must not start,
  * walled, fs ({ mkdir, rm, writeNew, list, lstat, chmodTree, rename }), ownUid, stopped (true once the runner is stopping: nothing more is spawned,
  * #364 self-review M1), log (what is told, such as a throwaway that can't be removed), productHeld(product) → null or why
- * the product starts no session (runner-main.mjs keepSnapshots, #369 r2 m2; asked at the start and again before claude),
+ * the product starts no session (runner-main.mjs rootSnapshots, L1226, behind the wall and test-product gates; asked first, before anything is read),
  * readSettings(id) → a live session's settings (#378 r1 M1).
  * The request: { card, kind, product, sessionId, live, undoCommit?, onGroup? } (live: the runner's other live sessions, liveWallProblem;
  * undoCommit: the reversed commit, 40 hex, an undo's only, L976; onGroup: told check 4's install process groups, #463 r3 m1).
@@ -412,11 +413,38 @@ export function liveWallProblem(live, product, places, read) {
 /** The start's default prompt (L970): the worker prompt's text, or null (and the start is refused) when it gives none. */
 export const workerPromptText = (x) => { const p = workerPrompt(x); return p.ok ? p.text : { ok: false, reason: p.reason }; };
 
+/**
+ * The account a worker session signs in with (L1079, L1261). With `signinFile` (setup's worker-config always names it, layout.mjs
+ * builderSigninPath): the long-lived token in that file, read fresh at each call (builder-signin.mjs readSigninFile: one
+ * handle, never a link, builder's own 0600 file in builder's own 0700 folder, every folder above root's alone, one token),
+ * handed to the session as SIGNIN_TOKEN_VAR in its environment only (sessionEnv lets that one name past check 9). No
+ * Keychain is needed (builder has none), so isSetUp is not asked; the session runs in account a's folder, on whichever
+ * account the owner made the token with: the owner's a/b choice (accountCopy) is not followed. Any problem refuses the
+ * start, with a reason that never holds a byte of the file. `readSignin` is a port for tests.
+ * Without `signinFile` (a config from before L1261): The runner runs as the builder user, so its own home's account file
+ * is not the owner's choice: with `accountCopy` (root's copy of the owner's choice, setup's, as the review runner reads it,
+ * review-runner-main.mjs) the choice is read there, and the sign-in folder is the builder's own for that account. A copy
+ * named but not readable is refused, never read as account a: a wrong account spends the other budget. Without
+ * `accountCopy`, the builder home's own file (accountInUse). → accountInUse's shape: { account, dir, env } or { account: null, reason }.
+ */
+export function workerAccount(c, { readCopy = readAccountFile, inUse = accountInUse, setUp = isSetUp, readSignin = readSigninFile } = {}) {
+  if (c.signinFile !== undefined) {
+    let r; try { r = readSignin(c.signinFile); } catch (e) { r = { ok: false, reason: `the builder sign-in file can't be read (${e?.code ?? 'error'})` }; }
+    if (!r?.ok || typeof r.value !== 'string' || r.value === '') return { account: null, reason: r?.reason ?? 'the builder sign-in file gave no answer' };
+    return { account: 'a', dir: accountDir(c.home, 'a'), env: { ...accountEnv(c.home, 'a'), [SIGNIN_TOKEN_VAR]: r.value }, signinToken: true };
+  }
+  if (c.accountCopy === undefined) return inUse({ home: c.home });
+  const r = readCopy({ file: c.accountCopy, uid: 0 });
+  if (!r?.ok) return { account: null, reason: `the owner's account choice could not be read (${r?.reason ?? 'no answer'})` };
+  if (!setUp(c.home, r.account)) return { account: null, reason: `account ${r.account} (the owner's choice) is not set up in ${c.home}` };
+  return { account: r.account, dir: accountDir(c.home, r.account), env: accountEnv(c.home, r.account) };
+}
+
 export function startPort(c, deps = {}) {
   const {
     readCard = (card) => readCardFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, card }),
     startCommit = cardStartCommit, prepare = prepareWorkerCopy, checksFor = () => ({}), promptFor = workerPromptText,
-    names = {}, account = () => accountInUse({ home: c.home }), spawn = childSpawn, pidStartOf = leaderStart, kill, there, launchFn = launch,
+    names = {}, account = () => workerAccount(c), spawn = childSpawn, pidStartOf = leaderStart, kill, there, launchFn = launch,
     walled = walledLaunchSettings, ownUid = () => process.getuid(), stopped = () => false, beforeStart, mainOf = mirrorMain,
     readSettings = sessionSettingsOf(c.settingsDir), undoCheck = undoCommitProblem,
   } = deps;
@@ -433,7 +461,7 @@ export function startPort(c, deps = {}) {
     const profile = DESIGN_PROFILES[role];
     const p = Object.hasOwn(c.products ?? {}, product) ? c.products[product] : null;
     if (!p || typeof p.repo !== 'string' || typeof p.mirror !== 'string' || !p.render?.paths) return refuse(`product ${product} is not in the runner's config`);
-    // A product whose rules snapshot is not kept fresh starts no session (#369 r2 m2): its hooks would refuse every call. Asked before anything is read.
+    // A product held (the wall, the test-product gate, or its rules snapshot not root's, fresh and its own: L1226) starts no session. Asked before anything is read.
     const held = deps.productHeld?.(product);
     if (held) return refuse(held);
     const cd = readCard(card);

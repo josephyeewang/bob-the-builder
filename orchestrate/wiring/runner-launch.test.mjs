@@ -9,6 +9,7 @@ import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.m
 import { SETTINGS as S } from '../modules/M4-workshop/launcher/settings-names.mjs';
 import { renderRoleSettings, checkRunnerWall } from '../modules/M4-workshop/launcher/render-settings.mjs';
 import { walledLaunchSettings } from './runner-launch.mjs';
+import { PROXY_PORTS } from '../shared/builder-ports.mjs';
 import { writeStatus } from './runner-files.mjs';
 import { checkRunnerConfig } from './runner-main.mjs';
 
@@ -36,6 +37,21 @@ test('L759 step 2: an editing or undo launch gets worker settings that carry the
       assert.equal(r.role, 'worker');
       assert.ok(r.settings[S.sandbox][S.filesystem][S.denyRead].includes(runner.requestsDir), kind);
     }
+    // Wall v2: every session the runner starts is the builder's, so its shell goes through the allow-list proxy.
+    const withHost = walledLaunchSettings(input('editing', runner, { product: { commands: { test: 'npm test' }, hosts: ['github.com'] }, rulesHosts: ['github.com'] }));
+    assert.equal(withHost.ok, true, withHost.reason);
+    assert.equal(withHost.settings[S.sandbox][S.network][S.httpProxyPort], PROXY_PORTS.session);
+    assert.equal(withHost.settings[S.sandbox][S.network][S.socksProxyPort], PROXY_PORTS.session);
+    let seen; walledLaunchSettings({ ...input('editing', runner), render: (a) => { seen = a; return { ok: false, reason: 'stop' }; } });
+    assert.equal(seen.builderProxy, true);
+    // #617 r1 m3: the port is the phase's own. The install phase's (its list adds the registry hosts) in a session's
+    // settings refuses, and so does the session's in an install's; the real renderer's own ports pass.
+    const hosts = { product: { commands: { test: 'npm test' }, hosts: ['github.com'] }, rulesHosts: ['github.com'] };
+    const swapPort = (port) => (a) => { const r = renderRoleSettings(a); r.settings[S.sandbox][S.network][S.httpProxyPort] = port; r.settings[S.sandbox][S.network][S.socksProxyPort] = port; return r; };
+    assert.match(walledLaunchSettings({ ...input('editing', runner, hosts), render: swapPort(PROXY_PORTS.install) }).reason ?? '', /proxy port 47001 is not the session phase's \(47000\)/);
+    assert.match(walledLaunchSettings({ ...input('editing', runner, { ...hosts, phase: 'install', registryHosts: ['registry.npmjs.org'] }), render: swapPort(PROXY_PORTS.session) }).reason ?? '', /proxy port 47000 is not the install phase's \(47001\)/);
+    const inst = walledLaunchSettings(input('editing', runner, { ...hosts, phase: 'install', registryHosts: ['registry.npmjs.org'] }));
+    assert.equal(inst.ok, true, inst.reason); assert.equal(inst.settings[S.sandbox][S.network][S.httpProxyPort], PROXY_PORTS.install);
     // The runner's own paths win over any the caller put in paths.
     const forged = walledLaunchSettings(input('editing', runner, { paths: { ...PATHS, workerRunner: { requestsDir: '/elsewhere/req', statusFile: '/elsewhere/s/status.json' } } }));
     assert.equal(forged.ok, true, forged.reason);
@@ -141,13 +157,13 @@ test('#439 m6: the launch renders with the realpath it checks with, so a snapsho
 test('L916 (#423 M2): a worker launch built from the config\'s real snapshot placement passes the render\'s wall; the old placement is refused at load', () => {
   const d = realpathSync(tempDir('orch-rl-'));
   try {
-    for (const f of ['requests', 'runner', 'snapshots']) mkdirSync(join(d, f));
+    for (const f of ['requests', 'runner', 'worker-rules']) mkdirSync(join(d, f));
     const deny = { record: '/w/record', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/w/keys', secrets: ['/w/secrets'], proposals: ['/w/proposals'], otherCopies: ['/w/copy2'] };
     const cfg = (snapshot) => ({ installRoot: '/i', requestsDir: join(d, 'requests'), statusFile: join(d, 'runner', 'status.json'), orchestrateUid: 501, outboxRoot: '/ob', copiesRoot: '/c',
       home: '/home', path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/w/record', recordUid: 502, claimMs: 1,
-      products: { p1: { repo: 'o/p', mirror: '/w/mirror.git', render: { paths: { ...PATHS, deny, snapshot } } } } });
-    // As runner-main places it: the config is taken, and the launch it renders, through the real renderer and check, passes.
-    const c = checkRunnerConfig(cfg(join(d, 'snapshots', 'rules-p1.json')));
+      products: { p1: { repo: 'o/p', mirror: '/w/mirror.git', render: { paths: { ...PATHS, deny, snapshot, snapshotOwner: 0 } } } } });
+    // As setup places it (root's worker-rules folder, L1226): the config is taken, and the launch it renders, through the real renderer and check, passes.
+    const c = checkRunnerConfig(cfg(join(d, 'worker-rules', 'p1.json')));
     const launchFrom = (conf) => walledLaunchSettings(input('editing', conf.workerRunner, { paths: { ...PATHS, ...conf.products.p1.render.paths } }));
     const r = launchFrom(c);
     assert.equal(r.ok, true, r.reason);

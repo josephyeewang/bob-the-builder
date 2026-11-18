@@ -28,8 +28,9 @@ import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.m
 import { uidsProblem } from '../modules/M4-workshop/launcher/review-user.mjs';
 import { reviewUserProblem } from '../modules/M9-record/outbox.mjs';
 import { PLAN_REVIEW_ROLE, RUNNER_ROLES } from '../shared/review-roles.mjs';
-import { COPY_CLAUDE_CODE as CLAUDE_CODE, COPY_HOOKS as HOOKS, managedGuardDir, parseConfig, scannerDir } from './layout.mjs';
+import { COPY_CLAUDE_CODE as CLAUDE_CODE, COPY_HOOKS as HOOKS, managedGuardDir, parseConfig, scannerDir, wallDir, wallStatusDir, workerRulesDir } from './layout.mjs';
 import { parseRobot } from './robot-setup.mjs';
+import { WORKER_RUNNER_CONFIG, parseWorkerRunner } from './worker-runner-setup.mjs';
 import { DISPATCHER_CONFIG, dispatcherConfigFor, dispatcherConfigText, dispatcherSourcePath, parseDispatcher } from './dispatcher-setup.mjs';
 import { SENSORS_CONFIG, sensorsConfigFor, sensorsConfigText, sensorsSourcePath } from './sensors-setup.mjs';
 import { readUser } from './users-folders.mjs';
@@ -38,9 +39,10 @@ import { pinProblem } from './review-config.mjs';   // a cycle (review-config re
 const HERE = dirname(fileURLToPath(import.meta.url));
 const KNOWN_ROLES = Object.freeze([...new Set([...Object.keys(DESIGN_PROFILES), ...RUNNER_ROLES])]);
 export const ORCH_ROOT = join(HERE, '..');   // this repository's orchestrate/ folder
-// The updater's module set, relative to orchestrate/ (review-updater.mjs imports the other two by these relative paths).
+// The updater's module set, relative to orchestrate/ (review-updater.mjs imports install-check and safe-git by these
+// relative paths; safe-git loads shared/secret-guard.mjs, R-0b-179's runtime guard, which imports only node's own modules).
 const UPDATER_DIR = posix.dirname(SCRIPTS.updater);
-export const BOOTSTRAP_FILES = Object.freeze([SCRIPTS.updater, posix.join(UPDATER_DIR, 'install-check.mjs'), posix.join(UPDATER_DIR, '../git/safe-git.mjs')].map((p) => posix.normalize(p)));
+export const BOOTSTRAP_FILES = Object.freeze([SCRIPTS.updater, posix.join(UPDATER_DIR, 'install-check.mjs'), posix.join(UPDATER_DIR, '../git/safe-git.mjs'), 'shared/secret-guard.mjs'].map((p) => posix.normalize(p)));
 // The jobs' label rule is review-daemons.mjs's own (it exports it), so there is one.
 export const LABEL_RE = LABEL;
 const HTTPS = /^https:\/\/[A-Za-z0-9.-]+(:\d+)?\/[^\s]+$/;
@@ -50,7 +52,7 @@ const KEEP_NAME = /^(?!\.\.?$)[A-Za-z0-9._-]{1,128}$/;
 /** Config for the install and the jobs: the setup config (layout.mjs) plus these keys. */
 export function parseInstallConfig(raw) {
   const base = parseConfig(raw);
-  const { address, gitBin = '/usr/bin/git', label, runnerConfig, extras = [], nodeBin = realpathSync(process.execPath), robot, dispatcher } = raw;
+  const { address, gitBin = '/usr/bin/git', label, runnerConfig, extras = [], nodeBin = realpathSync(process.execPath), robot, dispatcher, workerRunner } = raw;
   if (typeof address !== 'string' || !HTTPS.test(address)) throw new Error('config: address must be the https address of the repository');
   if (!PLAIN_ABS(gitBin)) throw new Error('config: gitBin must be a full path');
   if (typeof label !== 'string' || !LABEL_RE.test(label)) throw new Error('config: label must be letters, digits, . and - (it starts the jobs\' names)');
@@ -59,13 +61,15 @@ export function parseInstallConfig(raw) {
   // A code home's name is main's alone (L257 (B)), in any case (lane 2 on #144: macOS's disk ignores case), and said so.
   const home = Array.isArray(extras) ? extras.find((e) => typeof e === 'string' && MODULE_HOMES.includes(posix.basename(e).toLowerCase())) : undefined;
   if (home) throw new Error(`config: extras must not hold ${home}: ${posix.basename(home)} is the name of a folder of the copy's own code (main's alone)`);
-  if (!Array.isArray(extras) || extras.length > 20 || extras.some((e) => !PLAIN_ABS(e) || !KEEP_NAME.test(posix.basename(e)) || [...Object.keys(MUST_KEEP), STAMP, UPDATER_CONFIG, RUNNER_CONFIG, DISPATCHER_CONFIG, SENSORS_CONFIG].map((n) => n.toLowerCase()).includes(posix.basename(e).toLowerCase()))) {
+  if (!Array.isArray(extras) || extras.length > 20 || extras.some((e) => !PLAIN_ABS(e) || !KEEP_NAME.test(posix.basename(e)) || [...Object.keys(MUST_KEEP), STAMP, UPDATER_CONFIG, RUNNER_CONFIG, DISPATCHER_CONFIG, SENSORS_CONFIG, WORKER_RUNNER_CONFIG].map((n) => n.toLowerCase()).includes(posix.basename(e).toLowerCase()))) {
     throw new Error('config: extras must be full paths of files or folders to carry into the copy (the review runner\'s claude program and its hooks), each with a plain name of its own');
   }
   // The robot job (robot-setup.mjs): on only when asked, and only with its config among the extras.
   // The Dispatcher job (dispatcher-setup.mjs): on only with its entry, which names what setup can't know itself.
   const d = parseDispatcher(dispatcher, base);
-  return { ...base, address, gitBin, label, runnerConfig, extras, nodeBin, ...(parseRobot(robot, extras) ? { robot: true } : {}), ...(d ? { dispatcher: d } : {}) };
+  // The worker runner's job (worker-runner-setup.mjs, L1092): on only with its entry, which names its one product (L1112).
+  const w = parseWorkerRunner(workerRunner, base);
+  return { ...base, address, gitBin, label, runnerConfig, extras, nodeBin, ...(parseRobot(robot, extras) ? { robot: true } : {}), ...(d ? { dispatcher: d } : {}), ...(w ? { workerRunner: w } : {}) };
 }
 
 export function installPaths(cfg) {
@@ -77,10 +81,12 @@ export function installPaths(cfg) {
   };
 }
 
-/** The entries the install and the jobs put directly under the base, so `check` does not call them strangers (r3 n4). The scanner's folder is `scanner`'s (L1083). */
+/** The entries the install and the jobs put directly under the base, so `check` does not call them strangers (r3 n4). The scanner's folder is `scanner`'s (L1083).
+ *  The wall's two folders (builder-wall.mjs) and the worker rules' folder (worker-rules.mjs) are root jobs' too: without them every
+ *  users-folders run after the wall was placed stopped on its own check. Every other entry under the base is a folderTable row. */
 // The base dispatcher.json and sensors.json only with a dispatcher entry: a leftover one from a removed entry is then a stranger check names (L807 c2).
 // `dispatcher`: whether the config has a dispatcher entry (check reads the config without the install's keys, so main says).
-export const rootMadeEntries = (cfg, { dispatcher = cfg.dispatcher !== undefined } = {}) => { const P = installPaths(cfg); return [P.install, P.work, P.logDir, P.accountCopy, managedGuardDir(cfg), scannerDir(cfg), ...(dispatcher ? [dispatcherSourcePath(cfg), sensorsSourcePath(cfg)] : [])]; };
+export const rootMadeEntries = (cfg, { dispatcher = cfg.dispatcher !== undefined } = {}) => { const P = installPaths(cfg); return [P.install, P.work, P.logDir, P.accountCopy, managedGuardDir(cfg), scannerDir(cfg), wallDir(cfg), wallStatusDir(cfg), workerRulesDir(cfg), ...(dispatcher ? [dispatcherSourcePath(cfg), sensorsSourcePath(cfg)] : [])]; };
 
 const op = (text, run) => ({ text, run });
 /** Why `p` (a real path outside the prefix) cannot be carried into the copy, or null: it must exist, be a plain file or folder, and hold no link anywhere inside (the copy is root's alone and carries no links). */
@@ -107,7 +113,15 @@ function ownTree(io, p) {
   } else io.secureFile(p, { uid: io.rootUid, gid: 0, mode: (st.mode & 0o111) ? 0o755 : 0o644 });
 }
 
-/** The updater's own config, as the copy keeps it. Paths are the ones the updater will see (io.at). */
+/** Why an install whose top is a plain folder is refused: one text for every step that writes into the copy (I7). */
+export const NOT_THE_LINK = 'is a plain folder, not the link the updater flips';
+
+/**
+ * The updater's own config, as the copy keeps it. Paths are the ones the updater will see (io.at). Every name in `keep` is
+ * one the install seeds (planInstall), since the updater refuses a keep item the seed lacks. worker-runner.json is not
+ * one: it is built from the copy's full review.json, which exists only after install, so `worker-config` writes it and then
+ * adds it to the copy's keep itself (worker-runner-setup.mjs planWorkerRunnerConfig), as add-to-install does for its two.
+ */
 export function updaterConfigFor(io, cfg) {
   const P = installPaths(cfg);
   return { installRoot: io.at(P.installRoot), clone: io.at(P.clone), address: cfg.address, keep: ['bin', UPDATER_CONFIG, RUNNER_CONFIG, ...(cfg.dispatcher ? [DISPATCHER_CONFIG, SENSORS_CONFIG] : []), ...cfg.extras.map((e) => posix.basename(e))], gitBin: cfg.gitBin };
@@ -128,7 +142,7 @@ export function keepsNot(io, cfg) {
   return updaterConfigFor(io, cfg).keep.filter((n) => !keep.includes(n));
 }
 /** How a copy whose keep list lacks a name is put right: the one statement, said by install and dispatcher-config (L1029). */
-export const reinstallSteps = (cfg) => `install again, before the pinned Claude Code and add-to-install (a new install throws both away): unload the jobs (sudo node setup.mjs daemons unload), remove ${installPaths(cfg).install}, put the --for-install review.json at runnerConfig, run install, then put the full review.json back and run add-to-install (README, part 6); the machine-wide guard keeps running from its own folder throughout, and after add-to-install run managed-settings again if its code changed (README, part 2: a reinstall and the machine-wide guard)`;
+export const reinstallSteps = (cfg) => `install again, before the pinned Claude Code and add-to-install (a new install throws both away): unload the jobs (sudo node setup.mjs daemons unload), remove ${installPaths(cfg).install}, put the --for-install review.json at runnerConfig, run install, then put the full review.json back and run add-to-install, then worker-config and bob again, if set up (README, part 6); the machine-wide guard keeps running from its own folder throughout, and after add-to-install run managed-settings again if its code changed (README, part 2: a reinstall and the machine-wide guard)`;
 /** The warning for a copy that does not keep `names`. */
 export const keepsNotWarning = (cfg, names) => `the installed copy's updater does not keep ${names.join(', ')} (its keep list is fixed at the first install), so the copy never gets ${names.length > 1 ? 'them' : 'it'} and an update would drop ${names.length > 1 ? 'them' : 'it'}: ${reinstallSteps(cfg)}`;
 
@@ -220,7 +234,7 @@ export function planInstall(io, cfg, { readSource, runUpdater }) {
   const P = installPaths(cfg); const ops = []; const problems = [];
   const cur = currentCopy(io.at(P.installRoot), { owner: io.rootUid });
   if (!cur.missing) {
-    const why = cur.problem ?? (cur.link ? null : 'is a plain folder, not the link the updater flips');
+    const why = cur.problem ?? (cur.link ? null : NOT_THE_LINK);
     if (why) problems.push(`${P.installRoot}: ${why}. Nothing was changed`);
     // A copy made before something this setup now carries (the Dispatcher's config, the robot's, another extra): install does
     // nothing, so say what it would take (L1029).
@@ -284,7 +298,7 @@ export function planAddToInstall(io, cfg, { pin, sha256, readSource }) {
   const P = installPaths(cfg);
   const cur = currentCopy(io.at(P.installRoot), { owner: io.rootUid });
   if (cur.missing) return { ops: [], problems: [`${P.installRoot} is not installed yet: run install first. Nothing was changed`], installed: false };
-  const why = cur.problem ?? (cur.link ? null : 'is a plain folder, not the link the updater flips');
+  const why = cur.problem ?? (cur.link ? null : NOT_THE_LINK);
   if (why) return { ops: [], problems: [`${P.installRoot}: ${why}. Nothing was changed`], installed: false };
 
   const copy = join(P.install, relative(realpathSync(io.at(P.install)), cur.real));   // the real folder, by its own name: the link can't redirect a step

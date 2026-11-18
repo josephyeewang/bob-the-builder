@@ -45,7 +45,6 @@
 import { tellRefused, watchWrites } from './refused-writes.mjs';
 import { KEYS, minutes, need, MissingKey, missingFor } from './keys.mjs';
 import { sensorsFact } from './sensor-facts.mjs';
-import { READING_FUTURE_MS } from '../M12-sensors/facts.mjs';
 import { outageStep, OUTAGE_FACT } from './outage.mjs';
 import { intakePass } from './outbox-intake.mjs';
 import { leadRestartStep, leadInFlight, handoffVet, tellLeadSkipped, HANDOFF_NAME } from './lead-restart.mjs';
@@ -62,7 +61,7 @@ import { tellLostCards } from './lost-cards.mjs';
 import { tellStuckCards } from './stuck-cards.mjs';
 import { outbox, tellThen, sendAlerts, clearCause, writeFrom, alertFields, listed, plain } from './alerts.mjs';
 import { takePassLock } from './pass-lock.mjs';
-import { dueToTell } from '../../shared/still-waiting.mjs';
+import { dueToTell, pastTime } from '../../shared/still-waiting.mjs';
 import { schedulePass } from '../M2-approvals/schedule.mjs';
 import { planGoPass, plansAwaitingAnswer, PLAN_REVIEW_LEAD } from './plan-go.mjs';
 import { proposalsPass } from './proposals-intake.mjs';
@@ -158,11 +157,16 @@ const putFact = (rec, id, doc, kind, base, force = []) => writeFrom(rec, id, bas
 /** The signed-in account, or a reason nothing may start (audit MIN-9). */
 export function signedInAccount({ rec, rules, now }) {
   const d = sensorsFact(rec, ACCOUNT_FACT)?.doc;
-  if (!d?.account || typeof d.account !== 'string') return { account: null, reason: 'the signed-in account is not known' };
+  if (!d?.account || typeof d.account !== 'string') {
+    // L1152: Joe hears why, as the Sensors wrote it (a stale owner's answer names its age and its log).
+    const why = typeof d?.reason === 'string' && d.reason ? `: ${d.reason.slice(0, 200)}` : '';
+    return { account: null, reason: `the signed-in account is not known${why}` };
+  }
   let staleMs;
   try { staleMs = minutes(rules, KEYS.staleAfterMin); } catch { return { account: null, reason: `the rules have no value for ${KEYS.staleAfterMin}`, missing: KEYS.staleAfterMin }; }
-  const seen = Date.parse(d.observed_at ?? '');
-  if (!Number.isFinite(seen) || seen > now + READING_FUTURE_MS || now - seen > staleMs) return { account: null, reason: 'the signed-in account reading is stale' };
+  // One clock (L1152, I7): pastTime's 60 s allowance; null is a time that can't be read or is dated ahead.
+  const seen = pastTime(d.observed_at, now);
+  if (seen === null || now - seen > staleMs) return { account: null, reason: 'the signed-in account reading is stale' };
   return { account: d.account, reason: null };
 }
 

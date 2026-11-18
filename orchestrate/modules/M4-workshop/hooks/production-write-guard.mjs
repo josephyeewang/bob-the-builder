@@ -11,7 +11,7 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { readdirSync, statSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { isMain, runHook, MACHINE_WIDE_WAY_OUT, MANAGED_FILE, block, pass, toolPaths, shellCommands, shellWords, bothWords, programOf, landingPath, realFolder, inside, joinLines, unreadable, heredocs, expandBraces, fold, globRe } from './lib.mjs';
-import { readSnapshot } from './snapshot.mjs';
+import { readHookSnapshot, readSnapshot } from './snapshot.mjs';
 
 // ---- whole-folder writes (LEAD-CALLS L41 G2: deny by default) ----
 //
@@ -541,8 +541,9 @@ export function firstCommandEnd(raw) {
 export function decide(input, args) {
   // The machine-wide form (L1031) reads root's copy, written once by setup.mjs managed-settings and never refreshed: no age
   // limit, but root's alone. `ownerUid` is a test's stand-in for root; parseArgs never sets it. A copy that can't be used
-  // blocks, saying how to switch the machine-wide guard off (guard b).
-  const snap = args.machineWide ? readSnapshot(args.snapshot, { maxAgeMs: Infinity, ownerUid: args.ownerUid ?? 0 }) : readSnapshot(args.snapshot);
+  // blocks, saying how to switch the machine-wide guard off (guard b). A worker session's (`--snapshot-owner`, L1226) is
+  // root's alone too, and fresh.
+  const snap = args.machineWide ? readSnapshot(args.snapshot, { maxAgeMs: Infinity, ownerUid: args.ownerUid ?? 0 }) : readHookSnapshot(args);
   const broken = (why) => block(args.machineWide ? `${why}; ${MACHINE_WIDE_WAY_OUT}` : why);
   if (!snap.ok) return broken(snap.reason);
   const prod = snap.rules.production;

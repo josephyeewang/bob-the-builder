@@ -35,6 +35,8 @@ const TITLE_MAX = 256;
 const short = (s) => String(s ?? '').slice(0, 300);
 
 export function prWriter({ record, fetchFn = globalThis.fetch, now = () => Date.now(), mask, timeoutMs = 15_000 }) {
+  // A mask that is not a function would only fail at the first write, after the push (#536 r1 m6): refused when built.
+  if (mask !== undefined && mask !== null && typeof mask !== 'function') throw new Error('prWriter: mask must be a function');
   const masker = mask ?? ((s) => makeMasker().maskSecrets(s).text);
   const clean = (s, max) => masker(String(s ?? '')).slice(0, max);
 

@@ -2,9 +2,9 @@
 // The always-on Mac's one-time setup commands (R-0b-05 and the install). Every command has a --dry-run (changing commands)
 // or is read only; every changing command is safe to run twice and refuses clearly when it needs root and does not have it.
 //
-//   users-folders        [--dry-run]    the three Mac users and their folders                                  (root)
+//   users-folders        [--dry-run]    the plain-script Mac users and their folders                             (root)
 //   check                               PASS, FAIL or NEEDS ROOT per item for the above; exit 3 if some need root (read only)
-//   proofs               [--dry-run]    the owner's own Mac user cannot write the record, hooks,
+//   proofs               [--dry-run]    the builder user (L1079) cannot write the record, hooks,
 //                                       settings, launcher... or read the keys                                 (root, read only)
 //   install              [--dry-run]    the link layout, then the updater's first run                          (root)
 //   check-install        [--main <sha>] [--watch-only] the copy, its link, every install folder, access lists; --watch-only
@@ -23,6 +23,7 @@
 //   check-dispatcher     the review runner's launches folder, the job's dispatcher.json's outboxRoot and copiesRoot, and whether orchestrate can read the owner's host.lock, and if not why  (read only; sudo to read as orchestrate)
 //   dispatcher-config    [--dry-run]    write the Dispatcher's config, <base>/dispatcher.json, and the Sensors', <base>/sensors.json (and the copy's, when the copy keeps them)  (root)
 //                                       an existing dispatcher.json without outboxRoot and copiesRoot won't start the Dispatcher until this is run again
+//   worker-config        [--dry-run]    write the worker runner's config into the copy, <copy>/worker-runner.json, and add it to the copy's updater keep (worker-runner-setup.mjs, L1112)  (root)
 //   host-lock-copier     prints the owner's host.lock copier job file (a LaunchAgent of the owner's, L1029 E) on stdout and how to load it on
 //                        stderr; needs hostLockSource (read only; refused under sudo)
 //   scanner --from <the gitleaks program> [--dry-run]   the push step's secret scanner: the pinned program (hash checked) and the
@@ -45,6 +46,9 @@
 //                                       product's name typed at the terminal; added to M10's approval list (approve-rules.mjs)
 //                                       (sudo -k -u orchestrate, from the owner's own login; never root, never --config)
 //   token  [--dry-run]  save the watch-only token (typed hidden, never shown)  (root)
+//   builder-signin  [--dry-run]  save the worker (builder) sessions' Claude sign-in: a long-lived token the owner makes with
+//                   claude setup-token, typed hidden, never shown, saved as builder's own 0600 file (L1261; builder-signin-setup.mjs)  (root)
+//   check-builder-signin  that file's folder, owner, mode and size (never its text)  (read only; sudo to look)
 //   prove-token  the repository is the config's watch.repo (private, not archived); read works, a no-op pull-request write is refused as "this token may not"; each kind of read the watch job makes works (the check runs with the watcher App's token, minted as orchestrate); then a note to check the token page by eye  (sudo: the token is read as orchestrate)
 //   watch-rules --rules-source <full path> [--dry-run]  put the watch-only week's rules in place (the file's hash must match the config)  (root)
 //   watch-rules --print-config-line --repo <owner/name> --rules-source <full path>  prints the config line (repo + fingerprint of that file)  (read only)
@@ -63,11 +67,12 @@
 import { realpathSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { ROOT_CONFIG_PATH, parseConfig } from './layout.mjs';
+import { ROOT_CONFIG_PATH, hostLockCopyOf, parseConfig } from './layout.mjs';
 import { checkDispatcherKeys, dispatcherKeysOn } from './dispatcher-check.mjs';
 import { DISPATCHER_JOB, parseDispatcher } from './dispatcher-setup.mjs';
 import { checkDispatcherAndSensors, planDispatcherAndSensors } from './sensors-setup.mjs';
 import { OWNER_JOB_SUBS, checkOwnerJob, planOwnerLoad, planOwnerPlace, planOwnerUnload } from './owner-answer-setup.mjs';
+import { planWorkerRunnerConfig, workerRunnerLoadProblem } from './worker-runner-setup.mjs';
 import { realIo, rootProblem } from './mac.mjs';
 import { guarded } from './guard.mjs';
 import { apply, check, plan } from './users-folders.mjs';
@@ -83,7 +88,9 @@ import { checkScannerFiles, checkScannerSetup, planScanner } from './scanner-set
 import { bobGit, checkBob, planBob } from './bob-manifest.mjs';
 import { readUser } from './users-folders.mjs';
 import { approveRules, realPorts as approvePortsOf } from './approve-rules.mjs';
+import { productsEntry, realPorts as productsEntryPortsOf } from './products-entry.mjs';
 import { PRODUCT } from '../shared/product-paths.mjs';
+import { checkBuilderSignin, planBuilderSignin } from './builder-signin-setup.mjs';
 import { proveToken, checkProposals, checkSafeDirectory, checkToken, planProposals, planSafeDirectory, planToken } from './extras.mjs';
 
 // What prove-token did NOT prove, said after a PASS (L173 n1): only that the token cannot write pull requests.
@@ -93,7 +100,7 @@ const TOKEN_PAGE_NOTE = [
   '  - Repository access: only the one repository named in the config;',
   '  - Permissions: Metadata = Read-only (GitHub adds it by itself; fine if absent), Contents = Read-only (GitHub may call it "code"), Pull requests = Read-only, Commit statuses = Read-only (the watch job reads it to judge a merge), and nothing else. (Not Checks: the job reads check runs with the watcher App, which holds Checks: read.)',
 ];
-const USAGE ='usage: node setup.mjs <users-folders|check|proofs|install|check-install [--watch-only]|check-dispatcher|dispatcher-config|dispatcher-keys|host-lock-copier|scanner --from <the gitleaks program>|check-scanner (without sudo)|review-config --pin <x.y.z> --input <file> --out <file> [--for-install]|add-to-install --pin <x.y.z> --sha256 <hex>|bob --from <Bob checkout> --commit <sha>|managed-settings|daemons place|load|unload|list|check [--only <job>]|daemons reload-account|owner-job place|load|unload|check (as the owner, no sudo)|prove-token|proposals|check-proposals|safe-directory|check-safe-directory|token|check-token|watch-rules|check-watch-rules|watch-app|approve-rules <product>> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
+const USAGE ='usage: node setup.mjs <users-folders|check|proofs|install|check-install [--watch-only]|check-dispatcher|dispatcher-config|worker-config|dispatcher-keys|host-lock-copier|scanner --from <the gitleaks program>|check-scanner (without sudo)|review-config --pin <x.y.z> --input <file> --out <file> [--for-install]|add-to-install --pin <x.y.z> --sha256 <hex>|bob --from <Bob checkout> --commit <sha>|managed-settings|daemons place|load|unload|list|check [--only <job>]|daemons reload-account|owner-job place|load|unload|check (as the owner, no sudo)|prove-token|proposals|check-proposals|safe-directory|check-safe-directory|token|check-token|builder-signin|check-builder-signin|watch-rules|check-watch-rules|watch-app|approve-rules <product>|products-entry <product>> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
 // Tests only, refused outside them: a stand-in gitleaks' hash in place of the real pin, so a whole `scanner` run, its
 // after-run check included, can be tried (L1123 m4). Nothing a config or an argument can set.
 const scannerPin = (sha) => {
@@ -102,9 +109,9 @@ const scannerPin = (sha) => {
   return { binSha: sha };
 };
 const DAEMON_SUBS = ['place', 'load', 'unload', 'list', 'check', 'reload-account'];
-const COMMANDS = ['users-folders', 'check', 'proofs', 'install', 'check-install', 'check-dispatcher', 'dispatcher-config', 'dispatcher-keys', 'host-lock-copier', 'scanner', 'check-scanner', 'review-config', 'add-to-install', 'bob', 'managed-settings', 'daemons', 'owner-job', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app', 'approve-rules'];
-const READ_ONLY = ['check', 'check-scanner', 'check-install', 'check-dispatcher', 'dispatcher-keys', 'check-proposals', 'check-safe-directory', 'check-token', 'prove-token', 'check-watch-rules'];
-const PLAIN_CONFIG = ['users-folders', 'scanner', 'check-scanner', 'check', 'check-dispatcher', 'dispatcher-keys', 'proofs', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app', 'review-config'];
+const COMMANDS = ['users-folders', 'check', 'proofs', 'install', 'check-install', 'check-dispatcher', 'dispatcher-config', 'worker-config', 'dispatcher-keys', 'host-lock-copier', 'scanner', 'check-scanner', 'review-config', 'add-to-install', 'bob', 'managed-settings', 'daemons', 'owner-job', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'builder-signin', 'check-builder-signin', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app', 'approve-rules', 'products-entry'];
+const READ_ONLY = ['check', 'check-scanner', 'check-install', 'check-dispatcher', 'dispatcher-keys', 'check-proposals', 'check-safe-directory', 'check-token', 'check-builder-signin', 'prove-token', 'check-watch-rules'];
+const PLAIN_CONFIG = ['users-folders', 'scanner', 'check-scanner', 'check', 'check-dispatcher', 'dispatcher-keys', 'proofs', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'builder-signin', 'check-builder-signin', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app', 'review-config'];
 
 export function parseArgs(argv) {
   const cmd = argv[0];
@@ -114,7 +121,7 @@ export function parseArgs(argv) {
   if (cmd === 'owner-job') { sub = rest[0]; rest = rest.slice(1); if (!OWNER_JOB_SUBS.includes(sub)) throw new Error(`owner-job needs one of ${OWNER_JOB_SUBS.join(', ')}`); }
   // approve-rules takes the product's name first, and nothing else but --dry-run (L1127 c).
   let product = null;
-  if (cmd === 'approve-rules') { product = rest[0]; rest = rest.slice(1); if (typeof product !== 'string' || !PRODUCT.test(product)) throw new Error('approve-rules needs the product\'s name first: approve-rules <product>'); }
+  if (cmd === 'approve-rules' || cmd === 'products-entry') { product = rest[0]; rest = rest.slice(1); if (typeof product !== 'string' || !PRODUCT.test(product)) throw new Error(`${cmd} needs the product's name first: ${cmd} <product>`); }
   const o = { product, cmd, sub, config: null, dry: false, prefix: '', main: null, repo: null, rulesSource: null, printLine: false, watchOnly: false, only: null, app: {}, pin: null, claudePin: null, sha256: null, input: null, out: null, forInstall: false, from: null, commit: null };
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
@@ -166,7 +173,7 @@ export function parseArgs(argv) {
   if (cmd === 'scanner' && o.from === null) throw new Error('scanner needs --from <the full path of the gitleaks program taken out of the checked download>');
   if (cmd === 'bob' && (o.from === null || o.commit === null)) throw new Error('bob needs --from <the full path of a Bob checkout> and --commit <its 40-hex commit>');
   if (cmd === 'add-to-install' && (o.claudePin === null || o.sha256 === null)) throw new Error('add-to-install needs --pin <x.y.z> and --sha256 <hex>');
-  if (cmd === 'approve-rules' && (o.config !== null || o.prefix)) throw new Error('approve-rules reads only root\'s setup config at its fixed place: no --config or --root-prefix');
+  if ((cmd === 'approve-rules' || cmd === 'products-entry') && (o.config !== null || o.prefix)) throw new Error(`${cmd} reads only root's setup config at its fixed place: no --config or --root-prefix`);
   return o;
 }
 
@@ -197,13 +204,15 @@ export function planCommand(io, cfg, o, { readSource = (p) => io.readSource(p), 
     : o.cmd === 'add-to-install' ? planAddToInstall(io, cfg, { pin: o.claudePin, sha256: o.sha256, readSource })
     : o.cmd === 'bob' ? planBob(io, cfg, { from: o.from, commit: o.commit, git: bobGitOf(o.from) })
     : o.cmd === 'token' ? planToken(io, cfg)
+    : o.cmd === 'builder-signin' ? planBuilderSignin(io, cfg)
     : o.cmd === 'dispatcher-config' ? planDispatcherAndSensors(io, cfg, { jobLive: () => jobLive(io, cfg, DISPATCHER_JOB) })
+    : o.cmd === 'worker-config' ? planWorkerRunnerConfig(io, cfg)
     : o.sub === 'place' ? planPlace(io, cfg, o.jobs) : o.sub === 'load' ? planLoad(io, cfg, o.jobs) : o.sub === 'reload-account' ? planReloadAccount(io, cfg) : planUnload(io, cfg, o.jobs);
   return guarded(io, cfg, res);
 }
 
 /** Runs one command. `io`, `runUpdater`, `bobGitOf`, `managed` (managed-settings' nodeBin and guard), `approvePorts` and `env` (approve-rules') are ports for tests; `testScannerSha` is tests only. → exit code. */
-export function main(argv, { io: given, runUpdater = spawnUpdater, bobGitOf, managed = {}, testScannerSha, approvePorts, env = process.env, out = (s) => process.stdout.write(`${s}\n`), err = (s) => process.stderr.write(`${s}\n`) } = {}) {
+export function main(argv, { io: given, runUpdater = spawnUpdater, bobGitOf, managed = {}, testScannerSha, approvePorts, productsEntryPorts, env = process.env, out = (s) => process.stdout.write(`${s}\n`), err = (s) => process.stderr.write(`${s}\n`) } = {}) {
   let o; let cfg;
   try { o = parseArgs(argv); } catch (e) { err(`${e.message}\n${USAGE}`); return 2; }
   const io = given ?? realIo({ prefix: o.prefix });
@@ -222,12 +231,18 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, bobGitOf, man
     let raw; try { raw = JSON.parse(text); } catch { throw new Error('the config is not valid JSON'); }   // never the parser's own message: it quotes the file
     cfg = PLAIN_CONFIG.includes(o.cmd) ? parseConfig(raw) : parseInstallConfig(raw);
     if (o.cmd === 'watch-app') { o.raw = raw; o.text = text; }
+    // products-entry reads its own `github` entry (products-entry.mjs parseGithub): no other command takes it.
+    if (o.cmd === 'products-entry') o.githubRaw = raw?.github;
     // check reads the plain config, which drops the entry: on only when the entry's own parser takes it (L807 c2, r1 c1).
     // An entry there that its parser refuses: check-dispatcher says so rather than leave its root rows out (L905 m1).
     o.dispatcherOn = (() => { try { return parseDispatcher(raw?.dispatcher, cfg) !== undefined; } catch (e) { if (raw?.dispatcher !== undefined) o.dispatcherWhy = e?.message ?? 'it can\'t be read'; return false; } })();
+    // proofs reads the plain config, which drops the entry (#528 r2 m1): the Dispatcher's rules-state and approvals
+    // proofs (L1112 (3)) need it, so it goes back on, through its own parser.
+    if (o.cmd === 'proofs' && o.dispatcherOn) cfg = { ...cfg, dispatcher: parseDispatcher(raw.dispatcher, cfg) };
     if (o.only !== null) o.jobs = onlyJobs(cfg, o.only, { anyKnown: o.cmd === 'daemons' && (o.sub === 'unload' || o.sub === 'list') });   // a name that is no job of this config is refused before anything runs (unload and list take any job setup makes)
   } catch (e) { err(`${e.message}\n${USAGE}`); return 2; }
 
+  if (o.cmd === 'products-entry') return productsEntry({ io, cfg, githubRaw: o.githubRaw, product: o.product, dry: o.dry, ports: productsEntryPorts ?? productsEntryPortsOf(io), out, err });
   if (o.cmd === 'approve-rules') return approveRules({ io, cfg, product: o.product, dry: o.dry, env, ports: approvePorts ?? approvePortsOf(io, cfg), out, err });
   if (o.cmd === 'review-config') return reviewConfigCommand(cfg, { pin: o.claudePin, input: o.input, out: o.out, dry: o.dry, forInstall: o.forInstall }, { euid: io.euid(), userOf: (n) => readUser(io, n), out, err });
   if (o.cmd === 'check') return report(check(io, cfg, { alsoKnown: rootMadeEntries(cfg, { dispatcher: o.dispatcherOn }) }), out);
@@ -256,7 +271,7 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, bobGitOf, man
     let text; try { text = copierPlist({ label: cfg.label, installRoot: installPaths(cfg).installRoot, node: NODE, configPath: o.config ?? ROOT_CONFIG_PATH, copy: cfg.hostLockPath, home, copierNode: cfg.hostLockCopierNode }); } catch (e) { err(`PROBLEM  ${e.message}`); return 1; }
     const file = `${home}/Library/LaunchAgents/${cfg.label}.${COPIER_JOB}.plist`;
     out(text);
-    err(`Save the text above as ${file} (owner's own, 0644), make the copy's folder ${dirname(cfg.hostLockPath)} (the owner's, 0755), then: launchctl bootstrap gui/$(id -u) ${file}. Run dispatcher-config again so the Dispatcher's dispatcher.json names the copy too (with the Dispatcher's job in place, unload it first: README, Part 6 step 6). A minute later, sudo node setup.mjs check-dispatcher (README, Part 6 step 5).`);
+    err(`Save the text above as ${file} (owner's own, 0644), ${cfg.hostLockPath === hostLockCopyOf(cfg.base) ? `the copy's folder ${dirname(cfg.hostLockPath)} is users-folders' (the owner's, 0755), so run that first` : `make the copy's folder ${dirname(cfg.hostLockPath)} (the owner's, 0755)`}, then: launchctl bootstrap gui/$(id -u) ${file}. Run dispatcher-config again so the Dispatcher's dispatcher.json names the copy too (with the Dispatcher's job in place, unload it first: README, Part 6 step 6). A minute later, sudo node setup.mjs check-dispatcher (README, Part 6 step 5).`);
     return 0;
   }
   if (o.cmd === 'dispatcher-keys') { let k; try { k = dispatcherKeysOn(io, cfg); } catch (e) { err(`PROBLEM  ${e.message}`); return 1; } out(JSON.stringify(k, null, 2)); return 0; }
@@ -268,6 +283,7 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, bobGitOf, man
   if (o.cmd === 'check-proposals') return report(checkProposals(io, cfg), out);
   if (o.cmd === 'check-safe-directory') return report(checkSafeDirectory(io, cfg), out);
   if (o.cmd === 'check-token') return report(checkToken(io, cfg), out);
+  if (o.cmd === 'check-builder-signin') return report(checkBuilderSignin(io, cfg), out);
   if (o.cmd === 'check-watch-rules') return report(checkWatchRules(io, cfg), out);
   if (o.cmd === 'watch-rules' && o.printLine) { const r = watchConfigLine(cfg, { repo: o.repo, source: o.rulesSource, readSource: (p) => io.readRules(p) }); if (r.problem) { err(`PROBLEM  ${r.problem}`); return 1; } out(r.line); return 0; }
   if (o.cmd === 'prove-token') return proveToken(io, cfg, { proveApp: (on) => proveWatchAppChecks(io, cfg, on) }).then((res) => { const code = report(res, out); if (code === 0) for (const l of TOKEN_PAGE_NOTE) out(l); return code; });
@@ -279,13 +295,16 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, bobGitOf, man
   }
 
   if (o.cmd === 'proofs') {
-    if (o.dry) { for (const c of proofCommands(cfg)) out(`would run: ${c}`); out('dry run: nothing was run.'); return 0; }
+    if (o.dispatcherWhy) { err(`refused: the config's dispatcher entry can't be read (${o.dispatcherWhy}), so the proofs for its folders can't be built`); return 2; }
+    if (o.dry) { for (const c of proofCommands(io, cfg)) out(c.startsWith('not tried') ? c : `would run: ${c}`); out('dry run: nothing was run.'); return 0; }
     const p = rootProblem(io); if (p) { err(`refused: ${p}`); return 2; }
     const res = runProofs(io, cfg);
-    for (const r of res) out(r.ok ? `PASS  ${r.what}` : `FAIL  ${r.what} — ${r.why}`);
-    const bad = res.filter((r) => !r.ok).length;
-    out(bad ? `${bad} of ${res.length} proofs FAILED` : `all ${res.length} proofs PASS`);
-    return bad ? 1 : 0;
+    // NOT TRIED is not a pass (L1079, as L707 c1): containment is proven only when every line is PASS.
+    // NOT TRIED is read first (#528 r3 m2): a line marked so prints NOT TRIED and counts as untried whatever else it says.
+    for (const r of res) out(r.notTried ? `NOT TRIED  ${r.what} — ${r.why}` : r.ok ? `PASS  ${r.what}` : `FAIL  ${r.what} — ${r.why}`);
+    const failed = res.filter((r) => !r.ok && !r.notTried).length; const untried = res.filter((r) => r.notTried).length;
+    out(failed || untried ? `${failed} of ${res.length} proofs FAILED, ${untried} NOT TRIED: containment is not proven` : `all ${res.length} proofs PASS: containment is proven on this Mac`);
+    return failed || untried ? 1 : 0;
   }
 
   // The owner's answer job is the one command root does not run: it is the owner's, in the owner's session (owner-answer-setup.mjs).
@@ -311,9 +330,11 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, bobGitOf, man
   try { apply(planned.ops, { log: (t) => out(`run: ${t}`) }); } catch (e) { const why = String(e.message).replace(/\.+$/, '');   // a message that ends in its own period gets one, not two
     err(/run: daemons load/i.test(e.message) ? `stopped: ${why}.` : `stopped: ${why}. Run it again after fixing that; it picks up where it stopped.`); return 1; }
   const after = o.cmd === 'users-folders' ? check(io, cfg, { alsoKnown: rootMadeEntries(cfg, { dispatcher: o.dispatcherOn }) }) : o.cmd === 'install' || o.cmd === 'add-to-install' ? checkInstall(io, cfg)
-    : o.cmd === 'dispatcher-config' ? checkDispatcherAndSensors(io, cfg) : o.cmd === 'bob' ? checkBob(io, cfg, { commit: o.commit })
+    : o.cmd === 'dispatcher-config' ? checkDispatcherAndSensors(io, cfg)
+    : o.cmd === 'worker-config' ? ((why) => [{ ok: why === null, what: 'the copy\'s worker-runner.json is the config this setup writes, the runner takes it, and the copy\'s updater keeps it', why: why ?? '' }])(workerRunnerLoadProblem(io, cfg))
+    : o.cmd === 'bob' ? checkBob(io, cfg, { commit: o.commit })
     : o.cmd === 'managed-settings' ? checkManagedSettings(io, cfg)
-    : o.cmd === 'proposals' ? checkProposals(io, cfg) : o.cmd === 'safe-directory' ? checkSafeDirectory(io, cfg) : o.cmd === 'token' ? checkToken(io, cfg) : o.cmd === 'watch-rules' ? checkRulesCopy(io, cfg) : o.cmd === 'scanner' ? checkScannerFiles(io, cfg, scannerPin(testScannerSha)) : o.cmd === 'watch-app' ? checkWatchAppConfig(io, cfg, o.app, o.pin)
+    : o.cmd === 'proposals' ? checkProposals(io, cfg) : o.cmd === 'safe-directory' ? checkSafeDirectory(io, cfg) : o.cmd === 'token' ? checkToken(io, cfg) : o.cmd === 'builder-signin' ? checkBuilderSignin(io, cfg) : o.cmd === 'watch-rules' ? checkRulesCopy(io, cfg) : o.cmd === 'scanner' ? checkScannerFiles(io, cfg, scannerPin(testScannerSha)) : o.cmd === 'watch-app' ? checkWatchAppConfig(io, cfg, o.app, o.pin)
     : o.cmd === 'owner-job' ? (o.sub === 'unload' ? null : checkOwnerJob(io, cfg).filter((r) => (o.sub === 'place' ? /exactly the built job file/ : /is loaded in the owner's session/).test(r.what)))   // before the daemons' place/load: owner-job has the same sub names
     : o.sub === 'place' ? checkDaemons(io, cfg, o.jobs).filter((r) => /exactly the built job file$|under another label/.test(r.what)) : o.sub === 'load' ? checkDaemons(io, cfg, o.jobs).filter((r) => /is loaded$|loaded from the job file as it is now$/.test(r.what))
     : o.sub === 'reload-account' ? checkDaemons(io, cfg).filter((r) => /review-account (is loaded|was loaded from the job file as it is now)$/.test(r.what)) : null;

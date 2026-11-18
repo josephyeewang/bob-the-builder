@@ -26,6 +26,7 @@
 //     world-writable /tmp included: production never uses one, L257 (A)), with no access list.
 // The ports (lstat, fstat, open, list, readlink, acl, ownUid) are for a test only; every production caller passes none.
 
+import { createHash } from 'node:crypto';
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readdirSync, readlinkSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative } from 'node:path';
 import { aclProblem, copyModuleProblem, currentCopy, installProblem, ownerName } from '../modules/M4-workshop/launcher/install-check.mjs';
@@ -35,11 +36,11 @@ const READ_ID = Symbol('job config file read');
 
 /**
  * A config file read by descriptor (never through a link) and checked on that descriptor: a plain file no one but its
- * owner writes. → { value: the parsed JSON, st: the fstat }, or throws through `fail`. Shared by readJobConfig and the
+ * owner writes. → { value: the parsed JSON, st: the fstat, sha256: of the bytes read, in hex }, or throws through `fail`. Shared by readJobConfig and the
  * review runner's readConfig (L253), so no job parses a config it opened by name.
  */
 export function openJobJson(file, fail, { open = openSync, fstat = fstatSync } = {}) {
-  let fd; let text; let st;
+  let fd; let bytes; let st;
   try { fd = open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) {
     fail(e?.code === 'ELOOP' ? 'is a link (name the file itself)' : `can't be opened (${e?.code ?? e?.message ?? e})`);
   }
@@ -47,15 +48,22 @@ export function openJobJson(file, fail, { open = openSync, fstat = fstatSync } =
     st = fstat(fd);
     if (!st.isFile()) fail('is not a plain file');
     if (st.mode & 0o022) fail('can be written by group or others');
-    text = readFileSync(fd, 'utf8');
+    bytes = readFileSync(fd);
   } finally { closeSync(fd); }
+  const sha256 = createHash('sha256').update(bytes).digest('hex'); const text = bytes.toString('utf8');
   let value; try { value = JSON.parse(text); } catch (e) { fail(`is not JSON (${e.message})`); }
-  if (value && typeof value === 'object') Object.defineProperty(value, READ_ID, { value: { dev: st.dev, ino: st.ino } });
-  return { value, st };
+  if (value && typeof value === 'object') Object.defineProperty(value, READ_ID, { value: { dev: st.dev, ino: st.ino, sha256 } });
+  return { value, st, sha256 };
 }
 
 /** True when `config` came from openJobJson (it carries the read's device and inode). */
 export const readByDescriptor = (config) => Boolean(config?.[READ_ID]);
+
+/**
+ * The sha256 (hex) of the very bytes openJobJson read `config` from, on the one descriptor it checked; null for a config
+ * it did not read. Root's worker-rules job puts it in each snapshot (L1238 m3), so a reader can compare it with the file.
+ */
+export const readSha256 = (config) => config?.[READ_ID]?.sha256 ?? null;
 
 /** Null, or why `file` (by name, now) is not the file `config` was read from by openJobJson. */
 export function readChangedProblem(file, config, { lstat = lstatSync } = {}) {

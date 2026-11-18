@@ -34,12 +34,12 @@ export function workerConfig(dir) {
   // host.lock's owner is not the Dispatcher's own user (worker-ports.mjs, L763); the test's Dispatcher is this user.
   // The TOP outboxes and worker-copies folders (L887), real folders as setup makes them.
   for (const f of ['outboxes', 'worker-copies']) mkdirSync(join(dir, f), { recursive: true, mode: 0o755 });
-  // The worker runner's requests and own folders (setup layout.mjs workerRunnerPaths, L921). Its user is the owner's, the
-  // same stand-in uid as host.lock's, so its status here is never trusted: a test of the reads stands in for the files.
+  // The worker runner's requests and own folders (setup layout.mjs workerRunnerPaths, L921). Its user is the builder's
+  // (L1079), a stand-in uid apart from host.lock's, so its status here is never trusted: a test of the reads stands in for the files.
   const workerRunner = join(dir, 'worker-runner');
   for (const f of ['requests', 'runner']) mkdirSync(join(workerRunner, f), { recursive: true, mode: 0o755 });
   return { reviewRoot: runner, mirror, sealRoot: join(dir, 'seals'), outboxRoot: join(dir, 'outboxes'), copiesRoot: join(dir, 'worker-copies'), hostLockPath: join(dir, 'host.lock'), hostLockUid: process.getuid() + 3,
-    workerRequestsDir: join(workerRunner, 'requests'), workerStatusFile: join(workerRunner, 'runner', 'status.json'), workerUid: process.getuid() + 3 };
+    workerRequestsDir: join(workerRunner, 'requests'), workerStatusFile: join(workerRunner, 'runner', 'status.json'), workerUid: process.getuid() + 4 };
 }
 
 const C = 'c'.repeat(40);

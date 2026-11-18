@@ -15,7 +15,7 @@ import { NODE, RUNNER_CONFIG, STAMP, UPDATER_CONFIG } from '../modules/M4-worksh
 import { MUST_KEEP, readUpdaterConfig } from '../modules/M4-workshop/launcher/review-updater.mjs';
 import { pinnedBinary } from '../modules/M4-workshop/launcher/hooks-check.mjs';
 import { realIo, writeNewFile } from './mac.mjs';
-import { ROOT_CONFIG_PATH, folderTable, outboxRootPath, watchRulesPath, workerCopiesPath } from './layout.mjs';
+import { ROOT_CONFIG_PATH, folderTable, outboxRootPath, wallDir, wallStatusDir, watchRulesPath, workerCopiesPath, workerRulesDir } from './layout.mjs';
 import { BOOTSTRAP_FILES, LABEL_RE, installPaths, parseInstallConfig, spawnUpdater, updaterCommand, updaterConfigFor } from './install.mjs';
 import { FIRST_RUN_LIMIT_S, JOBS, checkDaemons, jobLogs, jobsFor, list, planLoad, planPlace, plistTexts, startProblems } from './daemons.mjs';
 import { ROBOT_JOB, ROBOT_NO_CONFIG, robotPlist } from './robot-setup.mjs';
@@ -26,6 +26,7 @@ import { CONFIG_KEYS, checkConfig } from '../wiring/dispatcher-wiring.mjs';
 import { ROOT_CONFIG_PATH as _R } from './layout.mjs';
 import { checkDispatcherKeys, dispatcherKeysOn } from './dispatcher-check.mjs';
 import { checkInstall, planAddToInstall, rootMadeEntries } from './install.mjs';
+import { WORKER_RUNNER_CONFIG, planWorkerRunnerConfig, workerRunnerConfigText } from './worker-runner-setup.mjs';
 import { main, parseArgs, planCommand } from './setup.mjs';
 import { apply, check } from './users-folders.mjs';
 import { fakeMac, macTest as test } from './fake-mac.test-helper.mjs';
@@ -80,7 +81,7 @@ async function origin(root) {
 }
 
 /** The throwaway Mac with the users and folders already set up (part 1), and the files the install needs. */
-async function world({ euid = 0, rules = null, robot = null, dispatcher = null, lock = DLOCK } = {}) {
+async function world({ euid = 0, rules = null, robot = null, dispatcher = null, lock = DLOCK, workerRunner = false } = {}) {
   const mac = fakeMac({ euid: 0 });
   const ext = realpathSync(tempDir('orch-setup-ext-'));
   const bare = await origin(ext);
@@ -105,6 +106,8 @@ async function world({ euid = 0, rules = null, robot = null, dispatcher = null, 
   if (robot !== null) { raw.robot = true; raw.extras.push(join(ext, 'robot.json')); writeFileSync(join(ext, 'robot.json'), '{}'); }
   // `dispatcher` (an entry, or true for a good one): the config turns the Dispatcher job on, with the owner's host.lock at `lock`.
   if (dispatcher !== null) { raw.hostLockPath = lock; raw.dispatcher = dispatcher === true ? { ...GOOD_DISPATCHER } : dispatcher; }
+  // `workerRunner` (true): the config turns the worker runner on, for alpha.
+  if (workerRunner) raw.workerRunner = { product: 'alpha' };
   const cfgFile = join(ext, 'install.json'); writeFileSync(cfgFile, JSON.stringify(raw));
   const cfg = parseInstallConfig(raw);
   // The updater's first run, for real, in a child: the setup's own seed and bootstrap copy, GitHub's address swapped for the
@@ -559,6 +562,34 @@ test('daemons check: files pass, "is loaded" items fail until the jobs are loade
   assert.equal(w.run(['daemons', 'check']).code, 1);
 });
 
+test('#528 r1 m9 PLANT: daemons check names the worker runner\'s old LaunchAgent in the owner\'s home; a LaunchAgents folder it can\'t list is never "none there"', async () => {
+  const w = await placed(); const dir = '/Users/sam/Library/LaunchAgents'; const what = /no worker runner job left in the owner's LaunchAgents/;
+  const row = () => checkDaemons(w.mac, w.cfg).find((r) => what.test(r.what));
+  assert.equal(row().ok, true, 'no such folder: nothing left');
+  mkdirSync(w.mac.at(dir), { recursive: true }); writeFileSync(w.mac.at(`${dir}/com.example.other.host-lock-copy.plist`), 'x');
+  assert.equal(row().ok, true, 'the owner\'s other jobs are not the runner');
+  // Found by what it starts (#528 r2 m7): a file named for the runner that starts something else is not it; one under any
+  // name that starts the runner's script is.
+  writeFileSync(w.mac.at(`${dir}/com.example.old.worker-runner.plist`), 'x');
+  assert.equal(row().ok, true, 'named like the runner, but starts something else');
+  const job = '<plist><dict><key>ProgramArguments</key><array><string>/usr/local/bin/node</string><string>/Users/sam/orch/install/wiring/runner-main.mjs</string></array></dict></plist>';
+  writeFileSync(w.mac.at(`${dir}/com.example.anything.plist`), job);
+  assert.equal(row().ok, false); assert.match(row().why, /com\.example\.anything\.plist: the old worker runner, which would start a second runner as sam/);
+  // A job file it can't read is said, never read as "not the runner".
+  chmodSync(w.mac.at(`${dir}/com.example.anything.plist`), 0o000);
+  try { assert.equal(row().ok, false); assert.match(row().why, /com\.example\.anything\.plist could not be read/); } finally { chmodSync(w.mac.at(`${dir}/com.example.anything.plist`), 0o644); }
+  chmodSync(w.mac.at(dir), 0o000);
+  try { assert.equal(row().ok, false); assert.match(row().why, /could not be listed \(EACCES\)/); } finally { chmodSync(w.mac.at(dir), 0o755); }
+  assert.ok(!checkDaemons(w.mac, w.cfg, [JOBS[0]]).some((r) => what.test(r.what)), 'a check narrowed with --only leaves it out');
+  // P17 (#528 r2 m8): the owner's home can't be read from this Mac → FAIL, said, never "none there". The full check stops
+  // first at the job files, which are built from that home; with that row out of the way (a home that is not a full
+  // path cannot build them either) the LaunchAgents row is never reached, so the run as a whole FAILs, never passes.
+  delete w.mac.users.get('sam').NFSHomeDirectory;
+  const rows = checkDaemons(w.mac, w.cfg);
+  assert.ok(rows.some((r) => !r.ok), 'never a pass'); assert.ok(!rows.some((r) => what.test(r.what) && r.ok), 'never "none there"');
+  assert.match(rows.find((r) => !r.ok).why, /cannot be built from the owner's Mac user sam .*is its home folder set\?/);
+});
+
 test('daemons load / list / unload: load starts all three once; a second load does nothing; unload stops them; a second unload is not an error', async () => {
   const w = await placed();
   let r = w.run(['daemons', 'load', '--dry-run']);
@@ -965,6 +996,41 @@ test('L149 m9 P12 the logs folder the jobs make is not a stranger to `check`', a
   assert.deepEqual(strangers, []);
 });
 
+test('the root jobs\' folders under the base (the wall\'s two, the worker rules\') are no strangers to `check`; a real stranger still FAILs; each entry left out FAILs', async () => {
+  const w = await placed();
+  const did = (rs) => rs.filter((r) => !r.ok && /did not make/.test(r.why ?? ''));
+  const jobs = [wallDir(w.cfg), wallStatusDir(w.cfg), workerRulesDir(w.cfg)];
+  for (const d of jobs) assert.ok(rootMadeEntries(w.cfg).includes(d), d);
+  // Every entry the install and the jobs put directly under the base, there at once, as the jobs leave them (root's).
+  const all = rootMadeEntries(w.cfg, { dispatcher: true });
+  for (const p of all) {
+    assert.equal(dirname(p), BASE, `${p} is directly under the base`);
+    if (existsSync(w.mac.at(p))) continue;
+    if (/\.json$/.test(p)) writeFileSync(w.mac.at(p), '{}\n'); else mkdirSync(w.mac.at(p));
+    w.mac.owners.set(p, { uid: w.mac.rootUid, gid: 0 });
+  }
+  assert.deepEqual(did(check(w.mac, w.cfg, { alsoKnown: all })), []);
+  // Each one left out of the list is named as a stranger: the list, not something else, is what lets it be.
+  for (const p of all) {
+    const named = did(check(w.mac, w.cfg, { alsoKnown: all.filter((x) => x !== p) }));
+    assert.equal(named.length, 1, p); assert.match(named[0].why, new RegExp(`did not make: ${p.split('/').pop().replace(/\./g, '\\.')}$`), p);
+  }
+  // A real stranger beside them still FAILs.
+  mkdirSync(w.mac.at(`${BASE}/stranger`)); w.mac.owners.set(`${BASE}/stranger`, { uid: w.mac.rootUid, gid: 0 });
+  const s = did(check(w.mac, w.cfg, { alsoKnown: all }));
+  assert.equal(s.length, 1); assert.match(s[0].why, /did not make: stranger$/);
+  // The class: every name the setup's code puts directly under the base (join(cfg.base, '<name>') in setup/) is a folder
+  // table row or one of these entries, so a new root job's folder can't be missed again.
+  const known = new Set([...folderTable({ ...w.cfg, products: w.cfg.products.length ? w.cfg.products : ['p'] }).map((r) => r.path), ...all]
+    .filter((p) => dirname(p) === BASE).map((p) => p.slice(BASE.length + 1)));
+  const here = dirname(fileURLToPath(import.meta.url)); const used = new Set();
+  for (const f of readdirSync(here).filter((n) => n.endsWith('.mjs') && !/\.test\.mjs$|test-helper/.test(n))) {
+    for (const m of readFileSync(join(here, f), 'utf8').matchAll(/join\(cfg\.base, '([^'/]+)'/g)) used.add(`${f}: ${m[1]}`);
+  }
+  assert.ok(used.size > 20, `the scan finds the setup's names (${used.size})`);
+  assert.deepEqual([...used].filter((u) => !known.has(u.split(': ')[1])), [], 'a name under the base that neither the folder table nor rootMadeEntries knows');
+});
+
 test('L149 m9 P14 P20 the updater is started with --first and the seed, a fixed PATH and nothing else of the environment — and spawnUpdater really does it', async () => {
   const w = await installed();
   const call = w.updaterCalls.at(-1); const P = installPaths(w.cfg);
@@ -1255,6 +1321,11 @@ const ROBOT_PLANTS = [
   ['a bad alert repository', (c) => ({ ...c, ...ROBOT_APP, alertRepo: 'not a repo' }), /alertRepo/],
   ['a bad alert owner', (c) => ({ ...c, ...ROBOT_APP, alertOwner: '-bad-' }), /alertOwner must be a GitHub login/],
   ['a bad installation number', (c) => ({ ...c, ...ROBOT_APP, appInstallation: 'x' }), /appInstallation must be the installation's number/],
+  // #536 r1 m5: the push pass's outside-check keys, all or none and well formed, refused here as the wiring refuses them.
+  ['only some of the outside-check keys', (c) => ({ ...c, outsideRepo: 'owner-x/outside' }), /outside check keys go together, all four or none: outsideWorkflow, outsideSlot, outsideTag missing/],
+  ['a bad outside-check repository', (c) => ({ ...c, outsideRepo: 'no-slash', outsideWorkflow: '.github/workflows/outside-check.yml', outsideSlot: 'product 1', outsideTag: 'abcd1234' }), /outsideRepo/],
+  // #536 r1 m3: hostLockUid, when named, must be the owner's Mac user id, not orchestrate's (the config's ownerUid).
+  ['hostLockUid that is orchestrate\'s, not the owner\'s', (c) => ({ ...c, hostLockUid: c.ownerUid }), /hostLockUid must be \d+, the owner \S+'s Mac user id/],
   // #305 r1 m1: good App keys, but the config fails elsewhere: still no key line (the loop's doesNotMatch).
   ['good App keys with a bad wiring', (c) => ({ ...c, ...ROBOT_APP, wiring: `${c.installRoot}/wiring/dispatcher-wiring.mjs` }), /wiring must be/],
 ];
@@ -1268,6 +1339,12 @@ for (const [what, edit, re] of ROBOT_PLANTS) {
     assert.doesNotMatch(ck.text, /the robot App's key/, 'a robot.json that fails its check asks for no key file');
   });
 }
+
+test('#536 r1 m3: robot.json naming the owner\'s own Mac user id as hostLockUid passes the check', async () => {
+  const w = await robotWorld((c, { mac }) => ({ ...c, hostLockUid: Number(mac.users.get('sam').UniqueID) }));
+  const ck = w.run(['daemons', 'check', '--only', 'robot']); assert.doesNotMatch(ck.text, /hostLockUid/, ck.text);
+  assert.match(ck.text, /the robot job's config in the copy \(robot\.json\) matches this setup/);
+});
 
 test('L727: the robot App named in robot.json → its key (token.mjs\'s default name) must be orchestrate\'s 0600 key in the keys folder: missing or open → place and load refuse (L807 M1), check FAILs; in place → all pass', async () => {
   const w = await robotWorld((c) => ({ ...c, ...ROBOT_APP }));
@@ -1477,7 +1554,7 @@ test('Dispatcher config: every key the Dispatcher takes, from the layout and the
     reviewRequestsDir: at(`${BASE}/review/requests`), reviewStatusFile: at(`${BASE}/review/status.json`), reviewUid: uid('review'),
     reviewRunnerLog: at(`${BASE}/logs/review-runner.err.log`), reviewInstallRoot: R,
     reviewRoot: at(`${BASE}/review`), mirror: at(`${BASE}/mirror`), sealRoot: at(`${BASE}/seals`), outboxRoot: at(`${BASE}/outboxes`), copiesRoot: at(`${BASE}/worker-copies`), hostLockPath: at(DLOCK), hostLockUid: uid('sam'),
-    workerRequestsDir: at(`${BASE}/worker-runner/requests`), workerStatusFile: at(`${BASE}/worker-runner/runner/status.json`), workerUid: uid('sam'),
+    workerRequestsDir: at(`${BASE}/worker-runner/requests`), workerStatusFile: at(`${BASE}/worker-runner/runner/status.json`), workerUid: uid('builder'),
   });
   // The ten worker keys are dispatcherKeys' (the one source), as the job sees them; host.lock's owner is the owner's uid.
   const k = dispatcherKeysOn(w.mac, w.cfg);
@@ -2155,6 +2232,55 @@ test('add-to-install: the next real update carries claude-code and hooks across,
   assert.equal(readFileSync(join(w.root, 'a.txt'), 'utf8'), 'two\n');
   assert.equal(readFileSync(pinnedBinary(w.root, PIN), 'utf8'), PROGRAM);
   assert.deepEqual(readdirSync(join(w.root, 'hooks')), ['guard.mjs']);
+});
+
+// The live failure (Nov 2026): with a workerRunner entry, install's keep list named worker-runner.json, which install never
+// seeds (it is built from the copy's full review.json, which only exists after install), so the updater's first run refused
+// ("the copy's own item worker-runner.json is missing from .../seed") and no install with the entry could complete. Now
+// every keep item is seeded, and worker-config adds the file to keep after writing it; the next real update carries it.
+test('install with a workerRunner entry: every keep item is seeded, the real first run passes; worker-config then keeps the file, and the next update carries it', async () => {
+  const w = await world({ dispatcher: true, workerRunner: true });
+  const c = w.run(['dispatcher-config']); assert.equal(c.code, 0, c.text);
+  // The plan: every name the seeded updater.json keeps is put into the seed by some step.
+  const P = installPaths(w.cfg);
+  const p = planCommand(w.mac, w.cfg, { cmd: 'install' }, { runUpdater: w.runUpdater });
+  assert.deepEqual(p.problems, []);
+  const seeded = new Set(p.ops.flatMap((o) => [...o.text.matchAll(new RegExp(`${P.seed}/([^/\\s]+)`, 'g'))].map((m) => m[1])));
+  const keep = updaterConfigFor(w.mac, w.cfg).keep;
+  for (const n of keep) assert.ok(seeded.has(n), `keep names ${n}, which no install step seeds (seeded: ${[...seeded].join(', ')})`);
+  assert.ok(!keep.includes(WORKER_RUNNER_CONFIG), 'worker-runner.json joins keep at worker-config, not at install');
+  // The real first run.
+  const r = w.run(['install']); assert.equal(r.code, 0, r.text);
+  assert.equal(failed(checkInstall(w.mac, w.cfg)).length, 0, JSON.stringify(failed(checkInstall(w.mac, w.cfg))));
+  // worker-config (its built config stubbed: what it is built from is worker-runner-setup.test.mjs's): the file, then keep.
+  const uc = join(real(w), UPDATER_CONFIG); const was = JSON.parse(readFileSync(uc, 'utf8')); w.bare = was.address;
+  writeFileSync(uc, JSON.stringify({ ...was, address: w.raw.address }));   // the real kind of address, as the step reads it
+  const config = { products: { alpha: {} } }; const built = () => ({ config, problems: [] });
+  const plan = () => planWorkerRunnerConfig(w.mac, w.cfg, { built });
+  const first = plan(); assert.deepEqual(first.problems, []);
+  assert.deepEqual(first.ops.map((o) => o.text.split(' ')[0]), ['write', 'add']);
+  for (const o of first.ops) o.run();
+  assert.equal(readFileSync(join(real(w), WORKER_RUNNER_CONFIG), 'utf8'), workerRunnerConfigText(config));
+  assert.equal(lstatSync(join(real(w), WORKER_RUNNER_CONFIG)).mode & 0o7777, 0o644);
+  const kept = readUpdaterConfig(uc); assert.ok(kept.keep.includes(WORKER_RUNNER_CONFIG));
+  assert.deepEqual({ ...kept, keep: kept.keep.filter((n) => n !== WORKER_RUNNER_CONFIG) }, { ...was, address: w.raw.address }, 'nothing else in updater.json changed');
+  assert.deepEqual(plan().ops, [], 'twice does nothing');
+  // The next real update carries it into the new copy.
+  writeFileSync(uc, JSON.stringify({ ...kept, address: w.bare }));
+  const seed = join(w.ext, 'second'); const sg = { gitDir: join(seed, '.git'), workTree: seed, cwd: seed, extraConfig: ID };
+  assert.equal(spawnSync(GIT, ['clone', '-q', w.bare, seed]).status, 0);
+  writeFileSync(join(seed, 'orchestrate', 'a.txt'), 'two\n');
+  await gitOk(['add', '-A'], sg); await gitOk(['commit', '-q', '-m', 'second'], sg); await gitOk(['push', '-q', w.bare, 'HEAD:refs/heads/main'], sg);
+  const before = real(w);
+  const u = spawnSync(process.execPath, [join(w.ext, 'run-updater.mjs'), join(HERE, '..', SCRIPTS.updater), JSON.stringify({ uid: ME, owner: ME, top: w.mac.prefix, localAddress: true, pathDirs: [], self: join(real(w), SCRIPTS.updater) }), join(w.root, UPDATER_CONFIG)], { encoding: 'utf8' });
+  assert.equal(u.status, 0, u.stderr);
+  assert.notEqual(real(w), before, 'the link moved');
+  assert.equal(readFileSync(join(w.root, 'a.txt'), 'utf8'), 'two\n');
+  assert.equal(readFileSync(join(w.root, WORKER_RUNNER_CONFIG), 'utf8'), workerRunnerConfigText(config), 'the update carried worker-runner.json');
+  // An install whose link is not the updater's (here a plain folder) is said as such, never "not there yet" (c1).
+  renameSync(w.root, `${w.root}.moved`); mkdirSync(w.root);
+  const plain = plan(); assert.deepEqual(plain.ops, []);
+  assert.match(plain.problems.join(), /is a plain folder, not the link the updater flips\. Nothing was changed/);
 });
 
 // L1031: managed-settings through setup.mjs's own main, after add-to-install: the way out is said first, a dry run changes

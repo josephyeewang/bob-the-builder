@@ -38,7 +38,7 @@ Every outside effect (launching, stopping, typing into a session, git, alerts) i
 
 ## The tick's ports
 
-`tick()` takes every outside effect as a port, so the wiring module (written at the live proof) is the only place that touches the Mac. `main.mjs` reads a config file `{ installRoot, wiring, lockFile }` (all absolute paths) through the one checked reader, `shared/job-config.mjs` (L253): the config, the wiring and `main.mjs` itself must be files of the installed copy at `installRoot`, root's or the job's own user's alone, or nothing runs. Then it imports the wiring module and calls its `wire(config, { limitedSync })`, which returns `{ rec, rules, ports }`. The ports:
+`tick()` takes every outside effect as a port, so the wiring module (written at the live proof) is the only place that touches the Mac. `main.mjs` reads a config file `{ installRoot, wiring, lockFile }` (all absolute paths) through the one checked reader, `shared/job-config.mjs` (L253): the config, the wiring and `main.mjs` itself must be files of the installed copy at `installRoot`, root's or the job's own user's alone, or nothing runs. Then it imports the wiring module and calls its `wire(config, { limitedSync })` with `limitedSync`'s maker (`main.mjs` can't import `child_process`), and `wire()` makes the runner once with node's `spawnSync` for the ports that run commands (L1180). It returns `{ rec, rules, ports }`. The ports:
 
 | Port | Used by | What it does |
 |---|---|---|
@@ -73,7 +73,7 @@ For a fact M12 writes, the shape is the fields this folder reads, the same list 
 |---|---|---|
 | `usage-<account>` | M12 Sensors (lane 3), to the review's M5 contract | `{ account, observed_at, week: {used_pct, resets_at}, h5: {used_pct, resets_at} }` |
 | `band-usage` | this folder | `{ band: green/amber/red/unknown, own_building, reason, account, decided_at, unknown_since }` |
-| `signed-in-account` | M12 | `{ account, observed_at }` |
+| `signed-in-account` | M12 | `{ account, reason, observed_at }` |
 | `pr-<n>` | M12 | `{ state, merged, merge_commit_sha, head_sha, observed_at }` |
 | `outage` | this folder | `{ state: open/ended, ... }` |
 | `limit-hit-<account>` | M12 (screen rules) or a worker's exit result | `{ resets_at, observed_at }` |

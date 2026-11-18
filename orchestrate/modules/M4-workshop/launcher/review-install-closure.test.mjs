@@ -48,6 +48,9 @@ import { ownerJobPlist, OWNER_SCRIPT } from '../../../setup/owner-answer-setup.m
 import { copierPlist, COPIER_SCRIPT } from '../../../setup/host-lock-copy.mjs';
 import { sensorsJobPlist } from '../../M12-sensors/sensors-job.mjs';
 import { workerRunnerPlist } from '../../../wiring/runner-job.mjs';
+import { WALL_SCRIPT, wallCheckPlist, wallPlist } from '../../../setup/builder-wall.mjs';
+import { BUILDER_PROXY_SCRIPT, builderProxyPlist } from '../../../setup/builder-proxy.mjs';
+import { workerRulesPlist, WORKER_RULES_SCRIPT } from '../../../setup/worker-rules.mjs';
 import { copierAgentPlist } from '../../M13-ledger/handoff-copier.mjs';
 import { updateOnce, MAIN } from './review-updater.mjs';
 
@@ -110,13 +113,96 @@ const JOB_BUILDERS = Object.freeze({
   'setup/owner-answer-setup.mjs': () => [ownerJobPlist({ base: SAMPLE_BASE, label: LABEL }, { home: join(SAMPLE_BASE, 'owner-home') })],
   // L874: the worker runner's LaunchAgent is built the same way, through loginJobPlist (#364, #378).
   'wiring/runner-job.mjs': () => [workerRunnerPlist({ label: LABEL, node: join(SAMPLE_ROOT, NODE), script: join(SAMPLE_ROOT, RUNNER_MAIN),
-    config: join(SAMPLE_BASE, 'runner.json'), path: '/usr/bin:/bin', logDir: join(SAMPLE_BASE, 'logs'), workDir: SAMPLE_BASE, home: join(SAMPLE_BASE, 'owner-home') })],
+    config: join(SAMPLE_BASE, 'runner.json'), path: '/usr/bin:/bin', logDir: join(SAMPLE_BASE, 'logs'), workDir: SAMPLE_BASE, home: join(SAMPLE_BASE, 'home', 'builder') })],
   // L1029 E: the owner's host.lock copier, a LaunchAgent built the same way, through loginJobPlist.
   'setup/host-lock-copy.mjs': () => [copierPlist({ label: LABEL, installRoot: SAMPLE_ROOT, node: NODE, configPath: join(SAMPLE_BASE, 'setup.json'),
     copy: join(SAMPLE_BASE, 'owner-home', '.orchestrate', 'host.lock'), home: join(SAMPLE_BASE, 'owner-home') })],
+  // L1226: root's worker-rules job (a LaunchDaemon, no UserName) starts setup/worker-rules.mjs of the copy, so it is here.
+  'setup/worker-rules.mjs': () => [workerRulesPlist({ base: SAMPLE_BASE, label: LABEL })],
   'modules/M13-ledger/handoff-copier.mjs': () => [copierAgentPlist({ label: LABEL, node: join(SAMPLE_ROOT, NODE), script: join(SAMPLE_ROOT, HANDOFF_COPIER),
     from: join(SAMPLE_BASE, 'ledger-handoffs'), to: join(SAMPLE_BASE, 'dropbox-handoffs'), stateDir: join(SAMPLE_BASE, 'copier'), products: ['p1'] })],
+  // #604 (lane 2's flag): the wall's check job, root's LaunchDaemon every few minutes, starts the copy's builder-wall.mjs
+  // check. The same module's wall job starts no copy script and is on NO_COPY_SCRIPT below.
+  'setup/builder-wall.mjs': () => [wallCheckPlist({ base: SAMPLE_BASE, label: LABEL })],
+  // Wall v2: the builder's allow-list proxy, a LaunchDaemon run as the builder, built through loginJobPlist; it starts the
+  // copy's setup/builder-proxy.mjs.
+  'setup/builder-proxy.mjs': () => [builderProxyPlist({ base: SAMPLE_BASE, label: LABEL })],
 });
+// R-0b-179: job files that name a start command but start no script of the copy, so nothing they start goes through the
+// link above. Each is checked below: a job builder here must still start no copy script, and a reader must write none.
+// A module may build jobs of both kinds (#604): its copy-script jobs are on JOB_BUILDERS, the others here, and the two
+// together must account for every start command it writes.
+const NO_COPY_SCRIPT = Object.freeze({
+  // The pf wall's LaunchDaemon runs /bin/sh with its own script text, as root, and loads no module of the copy.
+  'setup/builder-wall.mjs': () => [wallPlist({ base: SAMPLE_BASE, label: LABEL })],
+});
+const READS_JOB_FILES = Object.freeze({
+  'shared/credential-args.mjs': 'the no-credential-as-argument scan reads every job file\'s start command; it builds none',
+});
+// Readers that import (L1211 #591): each reads job files to check them and builds none. It can't import nothing, so its
+// import lines are pinned here, every one; a new import fails the check below until it is looked at and added. None
+// imports a job-file builder function (only names and paths), and from node:fs only readers.
+const READS_JOB_FILES_PINNED = Object.freeze({
+  'setup/live-proofs/guard-proof.mjs': Object.freeze({
+    why: 'the guard proof (L1211) reads each placed job file\'s start command, user and Label to check them; it places none',
+    // #591 r1 M2: the one builder it may import, and why. It builds the installer's own job file for each job in memory, from
+    // the config and the Mac's users, only to learn which keys and environment names that job may have; the text is read,
+    // never written (the proof writes nothing). realIo is the Mac reader that builder needs.
+    builders: Object.freeze(["import { DAEMON_DIR, plistTexts } from '../daemons.mjs';"]),
+    imports: Object.freeze([
+      "import { lstatSync, readFileSync, realpathSync } from 'node:fs';",
+      "import { join } from 'node:path';",
+      "import { spawnSync } from 'node:child_process';",
+      "import { randomBytes } from 'node:crypto';",
+      "import { fileURLToPath } from 'node:url';",
+      "import { DAEMON_DIR, plistTexts } from '../daemons.mjs';",
+      "import { realIo } from '../mac.mjs';",
+      "import { installPaths, parseInstallConfig } from '../install.mjs';",
+      "import { ROOT_CONFIG_PATH } from '../layout.mjs';",
+      "import { WATCH_RUN } from '../watch-setup.mjs';",
+      "import { ROBOT_JOB, ROBOT_MAIN } from '../robot-setup.mjs';",
+      "import { DISPATCHER_JOB, DISPATCHER_MAIN } from '../dispatcher-setup.mjs';",
+      "import { SENSORS_JOB, SENSORS_MAIN } from '../sensors-setup.mjs';",
+      "import { WORKER_RUNNER_JOB, WORKER_RUNNER_MAIN } from '../worker-runner-setup.mjs';",
+      // L1243: the worker runner's node options only (a frozen list of names), not its job-file builder.
+      "import { RUNNER_NODE_FLAGS } from '../../wiring/runner-job.mjs';",
+      "import { SCRIPTS } from '../../modules/M4-workshop/launcher/review-daemons.mjs';",
+      "import { NODE, chainProblem, currentCopy } from '../../modules/M4-workshop/launcher/install-check.mjs';",
+      "import { INSTALL_MARK, REFUSED_CODE } from '../../shared/secret-guard.mjs';",
+      // The child's code (a string the proof runs in a child as the job's user; its fs is for the answer line only).
+      "import cp from 'node:child_process';",
+      "import fs from 'node:fs';",
+      "import net from 'node:net';",
+      "import dgram from 'node:dgram';",
+      "import dns from 'node:dns';",
+      "import wt from 'node:worker_threads';",
+      "import { syncBuiltinESMExports } from 'node:module';",
+      "import { randomBytes } from 'node:crypto';",
+      "import { fileURLToPath, pathToFileURL } from 'node:url';",
+    ]),
+  }),
+});
+/**
+ * A pinned reader's problems (L1216): a <key>, a require, import lines other than the pinned ones, or a builder name
+ * imported on any line but the exact ones its entry allows, each with its reason (#591 r1).
+ */
+function pinnedReaderProblems(text, imports, builders = []) {
+  const out = [];
+  if (/<key>/.test(text)) out.push('it holds a <key>, so it could write a start command');
+  if (/\brequire\s*\(/.test(text)) out.push('it has a require');
+  // #591 r2 m-1, r3 5: a module comes in by a dynamic import of a named module, a re-export (its braces or its `from`
+  // on other lines too), or node's other loaders, never by a pinned line. The re-export rule matches the re-export's own
+  // shape (`export {…} from`, `export * [as x] from`): a looser `export … from` would match an export whose value is
+  // text holding an import line, as guard-proof's PROBE is.
+  if (/\bimport\s*\(\s*['"`]/.test(text)) out.push('it has a dynamic import of a named module');
+  if (/^\s*export\s*(?:\*\s*(?:as\s+[\w$]+\s*)?|\{[^}]*\}\s*)from\s*['"`]/m.test(text)) out.push('it re-exports from another module');
+  // `create[R]equire` and the joined plant name below keep consume-ask's count of this file where it is (r3 1).
+  if (/\bgetBuiltinModule\b|\bcreate[R]equire\b|import\.meta\.resolve/.test(text)) out.push("it uses another way to load a module (getBuiltinModule, node:module's require maker or import.meta.resolve)");
+  const lines = text.split('\n').filter((l) => /^\s*import\b/.test(l)).map((l) => l.trim());
+  if (JSON.stringify(lines) !== JSON.stringify(imports)) out.push(`its import lines are not the pinned ones: ${JSON.stringify(lines)}`);
+  for (const l of imports) if (/plist/i.test(l) && !builders.includes(l)) out.push(`it imports a job-file builder: ${l}`);
+  return out;
+}
 /** The one script of the copy a job file starts: the .mjs file under the copy's link in its start command. */
 function startedScript(text) {
   const args = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(text)?.[1];
@@ -130,7 +216,7 @@ function startedScript(text) {
 // the builder it uses; the tripwire checks each still imports it.
 const BUILT_THROUGH = Object.freeze({ 'setup/robot-setup.mjs': 'modules/M11-dispatcher/login-job.mjs', 'setup/dispatcher-setup.mjs': 'modules/M11-dispatcher/login-job.mjs', 'modules/M12-sensors/sensors-job.mjs': 'modules/M11-dispatcher/login-job.mjs', 'wiring/runner-job.mjs': 'modules/M11-dispatcher/login-job.mjs',
   'setup/owner-answer-setup.mjs': 'modules/M11-dispatcher/login-job.mjs', 'setup/sensors-setup.mjs': 'modules/M12-sensors/sensors-job.mjs',
-  'setup/host-lock-copy.mjs': 'modules/M11-dispatcher/login-job.mjs' });
+  'setup/host-lock-copy.mjs': 'modules/M11-dispatcher/login-job.mjs', 'setup/builder-proxy.mjs': 'modules/M11-dispatcher/login-job.mjs' });
 // The functions that build a job file's text, each with the module that exports it (L734 self-review M1; #352 m1, r2 M1).
 // The scan reads each module of the copy through lex() below, so comments, strings and template text are never read as
 // code. A module that brings a builder in, by a named import or re-export (`import { … } from`, `import d, { … } from`,
@@ -155,7 +241,8 @@ const JOB_FILE_FNS = Object.freeze({ loginJobPlist: 'modules/M11-dispatcher/logi
   sensorsJobPlist: 'modules/M12-sensors/sensors-job.mjs', robotPlist: 'setup/robot-setup.mjs', dispatcherPlist: 'setup/dispatcher-setup.mjs', workerRunnerPlist: 'wiring/runner-job.mjs', copierPlist: 'setup/host-lock-copy.mjs',
   copierAgentPlist: 'modules/M13-ledger/handoff-copier.mjs' });
 const USES_JOB_FILES = Object.freeze({ 'setup/daemons.mjs': 'places the job files the listed builders make; it builds none of its own',
-  'setup/setup.mjs': 'prints the copier\'s job file (host-lock-copier, L1029 E) for the owner to place; it builds none of its own' });
+  'setup/setup.mjs': 'prints the copier\'s job file (host-lock-copier, L1029 E) for the owner to place; it builds none of its own',
+  'setup/worker-runner-setup.mjs': 'passes the layout to runner-job.mjs\'s workerRunnerPlist (a listed builder) for the worker runner\'s job; it builds none of its own' });
 /**
  * The job-file functions module `r`'s real imports bring in, each with the module (copy-relative) it imports them
  * from. An `import * as` or an `import()` of a builder's module brings in every function that module exports.
@@ -539,8 +626,8 @@ test('L92 item 4, L106 M-1: every module of the installed copy loads from the co
 // m-c (audit r2 N25): the reader-against-node check, on a module whose computed import node follows and the reader's
 // static imports do not, and on the same module without it.
 test('L136 m1: the programs to start come from every job-file builder of the copy, and a new builder must be listed', () => {
-  // Every launchd job file of today, read from its builder: the three LaunchDaemons, the watch-only week, the Dispatcher, the robot job and the Sensors loop.
-  assert.deepEqual(ENTRY_POINTS, [...new Set([...Object.values(SCRIPTS), DISPATCHER_MAIN, 'modules/M6-merge-gate/watch-run.mjs', ROBOT_MAIN, SENSORS_LOOP, RUNNER_MAIN, OWNER_SCRIPT, COPIER_SCRIPT, HANDOFF_COPIER])].sort());
+  // Every launchd job file of today, read from its builder: the three LaunchDaemons, the watch-only week, the Dispatcher, the robot job, the Sensors loop, the wall's check job and root's worker-rules job (L1226).
+  assert.deepEqual(ENTRY_POINTS, [...new Set([...Object.values(SCRIPTS), DISPATCHER_MAIN, 'modules/M6-merge-gate/watch-run.mjs', ROBOT_MAIN, SENSORS_LOOP, RUNNER_MAIN, OWNER_SCRIPT, COPIER_SCRIPT, HANDOFF_COPIER, WALL_SCRIPT, WORKER_RULES_SCRIPT, BUILDER_PROXY_SCRIPT])].sort());
   // The tripwire: a module of the copy (test code aside) that writes a launchd start command is a job-file builder, and
   // each one must be on JOB_BUILDERS, so the script its jobs start is started through the link above. A listed
   // builder that no longer writes one is stale.
@@ -548,7 +635,31 @@ test('L136 m1: the programs to start come from every job-file builder of the cop
   const writers = tracked([SOURCE]).filter((f) => f.endsWith('.mjs')).map((f) => f.slice(SOURCE.length + 1))
     .filter((r) => !isTestCode(r) && /ProgramArguments/.test(readFileSync(join(REPO, SOURCE, r), 'utf8')));
   const direct = Object.keys(JOB_BUILDERS).filter((f) => !(f in BUILT_THROUGH));
-  assert.deepEqual(writers.sort(), direct.sort(), 'every module that builds a job file is on JOB_BUILDERS, and only those');
+  assert.deepEqual(writers.sort(), [...new Set([...direct, ...Object.keys(NO_COPY_SCRIPT), ...Object.keys(READS_JOB_FILES), ...Object.keys(READS_JOB_FILES_PINNED)])].sort(),
+    'every module that builds a job file is on JOB_BUILDERS (or NO_COPY_SCRIPT), every other that names a start command is on READS_JOB_FILES, and only those');
+  for (const [f, build] of Object.entries(NO_COPY_SCRIPT)) {
+    const jobs = build();
+    assert.ok(jobs.length >= 1, `${f} builds a job file`);
+    for (const j of jobs) {
+      const args = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(j)?.[1];
+      assert.ok(args, `${f}: its job file has a start command`);
+      assert.ok(!args.includes(SAMPLE_ROOT) && !/\.mjs\b/.test(args), `${f}: its job starts no script of the copy, so it belongs on JOB_BUILDERS if it ever does`);
+    }
+    // #604: one job file per start command the module writes, of either kind, so a new job in it is on one list or the other.
+    const both = jobs.length + (Object.hasOwn(JOB_BUILDERS, f) ? JOB_BUILDERS[f]().length : 0);
+    const named = (readFileSync(join(REPO, SOURCE, f), 'utf8').match(/<key>ProgramArguments<\/key>/g) ?? []).length;
+    assert.equal(named, both, `${f} writes ${named} start commands, and its listed jobs are ${both}: list each new one on JOB_BUILDERS or NO_COPY_SCRIPT`);
+  }
+  // A reader writes no job file however the key is spelled (#556 r2 c1): it holds no `<key>` at all, and it imports
+  // nothing, so it has no way to write a file or build one through a helper.
+  for (const f of Object.keys(READS_JOB_FILES)) {
+    const text = readFileSync(join(REPO, SOURCE, f), 'utf8');
+    assert.ok(!/<key>/.test(text), `${f} writes no start command (it holds a <key>)`);
+    assert.ok(!/^\s*import\b|\bimport\s*\(|\brequire\s*\(\s*['"]/m.test(text), `${f} imports nothing, so it writes no job file`);
+  }
+  for (const [f, { imports, builders }] of Object.entries(READS_JOB_FILES_PINNED)) {
+    assert.deepEqual(pinnedReaderProblems(readFileSync(join(REPO, SOURCE, f), 'utf8'), imports, builders), [], f);
+  }
   // Builders through another builder, found from their real import lines (L734 self-review M1, m1).
   const users = tracked([SOURCE]).filter((f) => f.endsWith('.mjs')).map((f) => f.slice(SOURCE.length + 1))
     .filter((r) => !isTestCode(r) && !writers.includes(r))
@@ -685,4 +796,41 @@ test('L106 M-1 (b), (c): the scans find a load the real import cannot see', () =
   assert.equal(scan('modules/M10-rules/policy.mjs', "import { s } from '../../../scripts/blueprint/schema-check.mjs';\n").length, 1);
   // Text the reader can't read is a finding, not a pass.
   assert.match(scan('a/b.mjs', 'const s = "open;\n').join('|'), /could not read it \(an unterminated string\)/);
+});
+
+test('L1216 plant: a pinned job-file reader with one more import, a <key>, a require or a builder import is caught', () => {
+  const [f, { imports, builders }] = Object.entries(READS_JOB_FILES_PINNED)[0];
+  const text = readFileSync(join(REPO, SOURCE, f), 'utf8');
+  assert.deepEqual(pinnedReaderProblems(text, imports, builders), [], 'the real file is clean');
+  // The allowed builder line is allowed only as written: one more name on it, or the same builder from another line, is caught.
+  for (const b of builders) {
+    const wider = b.replace('plistTexts', 'plistTexts, placeSteps');
+    assert.ok(pinnedReaderProblems(text.replace(b, wider), imports.map((l) => (l === b ? wider : l)), builders).some((x) => x.startsWith('it imports a job-file builder')), 'a wider builder line is caught');
+  }
+  assert.ok(pinnedReaderProblems(text, imports).some((x) => x.startsWith('it imports a job-file builder')), 'with no allowed list, its builder line is caught');
+  const first = imports[0];
+  const plants = {
+    'one more import': text.replace(first, `${first}\nimport { writeFileSync } from 'node:fs';`),
+    'an import changed': text.replace(first, first.replace('lstatSync, ', 'lstatSync, writeFileSync, ')),
+    'an import dropped': text.replace(`${first}\n`, ''),
+    'a <key>': `${text}\n// <key>ProgramArguments</key>\n`,
+    'a require': `${text}\nconst x = require('node:fs');\n`,
+    // Built by joining, so this file's own text holds no dynamic import (consume-ask's count, r3 1).
+    'a dynamic import of a named module (r2 m-1)': `${text}\nconst d = await ${'imp' + 'ort'}('../daemons.mjs');\n`,
+    'a dynamic import with a backtick name (r2 m-1)': `${text}\nconst d = await ${'imp' + 'ort'}(\`../daemons.mjs\`);\n`,
+    'a re-export (r2 m-1)': `${text}\nexport { placeSteps } from '../daemons.mjs';\n`,
+    'a re-export of everything (r2 m-1)': `${text}\nexport * from '../daemons.mjs';\n`,
+    'a re-export of everything as a name (r3 5)': `${text}\nexport * as d from '../daemons.mjs';\n`,
+    'a re-export over several lines (r3 5)': `${text}\nexport {\n  placeSteps,\n  plistTexts,\n} from '../daemons.mjs';\n`,
+    'a re-export with its from on the next line (r3 5)': `${text}\nexport { placeSteps }\n  from '../daemons.mjs';\n`,
+    'getBuiltinModule (r3 5)': `${text}\nconst fs2 = process.getBuiltinModule('node:fs');\n`,
+    'the require maker (r3 5)': `${text}\nconst r = mod.${'create' + 'Require'}(import.meta.url);\n`,
+    'import.meta.resolve (r3 5)': `${text}\nconst u = import.meta.resolve('../daemons.mjs');\n`,
+  };
+  for (const [name, planted] of Object.entries(plants)) {
+    assert.notEqual(planted, text, name);
+    assert.ok(pinnedReaderProblems(planted, imports, builders).length > 0, `${name} is caught`);
+  }
+  const withBuilder = [...imports, "import { loginJobPlist } from '../../modules/M11-dispatcher/login-job.mjs';"];
+  assert.ok(pinnedReaderProblems(`${text}\n${withBuilder.at(-1)}\n`, withBuilder, builders).some((x) => x.startsWith('it imports a job-file builder')), 'a builder import is caught even when pinned');
 });

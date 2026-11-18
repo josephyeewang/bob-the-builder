@@ -15,7 +15,11 @@
 // M4's gate stays shut for every product (fails shut). Missing: (1) a caller in the Sensors' loop that runs it every
 // 5 minutes per product; (2) that caller passes pinnedSkip = M6 build-skip.mjs skipCommand({ mode: 'first' }), which
 // L571 says is computed by code with no rules line (that form of skipCommand lands with #241; on main first mode still
-// asks for a checker URL and hash), and vercelProject from the product's rules entry.
+// asks for a checker URL and hash), and vercelProject from the product's rules entry; (3) that caller skips a product
+// whose rules say exactly `none` (M4 start-gate.mjs NO_VERCEL, L1081, #519): it has no Vercel project, so nothing reads
+// Vercel for it and no fact is written (M4 opens facts 3 and 4 for it without one). Read as a name, `none` would make
+// this pass ask Vercel for a project called "none" and write failing facts. The production watcher's caller
+// (prod-watcher.mjs) must skip such a product the same way.
 
 import { createHash } from 'node:crypto';
 

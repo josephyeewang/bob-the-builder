@@ -33,10 +33,12 @@ export const MOVES = Object.freeze({
     // → in_review from verified or approved: a new head pushed after verification (workshop, R2-M7).
     // verified/approved → merged: only the Merge Gate's reconcile of an interrupted merge GitHub shows merged (L85 M-1 b);
     // the writer asks for this card's merged merge document at the same commit, as for every move into merged.
-    verified: { in_review: W, approved: A, merging: G, merged: G, waiting: D, cancelled: A },
+    // verified/approved → failed: only the Merge Gate, only an undo card it found can never be an exact reverse (L980);
+    // the writer asks for the gate's own not_clean reverse- fact, so M11 can write the fix card (a fix fixes a failed card).
+    verified: { in_review: W, approved: A, merging: G, merged: G, waiting: D, cancelled: A, failed: G },
     // approved → waiting: an approved card whose merge is refused twice is put on the owner, and comes back to approved
     // (L116; the wait's resume: continue returns to approved).
-    approved: { merging: G, merged: G, verified: A, in_review: W, waiting: D, cancelled: A },
+    approved: { merging: G, merged: G, verified: A, in_review: W, waiting: D, cancelled: A, failed: G },
     merging: { merged: G, verified: G, in_review: G },
     merged: { closed: D, reverted: G },
     closed: { reverted: G },

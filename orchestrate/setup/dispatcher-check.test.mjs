@@ -48,7 +48,7 @@ test('L748: the seal folder is orchestrate\'s 0700; the copies folder has the on
   const rows = folderTable(cfg); const by = (p) => rows.find((r) => r.path === p);
   assert.deepEqual([by(sealRootPath(cfg)).owner, by(sealRootPath(cfg)).mode, by(sealRootPath(cfg)).acl], ['orchestrate', 0o700, []]);
   assert.equal(sealRootPath(cfg), `${BASE}/seals`);
-  assert.deepEqual([by(`${BASE}/worker-copies`).owner, by(`${BASE}/worker-copies`).mode, by(`${BASE}/worker-copies`).acl], ['owner', 0o755, [COPIES_CLEANUP_ACL]]);
+  assert.deepEqual([by(`${BASE}/worker-copies`).owner, by(`${BASE}/worker-copies`).mode, by(`${BASE}/worker-copies`).acl], ['builder', 0o755, [COPIES_CLEANUP_ACL]]);   // L1079: the workers' clones are the builder's
   assert.deepEqual([...COPIES_CLEANUP_ACL.perms].sort(), ['delete_child', 'directory_inherit', 'file_inherit', 'list', 'readattr', 'readextattr', 'readsecurity', 'search']);
   // No add or write; no `read` (a folder shows it as `list`, so the exact check could never pass) and no `delete` (the empty copies folder itself could go).
   for (const no of ['add_file', 'add_subdirectory', 'write', 'append', 'writeattr', 'writeextattr', 'writesecurity', 'chown', 'read', 'delete', 'execute']) assert.ok(!COPIES_CLEANUP_ACL.perms.includes(no), no);
@@ -71,16 +71,20 @@ test('L748: on the real chmod and ls, the copies entry round-trips exactly, and 
 
 test('L748, L763, L925: dispatcherKeys names the ten Dispatcher keys, the very ones the wiring reads, from the one place', () => {
   const cfg = parseConfig(RAW);
-  const k = dispatcherKeys(cfg, { hostLockUid: 65001 });
+  const k = dispatcherKeys(cfg, { hostLockUid: 65001, workerUid: 601 });
   assert.deepEqual(Object.keys(k).sort(), [...WORKER_CONFIG_KEYS].sort());
   assert.deepEqual(k, { reviewRoot: `${BASE}/review`, mirror: mirrorPath(cfg), sealRoot: sealRootPath(cfg), outboxRoot: `${BASE}/outboxes`, copiesRoot: `${BASE}/worker-copies`, hostLockPath: LOCK, hostLockUid: 65001,
-    workerRequestsDir: `${BASE}/worker-runner/requests`, workerStatusFile: `${BASE}/worker-runner/runner/status.json`, workerUid: 65001 });
-  assert.throws(() => dispatcherKeys(parseConfig({ ...RAW, hostLockPath: undefined }), { hostLockUid: 65001 }), /hostLockPath is not set/);
+    workerRequestsDir: `${BASE}/worker-runner/requests`, workerStatusFile: `${BASE}/worker-runner/runner/status.json`, workerUid: 601 });
+  assert.throws(() => dispatcherKeys(parseConfig({ ...RAW, hostLockPath: undefined }), { hostLockUid: 65001, workerUid: 601 }), /hostLockPath is not set/);
+  // L1079 (I1): the worker runner's user is the builder's, read on this Mac; none, root or the owner's is never a key.
+  for (const u of [undefined, 0, -1, '601']) assert.throws(() => dispatcherKeys(cfg, { hostLockUid: 65001, workerUid: u }), /the builder user is not on this Mac/, String(u));
+  assert.throws(() => dispatcherKeys(cfg, { hostLockUid: 65001, workerUid: 65001 }), /owner/);
   // host.lock's owner is the owner's Mac user id, read on this Mac: none is never a key.
   assert.throws(() => dispatcherKeys(cfg), /the owner sam is not a user on this Mac, so host\.lock's owner \(hostLockUid\) can't be named/);
   // On the stand-in Mac, dispatcherKeysOn reads it from the owner's own record.
   const w = world();
   assert.equal(dispatcherKeysOn(w.mac, w.cfg).hostLockUid, 65001);
+  assert.equal(dispatcherKeysOn(w.mac, w.cfg).workerUid, Number(w.mac.users.get('builder').UniqueID), 'the builder\'s, read from its record');
   assert.throws(() => dispatcherKeysOn(w.mac, parseConfig({ ...RAW, owner: 'nobody2', hostLockPath: '/Users/nobody2/host.lock' })), /the owner nobody2 is not a user on this Mac/);
 });
 
