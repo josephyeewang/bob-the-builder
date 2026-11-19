@@ -90,7 +90,12 @@
 // the destination, each taken as a set, and the from part and the to part, each in order (#617 r1 m1: so a rule with its
 // source and destination swapped is another rule). It wants exactly the wall's: a word missing, a word more or a part
 // moved refuses, so an unexpected print fails closed, never open (and place then takes it out). The self rule's
-// address must be one of this Mac's own (os.networkInterfaces, plus loopback), or `self` itself.
+// address must be one of this Mac's own (os.networkInterfaces, plus loopback), or `self` itself, or (seen on macOS
+// 2026-11-18: a Mac with many IPv6 addresses) a table pfctl made of them as it loaded, printed `<__automatic_<hex>_<n>>`
+// (AUTO_TABLE). Such a table counts only in the self rule, and only once it is proven: settingsChecks reads it with
+// `pfctl -a <ANCHOR> -t <name> -T show` (pfctl(8): a table made inside an anchor is that anchor's own), and it must hold
+// at least one entry and every entry one of this Mac's own addresses (tableProblem). Any other table name, a table that
+// can't be read, an empty one or one holding any other address refuses.
 //
 // The status (L1193): every `check` and every `place` writes <base>/builder-wall-status/status.json (STATUS_FILE; root's
 // 0644 in a folder of root's 0755, written whole): when, the builder's uid, the sha256 of anchorText(uid), ok and why. ok
@@ -209,12 +214,42 @@ export function ownAddresses(ifaces = networkInterfaces()) {
   for (const list of Object.values(ifaces ?? {})) for (const nic of list ?? []) if (nic?.address) out.add(String(nic.address).replace(/%.*$/, '').toLowerCase());
   return out;
 }
-function fits(r, uid, line, p, selfAddresses) {
+/**
+ * The name pfctl gives a table it makes, as it loads a rule, from the rule's address list (`self` turned into this Mac's
+ * many addresses, for one), as `pfctl -s rules` prints it. Seen on macOS 2026-11-18: `<__automatic_c097741b_0>`.
+ */
+export const AUTO_TABLE = /^<__automatic_[0-9a-f]+_[0-9]+>$/;
+/** Every table a printed rule text names (`<name>`; the port range's `<>` is no name). */
+export const tablesNamed = (text) => [...new Set(String(text).match(/<[^<>\s]+>/g) ?? [])];
+/** One line of `pfctl -t <name> -T show` → the one address it is, or null when it is not one plain address (`!x`, a network). */
+function tableEntry(e) {
+  const m = /^([0-9a-fA-F:.]+)(?:%\S*?)?(?:\/(\d+))?$/.exec(String(e).trim());
+  if (!m) return null;
+  if (m[2] !== undefined && Number(m[2]) !== (m[1].includes(':') ? 128 : 32)) return null;
+  return m[1].toLowerCase();
+}
+/**
+ * Null, or why the table `name` (as printed, with its `<>`) is not proven to hold only this Mac's own addresses. `read`:
+ * { text } (what `pfctl -a <ANCHOR> -t <name> -T show` printed) or { error }, or undefined when it was not read.
+ */
+export function tableProblem(name, read, selfAddresses) {
+  if (!AUTO_TABLE.test(name)) return `${name} is not a table pfctl makes for \`self\` (only <__automatic_<hex>_<n>> is taken)`;
+  if (!read) return `${name} was not read, so what it holds is not known`;
+  if (read.error !== undefined) return `${name} could not be read (${String(read.error).slice(0, 120)})`;
+  const entries = String(read.text ?? '').split('\n').map((l) => l.trim()).filter(Boolean);
+  if (!entries.length) return `${name} is empty`;
+  for (const e of entries) {
+    const a = tableEntry(e);
+    if (a === null || !selfAddresses.has(a)) return `${name} holds ${e.slice(0, 60)}, which is not one of this Mac's own addresses`;
+  }
+  return null;
+}
+function fits(r, uid, line, p, selfAddresses, proven) {
   if (!r.protos.includes(p)) return false;
   const got = parts(line, uid); const want = parts(r.words(uid, p), uid);
   if (r.anyAddress) {
     const named = String(got.to ?? '').replace(/%\S*$/, '').toLowerCase();
-    if (named !== 'self' && !selfAddresses.has(named)) return false;
+    if (named !== 'self' && !selfAddresses.has(named) && !proven.has(named)) return false;
     got.to = 'ADDRESS'; got.head = got.head.split(' ').filter((x) => x !== 'inet' && x !== 'inet6').join(' ');
   }
   return key(got) === key(want);
@@ -223,13 +258,21 @@ function fits(r, uid, line, p, selfAddresses) {
 /**
  * Null, or why the anchor as pfctl prints it is not these rules (iv): each rule in each protocol, and no line that is none of
  * them. `text`: `pfctl -a <ANCHOR> -s rules`. `selfAddresses`: the addresses the self rule may name (ownAddresses()).
+ * `tables`: Map of each table the text names (`<name>`) → what reading it gave, { text } or { error } (settingsChecks
+ * reads them). A line naming a table not proven by tableProblem refuses; a proven one counts in the self rule alone.
  */
-export function loadedRulesProblem(text, uid, { selfAddresses = ownAddresses() } = {}) {
+export function loadedRulesProblem(text, uid, { selfAddresses = ownAddresses(), tables = new Map() } = {}) {
   const lines = String(text).split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#')).flatMap(perProto);
   if (!lines.length) return `${ANCHOR} holds no rules`;
+  const proven = new Set();
+  for (const l of lines) for (const name of tablesNamed(l)) {
+    const why = tableProblem(name, tables.get(name), selfAddresses);
+    if (why) return `${ANCHOR} holds a line naming a table not proven to hold only this Mac's own addresses: ${why}: ${l.slice(0, 120)}`;
+    proven.add(name);
+  }
   const missing = [];
-  for (const r of RULES) for (const p of r.protos) if (!lines.some((l) => fits(r, uid, l, p, selfAddresses))) missing.push(`${r.id} (${p})`);
-  const extra = lines.filter((l) => !RULES.some((r) => PROTOS.some((p) => fits(r, uid, l, p, selfAddresses))));
+  for (const r of RULES) for (const p of r.protos) if (!lines.some((l) => fits(r, uid, l, p, selfAddresses, proven))) missing.push(`${r.id} (${p})`);
+  const extra = lines.filter((l) => !RULES.some((r) => PROTOS.some((p) => fits(r, uid, l, p, selfAddresses, proven))));
   if (missing.length) return `${ANCHOR} is missing the rule${missing.length > 1 ? 's' : ''} ${missing.join(', ')} exactly as written: what is loaded is not the wall`;
   if (extra.length) return `${ANCHOR} holds ${extra.length === 1 ? 'a line' : `${extra.length} lines`} that ${extra.length === 1 ? 'is' : 'are'} not the wall's: ${extra[0].slice(0, 120)}`;
   return null;
@@ -516,6 +559,33 @@ function tokenHeld(io, cfg) {
   return { tok, refs, held };
 }
 
+/** How many times anchorRulesProblem reads the rules and their tables while the rules keep changing under it. */
+export const RULE_READ_TRIES = 3;
+/**
+ * Null, or why the anchor pf holds is not the wall's rules (iv), read as root. Each table pfctl made inside the anchor (the
+ * self rule's, AUTO_TABLE) is read, so loadedRulesProblem can prove it; a name of any other shape is not read
+ * (loadedRulesProblem refuses it as it stands). The wall's job reloads the anchor every RECHECK_EVERY_S, and a reload may
+ * give a table a new name: so when tables were read, the rules are read again after them, and when they changed the
+ * whole pass is done again, RULE_READ_TRIES times in all; then the last pass's reason stands.
+ */
+function anchorRulesProblem(io, uid, selfAddresses) {
+  let why = null;
+  for (let tries = 1; ; tries += 1) {
+    const a = io.run(PFCTL, ['-a', ANCHOR, '-s', 'rules']);
+    if (a.status !== 0) return `pfctl -a ${ANCHOR} -s rules failed (${said(a)})`;
+    const tables = new Map();
+    for (const name of tablesNamed(a.stdout).filter((n) => AUTO_TABLE.test(n))) {
+      const t = io.run(PFCTL, ['-a', ANCHOR, '-t', name.slice(1, -1), '-T', 'show']);
+      tables.set(name, t.status === 0 ? { text: t.stdout } : { error: said(t) });
+    }
+    why = loadedRulesProblem(a.stdout, uid, { selfAddresses, tables });
+    if (!tables.size) return why;
+    const again = io.run(PFCTL, ['-a', ANCHOR, '-s', 'rules']);
+    if (again.status === 0 && again.stdout === a.stdout) return why;
+    if (tries >= RULE_READ_TRIES) return `${why ?? 'the rules read as the wall\'s'}, but they changed while being read, ${RULE_READ_TRIES} times running`;
+  }
+}
+
 /**
  * The settings half (iii, iv): [{ ok, what, why?, warn? }], always SETTINGS_ROWS of them. Reads only, as root. The wiring
  * PR's gate runs it before every builder session. `selfAddresses`: loadedRulesProblem's. A row with `warn` is ok (it
@@ -539,8 +609,7 @@ export function settingsChecks(io, cfg, uid, { selfAddresses } = {}) {
   const main = io.run(PFCTL, ['-s', 'rules']);
   item(main.status === 0 && /^anchor "com\.apple\/\*"/m.test(main.stdout), 'the main ruleset reaches com.apple/* (iv)',
     main.status !== 0 ? `pfctl -s rules failed (${said(main)})` : 'the main ruleset has no anchor "com.apple/*", so the wall\'s anchor is never read (macOS\'s own /etc/pf.conf has it; something replaced the main ruleset)');
-  const a = io.run(PFCTL, ['-a', ANCHOR, '-s', 'rules']);
-  const why = a.status !== 0 ? `pfctl -a ${ANCHOR} -s rules failed (${said(a)})` : loadedRulesProblem(a.stdout, uid, selfAddresses ? { selfAddresses } : {});
+  const why = anchorRulesProblem(io, uid, selfAddresses ?? ownAddresses());
   item(why === null, `${ANCHOR} holds exactly the wall's rules (iv)`, why);
   const eph = ephemeralProblem(io);
   item(eph === null, `the Mac's ephemeral port range is inside ${EPHEMERAL.first}-${EPHEMERAL.last}, clear of the builder's ports (iv)`, eph);
@@ -806,4 +875,7 @@ export async function main(argv, { io = realIo(), net, wait = {}, out = (s) => p
 }
 
 const self = (() => { try { return pathToFileURL(realpathSync(process.argv[1])).href; } catch { return null; } })();
-if (self === import.meta.url) process.exitCode = await main(process.argv.slice(2));
+// No top-level await at the entry (M4 review-install-closure.test.mjs): a dynamic import that main() makes, whose
+// own imports reach back here, would wait on this file while this file waits on main(), and node would exit 13 with
+// nothing said. A throw from main exits 1 at once, as an uncaught one did.
+if (self === import.meta.url) main(process.argv.slice(2)).then((code) => { process.exitCode = code; }, (e) => { process.stderr.write(`${e?.stack ?? e}\n`); process.exit(1); });

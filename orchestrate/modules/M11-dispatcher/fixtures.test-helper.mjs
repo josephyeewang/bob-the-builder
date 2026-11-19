@@ -15,6 +15,15 @@ import { factFamilyOf, fieldsAllowed } from '../M9-record/permissions.mjs';
 import { KEYS as K } from './keys.mjs';
 import { outbox, sendAlerts, queueAlert, ALERT_QUEUE_FACT } from './alerts.mjs';
 import { undoCardDoc } from './undo.mjs';
+import { handoffText } from '../M3-lead/handoff.mjs';
+
+/** A handoff in M3's one shape (R-0b-143), which the intake's vet now reads, padded in its one message to exactly `bytes`
+ *  bytes (or its shortest, when `bytes` is less). `mark` makes two notes differ. */
+export function handoffNote(bytes = 0, mark = '') {
+  const note = (pad) => handoffText({ claim: 'Lead of product p, session L-1', open_card: 'C-1', next: 'send C-2',
+    decisions: [{ about: 'scope', decided: 'small cards', when: '1 Nov' }], messages: [`${mark}${'x'.repeat(pad)}`] });
+  return note(Math.max(1, bytes - Buffer.byteLength(note(1)) + 1));
+}
 
 export const VALUES = Object.freeze({
   [K.redPace]: 1.0, [K.redWeek]: 85, [K.redH5]: 80,

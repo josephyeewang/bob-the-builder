@@ -159,7 +159,9 @@ export function writeAnswer({ to, answer, uid = process.getuid?.() }) {
 
 const self = (() => { try { return realpathSync(fileURLToPath(import.meta.url)); } catch { return null; } })();
 const invoked = (() => { try { return process.argv[1] ? realpathSync(process.argv[1]) : null; } catch { return null; } })();
-if (self && self === invoked) {
+// No top-level await at the entry (M4 review-install-closure.test.mjs): the run is an async function, so a dynamic
+// import it makes never waits on this file's own loading. A throw exits 1 at once, as an uncaught one did.
+if (self && self === invoked) (async () => {
   const arg = (k) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : undefined; };
   const home = homedir(); const to = arg('--to');
   if (typeof to !== 'string' || !to.startsWith('/')) {
@@ -171,4 +173,4 @@ if (self && self === invoked) {
   console.log(JSON.stringify({ at: a.observed_at, account: a.account, signed_in: a.signed_in, usage: a.usage ? 'read' : 'unknown',
     usage_reason: a.usage_reason ?? null, written: w.ok, reason: w.ok ? null : w.reason }));
   process.exit(w.ok ? 0 : 1);
-}
+})().catch((e) => { process.stderr.write(`${e?.stack ?? e}\n`); process.exit(1); });

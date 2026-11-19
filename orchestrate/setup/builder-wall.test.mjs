@@ -13,7 +13,7 @@ import { tempDir } from '../shared/test-tmp.mjs';
 import { ROOT_CONFIG_PATH, wallDir } from './layout.mjs';
 import { chainProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
 import {
-  ALL_ADDRESSES, ANCHOR, ANCHOR_DIR, ANCHOR_FILE, FAMILIES, PROTOS, RULES, WALL_RANGE, EPHEMERAL, anchorText, bootScript, checkWall, loadedRulesProblem, main, otherAddresses,
+  ALL_ADDRESSES, ANCHOR, ANCHOR_DIR, AUTO_TABLE, RULE_READ_TRIES, tableProblem, ANCHOR_FILE, FAMILIES, PROTOS, RULES, WALL_RANGE, EPHEMERAL, anchorText, bootScript, checkWall, loadedRulesProblem, main, otherAddresses,
   planWall, tokenPath, unreadPath, waitForFirstRun, wallLabel, wallPlistPath,
   RECHECK_EVERY_S, STATUS_FILE, STATUS_VERSION, WALL_CHECK_JOB, WALL_SCRIPT, WHY_CHARS, WHY_MAX, anchorSha256, parseStatus, statusOf, statusText,
   wallCheckPlist, WAY_OUT_TEXT, LISTENER, CLIENT, ephemeralProblem, rangeListenersProblem, SETTINGS_ROWS, expectedRows, ownAddresses, trafficChecks,
@@ -42,7 +42,8 @@ const FAST = { sleep: async () => {}, limitMs: 15_000, stepMs: 500 };
 
 /** pf, stood in: its state, pfctl's answers, and a rule evaluator for the probes' packets. */
 function fakePf(mac, { mainAnchor = true } = {}) {
-  const pf = { enabled: false, refs: new Map(), next: 41, anchors: new Map(), mainAnchor, calls: [] };
+  // tables: the anchor's tables as `pfctl -a <ANCHOR> -t <name> -T show` prints them (name without its <>), → [address].
+  const pf = { enabled: false, refs: new Map(), next: 41, anchors: new Map(), tables: new Map(), mainAnchor, calls: [] };
   const ok = (stdout = '') => ({ status: 0, stdout, stderr: '' });
   // The way macOS's pfctl writes a loaded rule: one per protocol, `user = N`, `all` only for from any to any with no port.
   const printed = (text) => text.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#')).flatMap((l) => {
@@ -61,6 +62,10 @@ function fakePf(mac, { mainAnchor = true } = {}) {
     if (args[0] === '-a' && args[1] === ANCHOR) {
       if (args[2] === '-s' && args[3] === 'rules') return ok((pf.anchors.get(ANCHOR) ?? []).map((l) => `${l}\n`).join(''));
       if (args[2] === '-F' && args[3] === 'rules') { pf.anchors.delete(ANCHOR); return ok(); }
+      if (args[2] === '-t' && args[4] === '-T' && args[5] === 'show' && args.length === 6) {
+        const t = pf.tables.get(args[3]);
+        return t ? ok(t.map((x) => `   ${x}\n`).join('')) : { status: 1, stdout: '', stderr: 'pfctl: Table does not exist.\n' };
+      }
       if (args[2] === '-q' || args[2] === '-f') { const f = args.at(-1); pf.anchors.set(ANCHOR, printed(readFileSync(mac.at(f), 'utf8'))); return ok(); }
     }
     return { status: 1, stdout: '', stderr: `stand-in pfctl does not know: ${a}` };
@@ -431,6 +436,97 @@ test('R-0b-179: loadedRulesProblem reads macOS\'s print or a list not split, in 
   assert.deepEqual(RULES.map((r) => `${r.id}:${r.protos.join('+')}`), ['udp-out:udp', 'tcp-out:tcp', 'range-in:tcp+udp', 'self:tcp+udp']);
   // #617 r1 M1: the removed UDP answer rule is refused if it is ever loaded again.
   assert.match(String(loadedRulesProblem([`pass out quick on lo0 proto udp from any port 47000:47999 to any port 49152:65535 user = ${u} no state`, ...asPrinted].join('\n'), u, mine)), /a line that is not the wall's: pass out/);
+});
+
+test('wall self table: pf\'s automatic table for `self` counts only once read and proven to hold this Mac\'s own addresses', () => {
+  const u = 603;
+  // Verbatim from a Mac's failed place (2026-11-18): with many IPv6 addresses pfctl put them in a table it made.
+  const seen = `block return out quick on ! lo0 inet6 proto tcp from any to <__automatic_c097741b_0> user = ${u}`;
+  const T = '<__automatic_c097741b_0>';
+  const base = [
+    `block return out quick on lo0 proto udp from any to any port 47000 <> 47999 user = ${u}`,
+    `block return out quick on lo0 proto tcp from any to any port 47000 <> 47999 user = ${u} flags S/SA`,
+    `block return in quick on lo0 proto tcp from any to any port 47000:47999 user != ${u}`, `block return in quick on lo0 proto udp from any to any port 47000:47999 user != ${u}`,
+    `block return out quick on ! lo0 inet proto tcp from any to 127.0.0.1 user = ${u}`, `block return out quick on ! lo0 inet proto udp from any to 127.0.0.1 user = ${u}`,
+    `block return out quick on ! lo0 inet proto tcp from any to 192.168.1.20 user = ${u}`, `block return out quick on ! lo0 inet proto udp from any to 192.168.1.20 user = ${u}`,
+    seen, seen.replace('proto tcp', 'proto udp'),
+  ];
+  const text = base.join('\n');
+  const own = new Set(['127.0.0.1', '::1', 'fe80::1', '192.168.1.20', 'fe80::aede:48ff:fe00:1122', '2001:db8::7']);
+  const read = (lines) => new Map([[T, { text: lines.map((x) => `   ${x}\n`).join('') }]]);
+  const good = read(['::1', 'fe80::1', 'fe80::aede:48ff:fe00:1122%en0', '2001:db8::7/128']);
+  // PASS: inet lines with addresses, inet6 lines with the proven table.
+  assert.equal(loadedRulesProblem(text, u, { selfAddresses: own, tables: good }), null);
+  assert.ok(AUTO_TABLE.test(T));
+  // FAIL: a table holding an address that is not this Mac's.
+  assert.match(String(loadedRulesProblem(text, u, { selfAddresses: own, tables: read(['::1', '2001:db8::99']) })), /not proven .*holds 2001:db8::99, which is not one of this Mac's own addresses/);
+  // FAIL: a network, a negated entry.
+  assert.match(String(loadedRulesProblem(text, u, { selfAddresses: own, tables: read(['::1', '2001:db8::/64']) })), /holds 2001:db8::\/64/);
+  assert.match(String(loadedRulesProblem(text, u, { selfAddresses: own, tables: read(['::1', '!2001:db8::7']) })), /holds !2001:db8::7/);
+  // FAIL: one of this Mac's own addresses with a short prefix is a network, not that address (only /128 and /32 are one).
+  assert.match(String(loadedRulesProblem(text, u, { selfAddresses: own, tables: read(['::1', '2001:db8::7/64']) })), /holds 2001:db8::7\/64, which is not one/);
+  assert.match(String(loadedRulesProblem(text, u, { selfAddresses: own, tables: read(['::1', '192.168.1.20/24']) })), /holds 192\.168\.1\.20\/24, which is not one/);
+  assert.equal(loadedRulesProblem(text, u, { selfAddresses: own, tables: read(['::1', '192.168.1.20/32']) }), null);
+  // FAIL: an empty table, a table that could not be read, no proof supplied at all.
+  assert.match(String(loadedRulesProblem(text, u, { selfAddresses: own, tables: read([]) })), /<__automatic_c097741b_0> is empty/);
+  assert.match(String(loadedRulesProblem(text, u, { selfAddresses: own, tables: new Map([[T, { error: 'pfctl: Table does not exist.' }]]) })), /could not be read \(pfctl: Table does not exist\.\)/);
+  assert.match(String(loadedRulesProblem(text, u, { selfAddresses: own })), /<__automatic_c097741b_0> was not read/);
+  assert.match(String(loadedRulesProblem(text, u, { selfAddresses: own, tables: new Map([['<__automatic_c097741b_1>', good.get(T)]]) })), /was not read/, 'proof for another table');
+  // FAIL: a table that is not pfctl's automatic one, though it holds only this Mac's addresses.
+  const foo = new Map([['<foo>', good.get(T)]]);
+  assert.match(String(loadedRulesProblem(text.replaceAll(T, '<foo>'), u, { selfAddresses: own, tables: foo })), /<foo> is not a table pfctl makes for `self`/);
+  for (const bad of ['<__automatic_C097741B_0>', '<__automatic__0>', '<__automatic_c097741b_>', '<__automatic_c097741b_0x>', '<x__automatic_c097741b_0>']) {
+    assert.match(String(loadedRulesProblem(text.replaceAll(T, bad), u, { selfAddresses: own, tables: new Map([[bad, good.get(T)]]) })), /is not a table pfctl makes/, bad);
+  }
+  // FAIL: a proven automatic table in a rule that is not the self rule.
+  const elsewhere = [...base, `block return in quick on lo0 proto tcp from any to ${T} port 47000:47999 user != ${u}`].join('\n');
+  assert.match(String(loadedRulesProblem(elsewhere, u, { selfAddresses: own, tables: good })), /a line that is not the wall's: block return in quick on lo0 proto tcp from any to <__automatic/);
+  assert.match(String(loadedRulesProblem(base.map((l) => l.replace('from any to any port 47000:47999', `from any to ${T} port 47000:47999`)).join('\n'), u, { selfAddresses: own, tables: good })), /is missing the rules range-in \(tcp\), range-in \(udp\) exactly as written/);
+  // The table in the from part, not the to part, is another rule.
+  assert.match(String(loadedRulesProblem(text.replaceAll(`from any to ${T}`, `from ${T} to any`), u, { selfAddresses: own, tables: good })), /holds 2 lines that are not the wall's: block return out quick on ! lo0 inet6 proto tcp from <__automatic_c097741b_0> to any user = 603$/);
+  // tableProblem on its own.
+  assert.equal(tableProblem(T, good.get(T), own), null);
+  assert.match(String(tableProblem(T, { text: '\n  \n' }, own)), /is empty/);
+});
+
+test('wall self table, end to end: check reads the anchor\'s automatic table through pfctl and passes; a foreign or missing table fails (iv)', async () => {
+  const w = world();
+  assert.deepEqual(fails(await placed(w)), []);
+  const T = '__automatic_c097741b_0';
+  const asTable = () => w.pf.anchors.set(ANCHOR, w.pf.anchors.get(ANCHOR).flatMap((l) => (/ to self /.test(l) ? [l.replace(' proto ', ' inet proto ').replace(' to self ', ` to ${LAN} `), l.replace(' proto ', ' inet6 proto ').replace(' to self ', ` to <${T}> `)] : [l])));
+  asTable();
+  w.pf.tables.set(T, ['::1', 'fe80::1']);
+  assert.deepEqual(fails(await checkWall(w.mac, w.cfg, { net: w.net })), []);
+  assert.ok(w.pf.calls.includes(`-a ${ANCHOR} -t ${T} -T show`), w.pf.calls.join('\n'));
+  w.pf.tables.set(T, ['::1', '2001:db8::99']);
+  let f = fails(await checkWall(w.mac, w.cfg, { net: w.net }));
+  assert.ok(f.some((x) => /\(iv\) — .*2001:db8::99, which is not one of this Mac's own addresses/.test(x)), f.join('\n'));
+  w.pf.tables.delete(T);
+  f = fails(await checkWall(w.mac, w.cfg, { net: w.net }));
+  assert.ok(f.some((x) => /\(iv\) — .*could not be read \(pfctl: Table does not exist\.\)/.test(x)), f.join('\n'));
+  w.pf.tables.set(T, []);
+  f = fails(await checkWall(w.mac, w.cfg, { net: w.net }));
+  assert.ok(f.some((x) => /\(iv\) — .*is empty/.test(x)), f.join('\n'));
+});
+
+test('wall self table: a reload that renames the table between the reads is read again; one that renames it on every read refuses after RULE_READ_TRIES', async () => {
+  const w = world();
+  assert.deepEqual(fails(await placed(w)), []);
+  let n = 0; const name = () => `__automatic_c097741b_${n}`;
+  const asTable = () => w.pf.anchors.set(ANCHOR, w.pf.anchors.get(ANCHOR).flatMap((l) => (/ to self /.test(l) ? [l.replace(' proto ', ' inet proto ').replace(' to self ', ` to ${LAN} `), l.replace(' proto ', ' inet6 proto ').replace(' to self ', ` to <${name()}> `)] : [l])));
+  const plain = w.pf.anchors.get(ANCHOR);
+  const reload = () => { w.pf.tables.delete(name()); n += 1; w.pf.anchors.set(ANCHOR, plain); asTable(); w.pf.tables.set(name(), ['::1', 'fe80::1']); };
+  asTable(); w.pf.tables.set(name(), ['::1', 'fe80::1']);
+  // The job reloads the anchor right after the check's first read of the rules, once: the table it read is gone.
+  const run = w.pf.run; let reads = 0; let reloadOn = new Set([1]);
+  w.pf.run = (args) => { const r = run(args); if (args.join(' ') === `-a ${ANCHOR} -s rules` && reloadOn.has(reads += 1)) reload(); return r; };
+  assert.deepEqual(fails(await checkWall(w.mac, w.cfg, { net: w.net })), []);
+  assert.equal(reads, 4, 'read, (renamed) read again, then a whole second pass');
+  // A reload after every read of the rules: refused after RULE_READ_TRIES passes, with the last pass's reason.
+  reads = 0; reloadOn = { has: () => true };
+  const f = fails(await checkWall(w.mac, w.cfg, { net: w.net }));
+  assert.equal(reads, 2 * RULE_READ_TRIES);
+  assert.ok(f.some((x) => /\(iv\) — .*could not be read \(pfctl: Table does not exist\.\).*but they changed while being read, 3 times running/.test(x)), f.join('\n'));
 });
 
 test('R-0b-179: a failed read-back takes the wall out again (job unloaded, its file gone, rules emptied, token released)', async () => {
@@ -991,7 +1087,13 @@ test('#617 r1 m7: a read-back with a row skipped (or one more) refuses at run ti
   assert.deepEqual(fails(lone), []); assert.equal(lone.length, expectedRows(0));
 });
 
-test('#617 r1 M1: the real UDP client sends from a port in the range it is given (the builder\'s probes for v, vii and viii)', async () => {
+test('#617 r1 M1: the real UDP client sends from a port in the range it is given (the builder\'s probes for v, vii and viii)', async (t) => {
+  // L1299: on a Mac where the wall is placed, rule 3 refuses the listener's answer into the wall's range for any user but
+  // builder, so this real send can't come back here (the wall working); V2's live rows (v) run the same client as builder.
+  if (existsSync(ANCHOR_FILE)) { t.skip(`the builder wall is placed on this machine (${ANCHOR_FILE}); its live check runs this client`); return; }
+  // With no range the kernel picks the port: it is clear of the wall's range only where the ephemeral range is, as on a
+  // Mac the wall accepts (iv). A Linux runner's range (32768-60999) holds 47000-47999, so a pick there proves nothing.
+  const clear = ephemeralProblem({ run: (bin, args) => spawnSync(bin, args, { encoding: 'utf8' }) }) === null;
   const { createSocket } = await import('node:dgram');
   const s = createSocket('udp4'); const seen = [];
   s.on('message', (m, r) => { seen.push(r.port); s.send('pong', r.port, r.address); });
@@ -1001,6 +1103,6 @@ test('#617 r1 M1: the real UDP client sends from a port in the range it is given
     assert.equal(await run([String(PROBE_FIRST), String(WALL_RANGE.last)]), 'ok');
     assert.ok(seen[0] >= PROBE_FIRST && seen[0] <= WALL_RANGE.last, `sent from ${seen[0]}`);
     assert.equal(await run([]), 'ok');
-    assert.ok(seen[1] < WALL_RANGE.first || seen[1] > WALL_RANGE.last, `with no range, sent from ${seen[1]}`);
+    if (clear) assert.ok(seen[1] < WALL_RANGE.first || seen[1] > WALL_RANGE.last, `with no range, sent from ${seen[1]}`);
   } finally { s.close(); }
 });

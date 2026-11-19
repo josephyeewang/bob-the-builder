@@ -174,7 +174,10 @@ async function mintChecksClient(o, { owner, repo, fetchFn, uid = process.getuid?
 // Started as a program? Compare real paths: launchd starts it through the installed link, so argv[1] is the link while
 // import.meta.url is the real file.
 const started = (() => { try { return process.argv[1] ? realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)) : false; } catch { return false; } })();
-if (started) process.exitCode = await main(process.argv.slice(2));
+// No top-level await at the entry (M4 review-install-closure.test.mjs): a dynamic import that main() makes, whose
+// own imports reach back here, would wait on this file while this file waits on main(), and node would exit 13 with
+// nothing said. A throw from main exits 1 at once, as an uncaught one did.
+if (started) main(process.argv.slice(2)).then((code) => { process.exitCode = code; }, (e) => { process.stderr.write(`${e?.stack ?? e}\n`); process.exit(1); });
 
 // For the tests only: the check-runs client one pass would use.
 export const watchChecksClientForTest = appChecksClient;
