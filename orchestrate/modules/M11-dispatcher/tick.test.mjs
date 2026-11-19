@@ -2174,3 +2174,16 @@ test('L765: a refused outage end is told once, then daily', async () => {
   assert.equal(told().length, 2, 'told again a day later');
   assert.equal(rec.read('fact', OUTAGE_FACT).doc.state, 'open');
 });
+
+// Review r2 of L759 m1: a refused save of an outage pass (here a second wave, no end tried) is told the same way.
+test('L759: a refused save of an outage pass is told to Joe', async () => {
+  const gone = (id, c) => ({ id, card: c, alive: false, ended: true, lastWriteAt: T0 - 10 * MIN });
+  const live = (id, c) => ({ id, card: c, alive: true, ended: false, lastWriteAt: T0 - MIN });
+  const w = world([account(), usage(), card('C-1', { state: 'running' }), ['fact', OUTAGE_FACT, { id: 'o-1', state: 'open', told_id: 'o-1', started_at: iso(T0 - 10 * MIN), dead: [{ id: 'S-1', card: 'C-1' }], board: 3, healthy_passes: 1 }]],
+    { over: { board: () => [gone('S-2', 'C-1'), gone('S-3', 'C-1'), gone('S-4', 'C-1'), live('S-5', 'C-1')] } });
+  const rec = Object.create(w.rec, { write: { value: (x) => (x.kind === 'outage_pass' ? { ok: false, reason: 'planted refusal' } : w.rec.write(x)) } });
+  const r = await tick({ rec, rules: rulesWith({}, allow), now: T0, ports: w.ports });
+  assert.equal(r.steps.outage.result.passRefused, 'planted refusal');
+  assert.equal(r.steps.outage.result.outage, true, 'the second wave keeps the outage open');
+  assert.equal(w.calls.alerts.filter((a) => /this outage pass could not be saved \(planted refusal\)/.test(a)).length, 1, w.calls.alerts.join(' | '));
+});

@@ -22,11 +22,13 @@
 // still-dead are still handed to `actOnDead` each pass, to try again. The list is written only when it changes (as a
 // set); a refused write is returned as `countedRefused` (they would be counted again next pass, as before L759).
 // The ending pass checks too (review of L759): if its new deaths (not held by the outage, not counted) reach the
-// threshold, the outage stays open, its healthy passes start again, and they are held with its dead.
+// threshold, the outage stays open, its healthy passes start again, and they are held with its dead. Such a second
+// wave only makes the outage last longer: Joe gets no new alert for it (the outage's one alert stands).
 // A refused end (L765): the Record still holds the outage open, so this pass stays in it (nothing restarts, no card is
 // decided; its new deaths are held and an undelivered outage alert is retold, as on any outage pass) and the end is
-// tried again next pass; the refusal is returned as `endRefused`, for tick.mjs to tell Joe. If that pass's save of the
-// held deaths is refused too, `endRefused` says so, since those deaths would then go undecided at the end.
+// tried again next pass; the refusal is returned as `endRefused`, for tick.mjs to tell Joe.
+// A refused save of an outage pass (its held deaths and healthy count) is returned as `passRefused` on any outage pass,
+// for tick.mjs to tell Joe: deaths not held would go undecided at the end.
 
 import { KEYS, need, minutes } from './keys.mjs';
 import { tellThen } from './alerts.mjs';
@@ -51,8 +53,9 @@ export function isDead(s, { now, quietMs }) {
 /**
  * One pass's outage step. `board` = [{ id, card, alive, ended, lastWriteAt }] for the sessions on
  * the board. `healthy` = network up and signed in and usage readable, this pass. `resume` = Joe
- * said resume. Returns { outage, ended, restart: [session ids], asks: [card ids], cards: {session id: card} }, plus
- * `countedRefused` or `endRefused` (the reason) when that write was refused; writes the outage fact and raises at most
+ * said resume; it must stay set until the outage has ended, since a pass whose new deaths reach the threshold ignores
+ * it. Returns { outage, ended, restart: [session ids], asks: [card ids], cards: {session id: card} }, plus
+ * `countedRefused`, `endRefused` or `passRefused` (the reason) when that write was refused; writes the outage fact and raises at most
  * one alert per outage.
  */
 export function outageStep({ rec, rules, board, now, healthy, resume = false, alert }) {
@@ -85,10 +88,10 @@ export function outageStep({ rec, rules, board, now, healthy, resume = false, al
     }
     const more = dead.filter((s) => !held0.some((d) => d.id === s.id)).map((s) => ({ id: s.id, card: s.card ?? null }));
     const pw = write({ ...cur.doc, healthy_passes: passes, dead: [...held0, ...more] }, 'outage_pass');
-    if (endRefused && !pw?.ok) endRefused += `; this pass's new deaths could not be held either (${pw?.reason ?? 'refused'})`;
+    const passRefused = pw?.ok ? undefined : (pw?.reason ?? 'refused');
     // An outage whose alert the queue refused is told each pass until delivered (L130); the mark names the outage.
     if (cur.doc.told_id !== cur.doc.id) tellThen(alert, cur.doc.alert_text ?? `running sessions stopped at once (${cur.doc.id}); nothing is restarted until you say resume`, { fact: OUTAGE_FACT, fields: { told_id: cur.doc.id }, kind: 'outage_told' });
-    return { outage: true, ended: false, restart: [], asks: [], ...(endRefused ? { endRefused } : {}) };
+    return { outage: true, ended: false, restart: [], asks: [], ...(endRefused ? { endRefused } : {}), ...(passRefused ? { passRefused } : {}) };
   }
   const fresh = dead.filter((s) => !counted.has(deathKey(s)));
   // The board less the deaths already counted: those were not running at the previous pass (review of L759).

@@ -344,14 +344,39 @@ test('L759: an outage about to end stays open when most running sessions die in 
   assert.deepEqual(r.asks.sort(), ['C-1', 'C-2']);
 });
 
-// Review of L759 m3: when the end is refused, the save of that pass's held deaths is checked too.
-test('L765: a refused end whose held deaths cannot be saved either says so in the refusal', () => {
-  const base = openOutage();
-  const no = { outage_end: 'planted refusal', outage_pass: 'pass refused' };
-  const rec = Object.create(base, { write: { value: (w) => (no[w.kind] ? { ok: false, reason: no[w.kind] } : base.write(w)) } });
-  const r = outageStep({ rec, rules: R, board: [gone('S3', 'C-3'), live('S2', 'C-2')], now: T0, healthy: true, alert: fakeAlert() });
-  assert.equal(r.outage, true);
-  assert.equal(r.endRefused, "planted refusal; this pass's new deaths could not be held either (pass refused)");
+// Review of L759 m3 / r2 m1: the save of an outage pass is checked on every outage pass, and a refusal handed back.
+test('L759: a refused save of an outage pass is handed back as passRefused, whether or not the end was refused', () => {
+  const plant = (no) => { const base = openOutage(); return Object.create(base, { write: { value: (w) => (no[w.kind] ? { ok: false, reason: no[w.kind] } : base.write(w)) } }); };
+  // The end refused, and the pass's save too.
+  const r = outageStep({ rec: plant({ outage_end: 'planted refusal', outage_pass: 'pass refused' }), rules: R, board: [gone('S3', 'C-3'), live('S2', 'C-2')], now: T0, healthy: true, alert: fakeAlert() });
+  assert.deepEqual([r.outage, r.endRefused, r.passRefused], [true, 'planted refusal', 'pass refused']);
+  // A surge pass (no end tried) whose save is refused.
+  const surge = [gone('S2', 'C-2'), gone('S3', 'C-3'), gone('S4', 'C-4'), live('S6', 'C-4'), live('S7', 'C-4')];
+  const s = outageStep({ rec: plant({ outage_pass: 'pass refused' }), rules: R, board: surge, now: T0, healthy: true, alert: fakeAlert() });
+  assert.deepEqual([s.outage, s.endRefused, s.passRefused], [true, undefined, 'pass refused']);
+  // Saved: nothing handed back.
+  assert.equal(outageStep({ rec: openOutage(), rules: R, board: surge, now: T0, healthy: true, alert: fakeAlert() }).passRefused, undefined);
+});
+
+// Review r2 of L759 (M1): held deaths still on the board, dead, are not new deaths; they never keep the outage open.
+test('L759: held deaths left on the board, dead, do not keep the outage open', () => {
+  const rec = recWith([...cards(), ['fact', OUTAGE_FACT, { id: 'o-1', state: 'open', told_id: 'o-1', dead: [{ id: 'S1', card: 'C-1' }, { id: 'S2', card: 'C-2' }, { id: 'S3', card: 'C-3' }], healthy_passes: 0 }]]);
+  const board = [gone('S1', 'C-1'), gone('S2', 'C-2'), gone('S3', 'C-3'), live('S4', 'C-4')];
+  const step = () => outageStep({ rec, rules: R, board, now: T0, healthy: true, alert: fakeAlert() });
+  assert.equal(step().outage, true);
+  const end = step();
+  assert.equal(end.ended, true, 'ends after 2 healthy passes');
+  assert.deepEqual(end.asks.sort(), ['C-1', 'C-2', 'C-3']);
+});
+
+// Review r2 of L759 (M3): only deaths still on the board leave its size; held sessions that left it are not subtracted.
+test('L759: 3 new deaths on a board of 8 end the outage, whatever it holds off the board', () => {
+  const held = [1, 2, 3, 4].map((n) => ({ id: `H${n}`, card: 'C-1' }));
+  const rec = recWith([...cards(), ['fact', OUTAGE_FACT, { id: 'o-1', state: 'open', told_id: 'o-1', dead: held, healthy_passes: 1 }]]);
+  const board = [1, 2, 3, 4, 5, 6, 7, 8].map((n) => (n <= 3 ? gone(`S${n}`, 'C-2') : live(`S${n}`, 'C-3')));
+  const r = outageStep({ rec, rules: R, board, now: T0, healthy: true, alert: fakeAlert() });
+  assert.equal(r.ended, true, '3 of 8 is below half the board');
+  assert.equal(r.asks.length, 7);
 });
 
 // Review of L759 c4: the counted list is compared as a set, so a session listed twice does not write every pass.
