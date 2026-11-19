@@ -31,23 +31,82 @@ test('LIVE GitHub (read-only, no token): the recorded pull request answers match
   const m = /github\.com[:/]([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?$/.exec(url);
   if (!m) return t.skip('this checkout has no GitHub remote');
   const [, owner, repo] = m;
-  const gh = makeFetchGh({});
-  let first;
-  try { first = await gh.get(`/repos/${owner}/${repo}/pulls/${REC.merged}`); } catch (e) { return t.skip(`GitHub not reachable (${e.message})`); }
-  if (first.status === 403 || first.status === 429) return t.skip('GitHub rate limit for unauthenticated reads');
-  if (first.status === 404) return t.skip('the repository is not public');
-  const reader = prReader({ gh, checksGh: makeFetchGh({}), owner, repo }); // public check runs need no token; live, the watcher App's
-  const pr = await reader.pr(REC.merged);
-  const rec = REC.answers[`/pulls/${REC.merged}`];
-  assert.deepEqual([pr.state, pr.merged, pr.merge_commit_sha, pr.head_sha, pr.base_ref], [rec.state, true, rec.merge_commit_sha, rec.head.sha, rec.base.ref]);
-  const files = await reader.files(REC.merged);
-  assert.ok(files.length > 0 && files.every((f) => typeof f.filename === 'string' && typeof f.additions === 'number'));
-  const checks = await reader.checks(pr.head_sha);
-  assert.ok(checks.every((c) => typeof c.name === 'string' && typeof c.status === 'string'));
-  assert.ok(Number.isInteger(await reader.behindBy(REC.merged)));
-  const list = await prsToRead({ gh, owner, repo, rec: { list: () => [] } });
-  assert.equal(list.problem, null, 'the open list reads as a list (it may be empty)');
-  assert.ok(list.numbers.every((n) => Number.isInteger(n) && n > 0));
+  await liveCheck(t, { gh: makeFetchGh({}), checksGh: makeFetchGh({}), owner, repo }); // public check runs need no token; live, the watcher App's
+});
+
+// GitHub's unauthenticated limit can run out on ANY read, not just the first (a CI run failed on "pull 119 files answered
+// 403"). Only two failures are the outside world's, and skip: a rate limit, which the readers report as "<what> answered
+// 403|429" (okJson in github-pr.mjs; prsToRead puts the same text in its problem, in brackets), and GitHub not reachable,
+// which M6's client lets fetch throw (TypeError "fetch failed" with a network code as its cause, or the 30 s TimeoutError;
+// prsToRead keeps only the message). Anything else (wrong data, a 500, a shape change) still fails.
+const NET_CODES = new Set(['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'ENETUNREACH', 'EHOSTUNREACH',
+  'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT']);
+const RATE_LIMIT = /answered (403|429)\)?$/;
+const NET_TEXT = /\((fetch failed|The operation was aborted due to timeout)\)$/;
+const outsideWorld = (e) => {
+  if (e?.name === 'TimeoutError') return 'GitHub did not answer in time';
+  if (e instanceof TypeError && e.message === 'fetch failed' && NET_CODES.has(e.cause?.code)) return `GitHub not reachable (${e.cause.code})`;
+  if (e instanceof Error && RATE_LIMIT.test(e.message)) return `GitHub rate limit for unauthenticated reads (${e.message})`;
+  return null;
+};
+const PROBLEM = Symbol('a problem the outside world caused');
+const live = async (read) => {
+  try { return await read(); } catch (e) { const why = outsideWorld(e); if (why) throw Object.assign(new Error(why), { [PROBLEM]: true }); throw e; }
+};
+
+async function liveCheck(t, { gh, checksGh, owner, repo }) {
+  try {
+    const first = await live(() => gh.get(`/repos/${owner}/${repo}/pulls/${REC.merged}`));
+    if (first.status === 403 || first.status === 429) return t.skip('GitHub rate limit for unauthenticated reads');
+    if (first.status === 404) return t.skip('the repository is not public');
+    const reader = prReader({ gh, checksGh, owner, repo });
+    const pr = await live(() => reader.pr(REC.merged));
+    const rec = REC.answers[`/pulls/${REC.merged}`];
+    assert.deepEqual([pr.state, pr.merged, pr.merge_commit_sha, pr.head_sha, pr.base_ref], [rec.state, true, rec.merge_commit_sha, rec.head.sha, rec.base.ref]);
+    const files = await live(() => reader.files(REC.merged));
+    assert.ok(files.length > 0 && files.every((f) => typeof f.filename === 'string' && typeof f.additions === 'number'));
+    const checks = await live(() => reader.checks(pr.head_sha));
+    assert.ok(checks.every((c) => typeof c.name === 'string' && typeof c.status === 'string'));
+    assert.ok(Number.isInteger(await live(() => reader.behindBy(REC.merged))));
+    const list = await prsToRead({ gh, owner, repo, rec: { list: () => [] } });
+    if (list.problem && (RATE_LIMIT.test(list.problem) || NET_TEXT.test(list.problem))) return t.skip(`GitHub: ${list.problem}`);
+    assert.equal(list.problem, null, 'the open list reads as a list (it may be empty)');
+    assert.ok(list.numbers.every((n) => Number.isInteger(n) && n > 0));
+  } catch (e) { if (e?.[PROBLEM]) return t.skip(e.message); throw e; }
+}
+
+test('LIVE GitHub check, against stand-ins: a rate limit or no network on a LATER read skips; a 500 or wrong data still fails', async () => {
+  // A stand-in for GitHub serving the recorded answers through M6's real client; `odd` replaces the answer to call n (1-based).
+  const fake = (odd = {}) => {
+    let n = 0;
+    return makeFetchGh({ fetchImpl: async (u) => {
+      n += 1;
+      if (odd[n] instanceof Error) throw odd[n];
+      const path = new URL(u).pathname.replace(/^\/repos\/o\/r/, '') + new URL(u).search;
+      const a = odd[n] ?? { status: REC.answers[path] ? 200 : 404, body: REC.answers[path] ?? null };
+      return { status: a.status, json: async () => a.body };
+    } });
+  };
+  const run = async (odd, checksOdd) => {
+    let skipped = null;
+    await liveCheck({ skip: (why) => { skipped = why; } }, { gh: fake(odd), checksGh: fake(checksOdd), owner: 'o', repo: 'r' });
+    return skipped;
+  };
+  assert.equal(await run(), null, 'the recorded answers pass, nothing skipped');
+  // gh calls: 1 first read, 2 pr, 3 files, 4 compare, 5 open list. checksGh: 1 check runs.
+  assert.match(await run({ 3: { status: 403, body: { message: 'API rate limit exceeded' } } }), /rate limit.*pull 119 files answered 403/);
+  assert.match(await run({ 4: { status: 429, body: null } }), /rate limit.*compare answered 429/);
+  assert.match(await run({}, { 1: { status: 403, body: null } }), /rate limit.*check runs answered 403/);
+  assert.match(await run({ 5: { status: 403, body: null } }), /the open pull request list answered 403/);
+  assert.match(await run({ 3: Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNRESET' } }) }), /not reachable \(ECONNRESET\)/);
+  assert.match(await run({ 5: Object.assign(new TypeError('fetch failed'), { cause: { code: 'ENOTFOUND' } }) }), /fetch failed/);
+  // PLANT: these are real failures, and must not be skipped.
+  await assert.rejects(run({ 3: { status: 500, body: null } }), /pull 119 files answered 500/);
+  await assert.rejects(run({ 3: { status: 404, body: null } }), /pull 119 files answered 404/);
+  await assert.rejects(run({ 2: { status: 200, body: { ...REC.answers[`/pulls/${REC.merged}`], state: 'open' } } }), assert.AssertionError);
+  await assert.rejects(run({ 3: { status: 200, body: { not: 'a list' } } }), /the file list is not a list/);
+  await assert.rejects(run({ 3: Object.assign(new TypeError('fetch failed'), { cause: { code: 'ERR_SOMETHING_ELSE' } }) }), /fetch failed/);
+  await assert.rejects(run({ 5: { status: 500, body: null } }), /the open list reads as a list/);
 });
 
 const onMac = process.platform === 'darwin' && process.env.SETUP_FORCE_NOT_MAC !== '1';
