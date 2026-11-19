@@ -508,7 +508,10 @@ lookup finds nothing, pf calls the owner "unknown", and a rule that names the bu
 through: the wall failed open. Joe's runs on macOS 27.0.1 saw it about once in a hundred blocked probes while probes ran
 side by side (a builder TCP connect on 18 Nov, a builder UDP send on 19 Nov). Three more rules hold a packet with an unknown
 owner to the builder's limits. Measured cost: one packet in about 6.5 minutes of probing and the Mac's own traffic. Why the
-lookup misses is not known; re-measure after a macOS upgrade.
+lookup misses is not known; re-measure after a macOS upgrade. These rules do not cover a lookup that finds the wrong
+socket: an open question (L1310) is whether a builder program sharing a port with another user's program bound to every
+address (macOS's own mDNSResponder on 5353, for one) is read as that user's. The source says it can be; a live test decides.
+A cost: any program's UDP answer to a port outside 47000-47999 whose owner pf can't find is dropped too.
 
 **What it costs.**
 - Any server the builder runs that must be reached on loopback has to listen in 47000-47999. The builder can't reach even

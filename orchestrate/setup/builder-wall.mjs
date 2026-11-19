@@ -28,8 +28,10 @@
 //        passes: the `user` match fails OPEN (read in apple-oss-distributions/xnu bsd/net/pf.c pf_socket_lookup and
 //        pf_match_uid, 2026-11-19; seen on macOS 27.0.1: a builder TCP connect and a builder UDP ping, about one blocked
 //        probe in a hundred while probes ran side by side, 18 and 19 Nov). `user unknown` matches exactly that miss, so
-//        5-7 close it for every user's packet the lookup misses. Measured cost (19 Nov, ten read-backs plus the Mac's own
-//        traffic, about 6.5 minutes): one packet. Rule 3 needs no twin: `user != <b>` already matches a miss, so it fails
+//        5-7 hold every user's missed packet to the builder's limits. They do NOT cover a lookup that finds the WRONG
+//        socket (Known limits, below), and the evidence (10 clean read-backs, the udp twin never matched) does not yet
+//        tell a miss from a wrong find for the UDP leak. Measured cost (19 Nov, ten read-backs plus the Mac's own
+//        traffic, about 6.5 minutes): one packet; any user's UDP answer to a port outside R whose lookup misses is lost. Rule 3 needs no twin: `user != <b>` already matches a miss, so it fails
 //        closed. Why the lookup misses is not known; this is a capability note about macOS 27.0.1's pf: re-measure on an
 //        upgrade (wall-check-loop in the lead's tools runs the read-back in a loop).
 // No rule names a family, so IPv4 and IPv6 (127.0.0.1 and ::1, 0.0.0.0 and ::) are covered alike. A connect to one of this
@@ -52,6 +54,11 @@
 //     over mDNSResponder's Unix socket, not loopback UDP.
 //
 // Known limits (#556 r1, L1158; said in Joe's run sheet too):
+//   - OPEN (#627 audit M1, L1310; from the xnu source, not yet tried live): pf finds an outgoing packet's socket by its
+//     source address and port, and when no socket matches exactly it takes one bound to 0.0.0.0 or :: on that port, of
+//     ANY user. A builder program that binds 0.0.0.0:5353 beside mDNSResponder (root, SO_REUSEPORT; the bind check lets
+//     another user share a wildcard port then) and sends UDP unconnected would be read as root's, so no `user` rule
+//     sees it, and the answer comes back in on 5353. No `user` rule can close that; a live test as the builder decides.
 //   - A packet sent by a setuid-root program the builder runs (traceroute's UDP probes, ping) comes from root's socket, so
 //     no `user` rule sees it as the builder's. Such a program sends probes; it holds no conversation the builder can use.
 //   - Unix sockets are outside pf (#617 r1 m5, an open item for the lead): a builder process outside Claude Code's
