@@ -713,6 +713,30 @@ test('L136 m1: the programs to start come from every job-file builder of the cop
   assert.equal(startedScript(`<key>ProgramArguments</key><array><string>${join(SAMPLE_ROOT, NODE)}</string><string>${join(SAMPLE_ROOT, 'modules', 'x.mjs')}</string><string>${SAMPLE_ROOT}</string></array>`), 'modules/x.mjs');
 });
 
+// No top-level await in a job's program, nor in anything it imports (wiring/runner-entry.test.mjs). The worker runner
+// awaited main() at the top level, and main()'s dynamic import of the wall code reached back to the runner through static
+// imports: the import waited on the runner's loading, which waited on main(), and node exited 13 with nothing said, once
+// a minute. require() refuses a module graph with a top-level await anywhere in it (ERR_REQUIRE_ASYNC_MODULE), so each
+// program must load through it. Each is loaded in a child of its own, named by an environment value, so its own start
+// check sees no script path in argv and it only loads.
+const LOADS_SYNC = 'try { require(process.env.ENTRY); process.stdout.write("\\nLOADED"); } catch (e) { process.stdout.write(`\\n${e?.code ?? e?.message}`); }';
+function asyncEntries(entries, root) {
+  return entries.flatMap((s) => {
+    const r = spawnSync(process.execPath, ['-e', LOADS_SYNC], { env: { ...process.env, ENTRY: join(root, s) }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 });
+    return r.stdout.endsWith('\nLOADED') ? [] : [`${s}: ${r.stdout.split('\n').pop() || `exit ${r.status ?? r.signal}`}`];
+  });
+}
+test('no job program, nor anything it imports, has a top-level await (it can deadlock on its own dynamic import)', () => {
+  assert.ok(ENTRY_POINTS.length > 10, `the programs were found (${ENTRY_POINTS.length})`);
+  assert.deepEqual(asyncEntries(ENTRY_POINTS, join(REPO, SOURCE)), []);
+  // The check itself: a planted program with a top-level await is found, and the same program without it is not.
+  const root = realpathSync.native(tempDir('m4-closure-tla-'));
+  writeFileSync(join(root, 'tla.mjs'), 'const main = async () => 0;\nif (process.argv[1] === "x") process.exitCode = await main();\n');
+  writeFileSync(join(root, 'plain.mjs'), 'const main = async () => 0;\nif (process.argv[1] === "x") main().then((c) => { process.exitCode = c; });\n');
+  writeFileSync(join(root, 'imports-tla.mjs'), 'import "./tla.mjs";\n');
+  assert.deepEqual(asyncEntries(['tla.mjs', 'plain.mjs', 'imports-tla.mjs'], root), ['tla.mjs: ERR_REQUIRE_ASYNC_MODULE', 'imports-tla.mjs: ERR_REQUIRE_ASYNC_MODULE']);
+});
+
 test('L132 m-c: the reader-against-node check reports a module that loads a file the reader does not find', async () => {
   const root = realpathSync.native(tempDir('m4-closure-rn-'));
   const folder = join(root, 'v');
