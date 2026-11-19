@@ -336,7 +336,7 @@ export async function gatherFacts(ctx, merge) {
           f.exactReverse = er.ok === true;
           if (er.ok === false) f.exactReverseReasons = said;
         } else f.exactReverseUnread = true;
-      }
+      } else f.exactReverseNotHere = true; // #466 r3 Minor 2: answered, but not of the card's change; 9 says so
     }
     const robotBotId = botId(get('product_profile.robot'));
     f.reversesGateMerge = (await attempt(async () => { const w = watchReads({ gh }); return throwIfUnread(await readMark({ gh: w.gh, owner, repo, sha: reverses, robotBotId }), w.seen); }, { ok: false }, unread('reversesGateMergeUnread', 'robot mark'))).ok === true;
