@@ -500,4 +500,8 @@ export function readRootFile(p, { uid = 0 } = {}) {
 
 function selfPath() { try { return realpathSync.native(fileURLToPath(import.meta.url)); } catch { return undefined; } }
 const invoked = (() => { try { return process.argv[1] ? realpathSync.native(process.argv[1]) : null; } catch { return null; } })();
-if (invoked && invoked === selfPath()) process.exitCode = await main(process.argv.slice(2));
+// No top-level await at the entry (M4 review-install-closure.test.mjs): main() loads the wall code with a dynamic
+// import, and its imports reach back here (setup/worker-runner-setup.mjs imports checkRunnerConfig), so an awaited
+// main() waited on this file while this file waited on main(), and node exited 13 with nothing said, once a minute.
+// A throw from main exits 1 at once, as an uncaught one did.
+if (invoked && invoked === selfPath()) main(process.argv.slice(2)).then((code) => { process.exitCode = code; }, (e) => { process.stderr.write(`${e?.stack ?? e}\n`); process.exit(1); });

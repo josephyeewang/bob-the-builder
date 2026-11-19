@@ -627,4 +627,7 @@ export async function main(argv, { log = (s) => process.stderr.write(`${s}\n`), 
 
 const me = (() => { try { return realpathSync.native(fileURLToPath(import.meta.url)); } catch { return null; } })();
 const invoked = (() => { try { return process.argv[1] ? realpathSync.native(process.argv[1]) : null; } catch { return null; } })();
-if (me && me === invoked) process.exitCode = await main(process.argv.slice(2));
+// No top-level await at the entry (M4 review-install-closure.test.mjs): a dynamic import that main() makes, whose
+// own imports reach back here, would wait on this file while this file waits on main(), and node would exit 13 with
+// nothing said. A throw from main exits 1 at once, as an uncaught one did.
+if (me && me === invoked) main(process.argv.slice(2)).then((code) => { process.exitCode = code; }, (e) => { process.stderr.write(`${e?.stack ?? e}\n`); process.exit(1); });
