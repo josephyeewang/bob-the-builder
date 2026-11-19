@@ -581,7 +581,8 @@ test('L980: a not-clean undo is refused, recorded not_clean by the gate, failed,
   await gatePass(w.ctx);
   const u = mergeOf(w, 'U-1');
   assert.equal(u.doc.state, 'refused');
-  assert.ok(u.doc.reasons.some((x) => x.startsWith('9:')), u.doc.reasons.join(' | '));
+  // Checked at the card's own head, so 9 says what the check found (#466 r3 Minor 2 keeps this wording here).
+  assert.ok(u.doc.reasons.includes('9: an undo card whose change is not an exact reverse'), u.doc.reasons.join(' | '));
   assert.ok(Array.isArray(u.doc.not_clean) && u.doc.not_clean.length, JSON.stringify(u.doc));
   const fid = REVERSE_FACT('U-1');
   assert.equal(fid, M11_REVERSE_FACT('U-1'), 'M11 reads the fact the gate writes');
@@ -1028,6 +1029,33 @@ test('L980 (#466 r2 m3): a clean undo waits on a stale test merge, then merges o
   w.ctx.gh = real;
   for (let i = 0; i < 3; i++) { w.env.clock.t += 60_000; await gatePass(w.ctx); }
   assert.equal(mergeOf(w, 'U-1').doc.state, 'merged', JSON.stringify(mergeOf(w, 'U-1').doc));
+});
+
+// #466 r3 Minor 1 (probe Y3) and Minor 2: a clean undo whose pull request was pushed past the card head, to a commit
+// with the very same files. The check says "yes" of that head, but a "yes" counts only of the card's change: the undo
+// is not merged (the review does not carry over, 5), nothing is recorded, the card is not failed, and 9 says the
+// reverse was not checked there instead of calling the content not an exact reverse.
+test('L980 (#466 r3 m1): a clean undo pushed past its card head with the same files is not merged; 9 says it was not checked there', async () => {
+  const w = world();
+  verifiedCard(w);
+  await gatePass(w.ctx);
+  const flagged = mergeOf(w).doc.merge_commit;
+  must(put(w.env.record, 'dispatcher', 'card', 'C-1', { state: 'closed' }), 'closed');
+  const h1 = verifiedCard(w, 'U-1', { pr: 9, files: { 'src/a.mjs': 'one' }, undo: flagged });
+  w.ctx.rules = fakeRules({ values: w.values, answers: { merge: allow('in lane') } });
+  const h2 = w.g.commit([h1], { 'src/a.mjs': 'one' }, { from: h1 });
+  w.g.openPull({ number: 9, head: h2, files: { 'src/a.mjs': 'one' } });
+  for (let i = 0; i < 3; i++) { w.env.clock.t += 60_000; await gatePass(w.ctx); }
+  const u = mergeOf(w, 'U-1');
+  assert.equal(u.doc.state, 'refused', JSON.stringify(u.doc));
+  const reasons = u.doc.reasons ?? [];
+  assert.ok(reasons.some((x) => x.startsWith('5:')), JSON.stringify(reasons));
+  assert.ok(reasons.includes('9: whether the undo is an exact reverse was not checked: the pull request is not the card\'s change, open and ready'), JSON.stringify(reasons));
+  assert.ok(!reasons.some((x) => /not an exact reverse$/.test(x)), JSON.stringify(reasons));
+  assert.equal(u.doc.not_clean, undefined, JSON.stringify(u.doc));
+  assert.equal(w.env.record.read('fact', REVERSE_FACT('U-1')), null);
+  assert.equal(w.env.record.read('card', 'U-1').doc.state, 'verified');
+  assert.equal(w.env.record.read('card', 'U-1').doc.head, h1);
 });
 
 // #466 r1 m4: refused under the lock (check), the card put back to verified is failed in that same pass. Main moves

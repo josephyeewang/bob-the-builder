@@ -1087,7 +1087,13 @@ test('#617 r1 m7: a read-back with a row skipped (or one more) refuses at run ti
   assert.deepEqual(fails(lone), []); assert.equal(lone.length, expectedRows(0));
 });
 
-test('#617 r1 M1: the real UDP client sends from a port in the range it is given (the builder\'s probes for v, vii and viii)', async () => {
+test('#617 r1 M1: the real UDP client sends from a port in the range it is given (the builder\'s probes for v, vii and viii)', async (t) => {
+  // L1299: on a Mac where the wall is placed, rule 3 refuses the listener's answer into the wall's range for any user but
+  // builder, so this real send can't come back here (the wall working); V2's live rows (v) run the same client as builder.
+  if (existsSync(ANCHOR_FILE)) { t.skip(`the builder wall is placed on this machine (${ANCHOR_FILE}); its live check runs this client`); return; }
+  // With no range the kernel picks the port: it is clear of the wall's range only where the ephemeral range is, as on a
+  // Mac the wall accepts (iv). A Linux runner's range (32768-60999) holds 47000-47999, so a pick there proves nothing.
+  const clear = ephemeralProblem({ run: (bin, args) => spawnSync(bin, args, { encoding: 'utf8' }) }) === null;
   const { createSocket } = await import('node:dgram');
   const s = createSocket('udp4'); const seen = [];
   s.on('message', (m, r) => { seen.push(r.port); s.send('pong', r.port, r.address); });
@@ -1097,6 +1103,6 @@ test('#617 r1 M1: the real UDP client sends from a port in the range it is given
     assert.equal(await run([String(PROBE_FIRST), String(WALL_RANGE.last)]), 'ok');
     assert.ok(seen[0] >= PROBE_FIRST && seen[0] <= WALL_RANGE.last, `sent from ${seen[0]}`);
     assert.equal(await run([]), 'ok');
-    assert.ok(seen[1] < WALL_RANGE.first || seen[1] > WALL_RANGE.last, `with no range, sent from ${seen[1]}`);
+    if (clear) assert.ok(seen[1] < WALL_RANGE.first || seen[1] > WALL_RANGE.last, `with no range, sent from ${seen[1]}`);
   } finally { s.close(); }
 });
