@@ -486,7 +486,7 @@ too, so it is a code change, never a config edit.
 
 ## Part 8 — the builder wall (R-0b-179; L1149, L1150, L1193, L1215; v2 2026-11-16)
 
-**What it changes.** As root, it turns on the Mac's packet filter (pf) with four rules of its own. Then the `builder`
+**What it changes.** As root, it turns on the Mac's packet filter (pf) with seven rules of its own. Then the `builder`
 user, which runs the worker runner and every worker session, can reach on this Mac only its **own** listeners in its own
 port range, **47000-47999** (one home: `shared/builder-ports.mjs`). It can't reach the owner's dev servers, databases or
 Claude ports, or root's local services, on 127.0.0.1, ::1 or the Mac's own address. Everyone else's traffic is untouched,
@@ -502,6 +502,13 @@ packets on the way in. That tag shape was **disproved on macOS 27.0.1 on 2026-11
 the way out of loopback is not seen on the way in, so v1 blocked nothing. pf does see who owns the socket (the sender on
 the way out, the receiver on the way in), so v2 tells the builder's traffic by port: on loopback the builder may only
 open connections into 47000-47999, and only the builder's own sockets may listen there.
+
+**Why the `user unknown` rules (L1308, 2026-11-19).** pf works out a packet's owner by looking up its socket. When that
+lookup finds nothing, pf calls the owner "unknown", and a rule that names the builder does not match, so the packet goes
+through: the wall failed open. Joe's runs on macOS 27.0.1 saw it about once in a hundred blocked probes while probes ran
+side by side (a builder TCP connect on 18 Nov, a builder UDP send on 19 Nov). Three more rules hold a packet with an unknown
+owner to the builder's limits. Measured cost: one packet in about 6.5 minutes of probing and the Mac's own traffic. Why the
+lookup misses is not known; re-measure after a macOS upgrade.
 
 **What it costs.**
 - Any server the builder runs that must be reached on loopback has to listen in 47000-47999. The builder can't reach even
