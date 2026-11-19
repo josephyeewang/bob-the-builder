@@ -11,10 +11,10 @@
 //   ## Messages       the messages still to answer or act on, one per line, or "none"; queued requests as "- queued: …"
 // Every heading must be there, once, in this order; a handoff missing one is refused, so a restart never starts from
 // half a note. A line still holding one of the template's placeholders (`<…>`) is refused too, so a template filled in
-// only in part never reads (L93 m-2). `handoffProblem` is the check for the Dispatcher's vet (L87 M-2). NOT WIRED YET:
-// M-2 (b) and the rest of (c) wait for #68 (M11 lead-restart handoffVet runs it before the old Lead is stopped, a note
-// that doesn't read is asked for again, and the old Lead is not stopped). The resume card is what the restarted Lead
-// reads first.
+// only in part never reads (L93 m-2). `handoffProblem` is the check the Dispatcher's vet runs (L87 M-2 b): M11
+// lead-restart handoffVet calls it in the outbox intake, before the handoff is applied, so a note that doesn't read is
+// asked for again and the old Lead is not stopped on it (lead-restart.test.mjs, R-0b-143 (c)). The resume card is what
+// the restarted Lead reads first; the Lead port that starts it on the handoff is R-0b-162 C's.
 
 import { HANDOFF_TEMPLATE } from './lead-wording.mjs';
 
@@ -70,8 +70,8 @@ export function readHandoff(text) {
 let PLACEHOLDERS = null;
 const placeholders = () => (PLACEHOLDERS ??= [...new Set(HANDOFF_TEMPLATE.match(/<[^<>\n]+>/g))]);
 
-/** The check for the Dispatcher's vet (M11 lead-restart handoffVet, once #68 is in): null when the note can be resumed
- *  from, else why not. */
+/** The check for the Dispatcher's vet (M11 lead-restart handoffVet): null when the note can be resumed from, else why
+ *  not. */
 export function handoffProblem(text) {
   const h = readHandoff(text);
   return h.ok ? null : h.reason;
