@@ -350,7 +350,7 @@ export async function stopPass({ rec, rules, now, clock = () => now, account, pr
       putFact(rec, STOP_FACT(s.id), pending, 'stop_wanted', was);
     }
     const limit = pending.reason === 'cancel' ? cancelMs : parkMs;
-    const late = now - Date.parse(pending.since) >= limit;
+    const late = now - pastTime(pending.since, now) >= limit; // readable and not ahead: restarted just above if not
     if (!atSafePoint({ role: roleOf(s), size: p?.size, activity: p?.activity }) && !late) { out.stopping.push([s.id, pending.reason]); continue; }
     due.push({ s, pending, late });
   }
@@ -372,7 +372,7 @@ export async function stopPass({ rec, rules, now, clock = () => now, account, pr
   for (const [i, { s, pending, late, stopped }] of done.entries()) {
     const saved = saves[i];
     // After a restart (its start time could not be read) the wait was longer than this count: the note says so (L339).
-    const counted = `${Math.round((after - Date.parse(pending.since)) / 60_000)} min${pending.restarted ? ' counted from a restart (its start time could not be read, so it waited longer)' : ''}`;
+    const counted = `${Math.round((after - pastTime(pending.since, after)) / 60_000)} min${pending.restarted ? ' counted from a restart (its start time could not be read, so it waited longer)' : ''}`;
     if (late) note(rec, `stop-note-${s.id}`, `session ${s.id} stopped without a safe point after ${counted} (${pending.reason})`, { now: after });
     // The move's answer is kept on the stop (L323): a park the Record refuses is tried again each pass (reparkStopped)
     // and told to the owner while it lasts (refused-writes.mjs), never dropped.
