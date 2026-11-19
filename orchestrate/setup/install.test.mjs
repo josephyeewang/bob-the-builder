@@ -1300,6 +1300,8 @@ const ROBOT_PLANTS = [
   ['the Record\'s owner is not orchestrate', (c) => ({ ...c, ownerUid: c.ownerUid + 1 }), /ownerUid must be/],
   ['the key folder is another one', (c) => ({ ...c, keyDir: `${c.keyDir}-other` }), /keyDir must be/],
   ['another install named', (c) => ({ ...c, installRoot: `${c.installRoot}-other` }), /installRoot must be/],
+  // L1311: the job's own reader (shared/job-config.mjs) requires installRoot; a config without it never started on the Mini (14-19 Nov).
+  ['no installRoot', (c) => { const { installRoot, ...rest } = c; return rest; }, /installRoot must be/],
   ['its lock is the Dispatcher\'s', (c) => ({ ...c, lockFile: c.dispatcherLockFile }), /a lock of its own/],
   ['a lock inside the install', (c) => ({ ...c, lockFile: `${c.installRoot}/robot.lock` }), /lockFile is inside the install/],
   ['a lock that is not a full path', (c) => ({ ...c, dispatcherLockFile: 'dispatcher.lock' }), /dispatcherLockFile must be a full path/],

@@ -131,7 +131,7 @@ function robotConfigCheck(io, cfg, seen) {
   const extra = Object.keys(c).filter((k) => !ROBOT_KEYS.includes(k));
   if (extra.length) why.push(`it has keys the robot job does not take: ${extra.slice(0, 5).join(', ')}`);
   const orch = readUser(io, ROBOT_USER);
-  const want = { wiring: join(root, ROBOT_WIRING), keyDir: io.at(keysPath(cfg)), ...('installRoot' in c ? { installRoot: root } : {}) };
+  const want = { wiring: join(root, ROBOT_WIRING), keyDir: io.at(keysPath(cfg)), installRoot: root };   // required, as the job's own reader requires it (L1311)
   for (const [k, v] of Object.entries(want)) if (c[k] !== v) why.push(`${k} must be ${v}`);
   if (!orch.exists) why.push(`the ${ROBOT_USER} user does not exist (run users-folders first)`);
   else if (c.ownerUid !== orch.uid) why.push(`ownerUid must be ${orch.uid}, ${ROBOT_USER}'s (the Record's owner; the job refuses to run as anyone else)`);
