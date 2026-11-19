@@ -141,7 +141,9 @@ export function copierPlist({ label, installRoot, node, configPath, copy, home, 
 
 // The job's entry: one run, one line, exit 1 on a refusal so launchd shows the last run failed.
 const isMain = (() => { try { return !!process.argv[1] && realFs.realpathSync(process.argv[1]) === realFs.realpathSync(fileURLToPath(import.meta.url)); } catch { return false; } })();
-if (isMain) {
+// No top-level await at the entry (M4 review-install-closure.test.mjs): the run is an async function, so a dynamic
+// import it makes never waits on this file's own loading. A throw exits 1 at once, as an uncaught one did.
+if (isMain) (async () => {
   // A read that hangs (a synced file macOS has not fetched yet) must not hold the job: launchd starts no next run while one
   // is going, so a stuck run would stop the copier for good. 20 s, well inside the 60 s beat; the stamp then ages and is told.
   setTimeout(() => { process.stderr.write(`${new Date().toISOString()} host.lock copier: gave up after 20 s (the synced host.lock did not answer)\n`); process.exit(1); }, 20_000).unref();
@@ -154,4 +156,4 @@ if (isMain) {
   const r = copyHostLock({ from: cfg.hostLockSource, to: cfg.hostLockPath });
   if (!r.ok) { process.stderr.write(`${new Date().toISOString()} host.lock copier: refused: ${r.why}\n`); process.exit(1); }
   if (r.did !== 'same' && r.did !== 'none') process.stdout.write(`${new Date().toISOString()} host.lock copier: ${r.did}\n`);
-}
+})().catch((e) => { process.stderr.write(`${e?.stack ?? e}\n`); process.exit(1); });
