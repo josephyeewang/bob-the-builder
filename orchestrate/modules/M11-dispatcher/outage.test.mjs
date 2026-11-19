@@ -306,3 +306,61 @@ test('L759: a refused write of the counted list is handed back, never silent', (
   assert.equal(r.countedRefused, 'planted refusal');
   assert.equal(outageStep({ rec, rules: R, board: [gone('S1', 'C-1'), live('S2', 'C-2')], now: T0, healthy: true, alert: fakeAlert() }).countedRefused, undefined);
 });
+
+// Review of L759 m1: a counted death is the session and its last write, not the session alone.
+test('L759: counted sessions that die again with new last writes are new deaths, and all together an outage', () => {
+  const rec = recWith([...cards(), ['fact', OUTAGE_FACT, { state: 'none', counted_dead: [key('S1'), key('S2'), key('S3')] }]]);
+  const board = [1, 2, 3, 4, 5, 6].map((n) => (n <= 3 ? gone(`S${n}`, `C-${n}`, 8) : live(`S${n}`, 'C-4')));
+  const alert = fakeAlert();
+  const r = outageStep({ rec, rules: R, board, now: T0, healthy: true, alert });
+  assert.equal(r.outage, true);
+  assert.match(alert.texts[0] ?? '', /3 of 6 running sessions stopped at once/);
+  assert.equal(rec.read('fact', OUTAGE_FACT).doc.running, 6, 'the running count is kept with the board');
+});
+
+// Review of L759 m2: the pass that would end an outage checks its own new deaths against the threshold.
+const openOutage = () => recWith([...cards(), ['fact', OUTAGE_FACT, { id: 'o-1', state: 'open', told_id: 'o-1', dead: [{ id: 'S1', card: 'C-1' }], healthy_passes: 1 }]]);
+test('L759: an outage about to end stays open when most running sessions die in that pass', () => {
+  for (const extra of [{ healthy: true }, { healthy: false, resume: true }]) {
+    const rec = openOutage();
+    const step = (board, a = { healthy: true }) => outageStep({ rec, rules: R, board, now: T0, alert: fakeAlert(), ...a });
+    // 4 of the 6 on the board die in the pass that would end it.
+    const r = step([gone('S2', 'C-2'), gone('S3', 'C-3'), gone('S4', 'C-4'), gone('S5', 'C-4'), live('S6', 'C-4'), live('S7', 'C-4')], extra);
+    assert.deepEqual(r, { outage: true, ended: false, restart: [], asks: [] }, JSON.stringify(extra));
+    const doc = rec.read('fact', OUTAGE_FACT).doc;
+    assert.equal(doc.state, 'open');
+    assert.equal(doc.healthy_passes, 0, 'the healthy count starts again');
+    assert.deepEqual(doc.dead.map((d) => d.id), ['S1', 'S2', 'S3', 'S4', 'S5'], 'the new deaths are held');
+    // Two healthy passes later it ends, and every held session is decided.
+    const two = [live('S6', 'C-4'), live('S7', 'C-4')];
+    assert.equal(step(two).outage, true);
+    const end = step(two);
+    assert.equal(end.ended, true);
+    assert.deepEqual(end.asks.sort(), ['C-1', 'C-2', 'C-3', 'C-4', 'C-4']);
+  }
+  // Below the threshold, the ending pass still ends, its one new death decided with the rest.
+  const r = outageStep({ rec: openOutage(), rules: R, board: [gone('S2', 'C-2'), live('S6', 'C-4'), live('S7', 'C-4')], now: T0, healthy: true, alert: fakeAlert() });
+  assert.equal(r.ended, true);
+  assert.deepEqual(r.asks.sort(), ['C-1', 'C-2']);
+});
+
+// Review of L759 m3: when the end is refused, the save of that pass's held deaths is checked too.
+test('L765: a refused end whose held deaths cannot be saved either says so in the refusal', () => {
+  const base = openOutage();
+  const no = { outage_end: 'planted refusal', outage_pass: 'pass refused' };
+  const rec = Object.create(base, { write: { value: (w) => (no[w.kind] ? { ok: false, reason: no[w.kind] } : base.write(w)) } });
+  const r = outageStep({ rec, rules: R, board: [gone('S3', 'C-3'), live('S2', 'C-2')], now: T0, healthy: true, alert: fakeAlert() });
+  assert.equal(r.outage, true);
+  assert.equal(r.endRefused, "planted refusal; this pass's new deaths could not be held either (pass refused)");
+});
+
+// Review of L759 c4: the counted list is compared as a set, so a session listed twice does not write every pass.
+test('L759: a dead session listed twice on the board writes the counted list once', () => {
+  const base = recWith(cards());
+  let writes = 0;
+  const rec = Object.create(base, { write: { value: (w) => { if (w.kind === 'outage_counted') writes += 1; return base.write(w); } } });
+  const board = [gone('S1', 'C-1'), gone('S1', 'C-1'), live('S2', 'C-2'), live('S3', 'C-3')];
+  for (const now of [T0, T0 + MIN, T0 + 2 * MIN]) outageStep({ rec, rules: R, board, now, healthy: true, alert: fakeAlert() });
+  assert.equal(writes, 1);
+  assert.deepEqual(rec.read('fact', OUTAGE_FACT).doc.counted_dead, [key('S1')]);
+});
