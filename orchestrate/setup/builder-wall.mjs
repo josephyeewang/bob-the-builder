@@ -20,6 +20,20 @@
 //   3. block return in quick on lo0 proto { tcp udp } from any to any port <R> user != <b>
 //        a socket in R that is not the builder's gets nothing: so the builder reaches only its own listeners in R
 //   4. block return out quick on ! lo0 proto { tcp udp } from any to self user <b>   (kept from v1)
+//   5. block return out quick on lo0 proto udp from any to any port <outside R> user unknown
+//   6. block return out quick on lo0 proto tcp from any to any port <outside R> user unknown flags S/SA
+//   7. block return out quick on ! lo0 proto { tcp udp } from any to self user unknown
+//        rules 1, 2 and 4 again for a packet whose owner pf could not find (L1308). pf learns a packet's user by looking
+//        up its socket; on a miss it leaves the uid at UID_MAX, and `user = <b>` does not match UID_MAX, so the packet
+//        passes: the `user` match fails OPEN (read in apple-oss-distributions/xnu bsd/net/pf.c pf_socket_lookup and
+//        pf_match_uid, 2026-11-19; seen on macOS 27.0.1: a builder TCP connect and a builder UDP ping, about one blocked
+//        probe in a hundred while probes ran side by side, 18 and 19 Nov). `user unknown` matches exactly that miss, so
+//        5-7 hold every user's missed packet to the builder's limits. They do NOT cover a lookup that finds the WRONG
+//        socket (Known limits, below), and the evidence (10 clean read-backs, the udp twin never matched) does not yet
+//        tell a miss from a wrong find for the UDP leak. Measured cost (19 Nov, ten read-backs plus the Mac's own
+//        traffic, about 6.5 minutes): one packet; any user's UDP answer to a port outside R whose lookup misses is lost. Rule 3 needs no twin: `user != <b>` already matches a miss, so it fails
+//        closed. Why the lookup misses is not known; this is a capability note about macOS 27.0.1's pf: re-measure on an
+//        upgrade (wall-check-loop in the lead's tools runs the read-back in a loop).
 // No rule names a family, so IPv4 and IPv6 (127.0.0.1 and ::1, 0.0.0.0 and ::) are covered alike. A connect to one of this
 // Mac's other addresses goes through lo0 too (the read-back probes one); rule 4 covers it off lo0 all the same. pf turns
 // `self` into the Mac's addresses when the rules load: after an address changes, `check` fails (safe) on rule 4 until
@@ -40,6 +54,11 @@
 //     over mDNSResponder's Unix socket, not loopback UDP.
 //
 // Known limits (#556 r1, L1158; said in Joe's run sheet too):
+//   - OPEN (#627 audit M1, L1310; from the xnu source, not yet tried live): pf finds an outgoing packet's socket by its
+//     source address and port, and when no socket matches exactly it takes one bound to 0.0.0.0 or :: on that port, of
+//     ANY user. A builder program that binds 0.0.0.0:5353 beside mDNSResponder (root, SO_REUSEPORT; the bind check lets
+//     another user share a wildcard port then) and sends UDP unconnected would be read as root's, so no `user` rule
+//     sees it, and the answer comes back in on 5353. No `user` rule can close that; a live test as the builder decides.
 //   - A packet sent by a setuid-root program the builder runs (traceroute's UDP probes, ping) comes from root's socket, so
 //     no `user` rule sees it as the builder's. Such a program sends probes; it holds no conversation the builder can use.
 //   - Unix sockets are outside pf (#617 r1 m5, an open item for the lead): a builder process outside Claude Code's
@@ -179,6 +198,13 @@ export const RULES = Object.freeze([
     words: (u, p) => `block return in quick on lo0 proto ${p} from any to any port ${R} user != ${u}` },
   { id: 'self', protos: PROTOS, text: (u) => `block return out quick on ! lo0 proto { tcp udp } from any to self user ${u}`,
     words: (u, p) => `block return out quick on ! lo0 proto ${p} from any to ADDRESS user = ${u}`, anyAddress: true },   // ADDRESS: one of ownAddresses()
+  // L1308: the same three for a packet whose socket pf could not find (`user unknown`; the header's rules 5-7).
+  { id: 'udp-out-unknown', protos: ['udp'], text: () => `block return out quick on lo0 proto udp from any to any port ${NOT_R} user unknown`,
+    words: (u, p) => `block return out quick on lo0 proto ${p} from any to any port ${NOT_R} user = unknown` },
+  { id: 'tcp-out-unknown', protos: ['tcp'], text: () => `block return out quick on lo0 proto tcp from any to any port ${NOT_R} user unknown flags S/SA`,
+    words: (u, p) => `block return out quick on lo0 proto ${p} from any to any port ${NOT_R} user = unknown flags S/SA` },
+  { id: 'self-unknown', protos: PROTOS, text: () => 'block return out quick on ! lo0 proto { tcp udp } from any to self user unknown',
+    words: (u, p) => `block return out quick on ! lo0 proto ${p} from any to ADDRESS user = unknown`, anyAddress: true },
 ]);
 
 /** One loaded line → the lines it stands for, one per protocol (a `{ tcp udp }` pfctl did not split counts for both). */

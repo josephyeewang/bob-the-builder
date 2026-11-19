@@ -49,7 +49,7 @@ function fakePf(mac, { mainAnchor = true } = {}) {
   const printed = (text) => text.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#')).flatMap((l) => {
     const m = /\bproto \{ ([a-z ]+) \}/.exec(l);
     const each = m ? m[1].split(' ').map((p) => l.replace(m[0], `proto ${p}`)) : [l];
-    return each.map((x) => x.replace(/from any to any(?! port)/, 'all').replace(/\buser (!=\s*)?(\d+)/, (_, n, u) => `user ${n ? '!= ' : '= '}${u}`).replace(/\bport (\d+)(?=\s|$)(?! <>| ><|:)/g, 'port = $1').replace(/\s+/g, ' '));
+    return each.map((x) => x.replace(/from any to any(?! port)/, 'all').replace(/\buser (!=\s*)?(\d+|unknown)/, (_, n, u) => `user ${n ? '!= ' : '= '}${u}`).replace(/\bport (\d+)(?=\s|$)(?! <>| ><|:)/g, 'port = $1').replace(/\s+/g, ' '));
   });
   pf.run = (args) => {
     pf.calls.push(args.join(' '));
@@ -96,7 +96,7 @@ function fakePf(mac, { mainAnchor = true } = {}) {
       action: l.split(' ')[0], dir: /\bin\b/.test(l) ? 'in' : 'out', quick: /\bquick\b/.test(l),
       lo0: /\bon lo0\b/.test(l) ? true : /\bon ! lo0\b/.test(l) ? false : null,
       proto: /\bproto (\w+)/.exec(l)?.[1] ?? null, fam: /\binet6\b/.test(l) ? 'IPv6' : /\binet\b/.test(l) ? 'IPv4' : null,
-      user: /\buser (=|!=) (\d+)/.exec(l), flags: /\bflags (\S+)/.exec(l)?.[1] ?? null,
+      user: /\buser (=|!=) (\d+|unknown)/.exec(l), flags: /\bflags (\S+)/.exec(l)?.[1] ?? null,
       sport: portTest(from?.[2]), dport: portTest(to?.[2]),
     };
   };
@@ -104,7 +104,9 @@ function fakePf(mac, { mainAnchor = true } = {}) {
   const flagsMeet = (want, has) => { const [a, b] = want.split('/'); return [...b].every((f) => a.includes(f) === has.includes(f)); };
   const matches = (r, k) => r.dir === k.dir && r.lo0 !== false && (!r.proto || r.proto === k.proto) && (!r.fam || r.fam === k.fam)
     && (!r.sport || r.sport(k.sport)) && (!r.dport || r.dport(k.dport)) && (!r.flags || (k.proto === 'tcp' && flagsMeet(r.flags, k.flags)))
-    && (!r.user || (r.user[1] === '=' ? k.uid === Number(r.user[2]) : k.uid !== Number(r.user[2])));
+    && (!r.user || userMeets(r.user, k.uid));
+  // pf's uid for a packet whose socket it could not find is UID_MAX, printed `unknown` (L1308): here `uid: undefined`.
+  const userMeets = ([, op, who], uid) => { const want = who === 'unknown' ? undefined : Number(who); return op === '=' ? uid === want : uid !== want; };
   /**
    * One packet on lo0, out from the sender's socket and in to the receiver's: 'pass', or where it was blocked ('out' or
    * 'in'). pf's last matching rule decides, a quick one at once; with none, the packet passes.
@@ -223,6 +225,10 @@ test('R-0b-179: place writes the rules for the builder\'s uid read from this Mac
     `block return out quick on lo0 proto tcp from any to any port 47000 <> 47999 user ${BUILDER_UID} flags S/SA`,
     `block return in quick on lo0 proto { tcp udp } from any to any port 47000:47999 user != ${BUILDER_UID}`,
     `block return out quick on ! lo0 proto { tcp udp } from any to self user ${BUILDER_UID}`,
+    // L1308: the same for a packet whose owner pf could not find.
+    'block return out quick on lo0 proto udp from any to any port 47000 <> 47999 user unknown',
+    'block return out quick on lo0 proto tcp from any to any port 47000 <> 47999 user unknown flags S/SA',
+    'block return out quick on ! lo0 proto { tcp udp } from any to self user unknown',
   ]);
   assert.deepEqual([WALL_RANGE.first, WALL_RANGE.last, EPHEMERAL.first, EPHEMERAL.last], [47000, 47999, 49152, 65535]);
   // The proxy's ports are the builder's, and no probe listener takes them.
@@ -386,6 +392,15 @@ test('R-0b-179 (wall v2): the owner reaches a builder listener in its ports and 
   for (const fam of ['IPv4', 'IPv6']) assert.equal(w.pf.packet({ proto: 'udp', fam, sport: 47100, dport: 50001, fromUid: BUILDER_UID, toUid: OWNER_UID }), 'out', `UDP from the range to an ephemeral port (${fam})`);
   assert.equal(w.pf.packet({ proto: 'udp', fam: 'IPv4', sport: 47100, dport: 47200, fromUid: BUILDER_UID, toUid: BUILDER_UID }), 'pass', 'builder UDP inside the range');
   assert.equal(w.pf.packet({ proto: 'udp', fam: 'IPv6', sport: 47100, dport: 5353, fromUid: BUILDER_UID, toUid: OWNER_UID }), 'out', 'UDP from the range to a fixed port below the ephemeral range');
+  // L1308: a packet whose owner pf could not find (uid unknown) is held to the builder's limits: it opens nothing outside
+  // the range (TCP SYN, any UDP), while an answer on a connection (SYN-ACK) and anything into the range still go.
+  const miss = (o) => w.pf.packet({ fam: 'IPv4', fromUid: undefined, toUid: OWNER_UID, ...o });
+  assert.equal(miss({ proto: 'tcp', sport: 50002, dport: 50001, flags: 'S' }), 'out', 'an unknown TCP SYN to an ephemeral port');
+  assert.equal(miss({ proto: 'udp', sport: 50002, dport: 54459 }), 'out', 'an unknown UDP send to an ephemeral port (the 19 Nov leak)');
+  assert.equal(miss({ proto: 'tcp', sport: 50001, dport: 50002, flags: 'SA' }), 'pass', 'an unknown TCP answer');
+  assert.equal(miss({ proto: 'tcp', sport: 50002, dport: 47100, flags: 'S', toUid: BUILDER_UID }), 'pass', 'an unknown SYN into the range, to a builder listener');
+  // The owner's own traffic is untouched when its socket is found.
+  assert.equal(w.pf.packet({ proto: 'tcp', fam: 'IPv4', fromUid: OWNER_UID, toUid: OWNER_UID, sport: 50002, dport: 50001, flags: 'S' }), 'pass');
 });
 
 test('R-0b-179: loadedRulesProblem reads macOS\'s print or a list not split, in any order, and refuses an extra or a missing word', () => {
@@ -397,6 +412,11 @@ test('R-0b-179: loadedRulesProblem reads macOS\'s print or a list not split, in 
     `block return in quick on lo0 proto tcp from any to any port 47000:47999 user != ${u}`, `block return in quick on lo0 proto udp from any to any port 47000:47999 user != ${u}`,
     `block return out quick on ! lo0 inet proto tcp from any to 192.168.1.20 user = ${u}`, `block return out quick on ! lo0 inet proto udp from any to 192.168.1.20 user = ${u}`,
     `block return out quick on ! lo0 inet6 proto tcp from any to fe80::1 user = ${u}`, `block return out quick on ! lo0 inet6 proto udp from any to fe80::1 user = ${u}`,
+    // L1308: the twins for a packet whose owner pf could not find, as pfctl printed them on Joe's Mac (19 Nov).
+    'block return out quick on lo0 proto udp from any to any port 47000 <> 47999 user = unknown',
+    'block return out quick on lo0 proto tcp from any to any port 47000 <> 47999 user = unknown flags S/SA',
+    'block return out quick on ! lo0 inet proto tcp from any to 192.168.1.20 user = unknown', 'block return out quick on ! lo0 inet proto udp from any to 192.168.1.20 user = unknown',
+    'block return out quick on ! lo0 inet6 proto tcp from any to fe80::1 user = unknown', 'block return out quick on ! lo0 inet6 proto udp from any to fe80::1 user = unknown',
   ];
   const mine = { selfAddresses: new Set(['127.0.0.1', '::1', 'fe80::1', '192.168.1.20']) };
   assert.equal(loadedRulesProblem(asPrinted.join('\n'), u, mine), null);
@@ -433,7 +453,12 @@ test('R-0b-179: loadedRulesProblem reads macOS\'s print or a list not split, in 
   assert.match(String(loadedRulesProblem(asPrinted.map((l) => l.replace('from any to', 'from ! any to')).join('\n'), u)), /not the wall's|missing/, '`from ! any` passed');
   assert.match(String(loadedRulesProblem(asPrinted.map((l) => l.replace('on ! lo0', '! on lo0')).join('\n'), u)), /not the wall's|missing/, '`! on lo0` passed');
   // Every rule is checked in exactly its protocols.
-  assert.deepEqual(RULES.map((r) => `${r.id}:${r.protos.join('+')}`), ['udp-out:udp', 'tcp-out:tcp', 'range-in:tcp+udp', 'self:tcp+udp']);
+  assert.deepEqual(RULES.map((r) => `${r.id}:${r.protos.join('+')}`), ['udp-out:udp', 'tcp-out:tcp', 'range-in:tcp+udp', 'self:tcp+udp', 'udp-out-unknown:udp', 'tcp-out-unknown:tcp', 'self-unknown:tcp+udp']);
+  // L1308: the wall without its `user unknown` twins (the rules before L1308) is not the wall: a lookup miss would pass.
+  assert.match(String(loadedRulesProblem(asPrinted.filter((l) => !/user = unknown/.test(l)).join('\n'), u, mine)), /missing the rules udp-out-unknown \(udp\), tcp-out-unknown \(tcp\), self-unknown \(tcp\), self-unknown \(udp\)/);
+  // A twin is not its builder rule: the uid for `unknown` refuses, and so does `!= unknown`.
+  assert.match(String(loadedRulesProblem(asPrinted.map((l) => l.replace('user = unknown', `user = ${u}`)).join('\n'), u, mine)), /missing the rules? udp-out-unknown/);
+  assert.match(String(loadedRulesProblem(asPrinted.map((l) => l.replace('user = unknown', 'user != unknown')).join('\n'), u, mine)), /missing|not the wall's/);
   // #617 r1 M1: the removed UDP answer rule is refused if it is ever loaded again.
   assert.match(String(loadedRulesProblem([`pass out quick on lo0 proto udp from any port 47000:47999 to any port 49152:65535 user = ${u} no state`, ...asPrinted].join('\n'), u, mine)), /a line that is not the wall's: pass out/);
 });
@@ -450,6 +475,11 @@ test('wall self table: pf\'s automatic table for `self` counts only once read an
     `block return out quick on ! lo0 inet proto tcp from any to 127.0.0.1 user = ${u}`, `block return out quick on ! lo0 inet proto udp from any to 127.0.0.1 user = ${u}`,
     `block return out quick on ! lo0 inet proto tcp from any to 192.168.1.20 user = ${u}`, `block return out quick on ! lo0 inet proto udp from any to 192.168.1.20 user = ${u}`,
     seen, seen.replace('proto tcp', 'proto udp'),
+    // L1308: the `user unknown` twins, their self rule through the same table.
+    'block return out quick on lo0 proto udp from any to any port 47000 <> 47999 user = unknown',
+    'block return out quick on lo0 proto tcp from any to any port 47000 <> 47999 user = unknown flags S/SA',
+    'block return out quick on ! lo0 inet proto tcp from any to 127.0.0.1 user = unknown', 'block return out quick on ! lo0 inet proto udp from any to 127.0.0.1 user = unknown',
+    seen.replace(`user = ${u}`, 'user = unknown'), seen.replace('proto tcp', 'proto udp').replace(`user = ${u}`, 'user = unknown'),
   ];
   const text = base.join('\n');
   const own = new Set(['127.0.0.1', '::1', 'fe80::1', '192.168.1.20', 'fe80::aede:48ff:fe00:1122', '2001:db8::7']);
@@ -482,8 +512,8 @@ test('wall self table: pf\'s automatic table for `self` counts only once read an
   const elsewhere = [...base, `block return in quick on lo0 proto tcp from any to ${T} port 47000:47999 user != ${u}`].join('\n');
   assert.match(String(loadedRulesProblem(elsewhere, u, { selfAddresses: own, tables: good })), /a line that is not the wall's: block return in quick on lo0 proto tcp from any to <__automatic/);
   assert.match(String(loadedRulesProblem(base.map((l) => l.replace('from any to any port 47000:47999', `from any to ${T} port 47000:47999`)).join('\n'), u, { selfAddresses: own, tables: good })), /is missing the rules range-in \(tcp\), range-in \(udp\) exactly as written/);
-  // The table in the from part, not the to part, is another rule.
-  assert.match(String(loadedRulesProblem(text.replaceAll(`from any to ${T}`, `from ${T} to any`), u, { selfAddresses: own, tables: good })), /holds 2 lines that are not the wall's: block return out quick on ! lo0 inet6 proto tcp from <__automatic_c097741b_0> to any user = 603$/);
+  // The table in the from part, not the to part, is another rule (4 lines: the builder's two and, L1308, their unknown twins).
+  assert.match(String(loadedRulesProblem(text.replaceAll(`from any to ${T}`, `from ${T} to any`), u, { selfAddresses: own, tables: good })), /holds 4 lines that are not the wall's: block return out quick on ! lo0 inet6 proto tcp from <__automatic_c097741b_0> to any user = 603$/);
   // tableProblem on its own.
   assert.equal(tableProblem(T, good.get(T), own), null);
   assert.match(String(tableProblem(T, { text: '\n  \n' }, own)), /is empty/);
