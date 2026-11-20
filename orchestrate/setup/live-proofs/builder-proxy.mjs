@@ -47,21 +47,25 @@ export function main(argv, { print = (t) => process.stdout.write(t), deps = REAL
   if (deps.euid() !== 0) { print(`NOT DONE: run with sudo (curl runs as the ${BUILDER} user); nothing was run\n`); return 1; }
   let lists; try { lists = listsFrom(JSON.parse(deps.read(config))); } catch (e) { print(`NOT DONE: ${config} can't be read (${e.code ?? e.message}); nothing was run\n`); return 1; }
   const allowed = arg('--allowed') ?? lists.session[0];
+  // L1318: a product whose rules allow no outside site has nothing to reach, so (a) has nothing to try; (b) still runs.
+  const none = !arg('--allowed') && !lists.session.length;
   const denied = arg('--denied') ?? 'example.com';
-  if (!allowed || !lists.session.includes(allowed)) { print(`NOT DONE: ${allowed ? `${allowed} is not on the session list` : 'the session list is empty'} (${lists.session.join(', ') || 'none'}); nothing was run\n`); return 1; }
+  if (!none && (!allowed || !lists.session.includes(allowed))) { print(`NOT DONE: ${allowed ? `${allowed} is not on the session list` : 'the session list is empty'} (${lists.session.join(', ') || 'none'}); nothing was run\n`); return 1; }
   if (!HOST.test(denied) || lists.session.includes(denied) || lists.install.includes(denied)) { print(`NOT DONE: --denied ${denied} must be a host name on no list; nothing was run\n`); return 1; }
   const p = PROXY_PORTS.session;
-  const cases = [
+  const cases = (none ? [] : [
     ['a', 'allowed-http', `${allowed} through the proxy (HTTP CONNECT)`, `http://127.0.0.1:${p}`, `https://${allowed}/`],
     ['a', 'allowed-socks', `${allowed} through the proxy (SOCKS5)`, `socks5h://[::1]:${p}`, `https://${allowed}/`],
+  ]).concat([
     ['b', 'denied-http', `${denied} refused by the proxy (HTTP CONNECT)`, `http://127.0.0.1:${p}`, `https://${denied}/`],
     ['b', 'denied-socks', `${denied} refused by the proxy (SOCKS5)`, `socks5h://127.0.0.1:${p}`, `https://${denied}/`],
-  ];
+  ]);
   const lines = cases.map(([id, kind, what, proxy, url]) => ({ id, what, ...judge(kind, asBuilder(deps.run, proxy, url)) }));
+  if (none) lines.unshift({ id: 'a', what: 'an allowed site through the proxy', result: 'NOT APPLICABLE', why: 'the session list is empty: no product\'s rules allow an outside site, so there is nothing to reach' });
   lines.push({ id: 'c', what: 'going direct from a builder session\'s sandboxed Bash fails', result: 'NOT DONE', why: 'needs a claude session signed in as the builder (PR #616\'s builder sign-in); not faked' });
   for (const l of lines) print(`${l.result.padEnd(9)} (${l.id}) ${l.what}: ${l.why}\n`);
-  const pass = lines.every((l) => l.result === 'PASS');
-  print(pass ? 'PASS\n' : `NOT DONE: ${lines.filter((l) => l.result !== 'PASS').map((l) => `(${l.id}) ${l.result}`).join(', ')}\n`);
+  const pass = lines.every((l) => l.result === 'PASS' || l.result === 'NOT APPLICABLE');
+  print(pass ? 'PASS\n' : `NOT DONE: ${lines.filter((l) => l.result !== 'PASS' && l.result !== 'NOT APPLICABLE').map((l) => `(${l.id}) ${l.result}`).join(', ')}\n`);
   return pass ? 0 : 1;
 }
 

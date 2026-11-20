@@ -19,7 +19,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { readRunnerConfig } from '../../wiring/runner-main.mjs';
+import { checkRunnerConfig, readRunnerConfig } from '../../wiring/runner-main.mjs';
 import { sessionEnv, workerAccount } from '../../wiring/runner-ports.mjs';
 import { holdsSecret } from '../../shared/secret-guard.mjs';
 import { configUnreadable, notOwnUser, pinProblem } from './before-run.mjs';
@@ -40,7 +40,8 @@ export function judge(r) {
 }
 
 const REAL = {
-  readConfig: (f) => readRunnerConfig(f, realpathSync(fileURLToPath(new URL('../../wiring/runner-main.mjs', import.meta.url)))),
+  // Checked, as runlocked reads it (L1318): the check is what adds ownDir, the runner's own folder.
+  readConfig: (f) => checkRunnerConfig(readRunnerConfig(f, realpathSync(fileURLToPath(new URL('../../wiring/runner-main.mjs', import.meta.url))))),
   uid: () => process.getuid(),
   ownerOf: (p) => lstatSync(p).uid,
   version: (bin) => /^(\d+\.\d+\.\d+)/.exec(execFileSync(bin, ['--version'], { encoding: 'utf8', timeout: 30_000 }).trim())?.[1] ?? null,
