@@ -15,7 +15,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { runTick, ACCOUNT_FACT } from '../modules/M11-dispatcher/tick.mjs';
+import { runTick, ACCOUNT_FACT, LAST_PASS_FACT } from '../modules/M11-dispatcher/tick.mjs';
 import { USAGE_FACT, BAND_FACT } from '../modules/M11-dispatcher/usage.mjs';
 import { UNKNOWN_FACT } from '../modules/M11-dispatcher/pass.mjs';
 import { KEYS as K } from '../modules/M11-dispatcher/keys.mjs';
@@ -117,6 +117,20 @@ test('#637 r2 m2: a fresh green reading but a sign-in that is not confirmed: no 
   await many.at(0);
   assert.equal(many.launched.length, VALUES[K.amberEditingPerProduct], `Tier-2 starts run, held to the amber cap: ${many.launched.join(', ')}`);
   assert.match(many.rec.read('fact', BAND_FACT).doc.reason, /sign-in of account acct-a is not confirmed/);
+});
+
+test('L1330: the last pass names each card it held and why, so a new reason under a cause already told is still seen', async () => {
+  const w = mac([account(), card('T1', { tier: 1 })]);
+  await w.at(0);
+  const held = w.rec.read('fact', LAST_PASS_FACT).doc.held;
+  assert.equal(held.length, 1, JSON.stringify(held));
+  assert.equal(held[0].step, 'pass'); assert.equal(held[0].card, 'T1');
+  assert.match(held[0].why, /Tier 1 start needs a usage reading|usage is unknown: no Tier-1 start/);
+  // With a green reading the same card starts, and the pass holds nothing.
+  const g = mac([account(), green(), card('T1', { tier: 1 })]);
+  await g.at(0);
+  assert.deepEqual(g.launched, ['T1']);
+  assert.deepEqual(g.rec.read('fact', LAST_PASS_FACT).doc.held, []);
 });
 
 test('no usage reading: Joe is told once, not every tick, and once more a day later while it lasts', async () => {

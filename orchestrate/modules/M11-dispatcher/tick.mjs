@@ -30,7 +30,7 @@
 //   9. cleanup   — last, because it is the slowest (R-0b-57).
 // Each step runs in its own try/catch: one failing step never stops the rest. A failing step alerts
 // Joe once per distinct error and again each day it lasts (fact `step-error-<step>`), cleared when the step next succeeds. The
-// fact `last-full-pass` records when every step last ran and how each ended. Each step also has a
+// fact `last-full-pass` records when every step last ran and how each ended, and which cards it held and why. Each step also has a
 // deadline (STEP_DEADLINE_MS, or the port `stepDeadlineMs`): a port that never answers fails its
 // step, and the later steps still run (audit 0b-6 r3 MAT-2). `main.mjs` bounds the whole run.
 // A rules value missing in any step (the main pass, or the start gate asked by the limits, the merges
@@ -148,6 +148,21 @@ export async function approvalsStep({ rec, rules, now, alert, approvals, product
 }
 export { ACCOUNT_FACT };
 export const LAST_PASS_FACT = 'last-full-pass';
+// The cards this pass did not start, and why, as of this pass (L1330). A held start is told once per cause per day, and a
+// new reason under the same cause is not told again (pass.mjs holdAlert), so without this the reason a card waits today
+// can be invisible until tomorrow. At most HELD_MAX cards, each reason cut to HELD_TEXT_MAX characters.
+export const HELD_MAX = 20;
+export const HELD_TEXT_MAX = 300;
+export function heldNow(res) {
+  const out = [];
+  for (const step of ['undo-starts', 'pass']) {
+    for (const x of res[step]?.result?.refused ?? []) {
+      const [card, why] = Array.isArray(x) ? x : [null, x];
+      out.push({ step, card: typeof card === 'string' ? card : null, why: String(why ?? '').slice(0, HELD_TEXT_MAX) });
+    }
+  }
+  return out.slice(0, HELD_MAX);
+}
 export const STEP_ERROR_FACT = (step) => `step-error-${step}`;
 export const STEP_DEADLINE_MS = 120_000;
 const iso = (ms) => new Date(ms).toISOString();
@@ -441,7 +456,7 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
     frontDoorAlive: p.frontDoorAlive, strayFrontDoor: p.strayFrontDoor, lastHandoff: p.frontDoorHandoff, alert }));
   await run('cleanup', () => cleanupPass({ rec, rules, now, ...p.cleanup, alert }));
 
-  putFact(rec, LAST_PASS_FACT, { at: iso(now), started_at: iso(startedAt), steps: Object.fromEntries(STEPS.map((s) => [s, res[s]?.ok ? 'ok' : 'failed'])) }, 'full_pass', rec.read('fact', LAST_PASS_FACT)?.doc);
+  putFact(rec, LAST_PASS_FACT, { at: iso(now), started_at: iso(startedAt), steps: Object.fromEntries(STEPS.map((s) => [s, res[s]?.ok ? 'ok' : 'failed'])), held: heldNow(res) }, 'full_pass', rec.read('fact', LAST_PASS_FACT)?.doc);
   // Refused writes (L323): told after every step, before this pass's own alerts go out.
   // watchWrites' whole answer, its refusals and the writes it saw taken, so neither can be left out alone.
   let refused = [];
