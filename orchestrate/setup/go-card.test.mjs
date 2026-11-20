@@ -397,7 +397,7 @@ test('who may run it: the Dispatcher\'s user, started through sudo by the owner'
   assert.match(whoProblem({ ...ok, sudoUid: '502' }), /by user 502, not by the owner/);
   assert.match(whoProblem({ ...ok, sudoUid: '501x' }), /not started through sudo/);
   assert.match(whoProblem({ ...ok, dispatcherUid: undefined }), /could not be found/);
-  assert.match(whoProblem({ ...ok, ownerUid: 300 }), /ownerUid/);
+  assert.match(whoProblem({ ...ok, ownerUid: 300 }), /hostLockUid/);
 });
 
 test('main: a wrong number of arguments, or a config that is not the installed copy\'s, refuses with one line', async () => {
@@ -437,4 +437,16 @@ test('L1323: go-card reads the Dispatcher\'s config against the Dispatcher\'s ow
   const root = dirname(dirname(fileURLToPath(import.meta.url)));
   assert.equal(copyModuleProblem(relative(root, DISPATCHER_SELF)), null);
   assert.match(DISPATCHER_SELF, /modules\/M11-dispatcher\/main\.mjs$/);
+});
+
+test('L1324: the owner is read from hostLockUid; the config\'s ownerUid is the Record\'s owner, the Dispatcher\'s user', async () => {
+  const { whoFromConfig } = await import('./go-card.mjs');
+  // The shape dispatcher-setup writes: ownerUid = orchestrate's uid, hostLockUid = the person's.
+  const config = { ownerUid: 600, hostLockUid: 501 };
+  const ok = { uid: 600, sudoUid: '501', dispatcherUid: 600, config };
+  assert.equal(whoFromConfig(ok), null);
+  assert.match(whoFromConfig({ ...ok, sudoUid: '600' }), /hostLockUid is not the owner|not by the owner/);
+  assert.match(whoFromConfig({ ...ok, sudoUid: '502' }), /by user 502, not by the owner/);
+  assert.match(whoFromConfig({ ...ok, config: { ownerUid: 501, hostLockUid: 501 } }), /Record's owner\) is not the Dispatcher's user/);
+  assert.match(whoFromConfig({ ...ok, config: { ownerUid: 600 } }), /hostLockUid is not the owner's user/);
 });
