@@ -448,17 +448,43 @@ test('R-0b-162 A: every port not wired yet refuses when called, and the alert po
   assert.deepEqual(logs, ['dispatcher: alert not sent (no channel to Joe is wired yet): hello']);
 });
 
-test('R-0b-162 A: the wired rules know the role files, and refuse a start that needs the running count', async () => {
+test('R-0b-162 A: the wired rules know the role files, and refuse an editing start whose running count can\'t be read (L1325)', async () => {
   const w = world();
   w.approve([blobOf(SAMPLE)]);
   const { rec, rules } = await wire(w.config, { log: () => {}, fetchFn: fakeGitHubFetch({ ...w.fake, text: SAMPLE }) });
   // An active product, as approvals would write it (the engine reads a product with no document as paused).
   rec.write({ actor: 'approvals', entity: 'product', id: P, expectRev: 0, doc: { state: 'active' }, kind: 'product' });
   assert.equal(rules.may('start_session', { product: P, role: 'reviewer', tier: 2, editing: false }).decision, 'allow');
-  // An editing start counts the sessions running; the count is not wired, so the rules refuse it with that reason, never allow it on 0.
+  // An editing start counts the sessions running (L1325). This world has no worker runner's status, so the count can't
+  // be read: the rules refuse with that reason, never allow it on 0.
   const ed = rules.may('start_session', { product: P, role: 'worker', tier: 2, editing: true });
   assert.equal(ed.decision, 'deny');
-  assert.match(ed.reason, new RegExp(notWiredText('running').replace(/[()]/g, '\\$&')));
+  assert.match(ed.reason, /worker runner's folder/);
+  assert.doesNotMatch(ed.reason, new RegExp(notWiredText('running').replace(/[()]/g, '\\$&')));
+});
+
+test('L1325 m3: through the wired closure, an editing start is allowed below the cap and refused at it, counted from live sessions', async () => {
+  const w = world();
+  w.approve([blobOf(SAMPLE)]);
+  // The worker runner's status, stood in for through wire()'s sessionsIo (the runner's user owns the real file).
+  let live = [];
+  const c = checkConfig(w.config);
+  const st = (dir) => ({ uid: c.workerUid, mode: dir ? 0o755 : 0o644, nlink: 1, isDirectory: () => dir, isFile: () => !dir, isSymbolicLink: () => false });
+  const row = (id) => ({ id, product: P, kind: 'editing', card: `C-${id}`, lead: null, role: 'worker', pgid: 70, signin: 's', config_dir: '/cfg', bundle_files: [],
+    outbox: join(c.outboxRoot, P, 'worker', id), uid: c.workerUid, alive: true, ended: false, outbox_open: true, stop_requested: false,
+    size: { tokens: 9, compactions: 0, turnEnded: true, endedAt: null, openTools: [] }, activity: { state: 'active' } });
+  const sessionsIo = {
+    stat: () => st(true), realpath: (x) => x, reviewStatus: () => ({ running: [] }),
+    open: () => ({ st: st(false), text: JSON.stringify({ written_at: new Date(Date.now() - 1000).toISOString(), sessions: live, requests: Object.fromEntries(live.map((x) => [x.id, { state: 'started' }])) }) }),
+  };
+  const { rec, rules } = await wire(w.config, { log: () => {}, fetchFn: fakeGitHubFetch({ ...w.fake, text: SAMPLE }), sessionsIo });
+  rec.write({ actor: 'approvals', entity: 'product', id: P, expectRev: 0, doc: { state: 'active' }, kind: 'product' });
+  const start = () => rules.may('start_session', { product: P, role: 'worker', tier: 2, editing: true });
+  assert.equal(start().decision, 'allow', `no session running: ${start().reason}`);
+  live = ['S-1', 'S-2', 'S-3', 'S-4', 'S-5', 'S-6'].map(row);
+  const full = start();
+  assert.equal(full.decision, 'deny');
+  assert.match(full.reason, /editing cap reached/);
 });
 
 // Launch check 12's rules for the runners (L1001): each pass (one wire) with usable rules writes the snapshot again.
@@ -641,4 +667,43 @@ test('A1 (L615): through the real wiring, mainSha reads main with the rules read
   assert.equal(await ports.mainSha({ product: P }), w.fake.commit);
   await assert.rejects(ports.mainSha({ product: 'other' }), /can't read product other/);
   assert.equal(typeof (await ports.planView({ product: P })).isDir, 'function');
+});
+
+test('L1325: runningCount counts claimed or running session cards and live runner sessions, once per session', async () => {
+  const { runningCount } = await import('./dispatcher-wiring.mjs');
+  const card = (id, state, extra = {}) => ({ id, rev: 1, doc: { product: 'p', kind: 'ordinary', state, claim: state === 'ready' ? undefined : { kind: 'session', session_id: `s-${id}` }, ...extra } });
+  const rec = (cards) => ({ list: (e) => (e === 'card' ? cards : []) });
+  const none = () => [];
+  // A claim not yet launched counts; ready and done cards don't; a claim that is not a session doesn't.
+  assert.equal(runningCount({ product: 'p' }, { rec: rec([card('a', 'claimed'), card('b', 'ready'), card('c', 'done')]), sessions: none }), 1);
+  assert.equal(runningCount({ product: 'p' }, { rec: rec([card('a', 'claimed', { claim: { kind: 'tab' } })]), sessions: none }), 0);
+  // The runner's live session for the same card is the same slot; one whose card moved on still counts.
+  const live = [{ id: 's-a', product: 'p', kind: 'editing', card: 'a' }, { id: 's-x', product: 'p', kind: 'editing', card: 'x' }];
+  assert.equal(runningCount({ product: 'p' }, { rec: rec([card('a', 'running')]), sessions: () => live }), 2);
+  // Review sessions are not editing ones; another product's count only Mac-wide.
+  const mixed = [{ id: 'r1', product: 'p', kind: 'review', card: 'r' }, { id: 'q1', product: 'q', kind: 'editing', card: 'q' }];
+  assert.equal(runningCount({ product: 'p' }, { rec: rec([]), sessions: () => mixed }), 0);
+  assert.equal(runningCount({}, { rec: rec([card('a', 'claimed')]), sessions: () => mixed }), 2);
+  // Audit M1: card ids are per product, so another product's live C-7 and this product's claimed C-7 are two slots;
+  // and a session still live under card a while a is claimed again by a new session is two.
+  assert.equal(runningCount({}, { rec: rec([card('C-7', 'claimed')]), sessions: () => [{ id: 's-q', product: 'q', kind: 'editing', card: 'C-7' }] }), 2);
+  assert.equal(runningCount({ product: 'p' }, { rec: rec([card('a', 'claimed')]), sessions: () => [{ id: 's-old', product: 'p', kind: 'editing', card: 'a' }] }), 2);
+  // A session with no id still counts.
+  assert.equal(runningCount({ product: 'p' }, { rec: rec([]), sessions: () => [{ product: 'p', kind: 'editing' }, { product: 'p', kind: 'editing' }] }), 2);
+  // Undo counts exact reverses only.
+  assert.equal(runningCount({ product: 'p', undo: true }, { rec: rec([card('a', 'claimed'), card('u', 'claimed', { kind: 'exact_reverse' })]), sessions: () => [{ id: 's9', product: 'p', kind: 'undo', card: 'u2' }] }), 2);
+  // Anything unreadable throws (the engine's "count unknown"), never 0.
+  assert.throws(() => runningCount({ product: 'p' }, { rec: null, sessions: none }), /Record is not open/);
+  assert.throws(() => runningCount({ product: 'p' }, { rec: rec([]), sessions: () => { throw new Error('status unreadable'); } }), /status unreadable/);
+  assert.throws(() => runningCount({ product: 'p' }, { rec: rec([]), sessions: () => null }), /not a list/);
+});
+
+test('L1325: a claim written in this pass is counted by the next start\'s check', async () => {
+  const { runningCount } = await import('./dispatcher-wiring.mjs');
+  const cards = [];
+  const rec = { list: () => cards };
+  const n = () => runningCount({ product: 'p' }, { rec, sessions: () => [] });
+  assert.equal(n(), 0);
+  cards.push({ id: 'a', rev: 2, doc: { product: 'p', kind: 'ordinary', state: 'claimed', claim: { kind: 'session', session_id: 's' } } });
+  assert.equal(n(), 1);
 });

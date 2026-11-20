@@ -87,7 +87,8 @@ import { readOnlyClient, tokenFile } from '../modules/M6-merge-gate/watch-only.m
 import { queueAlert } from '../modules/M11-dispatcher/alerts.mjs';
 import { writeRulesSnapshot } from '../modules/M11-dispatcher/budget.mjs';
 import { notWiredText, refusing } from './not-wired.mjs';
-import { NOT_WIRED_WORKER, cleanupProblem, hostLockOwnerProblem, workerPorts, workerUidProblem } from './worker-ports.mjs';
+import { NOT_WIRED_WORKER, cleanupProblem, hostLockOwnerProblem, sessionsNow, workerPorts, workerUidProblem } from './worker-ports.mjs';
+import { RUNNER_KINDS } from './owner-status.mjs';
 import { NOT_WIRED_REVIEW, reviewPorts } from './review-ports.mjs';
 import { NOT_WIRED_PHONE, phonePorts } from './phone-ports.mjs';
 
@@ -179,7 +180,7 @@ export function logOnlyAlert(log) {
  * with product, recordRoot, ownerUid, productsFile, rulesStateDir and tokenFile; `who` names the job in its log lines.
  * → { rec, rules, gh (read-only), entry (the product's products.json entry), reader (M10's, refreshed once), products }
  */
-export async function recordAndRules(c, { who, log, fetchFn, now }) {
+export async function recordAndRules(c, { who, log, fetchFn, now, sessionsIo = {} }) {
   const products = readProducts(c.productsFile);
   const entry = products.find((p) => p.product === c.product);
   if (!entry) throw new Error(`config: ${c.productsFile} does not list the product ${c.product}`);
@@ -199,13 +200,13 @@ export async function recordAndRules(c, { who, log, fetchFn, now }) {
     rulesState: (p) => reader.state(p),
     // The engine reads the product's state from the Record's product document; none reads as paused (no starts).
     productState: (p) => rec?.read('product', p)?.doc ?? null,
-    // How many editing sessions run: the session list, not wired yet. A throw is "count unknown", which the engine refuses.
-    // TO-DO (L322, in the change that wires this): in M11 pass.mjs a Tier-1 card M10 refuses with its cap words
-    // ("editing cap reached for <p> (<n>)", "... on this Mac (<n>)") is refused at the rules.may step and never reaches
-    // capRefusal / tier1Waiting, so Tier-2 cards are not held behind it in amber. Make that step count it (capRefusal
-    // reading M10's words), with a test. Until this is wired every start is refused here as "count unknown", so no card
-    // gets the cap words.
-    running: refusing('running'),
+    // How many editing sessions run (L1325): runningCount, from the Record's claims and the worker runner's live sessions.
+    // A throw is "count unknown", which the engine refuses. STILL OWED (L322): in M11 pass.mjs a Tier-1 card M10 refuses
+    // with its cap words ("editing cap reached for <p> (<n>)", "... on this Mac (<n>)") is refused at the rules.may step
+    // and never reaches capRefusal / tier1Waiting, so in amber Tier-2 cards are not held behind it. It holds nothing
+    // unsafe (a refusal), and the first cards are Tier 2 on the test product.
+    // sessionsIo: a test's stand-in for the runner's files (sessionsNow's io); empty in real use.
+    running: (scope) => runningCount(scope, { rec, sessions: () => sessionsNow(c, rec, { now, io: sessionsIo }) }),
     rolesDir: ROLES_DIR,
     clock: now,
   });
@@ -219,6 +220,47 @@ export async function recordAndRules(c, { who, log, fetchFn, now }) {
   return { rec, rules, gh, entry, reader, products: products.map((p) => p.product) };
 }
 
+// A card whose claim names a session holds a slot from the claim, written before the launch, until it leaves these
+// states; so a second ready card of this product, in the same pass, already counts the first. (Another product's claim
+// is in its own Record: it counts once the runner lists its session; L1325 m1.)
+const HOLDS_SLOT = Object.freeze(['claimed', 'running']);
+
+/**
+ * M10's running port (L1325): editing sessions for `scope` ({ product }, { product, undo: true }, or {} for the whole
+ * Mac). The union, by session id, of (a) the Record's cards in claimed or running whose claim is a session and (b) the
+ * worker runner's live sessions of its kinds (editing, undo, script): a claim not yet launched counts, and so does a
+ * session still running after its card moved on. The claim's session_id is the id the runner lists (M11 launches with
+ * it), so one session counts once; card ids are per product and never key the count (audit M1). Review sessions are
+ * not editing ones, and a tab claim (Joe's own tab) is not a worker: both are left out, as in M11's gate. Script
+ * sessions count against the editing caps here, the safe side (L1325 m2). `undo` counts exact
+ * reverses only. Anything that can't be read throws, which the engine reads as "count unknown" and refuses: never 0
+ * by default. This Record is this Dispatcher's product only; the runner's list is the Mac's, so {} also counts other
+ * products' live sessions.
+ */
+export function runningCount(scope, { rec, sessions }) {
+  if (!rec || typeof rec.list !== 'function') throw new Error('the Record is not open');
+  const undo = scope?.undo === true;
+  const product = scope?.product;
+  if (product !== undefined && (typeof product !== 'string' || !product)) throw new Error('running: product must be a name');
+  const inScope = (p, isUndo) => (product === undefined || p === product) && (!undo || isUndo);
+  const held = new Set();
+  for (const { id, doc } of rec.list('card')) {
+    if (!HOLDS_SLOT.includes(doc?.state) || doc?.claim?.kind !== 'session') continue;
+    if (!inScope(doc.product, doc.kind === 'exact_reverse')) continue;
+    const sid = doc.claim.session_id;
+    held.add(typeof sid === 'string' && sid ? `session:${sid}` : `card:${JSON.stringify([doc.product, id])}`);
+  }
+  const live = sessions();
+  if (!Array.isArray(live)) throw new Error('the session list is not a list');
+  for (const s of live) {
+    if (!RUNNER_KINDS.includes(s?.kind)) continue;
+    if (!inScope(s.product, s.kind === 'undo')) continue;
+    if (typeof s.id === 'string' && s.id) held.add(`session:${s.id}`);
+    else held.add(Symbol('a session with no id'));
+  }
+  return held.size;
+}
+
 /**
  * The tick's ports: refusing ones for every name on a group's list, then whatever each group's port file answers. Each port
  * has one home, or the start stops: a port both answered and listed, on two lists, answered by two files, a port the tick
@@ -229,11 +271,11 @@ export async function recordAndRules(c, { who, log, fetchFn, now }) {
  * stands in for it (L674). `limitedSync` is given as the maker (sync-limit.mjs) and ctx holds the runner it makes with
  * `spawnSync` (node's; a test stands in for it): main.mjs can't import child_process (L1180).
  */
-export async function wire(config, { limitedSync, spawnSync = nodeSpawnSync, log = (s) => process.stderr.write(`${s}\n`), fetchFn = globalThis.fetch, now = () => Date.now(), groups = PORT_GROUPS, selfUid = process.getuid() } = {}) {
+export async function wire(config, { limitedSync, spawnSync = nodeSpawnSync, log = (s) => process.stderr.write(`${s}\n`), fetchFn = globalThis.fetch, now = () => Date.now(), groups = PORT_GROUPS, selfUid = process.getuid(), sessionsIo } = {}) {
   const c = checkConfig(config);
   // Before the Record opens: a state folder M2 can't use stops the start, so no product is turned on untold (L295 MAT-1).
   const stateDir = approvalsDir(c);
-  const { rec, rules, gh, entry, reader, products } = await recordAndRules(c, { who: 'dispatcher', log, fetchFn, now });
+  const { rec, rules, gh, entry, reader, products } = await recordAndRules(c, { who: 'dispatcher', log, fetchFn, now, sessionsIo });
   // Launch check 12's rules for the two runners (L1001, M11 budget.mjs): one launch is one pass, and every pass whose own
   // rules are usable (ok or last_good) writes the snapshot again, changed or not, so its written_at stays fresh. One that
   // could not reach GitHub leaves it to go stale; any other refusal removes it, so the runners refuse at once (PR-2 r2 M1).
