@@ -428,3 +428,13 @@ test('L1096: the readers of go records are the known checkers (a new one must sh
   walk(ROOT);
   assert.deepEqual(found.sort(), READERS);
 });
+
+test('L1323: go-card reads the Dispatcher\'s config against the Dispatcher\'s own script, a code file the copy check accepts', async () => {
+  const { DISPATCHER_SELF } = await import('./go-card.mjs');
+  const { copyModuleProblem } = await import('../modules/M4-workshop/launcher/install-check.mjs');
+  const { relative, dirname } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const root = dirname(dirname(fileURLToPath(import.meta.url)));
+  assert.equal(copyModuleProblem(relative(root, DISPATCHER_SELF)), null);
+  assert.match(DISPATCHER_SELF, /modules\/M11-dispatcher\/main\.mjs$/);
+});
