@@ -50,7 +50,7 @@ import { intakePass } from './outbox-intake.mjs';
 import { leadRestartStep, leadInFlight, handoffVet, tellLeadSkipped, HANDOFF_NAME } from './lead-restart.mjs';
 import { dispatcherPass, stopPass, undoStarts, rulesMissingAlert, holdAlert, refusalReport, readHostLock, hostCopyReason, hostCopyAlertText, HOST_COPY_CAUSE, HELD_BANDS, HOLD_REPEAT_MS, TOLD_BANDS } from './pass.mjs';
 import { startGate } from './gate.mjs';
-import { currentBands } from './usage.mjs';
+import { currentBands, ACCOUNT_FACT } from './usage.mjs';
 import { timeLimits, requestMerges } from './merges.mjs';
 import { undoStep } from './undo.mjs';
 import { phoneLinkStep } from './phone-link.mjs';
@@ -145,7 +145,7 @@ export async function approvalsStep({ rec, rules, now, alert, approvals, product
   }
   return results;
 }
-export const ACCOUNT_FACT = 'signed-in-account';
+export { ACCOUNT_FACT };
 export const LAST_PASS_FACT = 'last-full-pass';
 export const STEP_ERROR_FACT = (step) => `step-error-${step}`;
 export const STEP_DEADLINE_MS = 120_000;

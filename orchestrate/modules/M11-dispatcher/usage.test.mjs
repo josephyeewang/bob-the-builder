@@ -9,6 +9,21 @@ const at = (f, rules = R, account = 'acct-a') => currentBands({ rec: recWith([['
 // pace = (week / 100) / gone; at gone = 0.3 a pace p needs week = 30 × p (own building stays open below 31.5)
 const pace = (p, h5 = 10) => at(usageFact({ week: 30 * p, h5, gone: 0.3 }));
 
+test('L1329 audit M1: an account whose sign-in is not confirmed has unknown usage, so no Tier-1 start; Tier 2 still starts', () => {
+  const fresh = usageFact({ week: 10, h5: 5, gone: 0.3 });
+  const withWho = (signed_in) => recWith([['fact', USAGE_FACT('acct-a'), fresh], ['fact', 'signed-in-account', { account: 'acct-a', signed_in, reason: null, observed_at: new Date(T0).toISOString() }]]);
+  assert.equal(currentBands({ rec: withWho(true), rules: R, account: 'acct-a', now: T0 }).band, 'green', 'confirmed: the reading counts');
+  for (const s of [null, false]) {
+    const b = currentBands({ rec: withWho(s), rules: R, account: 'acct-a', now: T0 });
+    assert.equal(b.band, 'unknown', String(s));
+    assert.match(b.reason, /sign-in of account acct-a is not confirmed/);
+    assert.equal(mayStart({ b, kind: 'editing', tier: 1, redRuns: [] }).ok, false, 'no Tier-1 start');
+    assert.equal(mayStart({ b, kind: 'editing', tier: 1, risky: ['production_data'], redRuns: [] }).ok, false, 'no Tier-1 production start');
+    assert.equal(mayStart({ b, kind: 'review', tier: 1, redRuns: [] }).ok, false, 'no Tier-1 review start');
+    assert.equal(mayStart({ b, kind: 'editing', tier: 2, redRuns: [] }).ok, true, 'Tier 2 still starts');
+  }
+});
+
 test('M2 plants: the band edges', () => {
   const plant = at(usageFact({ week: 50, h5: 60, gone: 0.625 })); // pace 0.80, week 50, 5-hour 60
   assert.equal(plant.band, 'green');

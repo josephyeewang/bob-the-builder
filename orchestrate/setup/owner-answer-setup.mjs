@@ -165,7 +165,7 @@ export function answerRows(io, cfg, { now = Date.now() } = {}) {
   let a; try { a = JSON.parse(io.readText(file)); } catch { return fail(`${file} is not JSON`); }
   const bad = answerProblem(a, now); if (bad) return fail(`${bad}${/min old/.test(bad) ? ` (look in ~${cfg.owner}/Library/Logs/${LOG_NAME}.err.log)` : ''}`);
   const rows = [{ ok: true, what }];
-  if (a.signed_in !== true) rows.push({ ok: true, warn: true, what: 'the owner\'s answer says who is signed in', why: `${a.signed_in === false ? 'it says no one is signed in' : 'it says who is signed in is not known'}${a.usage_reason ? ` (${String(a.usage_reason).slice(0, 120)})` : ''}, so the Dispatcher starts nothing until it is` });
+  if (a.signed_in !== true) rows.push({ ok: true, warn: true, what: 'the owner\'s answer says who is signed in', why: `${a.signed_in === false ? 'it says no one is signed in' : 'it says who is signed in is not known'}${a.usage_reason ? ` (${String(a.usage_reason).slice(0, 120)})` : ''}${a.signed_in === false ? ', so the Dispatcher starts nothing until it is' : ', so usage is unknown and the Dispatcher starts no Tier-1 work until it is'}` });
   return rows;
 }
 

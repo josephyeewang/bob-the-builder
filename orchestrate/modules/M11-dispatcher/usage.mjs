@@ -22,6 +22,8 @@ const H5_MS = 5 * 60 * 60_000;
 export const BANDS = Object.freeze(['green', 'amber', 'red', 'unknown']);
 export const USAGE_FACT = (account) => `usage-${account}`;
 export const BAND_FACT = 'band-usage';
+// The Sensors' signed-in account fact (one name; tick.mjs re-exports it).
+export const ACCOUNT_FACT = 'signed-in-account';
 
 const pct = (x) => typeof x === 'number' && Number.isFinite(x) && x >= 0 && x <= 100;
 const time = (s) => (typeof s === 'string' && /^\d{4}-\d\d-\d\dT/.test(s) ? Date.parse(s) : NaN);
@@ -89,7 +91,13 @@ export function bands({ rules, reading, now }) {
 /** Reads the fact and works out the bands. */
 export function currentBands({ rec, rules, account, now }) {
   const staleMs = minutes(rules, KEYS.staleAfterMin);
-  const reading = readFact(account ? sensorsFact(rec, USAGE_FACT(account)) : null, { account, now, staleMs });
+  // L1329 audit M1: an account whose sign-in the Sensors could not confirm (kept with signed_in null) has unknown usage
+  // whatever its last reading says, so a reading made before the sign-in went unconfirmed never holds a green band. The
+  // Sensors' writer always writes signed_in beside an account (state-facts.mjs), so the fact says it in so many words.
+  const who = account ? sensorsFact(rec, ACCOUNT_FACT)?.doc : null;
+  const unconfirmed = Boolean(account) && who?.account === account && (who.signed_in === null || who.signed_in === false);
+  const reading = unconfirmed ? { ok: false, reason: `the sign-in of account ${account} is not confirmed` }
+    : readFact(account ? sensorsFact(rec, USAGE_FACT(account)) : null, { account, now, staleMs });
   return bands({ rules, reading, now });
 }
 
