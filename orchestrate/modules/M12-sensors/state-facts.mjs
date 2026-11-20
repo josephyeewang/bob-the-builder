@@ -76,14 +76,11 @@ export async function writeUsageFact(writer, readUsage, account, { now = () => n
   const open = (w) => known(w) && Date.parse(w.resets_at) > at;
   const doc = { kind: 'fact.usage', account, observed_at, source: r.source ?? null, h5: win(r.h5), week: win(r.week) };
   const handedOn = stored && timeOrNull(stored.observed_at) ? ['h5', 'week'].filter((k) => !known(r[k]) && open(stored[k])) : [];
-  // Always written (true or false), so every field M11 reads is stored (R-0b-168); true as the reading says, or, when the
-  // reading is wholly blank (a failed read: all four figures null) and the stored week-only reading is handed on, as the
-  // stored fact said (L1331 r1 M1: the hand-on of L757 covers a week-only reading too; it still ages from the stored
-  // time). A reading with any figure of its own, or a stored fact with a 5-hour figure, never lends the marker (r2 M1).
-  const blank = (w) => w == null || (w.used_pct == null && w.resets_at == null);
-  doc.h5_none = r.h5_none === true
-    || (blank(r.h5) && blank(r.week) && handedOn.includes('week') && !handedOn.includes('h5')
-      && stored?.h5_none === true && stored?.h5?.used_pct == null);
+  // Always written (true or false), so every field M11 reads is stored (R-0b-168). True only when this reading itself
+  // says so and no stored 5-hour window is handed on beside it. Never handed on (L1331 r3): a failed or refused read can
+  // hide a 5-hour row the report showed, so the marker comes only from a fresh, accepted reading, and one failed read
+  // leaves usage unknown for that pass (it holds Tier-1 starts back; the safe side).
+  doc.h5_none = r.h5_none === true && !handedOn.includes('h5');
   for (const k of handedOn) doc[k] = win(stored[k]);
   if (handedOn.length) {
     doc.observed_at = relayed(observed_at, stored.observed_at);

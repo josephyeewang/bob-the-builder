@@ -101,7 +101,7 @@ export async function sensorsPass({ rec, ports, now = () => new Date(), deadline
       const r = await run('usage-', async (a) => { const v = await read(a); return v && typeof v === 'object' ? v : NO_USAGE; }, { account: who });
       // Unknown when there is no 5-hour figure, unless the report listed no 5-hour row at all (L1331: the week decides).
       const u = valueOf(`usage-${who}`);
-      note(`usage-${who}`, r, u?.h5?.used_pct == null && u?.h5_none !== true);
+      note(`usage-${who}`, r, u?.h5?.used_pct == null && !(u?.h5_none === true && u?.week?.used_pct != null && u?.week?.resets_at != null));
       // A window handed on from the stored reading (no new figure for it) is kept, not known (L771).
       if (r?.ok === true && r.handedOn?.length) wrote[`usage-${who}`].kept = [...r.handedOn];
     },

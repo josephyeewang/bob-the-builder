@@ -213,8 +213,8 @@ export function sensorsPorts({ file, ownerUid, now = () => new Date(), staleMs =
     let d = null; try { d = stored(account); } catch { d = null; }
     if (!d || !isTime(d.observed_at) || (d.h5?.used_pct == null && d.week?.used_pct == null)) return null;
     const w = (x) => (x ? { used_pct: x.used_pct ?? null, resets_at: x.resets_at ?? null } : null);
-    return { source: typeof d.source === 'string' ? d.source : null, h5: w(d.h5), week: w(d.week), observed_at: d.observed_at,
-      ...(d.h5_none === true ? { h5_none: true } : {}) };
+    // Never the no-5-hour marker (L1331 r3): the reading refused here may itself have shown a 5-hour row.
+    return { source: typeof d.source === 'string' ? d.source : null, h5: w(d.h5), week: w(d.week), observed_at: d.observed_at };
   };
   const read = () => {
     const r = readOwnerAnswer({ file, ownerUid, now, staleMs, acl });

@@ -69,6 +69,7 @@ const window = (row, name) => {
 /** The stream-json output of `claude -p /usage` → the two windows. Anything it doesn't know is refused with why. */
 // The rate_limits keys seen on Claude Code's /usage report (20 Nov 2026, L1331 audit m1).
 const RL_KEYS = ['limits', 'extra_usage'];
+const REPORT_KEYS = ['session', 'rate_limits']; // usage_report's own keys then (r3 m2: a figure moved beside rate_limits)
 
 export function parseUsageReport(text) {
   if (typeof text !== 'string' || !text) return refuse('Claude Code gave no answer to /usage');
@@ -110,8 +111,8 @@ export function parseUsageReport(text) {
   if (!h5 && !top) return refuse('the /usage report has neither a session nor a weekly row');
   const out = { ok: true, h5, week: top?.w ?? null, week_from: top ? rowName(top.row) : null };
   // L1331: no session row in a clean report with a weekly row = the plan lists no 5-hour limit (not a 0% one). Only when
-  // rate_limits holds just the keys this reader knows: a 5-hour figure moved elsewhere in it must stay unknown, never none.
-  if (!h5 && top && Object.keys(rl).every((k) => RL_KEYS.includes(k))) out.h5_none = true;
+  // the report and its rate_limits hold just the keys this reader knows: a 5-hour figure moved elsewhere must stay unknown.
+  if (!h5 && top && Object.keys(rl).every((k) => RL_KEYS.includes(k)) && Object.keys(report).every((k) => REPORT_KEYS.includes(k))) out.h5_none = true;
   return out;
 }
 

@@ -252,7 +252,7 @@ test('R-0b-168 usage and account: M11 reads the real usage and signed-in facts a
   assert.equal(signedInAccount({ rec, rules, now: T0 + 16 * MIN }).account, null);
 });
 
-test('L1331 audit M1: a failed read after a week-only reading hands the week on with its no-5-hour marker, and ages as before', async () => {
+test('L1331 r3: a failed read after a week-only reading hands the week on but never the no-5-hour marker, so that pass is unknown', async () => {
   const rec = recWith();
   const W = makeFactWriter(rec);
   const weekOnly = (now) => ({ source: 'owner-answer', h5: null, week: { used_pct: 30, resets_at: iso(now + 3 * D) }, h5_none: true });
@@ -261,11 +261,19 @@ test('L1331 audit M1: a failed read after a week-only reading hands the week on 
   const kept = await writeUsageFact(W, async () => blank, ACCT, { now: clockAt(T0 + 5 * MIN) });
   assert.deepEqual(kept.handedOn, ['week']);
   const doc = rec.read('fact', USAGE_FACT(ACCT)).doc;
-  assert.equal(doc.h5_none, true);
+  assert.equal(doc.h5_none, false, 'a failed read may have hidden a 5-hour row');
   assert.equal(doc.observed_at, iso(T0), 'the handed-on reading keeps the earlier time');
-  const ok = readFact(rec.read('fact', USAGE_FACT(ACCT)), { account: ACCT, now: T0 + 6 * MIN, staleMs: 15 * MIN });
-  assert.equal(ok.ok, true, ok.reason);
-  assert.equal(readFact(rec.read('fact', USAGE_FACT(ACCT)), { account: ACCT, now: T0 + 16 * MIN, staleMs: 15 * MIN }).ok, false, 'stale on schedule');
+  const r = readFact(rec.read('fact', USAGE_FACT(ACCT)), { account: ACCT, now: T0 + 6 * MIN, staleMs: 15 * MIN });
+  assert.deepEqual([r.ok, r.reason], [false, 'the 5-hour figure is not a percent']);
+  // The next accepted week-only reading is known again at once.
+  await writeUsageFact(W, async () => weekOnly(T0 + 10 * MIN), ACCT, { now: clockAt(T0 + 10 * MIN) });
+  assert.equal(readFact(rec.read('fact', USAGE_FACT(ACCT)), { account: ACCT, now: T0 + 11 * MIN, staleMs: 15 * MIN }).ok, true);
+  // A reading that says none while a stored 5-hour window is still open gets no marker: the stored figure is checked.
+  const rec6 = recWith(); const W6 = makeFactWriter(rec6);
+  await writeUsageFact(W6, async () => usageReading(T0), ACCT, { now: clockAt(T0) });
+  await writeUsageFact(W6, async () => weekOnly(T0 + 5 * MIN), ACCT, { now: clockAt(T0 + 5 * MIN) });
+  const d6 = rec6.read('fact', USAGE_FACT(ACCT)).doc;
+  assert.deepEqual([d6.h5.used_pct, d6.h5_none], [20, false]);
   // A stored reading that listed a 5-hour row never lends the marker; a reading of its own that lacks it stays unknown.
   const rec2 = recWith(); const W2 = makeFactWriter(rec2);
   await writeUsageFact(W2, async () => usageReading(T0), ACCT, { now: clockAt(T0) });
