@@ -80,7 +80,11 @@ export async function writeUsageFact(writer, readUsage, account, { now = () => n
   // says so and no stored 5-hour window is handed on beside it. Never handed on (L1331 r3): a failed or refused read can
   // hide a 5-hour row the report showed, so the marker comes only from a fresh, accepted reading, and one failed read
   // leaves usage unknown for that pass (it holds Tier-1 starts back; the safe side).
-  doc.h5_none = r.h5_none === true && !handedOn.includes('h5');
+  // r4: and only beside a complete week of its own (nothing handed on in its place), with no 5-hour figure in it, and no
+  // 5-hour percent stored in the last 5 hours (one stored without a reset time is never handed on, so it is checked here).
+  const recentH5 = stored?.h5?.used_pct != null && timeOrNull(stored.observed_at) !== null
+    && at - Date.parse(stored.observed_at) < 5 * 3600e3;
+  doc.h5_none = r.h5_none === true && r.h5?.used_pct == null && known(r.week) && !handedOn.length && !recentH5;
   for (const k of handedOn) doc[k] = win(stored[k]);
   if (handedOn.length) {
     doc.observed_at = relayed(observed_at, stored.observed_at);

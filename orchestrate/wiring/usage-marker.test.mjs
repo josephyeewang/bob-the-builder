@@ -17,20 +17,20 @@ const UID = process.getuid();
 const noAcl = () => null;
 const WEEK = { used_pct: 30, resets_at: '2026-11-07T22:59:59.000Z' };
 const ans = (t, usage, extra = {}) => ({ v: 1, account: 'a', signed_in: true, observed_at: new Date(t).toISOString(), usage, ...extra });
-async function scenario(second) {
+async function scenario(second, first = ans(T0, { h5: null, week: WEEK, week_from: 'weekly_all', h5_none: true })) {
   const dir = tempDir('orch-repro-'); chmodSync(dir, 0o755); const file = join(dir, ANSWER_FILE);
   const rec = memoryRecord();
   const run = async (n) => { const q = sensorsPorts({ file, ownerUid: UID, now: () => new Date(T0 + n), acl: noAcl, stored: storedUsage(rec) });
-    await sensorsPass({ rec, ports: { whoIsSignedIn: q.whoIsSignedIn, readUsage: q.readUsage, probes: {} }, now: () => new Date(T0 + n) }); return q; };
+    q.pass = await sensorsPass({ rec, ports: { whoIsSignedIn: q.whoIsSignedIn, readUsage: q.readUsage, probes: {} }, now: () => new Date(T0 + n) }); return q; };
   try {
-    assert.equal(writeAnswer({ to: file, answer: ans(T0, { h5: null, week: WEEK, week_from: 'weekly_all', h5_none: true }) }).ok, true);
+    assert.equal(writeAnswer({ to: file, answer: first }).ok, true);
     await run(0);
     assert.equal(writeAnswer({ to: file, answer: second }).ok, true);
     const q = await run(60_000);
     const doc = rec.read('fact', USAGE_FACT('a'))?.doc;
     const r = readFact({ doc }, { account: 'a', now: T0 + 120_000, staleMs: 15 * 60_000 });
     const b = bands({ rules: rulesWith(), reading: r, now: T0 + 120_000 });
-    return { doc, why: q.lastReason(), band: b.band };
+    return { doc, why: q.lastReason(), band: b.band, noted: q.pass?.wrote?.[USAGE_FACT('a')]?.unknown };
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }
 test('L1331 r3: after a week-only reading, a refused or dropped report never bands green from the handed-on week', async () => {
@@ -44,4 +44,22 @@ test('L1331 r3: after a week-only reading, a refused or dropped report never ban
     assert.notEqual(out.doc.h5_none, true, name);
     assert.notEqual(out.band, 'green', `${name}: ${JSON.stringify(out)}`);
   }
+});
+
+test('L1331 r4: the marker needs a complete week of its own, and no 5-hour percent seen in the last 5 hours', async () => {
+  // M1: a clean report with a 96% week but no reset time hands the stored 30% week on; never green from it.
+  const noReset = await scenario(ans(T0 + 60_000, { h5: null, week: { used_pct: 96, resets_at: null }, week_from: 'weekly_all', h5_none: true }));
+  assert.equal(noReset.doc.h5_none, false); assert.notEqual(noReset.band, 'green', JSON.stringify(noReset));
+  assert.equal(noReset.noted, true, 'the pass summary says unknown too (r4 m2)');
+  // M2: a 97% 5-hour figure without a reset time, then a clean week-only report a minute later.
+  const h5NoReset = await scenario(ans(T0 + 60_000, { h5: null, week: WEEK, week_from: 'weekly_all', h5_none: true }),
+    ans(T0, { h5: { used_pct: 97, resets_at: null }, week: WEEK, week_from: 'weekly_all' }));
+  assert.equal(h5NoReset.doc.h5_none, false); assert.notEqual(h5NoReset.band, 'green', JSON.stringify(h5NoReset));
+  // A forged marker after a high 5-hour reading in its window: the stored figure is handed on and checked (red).
+  const forged = await scenario(ans(T0 + 60_000, { h5: null, week: WEEK, week_from: 'weekly_all', h5_none: true }),
+    ans(T0, { h5: { used_pct: 97, resets_at: '2026-11-05T14:00:00.000Z' }, week: WEEK, week_from: 'weekly_all' }));
+  assert.equal(forged.doc.h5_none, false); assert.equal(forged.band, 'red');
+  // And the live case still bands from the week: two clean week-only reports.
+  const live = await scenario(ans(T0 + 60_000, { h5: null, week: WEEK, week_from: 'weekly_all', h5_none: true }));
+  assert.equal(live.doc.h5_none, true); assert.equal(live.band, 'green'); assert.equal(live.noted, false);
 });

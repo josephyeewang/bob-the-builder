@@ -106,6 +106,9 @@ test('ownerAnswer: signed in → the account and both windows, with no email, to
   assert.equal(moved.usage.week.used_pct, 48);
   const known = await ownerAnswer(fakes({ usage: stream({ session: {}, rate_limits: { limits: [row('weekly_all', 48)], extra_usage: { is_enabled: false } } }) }));
   assert.equal(known.usage.h5_none, true);
+  // r4 m1: a key beside rate_limits may hold a moved 5-hour figure too.
+  const beside = await ownerAnswer(fakes({ usage: stream({ session: {}, rate_limits: { limits: [row('weekly_all', 48)] }, five_hour: { utilization: 99 } }) }));
+  assert.equal(beside.usage.h5_none, undefined);
 });
 
 test('ownerAnswer: signed out, not known, no account or a refused report each say so, and never guess', async () => {
