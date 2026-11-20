@@ -18,7 +18,7 @@
 //
 // WHAT IT DOES, in order, and refuses on any failure (I1: nothing is guessed):
 //   1. It runs as the Dispatcher's user (orchestrate), started through sudo by the owner: SUDO_UID is the config's
-//      ownerUid. A builder session runs as its own user and can't sudo; a session running as the owner's user is
+//      hostLockUid (L1324; its ownerUid is the Record's owner). A builder session runs as its own user and can't sudo; a session running as the owner's user is
 //      stopped by sudo's password (above), not by this check.
 //   2. The product's own rules mark it the test product (M9 TEST_PRODUCT_KEY, exactly true), and the card is ordinary,
 //      Tier 2, of that product.
@@ -73,10 +73,20 @@ export const CARD_FILE_FIELDS = Object.freeze(['id', ...[...WRITERS.card[OWNER_C
 const fail = (reason) => ({ ok: false, reason });
 const sha256 = (s) => createHash('sha256').update(s).digest('hex');
 
-/** Why this process may not give the go, or null. `sudoUid` is the SUDO_UID text sudo set. */
+/**
+ * whoProblem read from the Dispatcher's config (L1324). Its `ownerUid` is the Record's owner, the Dispatcher's own user
+ * (dispatcher-setup writes orchestrate's uid; M9's Store Writer runs only as it), not the person: the owner's Mac user is
+ * `hostLockUid` (host.lock's owner). A config whose Record is not the Dispatcher's user's is refused too.
+ */
+export function whoFromConfig({ uid, sudoUid, dispatcherUid, config }) {
+  if (config?.ownerUid !== dispatcherUid) return `the config's ownerUid (the Record's owner) is not the Dispatcher's user (${RUN_AS})`;
+  return whoProblem({ uid, sudoUid, dispatcherUid, ownerUid: config.hostLockUid });
+}
+
+/** Why this process may not give the go, or null. `sudoUid` is the SUDO_UID text sudo set; `ownerUid` the person's uid. */
 export function whoProblem({ uid, sudoUid, dispatcherUid, ownerUid }) {
   if (!Number.isSafeInteger(dispatcherUid) || dispatcherUid <= 0) return 'the Dispatcher\'s user (orchestrate) could not be found on this Mac';
-  if (!Number.isSafeInteger(ownerUid) || ownerUid <= 0 || ownerUid === dispatcherUid) return 'the config\'s ownerUid is not the owner\'s user';
+  if (!Number.isSafeInteger(ownerUid) || ownerUid <= 0 || ownerUid === dispatcherUid) return 'the config\'s hostLockUid is not the owner\'s user';
   if (uid !== dispatcherUid) return `run it as the Dispatcher's user: ${USAGE}`;
   if (typeof sudoUid !== 'string' || !/^[1-9][0-9]{0,9}$/.test(sudoUid)) return 'it was not started through sudo, so who ran it is unknown';
   if (Number(sudoUid) !== ownerUid) return `it was started through sudo by user ${sudoUid}, not by the owner`;
@@ -218,7 +228,7 @@ export async function main(argv, {
     const { realIo } = await import('./mac.mjs');
     const c = readConfig(argv[0], { self });
     checkConfig(c);
-    const who = whoProblem({ uid, sudoUid: env.SUDO_UID, dispatcherUid: readUser(realIo(), RUN_AS).uid, ownerUid: c.ownerUid });
+    const who = whoFromConfig({ uid, sudoUid: env.SUDO_UID, dispatcherUid: readUser(realIo(), RUN_AS).uid, config: c });
     if (who) throw new Error(who);
     let cardText;
     try { cardText = readFileSync(argv[1]); } catch (e) { throw new Error(`the card file can't be read (${e?.code ?? 'unknown error'})`); }
