@@ -1096,14 +1096,22 @@ test('#528 r2 m8 PLANTs: kindOn tells an error from "not there" and a link by wh
   assert.match(groupsProblem(sp, () => 'it names members of its own'), /in com\.apple\.sharepoint\.group\.1/);
   assert.match(groupsProblem({ status: 0, stdout: 'builder staff\n' }, () => null), /in staff/, 'only File Sharing names are asked about');
   const EV = 'ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000000C';
-  const mac = (rec, ev = `GeneratedUID: ${EV}\n`) => ({ run: (cmd, args) => ({ status: 0, stdout: args[2] === '/Groups/everyone' ? ev : rec, stderr: '' }) });
-  const real = `GeneratedUID: 1D0CA145-F7B7-464A-85AB-AD93FAC4035A\nNestedGroups: ${EV}\nPrimaryGroupID: 701\nRealName:\n Sam's Public Folder\nRecordName: com.apple.sharepoint.group.1\n`;
+  const mac = (rec, ev = `GeneratedUID: ${EV}\n`) => ({ run: (cmd, args) => {
+    assert.equal(cmd, '/usr/bin/dscl'); assert.deepEqual(args.slice(0, 2), ['.', '-read']);
+    assert.ok(['/Groups/everyone', '/Groups/com.apple.sharepoint.group.1'].includes(args[2]), args[2]);
+    return { status: 0, stdout: args[2] === '/Groups/everyone' ? ev : rec, stderr: '' };
+  } });
+  const real = `dsAttrTypeNative:IsHidden: 1\nAppleMetaNodeLocation: /Local/Default\nGeneratedUID: 1D0CA145-F7B7-464A-85AB-AD93FAC4035A\nNestedGroups: ${EV}\nPrimaryGroupID: 701\nRealName:\n Sam's Public Folder\nRecordName: com.apple.sharepoint.group.1\n`;
   assert.equal(sharepointWhy(mac(real), 'com.apple.sharepoint.group.1'), null, 'the record macOS makes for a shared Public folder');
   assert.match(sharepointWhy(mac(`${real}GroupMembership: sam\n`), 'com.apple.sharepoint.group.1'), /members of its own/);
   assert.match(sharepointWhy(mac(`${real}GroupMembers: 11112222-AAAA-BBBB-CCCC-DDDDEEEEFFFF\n`), 'com.apple.sharepoint.group.1'), /members of its own/);
   assert.match(sharepointWhy(mac(real.replace(`NestedGroups: ${EV}`, `NestedGroups: ${EV} 11112222-AAAA-BBBB-CCCC-DDDDEEEEFFFF`)), 'com.apple.sharepoint.group.1'), /other than everyone/);
-  assert.match(sharepointWhy(mac(real.replace(/NestedGroups.*\n/, '')), 'com.apple.sharepoint.group.1'), /other than everyone/);
+  assert.match(sharepointWhy(mac(real.replace(/NestedGroups.*\n/, '')), 'com.apple.sharepoint.group.1'), /one value on one line/, 'no NestedGroups at all');
   assert.match(sharepointWhy(mac(real, ''), 'com.apple.sharepoint.group.1'), /everyone group's id/);
+  assert.match(sharepointWhy(mac(real.replace(`NestedGroups: ${EV}`, `NestedGroups:\n ${EV}\n 11112222-AAAA-BBBB-CCCC-DDDDEEEEFFFF`)), 'com.apple.sharepoint.group.1'), /one value on one line/, 'a value split over lines');
+  assert.match(sharepointWhy(mac(`${real}dsAttrTypeNative:NestedGroups: ${EV}\n`), 'com.apple.sharepoint.group.1'), /one value on one line/, 'a repeated key');
+  assert.match(sharepointWhy(mac(`${real}GroupMembership:\nRecordType: x\n`), 'com.apple.sharepoint.group.1'), /members of its own/, 'an empty member list still names the key');
+  assert.match(groupsProblem(sp, () => 'it names members of its own'), /refused because it names members of its own/, 'the reason is said');
   assert.match(sharepointWhy({ run: (c, a) => (a[2] === '/Groups/everyone' ? { status: 0, stdout: `GeneratedUID: ${EV}\n` } : { status: 56, stdout: '', stderr: 'no' }) }, 'com.apple.sharepoint.group.1'), /could not be read/);
   assert.match(sharepointWhy(mac(real), 'admin'), /not a File Sharing group/);
 });

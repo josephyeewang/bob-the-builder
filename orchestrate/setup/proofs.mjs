@@ -233,7 +233,10 @@ export function sharepointWhy(io, name) {
   const r = io.run(DSCL, ['.', '-read', `/Groups/${name}`]);
   if (r.status !== 0) return 'its record could not be read';
   const a = parseDscl(r.stdout);
-  if (a.GroupMembership || a.GroupMembers) return 'it names members of its own';
+  if ('GroupMembership' in a || 'GroupMembers' in a) return 'it names members of its own';
+  // Exactly one NestedGroups line, its value on that line (parseDscl keeps only one line of a value split over several).
+  const lines = String(r.stdout).split('\n'); const at = lines.flatMap((l, i) => (/^(?:dsAttrType\w+:)?NestedGroups:/.test(l) ? [i] : []));
+  if (at.length !== 1 || /^\s/.test(lines[at[0] + 1] ?? '')) return 'its NestedGroups is not one value on one line';
   if (a.NestedGroups !== evId) return `it holds groups other than everyone (${String(a.NestedGroups ?? 'none').slice(0, 80)})`;
   return null;
 }
@@ -247,8 +250,10 @@ export function groupsProblem(r, sharedWhy = () => 'not looked at') {
   const names = String(r.stdout).trim().split(/\s+/).filter(Boolean);
   if (!names.length) return 'its group list came back empty, which no Mac user has; not known that none opens the owner\'s home';
   if (!names.includes(BUILDER)) return `its own group ${BUILDER} is not among its groups (${names.join(' ').slice(0, 200)})`;
-  const extra = names.filter((n) => n !== BUILDER && !BUILDER_GROUPS_ALLOWED.includes(n) && !(SHAREPOINT_GROUP.test(n) && sharedWhy(n) === null));
-  return extra.length ? `it is in ${extra.join(', ')}, which is not its own group or one macOS gives every local user; take it out (dseditgroup -o edit -d ${BUILDER} -t user <group>)` : null;
+  const why = (n) => (SHAREPOINT_GROUP.test(n) ? sharedWhy(n) : 'not allowed');
+  const extra = names.filter((n) => n !== BUILDER && !BUILDER_GROUPS_ALLOWED.includes(n) && why(n) !== null);
+  const notes = extra.filter((n) => SHAREPOINT_GROUP.test(n)).map((n) => `; ${n} is a File Sharing group, refused because ${why(n)}`).join('');
+  return extra.length ? `it is in ${extra.join(', ')}, which is not its own group or one macOS gives every local user; take it out (dseditgroup -o edit -d ${BUILDER} -t user <group>)${notes}` : null;
 }
 
 /** → [{ ok, what, why?, notTried? }]. Reads only. A failed control makes every later proof FAIL as well, since it would prove nothing. */
