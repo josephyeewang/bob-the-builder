@@ -275,6 +275,19 @@ test('L1331 audit M1: a failed read after a week-only reading hands the week on 
   await writeUsageFact(W3, async () => weekOnly(T0), ACCT, { now: clockAt(T0) });
   await writeUsageFact(W3, async () => ({ ...weekOnly(T0 + 5 * MIN), h5_none: undefined }), ACCT, { now: clockAt(T0 + 5 * MIN) });
   assert.equal(rec3.read('fact', USAGE_FACT(ACCT)).doc.h5_none, false, 'a fresh week without the marker is not given it');
+  // r2 M1: a partial reading (a 5-hour percent, no reset times) in between never lends the marker on to a later failed read.
+  const rec4 = recWith(); const W4 = makeFactWriter(rec4);
+  await writeUsageFact(W4, async () => weekOnly(T0), ACCT, { now: clockAt(T0) });
+  await writeUsageFact(W4, async () => ({ source: 'owner-answer', h5: { used_pct: 99, resets_at: null }, week: { used_pct: 30, resets_at: null } }), ACCT, { now: clockAt(T0 + 5 * MIN) });
+  assert.equal(rec4.read('fact', USAGE_FACT(ACCT)).doc.h5_none, false, 'no marker beside a 5-hour figure');
+  await writeUsageFact(W4, async () => blank, ACCT, { now: clockAt(T0 + 10 * MIN) });
+  assert.equal(rec4.read('fact', USAGE_FACT(ACCT)).doc.h5_none, false);
+  assert.equal(readFact(rec4.read('fact', USAGE_FACT(ACCT)), { account: ACCT, now: T0 + 11 * MIN, staleMs: 15 * MIN }).ok, false, 'unknown, not green');
+  // A week of its own without a reset time (e.g. b's unknown-key case) is not blank either: no marker from the store.
+  const rec5 = recWith(); const W5 = makeFactWriter(rec5);
+  await writeUsageFact(W5, async () => weekOnly(T0), ACCT, { now: clockAt(T0) });
+  await writeUsageFact(W5, async () => ({ source: 'owner-answer', h5: null, week: { used_pct: 30, resets_at: null } }), ACCT, { now: clockAt(T0 + 5 * MIN) });
+  assert.equal(rec5.read('fact', USAGE_FACT(ACCT)).doc.h5_none, false);
 });
 
 test('L97 m-2: an account is one of M4\'s account names; anything else is stored as nobody, and usage is not written', async () => {

@@ -77,10 +77,13 @@ export async function writeUsageFact(writer, readUsage, account, { now = () => n
   const doc = { kind: 'fact.usage', account, observed_at, source: r.source ?? null, h5: win(r.h5), week: win(r.week) };
   const handedOn = stored && timeOrNull(stored.observed_at) ? ['h5', 'week'].filter((k) => !known(r[k]) && open(stored[k])) : [];
   // Always written (true or false), so every field M11 reads is stored (R-0b-168); true as the reading says, or, when the
-  // reading has nothing at all (a failed read) and the stored week-only reading is handed on, as the stored fact said
-  // (L1331 audit M1: the hand-on of L757 covers a week-only reading too; it still ages from the stored time).
+  // reading is wholly blank (a failed read: all four figures null) and the stored week-only reading is handed on, as the
+  // stored fact said (L1331 r1 M1: the hand-on of L757 covers a week-only reading too; it still ages from the stored
+  // time). A reading with any figure of its own, or a stored fact with a 5-hour figure, never lends the marker (r2 M1).
+  const blank = (w) => w == null || (w.used_pct == null && w.resets_at == null);
   doc.h5_none = r.h5_none === true
-    || (!known(r.h5) && !known(r.week) && handedOn.includes('week') && !handedOn.includes('h5') && stored?.h5_none === true);
+    || (blank(r.h5) && blank(r.week) && handedOn.includes('week') && !handedOn.includes('h5')
+      && stored?.h5_none === true && stored?.h5?.used_pct == null);
   for (const k of handedOn) doc[k] = win(stored[k]);
   if (handedOn.length) {
     doc.observed_at = relayed(observed_at, stored.observed_at);
