@@ -107,6 +107,18 @@ test('no usage reading: nothing Tier-1 starts, Tier-2 work runs under the lower 
   assert.equal(band.unknown_since, iso(T0));
 });
 
+test('#637 r2 m2: a fresh green reading but a sign-in that is not confirmed: no Tier-1 start, Tier-2 runs under the amber cap', async () => {
+  const unsure = ['fact', ACCOUNT_FACT, { account: ACCT, signed_in: null, reason: 'who is signed in is not confirmed', observed_at: iso(T0) }];
+  const one = mac([unsure, green(), card('T1', { tier: 1 })]);
+  const r = await one.at(0);
+  assert.ok(notes(r).some((x) => /^T1: (rules: .*Tier 1 start needs a usage reading|usage is unknown: no Tier-1 start)/.test(x)), notes(r).join(" | "));
+  assert.deepEqual(one.launched, [], 'a Tier-1 card started on an unconfirmed sign-in');
+  const many = mac([unsure, green(), ...TIER2()]);
+  await many.at(0);
+  assert.equal(many.launched.length, VALUES[K.amberEditingPerProduct], `Tier-2 starts run, held to the amber cap: ${many.launched.join(', ')}`);
+  assert.match(many.rec.read('fact', BAND_FACT).doc.reason, /sign-in of account acct-a is not confirmed/);
+});
+
 test('no usage reading: Joe is told once, not every tick, and once more a day later while it lasts', async () => {
   const m = mac([account(), card('A')]);
   await m.at(0);

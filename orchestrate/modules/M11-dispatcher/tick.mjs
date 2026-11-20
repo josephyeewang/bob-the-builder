@@ -39,8 +39,9 @@
 // No silent hold (L38): a missing or stale account reading, or a red or unknown usage band, is told to
 // Joe once per cause per day (pass.mjs `holdAlert`); a held undo, once per reason per day.
 //
-// The signed-in account comes from the record fact `signed-in-account` { account, observed_at }
-// (Sensors, lane 3). Missing, or older than usage.stale_after_min, means nothing new starts.
+// The signed-in account comes from the record fact `signed-in-account` { account, signed_in, observed_at }
+// (Sensors, lane 3). Missing, or older than usage.stale_after_min, means nothing new starts. An account with signed_in
+// null (the sign-in could not be confirmed) still starts work; usage.mjs counts its usage as unknown (L1329).
 
 import { tellRefused, watchWrites } from './refused-writes.mjs';
 import { KEYS, minutes, need, MissingKey, missingFor } from './keys.mjs';
@@ -50,7 +51,7 @@ import { intakePass } from './outbox-intake.mjs';
 import { leadRestartStep, leadInFlight, handoffVet, tellLeadSkipped, HANDOFF_NAME } from './lead-restart.mjs';
 import { dispatcherPass, stopPass, undoStarts, rulesMissingAlert, holdAlert, refusalReport, readHostLock, hostCopyReason, hostCopyAlertText, HOST_COPY_CAUSE, HELD_BANDS, HOLD_REPEAT_MS, TOLD_BANDS } from './pass.mjs';
 import { startGate } from './gate.mjs';
-import { currentBands } from './usage.mjs';
+import { currentBands, ACCOUNT_FACT } from './usage.mjs';
 import { timeLimits, requestMerges } from './merges.mjs';
 import { undoStep } from './undo.mjs';
 import { phoneLinkStep } from './phone-link.mjs';
@@ -145,7 +146,7 @@ export async function approvalsStep({ rec, rules, now, alert, approvals, product
   }
   return results;
 }
-export const ACCOUNT_FACT = 'signed-in-account';
+export { ACCOUNT_FACT };
 export const LAST_PASS_FACT = 'last-full-pass';
 export const STEP_ERROR_FACT = (step) => `step-error-${step}`;
 export const STEP_DEADLINE_MS = 120_000;

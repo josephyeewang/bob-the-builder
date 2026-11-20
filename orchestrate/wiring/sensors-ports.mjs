@@ -220,9 +220,16 @@ export function sensorsPorts({ file, ownerUid, now = () => new Date(), staleMs =
     whoIsSignedIn: async () => {
       const a = read();
       if (!a) return { account: null, signed_in: null, reason: why };
+      if (a.signed_in === false) {
+        why = `account ${a.account} is not signed in`;
+        return { account: null, signed_in: false, reason: why, observed_at: a.observed_at };
+      }
       if (a.signed_in !== true) {
-        why = a.signed_in === false ? `account ${a.account} is not signed in` : `who is signed in is not known (${a.usage_reason ?? 'no reason given'})`;
-        return { account: null, signed_in: a.signed_in, reason: why, observed_at: a.observed_at };
+        // L1329: the sign-in could not be confirmed, but the answer names the account new sessions start on. That account is
+        // handed on with signed_in null (not confirmed), so starts are not all off; usage stays unknown (readUsage below
+        // needs signed_in true), which still holds every Tier-1 start. Signed out in so many words still names no account.
+        why = `who is signed in is not confirmed (${a.usage_reason ?? 'no reason given'})`;
+        return { account: a.account ?? null, signed_in: null, reason: why, observed_at: a.observed_at };
       }
       return { account: a.account, signed_in: true, observed_at: a.observed_at };
     },

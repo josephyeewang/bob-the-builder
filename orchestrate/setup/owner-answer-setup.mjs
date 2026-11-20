@@ -147,8 +147,10 @@ export function planOwnerUnload(io, cfg) {
 
 /**
  * The answer's rows: fresh (the owner's own plain file, not writable by others, the answer's shape, written within the Sensors'
- * time limit and not ahead of this clock), and a WARNING when it says no one is signed in or its sign-in is not known (the
- * Dispatcher then starts nothing). Read only; root or the owner may run it.
+ * time limit and not ahead of this clock), and a WARNING when it says no one is signed in or its sign-in is not known (no
+ * account named, or signed out: the Dispatcher then starts nothing; an account named whose sign-in is not known: it starts
+ * no Tier-1 work, L1329). Read only; root or
+ * the owner may run it.
  */
 export function answerRows(io, cfg, { now = Date.now() } = {}) {
   const file = answerFileOf(cfg); const what = `the owner's answer ${file} is fresh (the owner's job wrote it within ${ANSWER_STALE_MS / 60_000} minutes)`;
@@ -165,7 +167,7 @@ export function answerRows(io, cfg, { now = Date.now() } = {}) {
   let a; try { a = JSON.parse(io.readText(file)); } catch { return fail(`${file} is not JSON`); }
   const bad = answerProblem(a, now); if (bad) return fail(`${bad}${/min old/.test(bad) ? ` (look in ~${cfg.owner}/Library/Logs/${LOG_NAME}.err.log)` : ''}`);
   const rows = [{ ok: true, what }];
-  if (a.signed_in !== true) rows.push({ ok: true, warn: true, what: 'the owner\'s answer says who is signed in', why: `${a.signed_in === false ? 'it says no one is signed in' : 'it says who is signed in is not known'}${a.usage_reason ? ` (${String(a.usage_reason).slice(0, 120)})` : ''}, so the Dispatcher starts nothing until it is` });
+  if (a.signed_in !== true) rows.push({ ok: true, warn: true, what: 'the owner\'s answer says who is signed in', why: `${a.signed_in === false ? 'it says no one is signed in' : 'it says who is signed in is not known'}${a.usage_reason ? ` (${String(a.usage_reason).slice(0, 120)})` : ''}${a.signed_in === false || a.account == null ? ', so the Dispatcher starts nothing until it is' : ', so usage is unknown and the Dispatcher starts no Tier-1 work until it is'}` });
   return rows;
 }
 

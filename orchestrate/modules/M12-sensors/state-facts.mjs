@@ -14,7 +14,8 @@
 // The account fact tells "nobody is signed in" apart from "couldn't tell" (L730, #289 r1 M1): signed_in is true (an
 // account of M4's), false (the port said plainly nobody is), or null (couldn't tell), and `reason` says why when it is
 // not true. A bare null or a name that isn't M4's is "couldn't tell", never "nobody". M11 reads a null account as
-// nobody either way, which is safe; the difference is what Joe is told.
+// nobody either way, which is safe; the difference is what Joe is told. An account of M4's that couldn't be confirmed
+// is kept with signed_in null (L1329): M11 starts Tier-2 work on it, and its usage counts as unknown (usage.mjs).
 // A port that hands back an observed_at of its own is a relay of an earlier reading (the owner's answer, L728 M1): the
 // fact keeps the EARLIER of that time and the read's start, so a reading is never made younger by being passed on. An
 // observed_at that is there but not a time is refused, never replaced by the read time.
@@ -94,6 +95,9 @@ export async function writeSignedInAccount(writer, whoIsSignedIn, { now = () => 
   if (got === null || got === undefined) reason = 'the account read gave no answer';
   else if (o.signed_in === false) { signed_in = false; reason = said ?? 'nobody is signed in'; }
   else if (accountOk(o.account) && o.signed_in !== null) { account = o.account; signed_in = true; reason = null; }
+  // L1329: an account named but its sign-in not confirmed is kept with signed_in null, so M11 knows which account starts
+  // would run on; usage for it stays unknown, which holds Tier-1 starts (usage.mjs mayStart).
+  else if (accountOk(o.account)) { account = o.account; signed_in = null; reason = said ?? 'the sign-in could not be confirmed'; }
   else reason = said ?? (o.account == null ? 'who is signed in could not be told' : 'the account read named no account of M4\'s');
   return writer.put(ACCOUNT_FACT, { kind: 'fact.signed-in-account', account, signed_in, reason, observed_at });
 }
