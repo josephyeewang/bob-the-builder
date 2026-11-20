@@ -45,3 +45,13 @@ test('nothing runs without root, a config, an allowed host on the list, or a den
     [['--config', '/i/w.json', '--denied', '1.2.3.4'], {}, /on no list/],
   ]) { const r = go(argv, opts); assert.equal(r.code, 1); assert.equal(r.calls.length, 0); assert.match(r.out, why); }
 });
+
+test('L1318: no product allows an outside site: (a) is NOT APPLICABLE, (b) still runs, nothing is refused for it', () => {
+  const none = JSON.stringify({ products: { t: { render: { rulesHosts: [] } } } });
+  let out = ''; const calls = [];
+  const run = (cmd, args) => { calls.push(args); return { status: 56, stdout: args.includes('-w') && args[args.indexOf('--proxy') + 1].startsWith('http:') ? '403 000' : '000 000', stderr: '' }; };
+  const code = main(['--config', '/i/w.json'], { print: (t) => { out += t; }, deps: { euid: () => 0, read: () => none, run } });
+  assert.equal(calls.length, 2, 'only the two denied cases');
+  assert.match(out, /NOT APPLICABLE \(a\)/); assert.match(out, /PASS {6}\(b\).*HTTP CONNECT/); assert.match(out, /NOT DONE: \(c\) NOT DONE\n$/);
+  assert.equal(code, 1);
+});
