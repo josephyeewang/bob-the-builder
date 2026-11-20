@@ -1,5 +1,16 @@
 # Lanes: who builds which folder
 
+**20 Nov 2026: the lanes' targets change; the folder owners do not.** Until now every lane worked on milestones of the safety-rails phase (0b), so building in parallel sped up safety, not what the owner uses. From now on the lanes build four tracks, on the plain test product first:
+
+| Track | What it delivers | Modules |
+|---|---|---|
+| A (first) | The owner talks to one place; the idea is filed and read back; after the go a worker builds it, a fresh reviewer checks it, it merges, and the roadmap row turns done by itself | M1, M8, M3, M9, with M4, M5 and M6 as they stand |
+| B | The safety already built, connected to Track A at "good enough", then frozen | M6, M10, M2, M12 |
+| C | Lessons become checks; usage bands; a generic live re-check of shown numbers | M14, M11, M13, M7 |
+| D | Any AI: an existing multi-AI runner under our gate, or a second-AI runner of our own | M4, M11, M12 |
+
+0b rows that no track needs are parked (built only when a logged failure earns them), not deleted. Each lane takes the next row of a track that touches its folders; the lead re-tags the rows. The milestone column below is history.
+
 Set 29 Oct 2026 for the parallel build. One writer per folder. A lane that needs a change in another lane's folder asks that lane, or the lead; it never edits the folder itself.
 
 | Lane | Folders | Milestones of the safety-rails phase (0b), in order |
