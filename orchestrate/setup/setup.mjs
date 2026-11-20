@@ -2,7 +2,7 @@
 // The always-on Mac's one-time setup commands (R-0b-05 and the install). Every command has a --dry-run (changing commands)
 // or is read only; every changing command is safe to run twice and refuses clearly when it needs root and does not have it.
 //
-//   users-folders        [--dry-run]    the plain-script Mac users and their folders                             (root)
+//   users-folders        [--dry-run]    the plain-script Mac users and their folders, and the mirror's repository (git as orchestrate)  (root)
 //   check                               PASS, FAIL or NEEDS ROOT per item for the above; exit 3 if some need root (read only)
 //   proofs               [--dry-run]    the builder user (L1079) cannot write the record, hooks,
 //                                       settings, launcher... or read the keys                                 (root, read only)

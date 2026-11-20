@@ -140,6 +140,20 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
     if (prog === '/bin/cat') for (let d = dirname(rest[0]); d !== '/'; d = dirname(d)) if (!can(d, false, true)) return { status: 1, stdout: '', stderr: `cat: ${rest[0]}: Permission denied` };
     if (prog === '/bin/cat') return can(rest[0], false) ? { status: 0, stdout: readFileSync(at(rest[0]), 'utf8'), stderr: '' } : { status: 1, stdout: '', stderr: `cat: ${rest[0]}: Permission denied` };
     if (prog === '/bin/ls') return reach(rest[0]) && can(rest[0], false) ? { status: 0, stdout: '', stderr: '' } : { status: 1, stdout: '', stderr: `ls: ${rest[0]}: Permission denied` };
+    // `git -C <folder> ...` (the mirror's repository, users-folders.mjs planMirror): the real git, run as this test's user,
+    // in a folder the stand-in user may enter and write (as the real one needs). Everything git makes there is that user's.
+    if (prog === '/usr/bin/git' && rest[0] === '-C') {
+      const dir = rest[1]; const logical = dir.startsWith(`${prefix}/`) ? dir.slice(prefix.length) : null;
+      if (logical === null) return { status: 128, stdout: '', stderr: `fake mac: git -C ${dir} is outside the stand-in Mac` };
+      if (!reach(logical) || !can(logical, true)) return { status: 128, stdout: '', stderr: `fatal: cannot change to '${dir}': Permission denied` };
+      if (mac.gitFail?.(rest.slice(2))) return { status: 1, stdout: '', stderr: 'injected failure' };
+      const walk = (p, acc = []) => { acc.push(p); let s; try { s = lstatSync(at(p)); } catch { return acc; } if (s.isDirectory() && !s.isSymbolicLink()) for (const n of readdirSync(at(p))) walk(`${p}/${n}`, acc); return acc; };
+      const before = new Set(walk(logical));
+      const r = spawnSync('/usr/bin/git', rest, { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', LC_ALL: 'C', HOME: at(logical) } });
+      mac.log.push(`git ${rest.slice(2).join(' ')} in ${logical} (as ${who})`);
+      for (const p of walk(logical)) if (!before.has(p)) mac.owners.set(p, { uid, gid });
+      return { status: r.status ?? 1, stdout: String(r.stdout ?? ''), stderr: String(r.stderr ?? r.error?.message ?? '') };
+    }
     if (prog === '/usr/bin/git' && rest[0] === 'config' && rest[1] === '--includes' && rest[2] === '--get-all' && rest[3] === 'safe.directory') {
       // every scope (system, global, included files), as the real git reads them: nothing else is set here
       const all = [...mac.gitSafeOther, ...(mac.gitSafe.get(who) ?? [])];

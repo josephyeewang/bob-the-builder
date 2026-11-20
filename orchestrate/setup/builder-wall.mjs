@@ -54,11 +54,13 @@
 //     over mDNSResponder's Unix socket, not loopback UDP.
 //
 // Known limits (#556 r1, L1158; said in Joe's run sheet too):
-//   - OPEN (#627 audit M1, L1310; from the xnu source, not yet tried live): pf finds an outgoing packet's socket by its
-//     source address and port, and when no socket matches exactly it takes one bound to 0.0.0.0 or :: on that port, of
-//     ANY user. A builder program that binds 0.0.0.0:5353 beside mDNSResponder (root, SO_REUSEPORT; the bind check lets
-//     another user share a wildcard port then) and sends UDP unconnected would be read as root's, so no `user` rule
-//     sees it, and the answer comes back in on 5353. No `user` rule can close that; a live test as the builder decides.
+//   - OPEN (#627 audit M1, L1310; confirmed live on 2026-11-19): pf finds an outgoing packet's socket by its source
+//     address and port, and when no socket matches exactly it takes one bound to 0.0.0.0 or :: on that port, of ANY
+//     user. A builder program that binds 0.0.0.0:5353 beside mDNSResponder (root, SO_REUSEPORT; the bind check lets
+//     another user share a wildcard port then) and sends UDP is read as root's, so no `user` rule sees it. Live: such a
+//     send reached a listener of the owner's 20 times out of 20, while the same send from an ordinary port was blocked.
+//     No `user` rule can close that. The lead accepted it for the test slice (L1312). It must be closed before workers
+//     run on a real product or on outside code; the planned fix is a sandbox for each process the runner starts.
 //   - A packet sent by a setuid-root program the builder runs (traceroute's UDP probes, ping) comes from root's socket, so
 //     no `user` rule sees it as the builder's. Such a program sends probes; it holds no conversation the builder can use.
 //   - Unix sockets are outside pf (#617 r1 m5, an open item for the lead): a builder process outside Claude Code's
