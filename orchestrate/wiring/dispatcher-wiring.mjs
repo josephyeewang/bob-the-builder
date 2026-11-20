@@ -180,7 +180,7 @@ export function logOnlyAlert(log) {
  * with product, recordRoot, ownerUid, productsFile, rulesStateDir and tokenFile; `who` names the job in its log lines.
  * → { rec, rules, gh (read-only), entry (the product's products.json entry), reader (M10's, refreshed once), products }
  */
-export async function recordAndRules(c, { who, log, fetchFn, now }) {
+export async function recordAndRules(c, { who, log, fetchFn, now, sessionsIo = {} }) {
   const products = readProducts(c.productsFile);
   const entry = products.find((p) => p.product === c.product);
   if (!entry) throw new Error(`config: ${c.productsFile} does not list the product ${c.product}`);
@@ -205,7 +205,8 @@ export async function recordAndRules(c, { who, log, fetchFn, now }) {
     // with its cap words ("editing cap reached for <p> (<n>)", "... on this Mac (<n>)") is refused at the rules.may step
     // and never reaches capRefusal / tier1Waiting, so in amber Tier-2 cards are not held behind it. It holds nothing
     // unsafe (a refusal), and the first cards are Tier 2 on the test product.
-    running: (scope) => runningCount(scope, { rec, sessions: () => sessionsNow(c, rec, { now }) }),
+    // sessionsIo: a test's stand-in for the runner's files (sessionsNow's io); empty in real use.
+    running: (scope) => runningCount(scope, { rec, sessions: () => sessionsNow(c, rec, { now, io: sessionsIo }) }),
     rolesDir: ROLES_DIR,
     clock: now,
   });
@@ -270,11 +271,11 @@ export function runningCount(scope, { rec, sessions }) {
  * stands in for it (L674). `limitedSync` is given as the maker (sync-limit.mjs) and ctx holds the runner it makes with
  * `spawnSync` (node's; a test stands in for it): main.mjs can't import child_process (L1180).
  */
-export async function wire(config, { limitedSync, spawnSync = nodeSpawnSync, log = (s) => process.stderr.write(`${s}\n`), fetchFn = globalThis.fetch, now = () => Date.now(), groups = PORT_GROUPS, selfUid = process.getuid() } = {}) {
+export async function wire(config, { limitedSync, spawnSync = nodeSpawnSync, log = (s) => process.stderr.write(`${s}\n`), fetchFn = globalThis.fetch, now = () => Date.now(), groups = PORT_GROUPS, selfUid = process.getuid(), sessionsIo } = {}) {
   const c = checkConfig(config);
   // Before the Record opens: a state folder M2 can't use stops the start, so no product is turned on untold (L295 MAT-1).
   const stateDir = approvalsDir(c);
-  const { rec, rules, gh, entry, reader, products } = await recordAndRules(c, { who: 'dispatcher', log, fetchFn, now });
+  const { rec, rules, gh, entry, reader, products } = await recordAndRules(c, { who: 'dispatcher', log, fetchFn, now, sessionsIo });
   // Launch check 12's rules for the two runners (L1001, M11 budget.mjs): one launch is one pass, and every pass whose own
   // rules are usable (ok or last_good) writes the snapshot again, changed or not, so its written_at stays fresh. One that
   // could not reach GitHub leaves it to go stale; any other refusal removes it, so the runners refuse at once (PR-2 r2 M1).

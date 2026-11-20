@@ -463,6 +463,30 @@ test('R-0b-162 A: the wired rules know the role files, and refuse an editing sta
   assert.doesNotMatch(ed.reason, new RegExp(notWiredText('running').replace(/[()]/g, '\\$&')));
 });
 
+test('L1325 m3: through the wired closure, an editing start is allowed below the cap and refused at it, counted from live sessions', async () => {
+  const w = world();
+  w.approve([blobOf(SAMPLE)]);
+  // The worker runner's status, stood in for through wire()'s sessionsIo (the runner's user owns the real file).
+  let live = [];
+  const c = checkConfig(w.config);
+  const st = (dir) => ({ uid: c.workerUid, mode: dir ? 0o755 : 0o644, nlink: 1, isDirectory: () => dir, isFile: () => !dir, isSymbolicLink: () => false });
+  const row = (id) => ({ id, product: P, kind: 'editing', card: `C-${id}`, lead: null, role: 'worker', pgid: 70, signin: 's', config_dir: '/cfg', bundle_files: [],
+    outbox: join(c.outboxRoot, P, 'worker', id), uid: c.workerUid, alive: true, ended: false, outbox_open: true, stop_requested: false,
+    size: { tokens: 9, compactions: 0, turnEnded: true, endedAt: null, openTools: [] }, activity: { state: 'active' } });
+  const sessionsIo = {
+    stat: () => st(true), realpath: (x) => x, reviewStatus: () => ({ running: [] }),
+    open: () => ({ st: st(false), text: JSON.stringify({ written_at: new Date(Date.now() - 1000).toISOString(), sessions: live, requests: Object.fromEntries(live.map((x) => [x.id, { state: 'started' }])) }) }),
+  };
+  const { rec, rules } = await wire(w.config, { log: () => {}, fetchFn: fakeGitHubFetch({ ...w.fake, text: SAMPLE }), sessionsIo });
+  rec.write({ actor: 'approvals', entity: 'product', id: P, expectRev: 0, doc: { state: 'active' }, kind: 'product' });
+  const start = () => rules.may('start_session', { product: P, role: 'worker', tier: 2, editing: true });
+  assert.equal(start().decision, 'allow', `no session running: ${start().reason}`);
+  live = ['S-1', 'S-2', 'S-3', 'S-4', 'S-5', 'S-6'].map(row);
+  const full = start();
+  assert.equal(full.decision, 'deny');
+  assert.match(full.reason, /editing cap reached/);
+});
+
 // Launch check 12's rules for the runners (L1001): each pass (one wire) with usable rules writes the snapshot again.
 function snapshotWorld() {
   const w = world();
@@ -645,7 +669,7 @@ test('A1 (L615): through the real wiring, mainSha reads main with the rules read
   assert.equal(typeof (await ports.planView({ product: P })).isDir, 'function');
 });
 
-test('L1325: runningCount counts claimed or running session cards and live runner sessions, once per card', async () => {
+test('L1325: runningCount counts claimed or running session cards and live runner sessions, once per session', async () => {
   const { runningCount } = await import('./dispatcher-wiring.mjs');
   const card = (id, state, extra = {}) => ({ id, rev: 1, doc: { product: 'p', kind: 'ordinary', state, claim: state === 'ready' ? undefined : { kind: 'session', session_id: `s-${id}` }, ...extra } });
   const rec = (cards) => ({ list: (e) => (e === 'card' ? cards : []) });
