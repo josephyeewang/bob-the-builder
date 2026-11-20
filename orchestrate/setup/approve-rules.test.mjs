@@ -10,7 +10,7 @@ import { tempDir } from '../shared/test-tmp.mjs';
 import { FIRST, ENTRY } from '../modules/M10-rules/first-cutover.test-helper.mjs';
 import { blobSha, allowListVerifier, RULES_PATH } from '../modules/M10-rules/reader.mjs';
 import { reviewConfig } from '../wiring/review-ports.test-helper.mjs';
-import { APPROVED_FILE, approveRules, mainRules, parseList, readLineFromTty, readListFile, realPorts, TTY_PATH, writeListFile } from './approve-rules.mjs';
+import { APPROVED_FILE, approveRules, mainRules, parseList, readLineFromTty, readListFile, realPorts, TTY_PATH, writeListFile, copyFolder } from './approve-rules.mjs';
 import { main as setupMain, parseArgs } from './setup.mjs';
 
 const P = ENTRY.product;
@@ -323,4 +323,12 @@ test('setup.mjs main reads root\'s config strictly at its fixed place, then runs
   const w3 = world();
   assert.equal(await setupMain(['approve-rules', P], { io: { ...ioOf(), readConfig: () => '{}' }, approvePorts: w3.ports, env: { SUDO_UID: String(OWNER) }, out: () => {}, err: () => {} }), 2);
   assert.equal(w3.gh.calls.length, 0);
+});
+
+test('L1319: the Dispatcher\'s config is read in the folder the copy\'s link names, never through the link', () => {
+  const seen = [];
+  const current = (root, o) => { seen.push([root, o]); return { real: '/B/install/orchestrate.v-abc/orchestrate', link: true }; };
+  assert.equal(copyFolder('/B/install/orchestrate', 0, { current }), '/B/install/orchestrate.v-abc/orchestrate');
+  assert.deepEqual(seen, [['/B/install/orchestrate', { owner: 0 }]], 'the link is checked as root\'s');
+  assert.throws(() => copyFolder('/B/install/orchestrate', 0, { current: () => ({ problem: 'the copy\'s link is not owned by root' }) }), /installed copy can't be used: the copy's link is not owned by root/);
 });
