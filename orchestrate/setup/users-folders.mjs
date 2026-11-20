@@ -20,7 +20,7 @@ import { baseChainProblem, guardOp } from './guard.mjs';
 import { live as liveSession } from '../wiring/owner-status.mjs';
 import { MIRROR_CONFIG_TEMPLATE, checkMirror } from '../modules/M4-workshop/git/safe-git.mjs';
 
-const DSCL = '/usr/bin/dscl';
+export const DSCL = '/usr/bin/dscl';
 const DSEDIT = '/usr/sbin/dseditgroup';
 const SUDO = '/usr/bin/sudo';
 const dscl = (io, args) => io.run(DSCL, ['.', ...args]);
