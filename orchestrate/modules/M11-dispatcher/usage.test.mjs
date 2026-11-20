@@ -42,7 +42,7 @@ test('L1331: a reading that says no 5-hour row was listed is banded by the week 
   assert.equal(at(noH5(84)).prodBlocked, false, 'production work is blocked by the week only past its line');
   assert.equal(at(noH5(91)).prodBlocked, true);
   assert.equal(at({ ...noH5(20), h5: null }).band, 'green', 'a null 5-hour window reads the same');
-  // Without the marker, a missing 5-hour figure is still unknown (L611); so is a marker that is not false.
+  // Without the marker, a missing 5-hour figure is still unknown (L611); so is a marker that is not exactly true.
   for (const extra of [{ h5_none: undefined }, { h5_none: false }, { h5_none: 'true' }]) {
     const b = at(noH5(20, extra));
     assert.equal(b.band, 'unknown', JSON.stringify(extra)); assert.match(b.reason, /5-hour figure is not a percent/);

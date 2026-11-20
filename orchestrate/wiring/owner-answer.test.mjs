@@ -100,6 +100,12 @@ test('ownerAnswer: signed in → the account and both windows, with no email, to
   // L1331: the live report's shape on 20 Nov (weekly rows only) → no 5-hour window, said in so many words.
   const weekly = await ownerAnswer(fakes({ usage: stream(limits([row('weekly_all', 48), row('weekly_scoped', 25, { scope: { model: { display_name: 'M' } } })])) }));
   assert.deepEqual(weekly.usage, { h5: null, week: { used_pct: 48, resets_at: '2026-11-07T22:59:59.734Z' }, week_from: 'weekly_all', h5_none: true });
+  // Audit m1: rate_limits with a key this reader doesn't know may hold a moved 5-hour figure, so no marker (unknown).
+  const moved = await ownerAnswer(fakes({ usage: stream({ session: {}, rate_limits: { limits: [row('weekly_all', 48)], five_hour: { utilization: 99 } } }) }));
+  assert.equal(moved.usage.h5_none, undefined);
+  assert.equal(moved.usage.week.used_pct, 48);
+  const known = await ownerAnswer(fakes({ usage: stream({ session: {}, rate_limits: { limits: [row('weekly_all', 48)], extra_usage: { is_enabled: false } } }) }));
+  assert.equal(known.usage.h5_none, true);
 });
 
 test('ownerAnswer: signed out, not known, no account or a refused report each say so, and never guess', async () => {

@@ -321,7 +321,7 @@ test('L1331: an answer that says no 5-hour row was listed reaches M11 as a week-
     assert.deepEqual([doc.h5.used_pct, doc.h5_none, doc.observed_at], [40, true, new Date(T0).toISOString()]);
     assert.equal(readFact({ doc }, { account: 'a', now: T0 + 60_000, staleMs: 15 * 60_000 }).h5, 40);
   } finally { w2.done(); }
-  // Only false, only with no 5-hour figure, and only with a weekly row.
+  // The marker is refused unless it is exactly true, with no 5-hour figure and a weekly row: each case below breaks one of those.
   for (const usage of [{ h5: null, week: W, week_from: 'weekly_all', h5_none: false },
     { h5: answer().usage.h5, week: W, week_from: 'weekly_all', h5_none: true },
     { h5: null, week: null, week_from: null, h5_none: true }]) {

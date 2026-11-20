@@ -252,6 +252,31 @@ test('R-0b-168 usage and account: M11 reads the real usage and signed-in facts a
   assert.equal(signedInAccount({ rec, rules, now: T0 + 16 * MIN }).account, null);
 });
 
+test('L1331 audit M1: a failed read after a week-only reading hands the week on with its no-5-hour marker, and ages as before', async () => {
+  const rec = recWith();
+  const W = makeFactWriter(rec);
+  const weekOnly = (now) => ({ source: 'owner-answer', h5: null, week: { used_pct: 30, resets_at: iso(now + 3 * D) }, h5_none: true });
+  const blank = { source: null, h5: { used_pct: null, resets_at: null }, week: { used_pct: null, resets_at: null } }; // loop.mjs NO_USAGE
+  await writeUsageFact(W, async () => weekOnly(T0), ACCT, { now: clockAt(T0) });
+  const kept = await writeUsageFact(W, async () => blank, ACCT, { now: clockAt(T0 + 5 * MIN) });
+  assert.deepEqual(kept.handedOn, ['week']);
+  const doc = rec.read('fact', USAGE_FACT(ACCT)).doc;
+  assert.equal(doc.h5_none, true);
+  assert.equal(doc.observed_at, iso(T0), 'the handed-on reading keeps the earlier time');
+  const ok = readFact(rec.read('fact', USAGE_FACT(ACCT)), { account: ACCT, now: T0 + 6 * MIN, staleMs: 15 * MIN });
+  assert.equal(ok.ok, true, ok.reason);
+  assert.equal(readFact(rec.read('fact', USAGE_FACT(ACCT)), { account: ACCT, now: T0 + 16 * MIN, staleMs: 15 * MIN }).ok, false, 'stale on schedule');
+  // A stored reading that listed a 5-hour row never lends the marker; a reading of its own that lacks it stays unknown.
+  const rec2 = recWith(); const W2 = makeFactWriter(rec2);
+  await writeUsageFact(W2, async () => usageReading(T0), ACCT, { now: clockAt(T0) });
+  await writeUsageFact(W2, async () => blank, ACCT, { now: clockAt(T0 + 5 * MIN) });
+  assert.equal(rec2.read('fact', USAGE_FACT(ACCT)).doc.h5_none, false);
+  const rec3 = recWith(); const W3 = makeFactWriter(rec3);
+  await writeUsageFact(W3, async () => weekOnly(T0), ACCT, { now: clockAt(T0) });
+  await writeUsageFact(W3, async () => ({ ...weekOnly(T0 + 5 * MIN), h5_none: undefined }), ACCT, { now: clockAt(T0 + 5 * MIN) });
+  assert.equal(rec3.read('fact', USAGE_FACT(ACCT)).doc.h5_none, false, 'a fresh week without the marker is not given it');
+});
+
 test('L97 m-2: an account is one of M4\'s account names; anything else is stored as nobody, and usage is not written', async () => {
   const rec = recWith();
   for (const bad of ['account A', 'someone@example.com', 'band', '', null]) {

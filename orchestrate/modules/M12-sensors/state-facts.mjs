@@ -75,9 +75,12 @@ export async function writeUsageFact(writer, readUsage, account, { now = () => n
   const at = Date.parse(started);
   const open = (w) => known(w) && Date.parse(w.resets_at) > at;
   const doc = { kind: 'fact.usage', account, observed_at, source: r.source ?? null, h5: win(r.h5), week: win(r.week) };
-  // Always written (true or false), so every field M11 reads is stored (R-0b-168); true only as the reading says.
-  doc.h5_none = r.h5_none === true;
   const handedOn = stored && timeOrNull(stored.observed_at) ? ['h5', 'week'].filter((k) => !known(r[k]) && open(stored[k])) : [];
+  // Always written (true or false), so every field M11 reads is stored (R-0b-168); true as the reading says, or, when the
+  // reading has nothing at all (a failed read) and the stored week-only reading is handed on, as the stored fact said
+  // (L1331 audit M1: the hand-on of L757 covers a week-only reading too; it still ages from the stored time).
+  doc.h5_none = r.h5_none === true
+    || (!known(r.h5) && !known(r.week) && handedOn.includes('week') && !handedOn.includes('h5') && stored?.h5_none === true);
   for (const k of handedOn) doc[k] = win(stored[k]);
   if (handedOn.length) {
     doc.observed_at = relayed(observed_at, stored.observed_at);
