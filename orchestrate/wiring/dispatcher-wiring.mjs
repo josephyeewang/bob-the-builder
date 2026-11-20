@@ -220,14 +220,18 @@ export async function recordAndRules(c, { who, log, fetchFn, now }) {
 }
 
 // A card whose claim names a session holds a slot from the claim, written before the launch, until it leaves these
-// states; so a second ready card in the same pass already counts the first.
+// states; so a second ready card of this product, in the same pass, already counts the first. (Another product's claim
+// is in its own Record: it counts once the runner lists its session; L1325 m1.)
 const HOLDS_SLOT = Object.freeze(['claimed', 'running']);
 
 /**
  * M10's running port (L1325): editing sessions for `scope` ({ product }, { product, undo: true }, or {} for the whole
- * Mac). The union, by card, of (a) the Record's cards in claimed or running whose claim is a session and (b) the worker
- * runner's live sessions of its kinds (editing, undo, script): a claim not yet launched counts, and so does a session
- * still running after its card moved on. Review sessions are not editing ones and are left out. `undo` counts exact
+ * Mac). The union, by session id, of (a) the Record's cards in claimed or running whose claim is a session and (b) the
+ * worker runner's live sessions of its kinds (editing, undo, script): a claim not yet launched counts, and so does a
+ * session still running after its card moved on. The claim's session_id is the id the runner lists (M11 launches with
+ * it), so one session counts once; card ids are per product and never key the count (audit M1). Review sessions are
+ * not editing ones, and a tab claim (Joe's own tab) is not a worker: both are left out, as in M11's gate. Script
+ * sessions count against the editing caps here, the safe side (L1325 m2). `undo` counts exact
  * reverses only. Anything that can't be read throws, which the engine reads as "count unknown" and refuses: never 0
  * by default. This Record is this Dispatcher's product only; the runner's list is the Mac's, so {} also counts other
  * products' live sessions.
@@ -241,14 +245,17 @@ export function runningCount(scope, { rec, sessions }) {
   const held = new Set();
   for (const { id, doc } of rec.list('card')) {
     if (!HOLDS_SLOT.includes(doc?.state) || doc?.claim?.kind !== 'session') continue;
-    if (inScope(doc.product, doc.kind === 'exact_reverse')) held.add(`card:${id}`);
+    if (!inScope(doc.product, doc.kind === 'exact_reverse')) continue;
+    const sid = doc.claim.session_id;
+    held.add(typeof sid === 'string' && sid ? `session:${sid}` : `card:${JSON.stringify([doc.product, id])}`);
   }
   const live = sessions();
   if (!Array.isArray(live)) throw new Error('the session list is not a list');
   for (const s of live) {
     if (!RUNNER_KINDS.includes(s?.kind)) continue;
     if (!inScope(s.product, s.kind === 'undo')) continue;
-    held.add(typeof s.card === 'string' && s.card ? `card:${s.card}` : `session:${s.id}`);
+    if (typeof s.id === 'string' && s.id) held.add(`session:${s.id}`);
+    else held.add(Symbol('a session with no id'));
   }
   return held.size;
 }

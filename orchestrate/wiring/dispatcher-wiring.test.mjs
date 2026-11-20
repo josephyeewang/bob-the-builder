@@ -660,6 +660,12 @@ test('L1325: runningCount counts claimed or running session cards and live runne
   const mixed = [{ id: 'r1', product: 'p', kind: 'review', card: 'r' }, { id: 'q1', product: 'q', kind: 'editing', card: 'q' }];
   assert.equal(runningCount({ product: 'p' }, { rec: rec([]), sessions: () => mixed }), 0);
   assert.equal(runningCount({}, { rec: rec([card('a', 'claimed')]), sessions: () => mixed }), 2);
+  // Audit M1: card ids are per product, so another product's live C-7 and this product's claimed C-7 are two slots;
+  // and a session still live under card a while a is claimed again by a new session is two.
+  assert.equal(runningCount({}, { rec: rec([card('C-7', 'claimed')]), sessions: () => [{ id: 's-q', product: 'q', kind: 'editing', card: 'C-7' }] }), 2);
+  assert.equal(runningCount({ product: 'p' }, { rec: rec([card('a', 'claimed')]), sessions: () => [{ id: 's-old', product: 'p', kind: 'editing', card: 'a' }] }), 2);
+  // A session with no id still counts.
+  assert.equal(runningCount({ product: 'p' }, { rec: rec([]), sessions: () => [{ product: 'p', kind: 'editing' }, { product: 'p', kind: 'editing' }] }), 2);
   // Undo counts exact reverses only.
   assert.equal(runningCount({ product: 'p', undo: true }, { rec: rec([card('a', 'claimed'), card('u', 'claimed', { kind: 'exact_reverse' })]), sessions: () => [{ id: 's9', product: 'p', kind: 'undo', card: 'u2' }] }), 2);
   // Anything unreadable throws (the engine's "count unknown"), never 0.
