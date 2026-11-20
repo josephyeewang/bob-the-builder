@@ -20,6 +20,7 @@ import { parseInstallConfig } from './install.mjs';
 import { workerRunnerConfigFor } from './worker-runner-setup.mjs';
 import { parseDispatcher } from './dispatcher-setup.mjs';
 import { fakeMac, macTest as test } from './fake-mac.test-helper.mjs';
+import { MIRROR_CONFIG_TEMPLATE, checkMirror } from '../modules/M4-workshop/git/safe-git.mjs';
 
 const RAW = { base: '/Library/orch-test', owner: 'sam', products: ['alpha', 'beta'] };
 const cfg = parseConfig(RAW);
@@ -646,6 +647,82 @@ test('PLANT the owner user missing → refused, nothing changed', () => {
   const mac = fakeMac(); mac.users.delete('sam');
   const r = run(mac, ['users-folders']);
   assert.equal(r.code, 1); assert.match(r.text, /owner's Mac user sam was not found/); assert.equal(mac.log.length, 0);
+});
+
+// ---- The Do-plane mirror's repository: made by users-folders, as orchestrate, judged by checkMirror (the push step's rule). ----
+
+const MIRROR = P('mirror');
+const MIRROR_ROW = /\/Library\/orch-test\/mirror is the mirror: a bare repository/;
+const allOrchestrates = (mac) => {
+  const uid = uidOf(mac, 'orchestrate'); const bad = [];
+  const walk = (p) => { if (mac.lstat(p).uid !== uid) bad.push(p); if (mac.lstat(p).isDirectory()) for (const n of mac.list(p)) walk(`${p}/${n}`); };
+  walk(MIRROR); return bad;
+};
+
+test('mirror: a fresh run makes the bare repository in the mirror folder, as orchestrate, exactly the template; check PASSes it', () => {
+  const dry = run(fakeMac({ euid: 501 }), ['users-folders', '--dry-run']);
+  assert.match(dry.text, /would run: as orchestrate: git -C \/Library\/orch-test\/mirror init --bare --template=/);
+  const mac = applied();
+  assert.deepEqual(checkMirror(mac.at(MIRROR)), { ok: true });
+  assert.equal(readFileSync(mac.at(`${MIRROR}/config`), 'utf8'), MIRROR_CONFIG_TEMPLATE);
+  assert.ok(!existsSync(mac.at(`${MIRROR}/hooks`)) && !existsSync(mac.at(`${MIRROR}/description`)), 'no hooks folder, no description');
+  assert.deepEqual(allOrchestrates(mac), [], 'every entry is orchestrate\'s');
+  assert.ok(mac.log.some((l) => /^git init --bare -q --template= in \/Library\/orch-test\/mirror \(as orchestrate\)$/.test(l)), 'git ran as orchestrate');
+  assert.ok(check(mac, cfg).some((r) => r.ok && MIRROR_ROW.test(r.what)));
+});
+
+test('mirror: a second run changes nothing', () => {
+  const mac = applied(); const n = mac.log.length;
+  const r = run(mac, ['users-folders']);
+  assert.equal(r.code, 0, r.text); assert.match(r.text, /nothing to do/);
+  assert.equal(mac.log.length, n, 'the second run made no changing call');
+});
+
+test('mirror: a Mac set up before (the folder there, orchestrate\'s, empty) gets only the repository; check FAILs until then', () => {
+  const mac = applied();
+  rmSync(mac.at(MIRROR), { recursive: true }); mkdirSync(mac.at(MIRROR), { mode: 0o755 }); chmodSync(mac.at(MIRROR), 0o755);
+  mac.owners.set(MIRROR, { uid: uidOf(mac, 'orchestrate'), gid: uidOf(mac, 'orchestrate') });
+  const row = check(mac, cfg).find((x) => MIRROR_ROW.test(x.what));
+  assert.equal(row.ok, false); assert.match(row.why, /the folder is empty: no repository has been made in it yet/);
+  const steps = plan(mac, cfg).ops.map((o) => o.text);
+  assert.equal(steps.length, 2, steps.join('\n')); assert.match(steps[1], /^as orchestrate: git -C \/Library\/orch-test\/mirror init --bare/);
+  const r = run(mac, ['users-folders']); assert.equal(r.code, 0, r.text);
+  assert.deepEqual(checkMirror(mac.at(MIRROR)), { ok: true }); assert.deepEqual(fails(mac), []);
+  assert.match(run(mac, ['users-folders']).text, /nothing to do/);
+});
+
+for (const [name, plant, want] of [
+  ['a config that differs from the template', (mac) => writeFileSync(mac.at(`${MIRROR}/config`), `${MIRROR_CONFIG_TEMPLATE}[core]\n\thooksPath = /tmp/x\n`), /mirror config differs from the template/],
+  ['a hook', (mac) => { mkdirSync(mac.at(`${MIRROR}/hooks`)); writeFileSync(mac.at(`${MIRROR}/hooks/post-update`), '#!/bin/sh\n'); }, /mirror has hooks: post-update/],
+  ['an attributes file', (mac) => { mkdirSync(mac.at(`${MIRROR}/info`), { recursive: true }); writeFileSync(mac.at(`${MIRROR}/info/attributes`), '* filter=x\n'); }, /mirror has info\/attributes/],
+  ['something that is no repository (a stray file)', (mac) => { rmSync(mac.at(MIRROR), { recursive: true }); mkdirSync(mac.at(MIRROR)); writeFileSync(mac.at(`${MIRROR}/notes.txt`), 'x'); mac.owners.set(MIRROR, { uid: uidOf(mac, 'orchestrate'), gid: uidOf(mac, 'orchestrate') }); }, /mirror config is missing or not a plain file/],
+]) {
+  test(`PLANT mirror: ${name} → users-folders refuses and repairs nothing; check FAILs naming it`, () => {
+    const mac = applied(); plant(mac);
+    const keep = new Map([...mac.owners].filter(([p]) => p.startsWith(MIRROR)));
+    const n = mac.log.length;
+    const r = run(mac, ['users-folders']);
+    assert.equal(r.code, 1, r.text); assert.match(r.text, want); assert.match(r.text, /It is not repaired/); assert.match(r.text, /nothing was changed/i);
+    assert.equal(mac.log.length, n, 'something was changed');
+    assert.deepEqual(new Map([...mac.owners].filter(([p]) => p.startsWith(MIRROR))), keep);
+    const row = check(mac, cfg).find((x) => MIRROR_ROW.test(x.what));
+    assert.equal(row.ok, false); assert.match(row.why, want);
+  });
+}
+
+test('PLANT mirror: an entry in it that is not orchestrate\'s → check FAILs naming it', () => {
+  const mac = applied(); mac.owners.set(`${MIRROR}/refs/heads`, { uid: mac.rootUid, gid: 0 });
+  const row = check(mac, cfg).find((x) => MIRROR_ROW.test(x.what));
+  assert.equal(row.ok, false); assert.match(row.why, /not orchestrate's .*\/Library\/orch-test\/mirror\/refs\/heads/);
+});
+
+test('mirror: git failing as orchestrate stops the run with its reason, and the next run makes it', () => {
+  const mac = fakeMac(); mac.gitFail = (args) => args[0] === 'init';
+  const r = run(mac, ['users-folders']);
+  assert.equal(r.code, 1, r.text); assert.match(r.text, /git init --bare in \/Library\/orch-test\/mirror failed as orchestrate \(injected failure\)/);
+  mac.gitFail = null;
+  const again = run(mac, ['users-folders']); assert.equal(again.code, 0, again.text);
+  assert.deepEqual(checkMirror(mac.at(MIRROR)), { ok: true });
 });
 
 test('a group named like a user, with no user yet: the user is made to match it (its id is kept)', () => {

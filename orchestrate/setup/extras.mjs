@@ -17,12 +17,11 @@ import { dirname, join } from 'node:path';
 import { chainProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { WATCH_READS, proveWatchReads } from '../modules/M6-merge-gate/watch-only.mjs';
 import { mirrorPath, proposalRows, proposalsParentOf } from './layout.mjs';
-import { aclEntries, folderChecks, planFolders, readUser } from './users-folders.mjs';
+import { GIT, aclEntries, folderChecks, planFolders, readUser } from './users-folders.mjs';
 import { refusedWhy } from './proofs.mjs';
 import { registerSecret } from '../shared/secret-guard.mjs';
 
 const SUDO = '/usr/bin/sudo';
-const GIT = '/usr/bin/git';
 const TEST = '/bin/test';
 const LS = '/bin/ls';
 export const TOKEN_FILE = 'watch-only-token';

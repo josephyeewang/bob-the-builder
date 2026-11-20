@@ -15,9 +15,10 @@
 // mac.mjs `secure`. New folders are made while still root's, parents first; owners and modes are set deepest first, so
 // a parent that a robot user will own is handed over last.
 
-import { BASE_MARKER, BOB_NEW, BOB_OLD, BUILDER, USERS, USER_ID_RANGE, WORKER_STATUS_FILE, aclText, baseMarkerPath, folderTable, homeOf, oldFlatOutboxPaths, shellOf, workerCopiesPath, workerRunnerPaths } from './layout.mjs';
+import { BASE_MARKER, BOB_NEW, BOB_OLD, BUILDER, USERS, USER_ID_RANGE, WORKER_STATUS_FILE, aclText, baseMarkerPath, folderTable, homeOf, mirrorPath, oldFlatOutboxPaths, shellOf, workerCopiesPath, workerRunnerPaths } from './layout.mjs';
 import { baseChainProblem, guardOp } from './guard.mjs';
 import { live as liveSession } from '../wiring/owner-status.mjs';
+import { MIRROR_CONFIG_TEMPLATE, checkMirror } from '../modules/M4-workshop/git/safe-git.mjs';
 
 const DSCL = '/usr/bin/dscl';
 const DSEDIT = '/usr/sbin/dseditgroup';
@@ -242,6 +243,76 @@ function ownerLeftovers(io, row, rows) {
   return names.filter((n) => n !== '.DS_Store' && !known.has(`${row.path}/${n}`)).map((n) => `${row.path}/${n}`).sort();
 }
 
+// ───────────────────────────────────────────── the Do-plane mirror's repository
+//
+// The mirror folder is a row of the folder table (orchestrate's, 0755). The bare repository in it is made here, by git run
+// as orchestrate (the mirror's only writer; the Dispatcher only reads it), never by root writing into a folder orchestrate
+// owns. safe-git.mjs initMirror makes the same shape but runs git as whoever calls it, so setup runs git itself through
+// sudo, and judges the result by the one rule the push step and the Dispatcher use: checkMirror. A folder that already
+// holds something checkMirror refuses is named and left alone, never repaired: what is in it may be someone's.
+
+/** The git setup runs as another user (here as orchestrate; extras.mjs as the owner). */
+export const GIT = '/usr/bin/git';
+/** The config keys the template sets ("core.bare", ...), as `git config --name-only --list` prints them. */
+const MIRROR_KEYS = new Set(MIRROR_CONFIG_TEMPLATE.split('\n').map((l) => /^\t(\w+) = /.exec(l)?.[1]).filter(Boolean).map((k) => `core.${k.toLowerCase()}`));
+/** git as orchestrate, in the mirror folder itself (`-C`: git never reads the folder setup was started from, which orchestrate may not enter). */
+const gitAsOrchestrate = (io, m, args) => io.run(SUDO, ['-n', '-H', '-u', 'orchestrate', GIT, '-C', io.at(m), ...args]);
+
+/** The step that makes the mirror's repository, or a problem: { ops, problems }. Nothing to do when checkMirror passes. */
+export function planMirror(io, cfg) {
+  const m = mirrorPath(cfg);
+  let st = null;
+  try { st = io.lstat(m); } catch (e) { if (e?.code !== 'ENOENT') return { ops: [], problems: [`${m} could not be read (${e?.code ?? e})`] }; }
+  if (st && (st.isSymbolicLink() || !st.isDirectory())) return { ops: [], problems: [] };   // planFolders names it
+  if (st) {
+    let names; try { names = io.list(m); } catch (e) { return { ops: [], problems: [`${m}'s contents could not be listed (${e?.code ?? e})`] }; }
+    if (names.length) {
+      const c = checkMirror(io.at(m));
+      if (c.ok) return { ops: [], problems: [] };
+      return { ops: [], problems: [`${m} holds something that is not the mirror setup makes (${c.reason}). It is not repaired: look inside it, move what is there out of the base, then run users-folders again. Nothing was changed`] };
+    }
+  }
+  return { ops: [op(`as orchestrate: git -C ${m} init --bare --template= (no hooks), then its config cut to exactly the mirror's (${[...MIRROR_KEYS].join(', ')})`, () => {
+    // The folder as the plan saw it: still a real, empty folder (the users-folders steps before this one made it orchestrate's).
+    const now = io.lstat(m);
+    if (now.isSymbolicLink() || !now.isDirectory()) throw new Error(`${m} is now ${now.isSymbolicLink() ? 'a link' : 'not a folder'}; no mirror was made`);
+    if (io.list(m).length) throw new Error(`${m} is no longer empty; no mirror was made in it`);
+    const must = (r, what) => { if (r.status !== 0) throw new Error(`${what} failed as orchestrate (${r.stderr.trim().slice(0, 160) || `exit ${r.status}`})`); return r; };
+    must(gitAsOrchestrate(io, m, ['init', '--bare', '-q', '--template=']), `git init --bare in ${m}`);
+    // git adds what it finds about the disk (on a Mac core.ignorecase and core.precomposeunicode): each key the template
+    // does not set is taken out, by git, as orchestrate. A value the template sets differently is not changed: checkMirror
+    // below refuses it.
+    const keys = must(gitAsOrchestrate(io, m, ['config', '--file', 'config', '--name-only', '--list']), `reading ${m}/config`).stdout.split('\n').filter(Boolean);
+    for (const k of keys) if (!MIRROR_KEYS.has(k)) must(gitAsOrchestrate(io, m, ['config', '--file', 'config', '--unset-all', k]), `taking ${k} out of ${m}/config`);
+    const c = checkMirror(io.at(m));
+    if (!c.ok) throw new Error(`the repository git made in ${m} is not the mirror's shape (${c.reason}); move ${m}'s contents out of the base, then run users-folders again`);
+  })], problems: [] };
+}
+
+/** Read only: the mirror passes checkMirror, and it and everything in it are orchestrate's. → item(ok, what, why). */
+export function mirrorCheck(io, cfg, ids, item) {
+  const m = mirrorPath(cfg);
+  const what = `${m} is the mirror: a bare repository whose config is exactly the template, no hooks, alternates or attributes file, all of it orchestrate's`;
+  let st; try { st = io.lstat(m); } catch { item(false, what, 'the mirror folder is missing (run users-folders)'); return; }
+  if (st.isSymbolicLink() || !st.isDirectory()) { item(false, what, `${m} is ${st.isSymbolicLink() ? 'a link' : 'not a folder'}`); return; }
+  let top; try { top = io.list(m); } catch (e) { item(false, what, `its contents could not be listed (${e?.code ?? e})`); return; }
+  if (!top.length) { item(false, what, 'the folder is empty: no repository has been made in it yet (run users-folders)'); return; }
+  const c = checkMirror(io.at(m));
+  if (!c.ok) { item(false, what, c.reason); return; }
+  const uid = ids.orchestrate?.uid;
+  if (uid === undefined) { item(false, what, 'no id for orchestrate'); return; }
+  // Every entry, never through a link: the robot writes all of it (a fetch adds objects and refs), so one it does not own breaks a push.
+  const notOurs = []; let unreadable = null;
+  const walk = (p) => {
+    let s; try { s = io.lstat(p); } catch (e) { unreadable ??= `${p} (${e?.code ?? e})`; return; }
+    if (s.uid !== uid) notOurs.push(`${p} (uid ${s.uid})`);
+    if (s.isDirectory() && !s.isSymbolicLink()) { let names; try { names = io.list(p); } catch (e) { unreadable ??= `${p} (${e?.code ?? e})`; return; } for (const n of names) walk(`${p}/${n}`); }
+  };
+  walk(m);
+  if (unreadable) { item(false, what, `could not be read: ${unreadable}`); return; }
+  item(notOurs.length === 0, what, `not orchestrate's (uid ${uid}): ${notOurs.slice(0, 5).join(', ')}${notOurs.length > 5 ? ` and ${notOurs.length - 5} more` : ''}`);
+}
+
 /**
  * Null, or why the folders can't be handed to the builder now (L1079: refuse while a session is live). The worker runner's
  * status file, when there is one, must list no live session: a session the owner's runner started would lose its folders
@@ -296,8 +367,10 @@ export function plan(io, cfg) {
     run: () => { io.write(baseMarkerPath(cfg), 'made by the orchestrate setup; delete the whole folder to start over\n', 0o444); io.secureFile(baseMarkerPath(cfg), { uid: io.rootUid, gid: 0, mode: 0o444 }); },
   }];
   const f = planFolders(io, cfg, u.ids, folderTable(cfg), { afterBase: b.fresh ? marker : [] });
-  const ops = [...u.ops, ...f.ops];
-  return { ops: ops.length ? [guardOp(io, cfg), ...ops] : ops, problems: [...u.problems, ...f.problems] };
+  // The mirror's repository last: its folder is orchestrate's only once the folder steps above have run.
+  const mi = planMirror(io, cfg);
+  const ops = [...u.ops, ...f.ops, ...mi.ops];
+  return { ops: ops.length ? [guardOp(io, cfg), ...ops] : ops, problems: [...u.problems, ...f.problems, ...mi.problems] };
 }
 
 export function apply(ops, { log = () => {} } = {}) {
@@ -366,6 +439,7 @@ export function check(io, cfg, { alsoKnown = [] } = {}) {
   // The runner roles' flat outbox folders (outboxes/worker, outboxes/script) that setup made before L914 are no entry the
   // setup did not make: the check below names them and what they hold, so the outbox root's row does not FAIL on them too.
   folderChecks(io, tableRows, ids, item, { base: cfg.base, known: new Set([...tableRows.map((r) => r.path), baseMarkerPath(cfg), ...oldFlatOutboxPaths(cfg), ...alsoKnown]) });
+  mirrorCheck(io, cfg, ids, item);
   // L914: the worker runner's roles have their outboxes in each product's folder (L836), so setup makes their flat folders no
   // more. One left from before is named with what it holds, for the owner to clear by hand: a session's hand-in there may
   // not be taken in yet. Setup deletes nothing. Finder's own .DS_Store is let be.
