@@ -54,7 +54,7 @@ const GITLEAKS_ARGS = "runScanner's words: a gitleaks subcommand (version, git, 
 const CLAUDE_VERSION = "claude's path (the worker runner config's claudeBin, or the one the proof is handed), asked only --version";
 const LIVE_TESTS = "settings-names' TESTS: each run(side, dir) gives claude fixed flags (with, per test, an --effort level, the --mcp-config JSON of an empty or test tool-server list, or a random --session-id), the path of a settings file written in the proof's own temp folder (the settings object goes in the file, not on the command line) and a prompt made of fixed text and paths in that folder (dir)";
 const SHARED = { SETUP_CFG, SETUP_IO, DESTRUCTURED, GIT_ANSWER, RECORD_DOC, CLAUDE_START, INSTALL_PATHS, PROOF_ROWS, CAPTURE_TOOL, REVIEW_CONFIG, GITLEAKS_SETUP, GITLEAKS_ARGS, CLAUDE_VERSION, LIVE_TESTS };
-const SHARED_COUNT = { SETUP_CFG: 4, SETUP_IO: 13, DESTRUCTURED: 9, GIT_ANSWER: 13, RECORD_DOC: 17, CLAUDE_START: 14, INSTALL_PATHS: 13, PROOF_ROWS: 31, CAPTURE_TOOL: 6, REVIEW_CONFIG: 4, GITLEAKS_SETUP: 2, GITLEAKS_ARGS: 1, CLAUDE_VERSION: 3, LIVE_TESTS: 3 };
+const SHARED_COUNT = { SETUP_CFG: 4, SETUP_IO: 17, DESTRUCTURED: 9, GIT_ANSWER: 13, RECORD_DOC: 17, CLAUDE_START: 14, INSTALL_PATHS: 13, PROOF_ROWS: 31, CAPTURE_TOOL: 6, REVIEW_CONFIG: 4, GITLEAKS_SETUP: 2, GITLEAKS_ARGS: 1, CLAUDE_VERSION: 3, LIVE_TESTS: 3 };
 const REVIEWED = {
   "modules/M11-dispatcher/cleanup.mjs unread git(…, ['merge-base', '--is-ancestor', a.merge_commit, 'refs/heads/): rec.list('merge') is a call whose answer is not read @d02e91a1": "rec is the Record store: rec.list('merge') gives merge records, whose merge_commit is a 40-hex commit id (checked before git sees it), and rec.list('product') gives product ids",
   "modules/M11-dispatcher/cleanup.mjs unread mirrorTree's sha reaches git(…, ['ls-tree', '-r', '-z', '--full-tree', sha]), and mirrorTree is called from other modules @879170a7": "mirrorTree(git, mirror, sha): git ls-tree on a commit id; its callers pass a card's recorded commit",
@@ -194,6 +194,12 @@ const REVIEWED = {
   "setup/users-folders.mjs unread want(…, [['UserShell', shellOf(name)], ['IsHidden', '1'], ['Password): shellOf(name) is a call whose answer is not read @8f7af688": "homeOf(cfg, name) is a home folder's path under the setup base and shellOf(name) a shell's path (/usr/bin/false or /bin/zsh); dscl attribute values",
   "setup/users-folders.mjs unread aclEntries's io reaches run(…, ['-led', io.at(path)]), and aclEntries is called from other modules @f142b286": SETUP_IO,
   "setup/users-folders.mjs unread planFolders's rows reaches aclOp(…, row), and planFolders is called from other modules @b54f037a": "rows are folderTable(cfg): paths, owners and modes",
+  // L1312 (#629): the mirror's repository, made by git run as orchestrate.
+  "setup/users-folders.mjs unread gitAsOrchestrate(…, ['config', '--file', 'config', '--unset-all', k]): io.run(SUDO, ['-n', '-H', '-u', 'orchestrate', GIT, '-C', io is a call whose answer is not read @791e0bad": "k is a config key name git itself printed for the mirror it just made (git config --name-only --list on a fresh bare repository: core.* keys); the path is mirrorPath(cfg), under the setup base",
+  "setup/users-folders.mjs unread planMirror's io reaches gitAsOrchestrate(…, io), and planMirror is called from other modules @6bb0729e": SETUP_IO,
+  "setup/users-folders.mjs unread planMirror's io reaches gitAsOrchestrate(…, io), and planMirror is called from other modules @6bb0729e #2": SETUP_IO,
+  "setup/users-folders.mjs unread planMirror's io reaches gitAsOrchestrate(…, io), and planMirror is called from other modules @6bb0729e #3": SETUP_IO,
+  "setup/users-folders.mjs unread plan's io reaches planMirror(…, io), and plan is called from other modules @75c64319": SETUP_IO,
   "setup/users-folders.mjs unread planFolders's io reaches aclOp(…, io), and planFolders is called from other modules @1120115e": SETUP_IO,
   "setup/users-folders.mjs unread planFolders's io reaches aclEntries(…, io), and planFolders is called from other modules @8fe81b16": SETUP_IO,
   "setup/users-folders.mjs unread planFolders's io reaches aclOp(…, io), and planFolders is called from other modules @1120115e #2": SETUP_IO,

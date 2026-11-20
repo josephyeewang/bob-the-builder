@@ -256,7 +256,7 @@ export const GIT = '/usr/bin/git';
 /** The config keys the template sets ("core.bare", ...), as `git config --name-only --list` prints them. */
 const MIRROR_KEYS = new Set(MIRROR_CONFIG_TEMPLATE.split('\n').map((l) => /^\t(\w+) = /.exec(l)?.[1]).filter(Boolean).map((k) => `core.${k.toLowerCase()}`));
 /** git as orchestrate, in the mirror folder itself (`-C`: git never reads the folder setup was started from, which orchestrate may not enter). */
-const gitAsOrchestrate = (io, m, args) => io.run(SUDO, ['-n', '-H', '-u', 'orchestrate', GIT, '-C', io.at(m), ...args]);
+const gitAsOrchestrate = (io, cfg, args) => io.run(SUDO, ['-n', '-H', '-u', 'orchestrate', GIT, '-C', io.at(mirrorPath(cfg)), ...args]);
 
 /** The step that makes the mirror's repository, or a problem: { ops, problems }. Nothing to do when checkMirror passes. */
 export function planMirror(io, cfg) {
@@ -278,12 +278,12 @@ export function planMirror(io, cfg) {
     if (now.isSymbolicLink() || !now.isDirectory()) throw new Error(`${m} is now ${now.isSymbolicLink() ? 'a link' : 'not a folder'}; no mirror was made`);
     if (io.list(m).length) throw new Error(`${m} is no longer empty; no mirror was made in it`);
     const must = (r, what) => { if (r.status !== 0) throw new Error(`${what} failed as orchestrate (${r.stderr.trim().slice(0, 160) || `exit ${r.status}`})`); return r; };
-    must(gitAsOrchestrate(io, m, ['init', '--bare', '-q', '--template=']), `git init --bare in ${m}`);
+    must(gitAsOrchestrate(io, cfg, ['init', '--bare', '-q', '--template=']), `git init --bare in ${m}`);
     // git adds what it finds about the disk (on a Mac core.ignorecase and core.precomposeunicode): each key the template
     // does not set is taken out, by git, as orchestrate. A value the template sets differently is not changed: checkMirror
     // below refuses it.
-    const keys = must(gitAsOrchestrate(io, m, ['config', '--file', 'config', '--name-only', '--list']), `reading ${m}/config`).stdout.split('\n').filter(Boolean);
-    for (const k of keys) if (!MIRROR_KEYS.has(k)) must(gitAsOrchestrate(io, m, ['config', '--file', 'config', '--unset-all', k]), `taking ${k} out of ${m}/config`);
+    const keys = must(gitAsOrchestrate(io, cfg, ['config', '--file', 'config', '--name-only', '--list']), `reading ${m}/config`).stdout.split('\n').filter(Boolean);
+    for (const k of keys) if (!MIRROR_KEYS.has(k)) must(gitAsOrchestrate(io, cfg, ['config', '--file', 'config', '--unset-all', k]), `taking ${k} out of ${m}/config`);
     const c = checkMirror(io.at(m));
     if (!c.ok) throw new Error(`the repository git made in ${m} is not the mirror's shape (${c.reason}); move ${m}'s contents out of the base, then run users-folders again`);
   })], problems: [] };
