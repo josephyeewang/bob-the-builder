@@ -52,6 +52,7 @@ import { SHA40 } from '../shared/plan-fingerprint.mjs';
 import { readUser } from './users-folders.mjs';
 import { installPaths } from './install.mjs';
 import { DISPATCHER_CONFIG, DISPATCHER_USER } from './dispatcher-setup.mjs';
+import { currentCopy } from '../modules/M4-workshop/launcher/install-check.mjs';
 
 export const APPROVED_FILE = 'approved-rules.json';
 export const TOP_LINES = 25;
@@ -137,12 +138,23 @@ export async function mainRules(gh, entry) {
 }
 
 /**
+ * The folder the copy's link names now (L1319): installRoot is root's link to orchestrate.v-<commit>/orchestrate, and
+ * readConfigFile refuses any link on the way, so the file is read in the real folder, as the Dispatcher's job does.
+ * currentCopy checks the link and both folders are root's first; a plain folder (an older copy) is used as it is.
+ */
+export function copyFolder(installRoot, rootUid, { current = currentCopy } = {}) {
+  const cur = current(installRoot, { owner: rootUid });
+  if (!cur.real) throw new Error(`the installed copy can't be used: ${cur.problem}`);
+  return cur.real;
+}
+
+/**
  * The real ports, as the Dispatcher's user: its config read as root's files are, its token, the read-only client, the list
  * file, the terminal. Tests pass their own.
  */
 export function realPorts(io, cfg, { fetchFn } = {}) {
   return {
-    dispatcherConfig: () => JSON.parse(readConfigFile(join(installPaths(cfg).installRoot, DISPATCHER_CONFIG), { strict: true, rootUid: io.rootUid, what: "the Dispatcher's config (dispatcher.json)" })),
+    dispatcherConfig: () => JSON.parse(readConfigFile(join(copyFolder(installPaths(cfg).installRoot, io.rootUid), DISPATCHER_CONFIG), { strict: true, rootUid: io.rootUid, what: "the Dispatcher's config (dispatcher.json)" })),
     products: (file) => readProducts(file),
     gh: (c, uid) => readOnlyClient({ token: tokenFile(c.tokenFile, { uid }), fetchFn }),
     folder: (path, uid) => privateFolder({ path, uid, what: "the rules reader's state folder (rulesStateDir)", writable: true }),
