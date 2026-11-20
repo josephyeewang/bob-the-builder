@@ -107,6 +107,22 @@ test('no usage reading: nothing Tier-1 starts, Tier-2 work runs under the lower 
   assert.equal(band.unknown_since, iso(T0));
 });
 
+test('L1331: a green week with no 5-hour row listed: a Tier-1 card starts and Tier-2 cards fill the normal cap', async () => {
+  const weekOnly = () => { const f = usageFact({ week: 30, h5: 0, account: ACCT, now: T0 }); return ['fact', USAGE_FACT(ACCT), { ...f, h5: { used_pct: null, resets_at: null }, h5_none: true }]; };
+  const one = mac([account(), weekOnly(), card('T1', { tier: 1 })]);
+  await one.at(0);
+  assert.deepEqual(one.launched, ['T1']);
+  const many = mac([account(), weekOnly(), ...TIER2()]);
+  await many.at(0);
+  assert.equal(many.launched.length, VALUES[K.editingPerProduct], `the normal cap: ${many.launched.join(', ')}`);
+  assert.equal(many.rec.read('fact', BAND_FACT).doc.band, 'green');
+  // Without the marker the same reading is unknown: nothing Tier-1 starts.
+  const f = usageFact({ week: 30, h5: 0, account: ACCT, now: T0 });
+  const old = mac([account(), ['fact', USAGE_FACT(ACCT), { ...f, h5: { used_pct: null, resets_at: null } }], card('T1', { tier: 1 })]);
+  await old.at(0);
+  assert.deepEqual(old.launched, []);
+});
+
 test('#637 r2 m2: a fresh green reading but a sign-in that is not confirmed: no Tier-1 start, Tier-2 runs under the amber cap', async () => {
   const unsure = ['fact', ACCOUNT_FACT, { account: ACCT, signed_in: null, reason: 'who is signed in is not confirmed', observed_at: iso(T0) }];
   const one = mac([unsure, green(), card('T1', { tier: 1 })]);

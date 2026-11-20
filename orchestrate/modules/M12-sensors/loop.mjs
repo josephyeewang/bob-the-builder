@@ -99,7 +99,9 @@ export async function sensorsPass({ rec, ports, now = () => new Date(), deadline
       if (typeof ports.readUsage !== 'function') problems.push('usage: no usage source yet (R-0b-66); written as unknown');
       const read = port(ports.readUsage, 'the usage read', NO_USAGE);
       const r = await run('usage-', async (a) => { const v = await read(a); return v && typeof v === 'object' ? v : NO_USAGE; }, { account: who });
-      note(`usage-${who}`, r, valueOf(`usage-${who}`)?.h5?.used_pct == null);
+      // Unknown when there is no 5-hour figure, unless the report listed no 5-hour row at all (L1331: the week decides).
+      const u = valueOf(`usage-${who}`);
+      note(`usage-${who}`, r, u?.h5?.used_pct == null && u?.h5_none !== true);
       // A window handed on from the stored reading (no new figure for it) is kept, not known (L771).
       if (r?.ok === true && r.handedOn?.length) wrote[`usage-${who}`].kept = [...r.handedOn];
     },

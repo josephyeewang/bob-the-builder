@@ -27,6 +27,38 @@ test('L1329 audit M1: an account whose sign-in is not confirmed has unknown usag
   assert.equal(currentBands({ rec: moved, rules: R, account: 'acct-a', now: T0 }).band, 'unknown');
 });
 
+test('L1331: a reading that says no 5-hour row was listed is banded by the week alone; any other gap stays unknown', () => {
+  // gone 0.1 keeps pace out (below the floor), so the week figure alone sets the edges.
+  const noH5 = (week, extra = {}) => ({ ...usageFact({ week, h5: 0, gone: 0.1 }), h5: { used_pct: null, resets_at: null }, h5_none: true, ...extra });
+  const green = at(noH5(20));
+  assert.deepEqual([green.band, green.h5, green.week, green.prodBlocked], ['green', null, 20, false]);
+  assert.doesNotMatch(green.reason, /5-hour/, 'no 5-hour line is named');
+  assert.equal(mayStart({ b: green, kind: 'editing', tier: 1, redRuns: [] }).ok, true, 'Tier 1 may start on a green week');
+  assert.equal(at(noH5(69)).band, 'green');
+  assert.equal(at(noH5(70)).band, 'amber');
+  assert.equal(at(noH5(84)).band, 'amber');
+  const red = at(noH5(85));
+  assert.equal(red.band, 'red'); assert.match(red.reason, /week 85%/); assert.doesNotMatch(red.reason, /5-hour/);
+  assert.equal(at(noH5(84)).prodBlocked, false, 'production work is blocked by the week only past its line');
+  assert.equal(at(noH5(91)).prodBlocked, true);
+  assert.equal(at({ ...noH5(20), h5: null }).band, 'green', 'a null 5-hour window reads the same');
+  // Without the marker, a missing 5-hour figure is still unknown (L611); so is a marker that is not false.
+  for (const extra of [{ h5_none: undefined }, { h5_none: false }, { h5_none: 'true' }]) {
+    const b = at(noH5(20, extra));
+    assert.equal(b.band, 'unknown', JSON.stringify(extra)); assert.match(b.reason, /5-hour figure is not a percent/);
+    assert.equal(mayStart({ b, kind: 'editing', tier: 1, redRuns: [] }).ok, false);
+  }
+  // A 5-hour figure that is there (a stored window handed on) is still checked: high is red, unreadable is unknown.
+  assert.equal(at(noH5(10, { h5: { used_pct: 80, resets_at: new Date(T0 + 60 * MIN).toISOString() } })).band, 'red');
+  assert.equal(at(noH5(10, { h5: { used_pct: 'x', resets_at: null } })).band, 'unknown');
+  // The week is still needed whole.
+  assert.match(at(noH5(20, { week: null })).reason, /week figure is not a percent/);
+  assert.match(at(noH5(20, { week: { used_pct: 20, resets_at: null } })).reason, /week reset time is missing/);
+  // L1329 still holds: a sign-in not confirmed is unknown whatever the reading says.
+  const rec = recWith([['fact', USAGE_FACT('acct-a'), noH5(10)], ['fact', 'signed-in-account', { account: 'acct-a', signed_in: null, reason: 'x', observed_at: new Date(T0).toISOString() }]]);
+  assert.equal(currentBands({ rec, rules: R, account: 'acct-a', now: T0 }).band, 'unknown');
+});
+
 test('M2 plants: the band edges', () => {
   const plant = at(usageFact({ week: 50, h5: 60, gone: 0.625 })); // pace 0.80, week 50, 5-hour 60
   assert.equal(plant.band, 'green');

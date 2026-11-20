@@ -55,6 +55,12 @@ test('L611: a report with no session row gives a null 5-hour window, never 0%', 
   assert.equal(r.ok, true);
   assert.equal(r.h5, null);
   assert.equal(r.week.used_pct, 99);
+  // L1331: and says the report listed no 5-hour row, so M11 judges by the week alone. Written only then.
+  assert.equal(r.h5_none, true);
+  assert.equal(Object.hasOwn(parseUsageReport(stream(limits([row('session', 1), row('weekly_all', 2)]))), 'h5_none'), false);
+  // A session row that can't be read refuses the whole report; it is never taken as no row.
+  assert.equal(parseUsageReport(stream(limits([row('session', 'x'), row('weekly_all', 2)]))).ok, false);
+  assert.equal(parseUsageReport(stream(limits([row('session', null), row('weekly_all', 2)]))).ok, false);
 });
 
 test('L611: a report this does not know is refused, and says why', () => {
@@ -91,6 +97,9 @@ test('ownerAnswer: signed in → the account and both windows, with no email, to
   assert.deepEqual(a, { v: 1, account: 'a', signed_in: true, observed_at: '2026-11-05T12:00:00.000Z',
     usage: { h5: { used_pct: 40, resets_at: '2026-11-07T22:59:59.734Z' }, week: { used_pct: 60, resets_at: '2026-11-07T22:59:59.734Z' }, week_from: 'weekly_all' } });
   assert.doesNotMatch(JSON.stringify(a), /example\.com|claude\.ai|max|Current week/);
+  // L1331: the live report's shape on 20 Nov (weekly rows only) → no 5-hour window, said in so many words.
+  const weekly = await ownerAnswer(fakes({ usage: stream(limits([row('weekly_all', 48), row('weekly_scoped', 25, { scope: { model: { display_name: 'M' } } })])) }));
+  assert.deepEqual(weekly.usage, { h5: null, week: { used_pct: 48, resets_at: '2026-11-07T22:59:59.734Z' }, week_from: 'weekly_all', h5_none: true });
 });
 
 test('ownerAnswer: signed out, not known, no account or a refused report each say so, and never guess', async () => {

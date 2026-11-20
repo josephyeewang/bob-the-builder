@@ -9,7 +9,9 @@
 // The fact ids are M11's own (imported, not copied), and every fact passes the allow-list in fact-shapes.mjs.
 //
 // Ports (each may be async):
-//   readUsage(account)  → { h5: { used_pct, resets_at }, week: { used_pct, resets_at }, source, observed_at? } | null
+//   readUsage(account)  → { h5: { used_pct, resets_at }, week: { used_pct, resets_at }, source, observed_at?, h5_none? } | null
+//                         h5_none: true = the plan's report listed no 5-hour row at all (L1331), so M11 judges the band
+//                         by the week alone. The fact always stores h5_none: true only when the reading says so, else false.
 //   whoIsSignedIn()     → the account name, or { account, signed_in?, reason?, observed_at? }, or null when it can't be read
 // The account fact tells "nobody is signed in" apart from "couldn't tell" (L730, #289 r1 M1): signed_in is true (an
 // account of M4's), false (the port said plainly nobody is), or null (couldn't tell), and `reason` says why when it is
@@ -73,6 +75,8 @@ export async function writeUsageFact(writer, readUsage, account, { now = () => n
   const at = Date.parse(started);
   const open = (w) => known(w) && Date.parse(w.resets_at) > at;
   const doc = { kind: 'fact.usage', account, observed_at, source: r.source ?? null, h5: win(r.h5), week: win(r.week) };
+  // Always written (true or false), so every field M11 reads is stored (R-0b-168); true only as the reading says.
+  doc.h5_none = r.h5_none === true;
   const handedOn = stored && timeOrNull(stored.observed_at) ? ['h5', 'week'].filter((k) => !known(r[k]) && open(stored[k])) : [];
   for (const k of handedOn) doc[k] = win(stored[k]);
   if (handedOn.length) {

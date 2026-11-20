@@ -135,7 +135,8 @@ export function heartbeatProbes({ rec, rules, now, labels = {}, upMs = () => upt
       if (!account) return null;
       const r = readFact(sensorsFact(rec, USAGE_FACT(account)), { account, now: now(), staleMs: staleMs() });
       if (!r.ok) return null;
-      return r.h5 > r.week ? { window: '5-hour', pct: r.h5 } : { window: 'weekly', pct: r.week };
+      // r.h5 is null when the plan lists no 5-hour limit (L1331): the week is the figure then.
+      return r.h5 !== null && r.h5 > r.week ? { window: '5-hour', pct: r.h5 } : { window: 'weekly', pct: r.week };
     }),
   };
 }
