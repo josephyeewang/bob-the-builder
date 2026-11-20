@@ -14,7 +14,7 @@ import { RUNNER_ROLES } from '../shared/review-roles.mjs';
 import { BASE_MARKER, FLAT_OUTBOX_ROLES, ORCHESTRATE_READ_ACL, PRODUCT_OUTBOX_ROLES, ROOT_CONFIG_PATH, USERS, USER_ID_RANGE, WORKER_ROLES, aclText, builderSigninDir, builderSigninPath, folderTable, homeOf, parseConfig, privatePath } from './layout.mjs';
 import { nodeProblemOf, realIo, secureFolder } from './mac.mjs';
 import { aclEntries, adminAnswer, apply, check, parseDscl, plan, readUser } from './users-folders.mjs';
-import { ACL_CHANGE, WALK_MAX, builderAclWhy, changedWhy, groupsProblem, hopsOn, identOn, kindOn, proofCommands, proofInputs, proofList, proveList, refusedWhy, runProofs, stickyOn, walkOn } from './proofs.mjs';
+import { ACL_CHANGE, WALK_MAX, builderAclWhy, changedWhy, groupsProblem, sharepointWhy, hopsOn, identOn, kindOn, proofCommands, proofInputs, proofList, proveList, refusedWhy, runProofs, stickyOn, walkOn } from './proofs.mjs';
 import { main } from './setup.mjs';
 import { parseInstallConfig } from './install.mjs';
 import { workerRunnerConfigFor } from './worker-runner-setup.mjs';
@@ -1090,6 +1090,22 @@ test('#528 r2 m8 PLANTs: kindOn tells an error from "not there" and a link by wh
   // P7: a sharing group (or any group not the allowed ones) FAILs.
   assert.match(groupsProblem({ status: 0, stdout: 'builder everyone com.apple.sharepoint.group.1\n' }), /in com\.apple\.sharepoint\.group\.1/);
   assert.equal(groupsProblem({ status: 0, stdout: 'builder everyone localaccounts _lpoperator\n' }), null);
+  // L1316: a File Sharing group passes only when sharepointWhy, read from the Mac, passes it; any other group still FAILs.
+  const sp = { status: 0, stdout: 'builder everyone com.apple.sharepoint.group.1\n' };
+  assert.equal(groupsProblem(sp, () => null), null);
+  assert.match(groupsProblem(sp, () => 'it names members of its own'), /in com\.apple\.sharepoint\.group\.1/);
+  assert.match(groupsProblem({ status: 0, stdout: 'builder staff\n' }, () => null), /in staff/, 'only File Sharing names are asked about');
+  const EV = 'ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000000C';
+  const mac = (rec, ev = `GeneratedUID: ${EV}\n`) => ({ run: (cmd, args) => ({ status: 0, stdout: args[2] === '/Groups/everyone' ? ev : rec, stderr: '' }) });
+  const real = `GeneratedUID: 1D0CA145-F7B7-464A-85AB-AD93FAC4035A\nNestedGroups: ${EV}\nPrimaryGroupID: 701\nRealName:\n Sam's Public Folder\nRecordName: com.apple.sharepoint.group.1\n`;
+  assert.equal(sharepointWhy(mac(real), 'com.apple.sharepoint.group.1'), null, 'the record macOS makes for a shared Public folder');
+  assert.match(sharepointWhy(mac(`${real}GroupMembership: sam\n`), 'com.apple.sharepoint.group.1'), /members of its own/);
+  assert.match(sharepointWhy(mac(`${real}GroupMembers: 11112222-AAAA-BBBB-CCCC-DDDDEEEEFFFF\n`), 'com.apple.sharepoint.group.1'), /members of its own/);
+  assert.match(sharepointWhy(mac(real.replace(`NestedGroups: ${EV}`, `NestedGroups: ${EV} 11112222-AAAA-BBBB-CCCC-DDDDEEEEFFFF`)), 'com.apple.sharepoint.group.1'), /other than everyone/);
+  assert.match(sharepointWhy(mac(real.replace(/NestedGroups.*\n/, '')), 'com.apple.sharepoint.group.1'), /other than everyone/);
+  assert.match(sharepointWhy(mac(real, ''), 'com.apple.sharepoint.group.1'), /everyone group's id/);
+  assert.match(sharepointWhy({ run: (c, a) => (a[2] === '/Groups/everyone' ? { status: 0, stdout: `GeneratedUID: ${EV}\n` } : { status: 56, stdout: '', stderr: 'no' }) }, 'com.apple.sharepoint.group.1'), /could not be read/);
+  assert.match(sharepointWhy(mac(real), 'admin'), /not a File Sharing group/);
 });
 
 test('#528 r2 m6: only the program\'s own refusal for this path passes; sudo\'s words, another path, or a test that speaks prove nothing', () => {
@@ -1880,6 +1896,7 @@ test('#528 r6 m-2: an access-list entry that lets the builder (or a group it is 
   assert.equal(builderAclWhy(at(['user:builder allow list,search,readattr']), '/p'), null, 'reading is the read proofs\' job');
   assert.equal(builderAclWhy(at(['group:everyone deny delete']), '/p'), null, 'a deny takes nothing away from the proof');
   assert.equal(builderAclWhy(at(['user:sam allow delete,writesecurity']), '/p'), null, 'someone else\'s entry');
+  assert.match(builderAclWhy(at(['group:com.apple.sharepoint.group.3 allow add_file']), '/p') ?? '', /sharepoint\.group\.3 allow add_file/, 'a File Sharing group counts as the builder\'s (L1316)');
   for (const [l, re] of [['user:builder allow delete', /user:builder allow delete/], ['group:everyone allow add_file,list', /group:everyone allow add_file/], ['group:builder inherited allow writesecurity', /writesecurity/], ['group:localaccounts allow chown', /chown/], ['group:_lpoperator allow delete_child', /delete_child/], ['user:builder allow write,append', /append,write/]]) {
     assert.match(builderAclWhy(at([l]), '/p') ?? '', re, l);
   }

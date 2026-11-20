@@ -47,7 +47,7 @@ import { runnerPlaces } from '../shared/product-paths.mjs';
 import { BUILDER, BUILDER_SHELL, builderSigninDir, builderSigninPath, FLAT_OUTBOX_ROLES, PRODUCT_OUTBOX_ROLES, USERS, WORKER_RUNNER_CONFIG, baseMarkerPath, proposalRows, homeOf, outboxRootPath, workerCopiesPath } from './layout.mjs';
 import { RUNNER_CONFIG } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { installPaths } from './install.mjs';
-import { aclEntries, readUser } from './users-folders.mjs';
+import { aclEntries, parseDscl, readUser } from './users-folders.mjs';
 import { signinFileRows } from '../wiring/builder-signin.mjs';
 
 const SUDO = '/usr/bin/sudo';
@@ -217,13 +217,37 @@ export function proofList(cfg, { ownerHome = null, rules = { files: [], why: 'no
   return list.filter((pr) => { if (!pr.above) return true; const k = pr.ownerOf ? `owner\0${pr.ownerOf}` : pr.args.join('\0'); if (once.has(k)) return false; once.add(k); return true; });
 }
 
-/** Null, or why the builder's groups are not its own and the allowed ones (L1079). `out`: `id -Gn builder`'s answer. */
-export function groupsProblem(r) {
+/** A File Sharing group's name, as macOS makes one for each shared folder. */
+export const SHAREPOINT_GROUP = /^com\.apple\.sharepoint\.group\.\d+$/;
+const DSCL = '/usr/bin/dscl';
+/**
+ * Null when `name` is a File Sharing group whose only members come from macOS's everyone group (L1316): no person or
+ * group of its own (no GroupMembership, no GroupMembers) and NestedGroups exactly everyone's GeneratedUID, read from
+ * this Mac, not assumed. Being in it gives the builder nothing every local user lacks. Otherwise why not.
+ */
+export function sharepointWhy(io, name) {
+  if (!SHAREPOINT_GROUP.test(name)) return 'not a File Sharing group';
+  const ev = io.run(DSCL, ['.', '-read', '/Groups/everyone', 'GeneratedUID']);
+  const evId = ev.status === 0 ? parseDscl(ev.stdout).GeneratedUID : null;
+  if (!evId) return 'the everyone group\'s id could not be read';
+  const r = io.run(DSCL, ['.', '-read', `/Groups/${name}`]);
+  if (r.status !== 0) return 'its record could not be read';
+  const a = parseDscl(r.stdout);
+  if (a.GroupMembership || a.GroupMembers) return 'it names members of its own';
+  if (a.NestedGroups !== evId) return `it holds groups other than everyone (${String(a.NestedGroups ?? 'none').slice(0, 80)})`;
+  return null;
+}
+
+/**
+ * Null, or why the builder's groups are not its own and the allowed ones (L1079). `r`: `id -Gn builder`'s answer.
+ * `sharedWhy(name)`: sharepointWhy for this Mac; a File Sharing group it passes is allowed (L1316), any other FAILs.
+ */
+export function groupsProblem(r, sharedWhy = () => 'not looked at') {
   if (!r || r.status !== 0) return `its groups could not be read (${String(r?.stderr ?? '').trim().slice(0, 100) || `exit ${r?.status}`}), so it is not known that none opens the owner's home`;
   const names = String(r.stdout).trim().split(/\s+/).filter(Boolean);
   if (!names.length) return 'its group list came back empty, which no Mac user has; not known that none opens the owner\'s home';
   if (!names.includes(BUILDER)) return `its own group ${BUILDER} is not among its groups (${names.join(' ').slice(0, 200)})`;
-  const extra = names.filter((n) => n !== BUILDER && !BUILDER_GROUPS_ALLOWED.includes(n));
+  const extra = names.filter((n) => n !== BUILDER && !BUILDER_GROUPS_ALLOWED.includes(n) && !(SHAREPOINT_GROUP.test(n) && sharedWhy(n) === null));
   return extra.length ? `it is in ${extra.join(', ')}, which is not its own group or one macOS gives every local user; take it out (dseditgroup -o edit -d ${BUILDER} -t user <group>)` : null;
 }
 
@@ -235,8 +259,8 @@ export function runProofs(io, cfg) {
   // Its shell is zsh (#487 r5 m1): the production guard's message shapes are safe as zsh reads them, not as bash 3.2 does.
   const u = readUser(io, BUILDER);
   out.push({ ok: u.exists && u.shell === BUILDER_SHELL, what: `${BUILDER}'s shell is ${BUILDER_SHELL} (its sessions' Bash tool runs it)`, ...(u.exists && u.shell === BUILDER_SHELL ? {} : { why: u.exists ? `its shell is ${u.shell || 'unset'}` : `${BUILDER} is not a user on this Mac` }) });
-  const g = groupsProblem(io.run(ID, ['-Gn', BUILDER]));
-  out.push({ ok: g === null, what: `${BUILDER}'s groups are its own and the ones macOS gives every local user (${BUILDER_GROUPS_ALLOWED.join(', ')})`, ...(g ? { why: g } : {}) });
+  const g = groupsProblem(io.run(ID, ['-Gn', BUILDER]), (n) => sharepointWhy(io, n));
+  out.push({ ok: g === null, what: `${BUILDER}'s groups are its own and the ones macOS gives every local user (${BUILDER_GROUPS_ALLOWED.join(', ')}, and File Sharing groups that hold only everyone)`, ...(g ? { why: g } : {}) });
   return out;
 }
 
@@ -256,7 +280,8 @@ export function builderAclWhy(io, p) {
   for (const e of a.entries) {
     if (e.startsWith(UNREADABLE)) return { notTried: `root could not read an access-list entry (${e.slice(UNREADABLE.length).slice(0, 62)})` };
     const m = /^(\S+)(?: inherited)? (allow|deny) (\S+)$/.exec(e);
-    if (!m || m[2] !== 'allow' || !who.has(m[1])) continue;
+    // Any File Sharing group counts as the builder's (L1316): groupsProblem may let it be in one, so its entries are checked.
+    if (!m || m[2] !== 'allow' || !(who.has(m[1]) || (m[1].startsWith('group:') && SHAREPOINT_GROUP.test(m[1].slice(6))))) continue;
     const bad = m[3].split(',').filter((x) => ACL_CHANGE.includes(x));
     if (bad.length) return `an access-list entry lets ${BUILDER} change it (${m[1]} allow ${bad.join(',')}), and must not`;
   }
