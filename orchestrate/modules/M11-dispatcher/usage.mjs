@@ -95,7 +95,8 @@ export function currentBands({ rec, rules, account, now }) {
   // whatever its last reading says, so a reading made before the sign-in went unconfirmed never holds a green band. It
   // counts as unconfirmed when the fact says null or false, or names another account (the account changed between the
   // caller's read and this one, #637 r2 m1). A fact written before signed_in existed says neither. A missing fact is left
-  // to the caller: every caller takes its account from that fact (tick.mjs signedInAccount), which starts nothing without it.
+  // to the caller: every caller takes its account from that fact (tick.mjs signedInAccount). The tick and the pass start
+  // nothing without it; the launcher's budget check (budget.mjs bandsNow) reads the band as unknown, behind the pass.
   const who = account ? sensorsFact(rec, ACCOUNT_FACT)?.doc : null;
   const unconfirmed = Boolean(account) && Boolean(who) && (who.account !== account || who.signed_in === null || who.signed_in === false);
   const reading = unconfirmed ? { ok: false, reason: `the sign-in of account ${account} is not confirmed` }

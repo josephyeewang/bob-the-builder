@@ -2512,6 +2512,11 @@ test('L1051 PLANT the owner\'s answer: missing, stale, ahead of the clock, not t
   const r = w.run(['daemons', 'check', '--only', 'sensors']);
   assert.equal(r.code, 0, r.text);
   assert.match(r.text, /WARNING {2}the owner's answer says who is signed in — it says no one is signed in, so the Dispatcher starts nothing until it is/);
+  // #637 r3 m2: not known with no account named starts nothing; not known with an account named holds only Tier 1.
+  writeAnswer(w.mac, { over: { signed_in: null, account: null } });
+  assert.match(w.run(['daemons', 'check', '--only', 'sensors']).text, /it says who is signed in is not known.*, so the Dispatcher starts nothing until it is/);
+  writeAnswer(w.mac, { over: { signed_in: null } });
+  assert.match(w.run(['daemons', 'check', '--only', 'sensors']).text, /it says who is signed in is not known.*, so usage is unknown and the Dispatcher starts no Tier-1 work until it is/);
   // The row is there only with the Sensors in the list.
   writeAnswer(w.mac, { ageMs: ANSWER_STALE_MS + 60_000 });
   const d = w.run(['daemons', 'check', '--only', 'dispatcher']); assert.doesNotMatch(d.text, /owner's answer/);

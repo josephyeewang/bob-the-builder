@@ -147,8 +147,9 @@ export function planOwnerUnload(io, cfg) {
 
 /**
  * The answer's rows: fresh (the owner's own plain file, not writable by others, the answer's shape, written within the Sensors'
- * time limit and not ahead of this clock), and a WARNING when it says no one is signed in or its sign-in is not known (with
- * no account named the Dispatcher then starts nothing; with one named it starts no Tier-1 work, L1329). Read only; root or
+ * time limit and not ahead of this clock), and a WARNING when it says no one is signed in or its sign-in is not known (no
+ * account named, or signed out: the Dispatcher then starts nothing; an account named whose sign-in is not known: it starts
+ * no Tier-1 work, L1329). Read only; root or
  * the owner may run it.
  */
 export function answerRows(io, cfg, { now = Date.now() } = {}) {
