@@ -812,6 +812,9 @@ export function guardProblem({ c, uid, ownDirUid, claudeVersion, account }) {
   return null;
 }
 
+// The runner's config is checked against the runner's own script in this copy, as runner-main reads it (L1323): this
+// file is in setup/, which the copy's own-code check refuses as a job's script.
+function runnerSelf() { try { return realpathSync.native(fileURLToPath(new URL('../../wiring/runner-main.mjs', import.meta.url))); } catch { return undefined; } }
 function selfPath() { try { return realpathSync.native(fileURLToPath(import.meta.url)); } catch { return undefined; } }
 const arg = (argv, k) => { const i = argv.indexOf(k); return i >= 0 ? argv[i + 1] : undefined; };
 
@@ -902,7 +905,7 @@ export function accountSettingsFiles(home) {
 export const restoreCommand = (c, argv) => ['sudo', '-H', '-u', basename(c.home), process.execPath, selfPath() ?? PROOF, ...argv.filter((a) => a !== '--restore'), '--restore'].join(' ');
 
 const REAL = {
-  readConfig: (path) => checkRunnerConfig(readJobConfig(path, { code: [], optionalCode: ['budget'], self: selfPath() })),
+  readConfig: (path) => checkRunnerConfig(readJobConfig(path, { code: [], optionalCode: ['budget'], self: runnerSelf() })),
   accountInUse, sessionEnv, makeLock, runAll,
   claudeVersion: (bin, env) => /^(\d+\.\d+\.\d+)/.exec(execFileSync(bin, [F.version], { encoding: 'utf8', timeout: 30_000, env: env ?? {} }).trim())?.[1] ?? null,
   makeBase: () => mkdtempSync(join(tmpdir(), 'settings-names-proof-')),

@@ -206,7 +206,7 @@ export const withPlannedCard = (rec, cardId, doc) => ({ ...rec, read: (entity, i
 /** The command. Ports are for a test; production passes none. → exit code. */
 export async function main(argv, {
   env = process.env, uid = process.getuid(), now = () => Date.now(), fetchFn = globalThis.fetch,
-  log = (s) => process.stderr.write(`${s}\n`), out = (s) => process.stdout.write(`${s}\n`), confirm = ttyConfirm, self = SELF,
+  log = (s) => process.stderr.write(`${s}\n`), out = (s) => process.stdout.write(`${s}\n`), confirm = ttyConfirm, self = DISPATCHER_SELF,
 } = {}) {
   try {
     if (argv.length !== 2) throw new Error(`usage: ${USAGE}`);
@@ -239,6 +239,9 @@ export async function main(argv, {
 
 const realOf = (p) => { try { return realpathSync(p); } catch { return null; } };
 const SELF = realOf(fileURLToPath(import.meta.url));
+// The config is the Dispatcher's, so it is checked as the Dispatcher's job reads it: against the job's own script in this
+// same copy (L1323). This file is in setup/, which the copy's own-code check (copyModuleProblem) rightly refuses as a job.
+export const DISPATCHER_SELF = realOf(fileURLToPath(new URL('../modules/M11-dispatcher/main.mjs', import.meta.url)));
 if (SELF && process.argv[1] && SELF === realOf(process.argv[1])) {
   main(process.argv.slice(2)).then((code) => { process.exitCode = code; });
 }
