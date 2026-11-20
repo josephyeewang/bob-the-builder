@@ -94,6 +94,9 @@ export async function writeSignedInAccount(writer, whoIsSignedIn, { now = () => 
   if (got === null || got === undefined) reason = 'the account read gave no answer';
   else if (o.signed_in === false) { signed_in = false; reason = said ?? 'nobody is signed in'; }
   else if (accountOk(o.account) && o.signed_in !== null) { account = o.account; signed_in = true; reason = null; }
+  // L1329: an account named but its sign-in not confirmed is kept with signed_in null, so M11 knows which account starts
+  // would run on; usage for it stays unknown, which holds Tier-1 starts (usage.mjs mayStart).
+  else if (accountOk(o.account)) { account = o.account; signed_in = null; reason = said ?? 'the sign-in could not be confirmed'; }
   else reason = said ?? (o.account == null ? 'who is signed in could not be told' : 'the account read named no account of M4\'s');
   return writer.put(ACCOUNT_FACT, { kind: 'fact.signed-in-account', account, signed_in, reason, observed_at });
 }

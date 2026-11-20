@@ -54,10 +54,10 @@ test('L611: no 5-hour row → null figures, never 0%, and the reason says it sta
   } finally { w.done(); }
 });
 
-test('signed out, not known, another account, or a report the owner side refused: not an account, with the reason', async () => {
-  for (const [doc, who, usage] of [
-    [answer({ signed_in: false, usage: null, usage_reason: 'not signed in' }), /not signed in/, /not about a signed-in/],
-    [answer({ signed_in: null, usage: null, usage_reason: 'who is signed in could not be read' }), /not known \(who is signed in could not be read\)/, /not about a signed-in/],
+test('signed out: not an account; not confirmed: the named account kept unconfirmed (L1329); a refused report: with the reason', async () => {
+  for (const [doc, who, usage, acct] of [
+    [answer({ signed_in: false, usage: null, usage_reason: 'not signed in' }), /not signed in/, /not about a signed-in/, null],
+    [answer({ signed_in: null, usage: null, usage_reason: 'who is signed in could not be read' }), /not confirmed \(who is signed in could not be read\)/, /not about a signed-in/, 'a'],
     [answer({ usage: null, usage_reason: 'the /usage answer has no usage_report' }), null, /no usage_report/],
   ]) {
     const w = place(doc);
@@ -65,7 +65,7 @@ test('signed out, not known, another account, or a report the owner side refused
       const p = ports(w.file);
       const a = await p.whoIsSignedIn();
       if (who) {
-        assert.deepEqual([a.account, a.signed_in, a.observed_at], [null, doc.signed_in, doc.observed_at]);
+        assert.deepEqual([a.account, a.signed_in, a.observed_at], [acct, doc.signed_in, doc.observed_at]);
         assert.match(a.reason, who); assert.match(p.lastReason(), who);
       } else assert.deepEqual(a, SIGNED_IN);
       assert.equal(await p.readUsage('a'), null);
@@ -196,11 +196,14 @@ test('L730 (#289 M1): the account fact tells nobody signed in apart from could n
   assert.deepEqual(await write(async () => null), [null, null, 'the account read gave no answer']);
   assert.deepEqual(await write(async () => 'someone@example.com'), [null, null, 'the account read named no account of M4\'s']);
   assert.deepEqual(await write(async () => ({ account: null, signed_in: false })), [null, false, 'nobody is signed in']);
-  assert.deepEqual(await write(async () => ({ account: 'a', signed_in: null, reason: 'odd' })), [null, null, 'odd']);
-  const cases = [[answer({ signed_in: false, usage: null }), false, /a is not signed in/], [answer({ signed_in: null, usage: null }), null, /not known/]];
-  for (const [doc, signed, why] of cases) {
+  // L1329: named but not confirmed keeps the account, unconfirmed; a name M4 does not have is still no account.
+  assert.deepEqual(await write(async () => ({ account: 'a', signed_in: null, reason: 'odd' })), ['a', null, 'odd']);
+  assert.deepEqual(await write(async () => ({ account: 'a', signed_in: null })), ['a', null, 'the sign-in could not be confirmed']);
+  assert.deepEqual(await write(async () => ({ account: 'someone', signed_in: null, reason: 'odd' })), [null, null, 'odd']);
+  const cases = [[answer({ signed_in: false, usage: null }), false, /a is not signed in/, null], [answer({ signed_in: null, usage: null }), null, /not confirmed/, 'a']];
+  for (const [doc, signed, why, want] of cases) {
     const w = place(doc);
-    try { const [acct, s, reason] = await write(ports(w.file).whoIsSignedIn); assert.deepEqual([acct, s], [null, signed]); assert.match(reason, why); } finally { w.done(); }
+    try { const [acct, s, reason] = await write(ports(w.file).whoIsSignedIn); assert.deepEqual([acct, s], [want, signed]); assert.match(reason, why); } finally { w.done(); }
   }
   const gone = place(); gone.done();
   const [acct, s, reason] = await write(ports(gone.file).whoIsSignedIn);
