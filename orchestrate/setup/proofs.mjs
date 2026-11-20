@@ -47,7 +47,7 @@ import { runnerPlaces } from '../shared/product-paths.mjs';
 import { BUILDER, BUILDER_SHELL, builderSigninDir, builderSigninPath, FLAT_OUTBOX_ROLES, PRODUCT_OUTBOX_ROLES, USERS, WORKER_RUNNER_CONFIG, baseMarkerPath, proposalRows, homeOf, outboxRootPath, workerCopiesPath } from './layout.mjs';
 import { RUNNER_CONFIG } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { installPaths } from './install.mjs';
-import { aclEntries, parseDscl, readUser } from './users-folders.mjs';
+import { DSCL, aclEntries, parseDscl, readUser } from './users-folders.mjs';
 import { signinFileRows } from '../wiring/builder-signin.mjs';
 
 const SUDO = '/usr/bin/sudo';
@@ -219,7 +219,6 @@ export function proofList(cfg, { ownerHome = null, rules = { files: [], why: 'no
 
 /** A File Sharing group's name, as macOS makes one for each shared folder. */
 export const SHAREPOINT_GROUP = /^com\.apple\.sharepoint\.group\.\d+$/;
-const DSCL = '/usr/bin/dscl';
 /**
  * Null when `name` is a File Sharing group whose only members come from macOS's everyone group (L1316): no person or
  * group of its own (no GroupMembership, no GroupMembers) and NestedGroups exactly everyone's GeneratedUID, read from
