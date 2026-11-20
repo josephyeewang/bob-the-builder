@@ -34,6 +34,7 @@ import { FACTS } from '../M11-dispatcher/phone-link.mjs';
 import { LIMIT_FACT } from '../M11-dispatcher/pass.mjs';
 import { ACCOUNT_NAMES } from '../M4-workshop/launcher/accounts.mjs';
 import { writePrFact } from './pr-facts.mjs';
+import { pastTime } from '../../shared/still-waiting.mjs';
 
 const stamp = (now) => now().toISOString();
 export const accountOk = (a) => typeof a === 'string' && ACCOUNT_NAMES.includes(a);
@@ -82,8 +83,9 @@ export async function writeUsageFact(writer, readUsage, account, { now = () => n
   // leaves usage unknown for that pass (it holds Tier-1 starts back; the safe side).
   // r4: and only beside a complete week of its own (nothing handed on in its place), with no 5-hour figure in it, and no
   // 5-hour percent stored in the last 5 hours (one stored without a reset time is never handed on, so it is checked here).
-  const recentH5 = stored?.h5?.used_pct != null && timeOrNull(stored.observed_at) !== null
-    && at - Date.parse(stored.observed_at) < 5 * 3600e3;
+  // Its time through pastTime (I4): one that can't be read, or lies ahead, counts as recent (the safe side).
+  const storedAt = pastTime(stored?.observed_at, at);
+  const recentH5 = stored?.h5?.used_pct != null && (storedAt === null || at - storedAt < 5 * 3600e3);
   doc.h5_none = r.h5_none === true && r.h5?.used_pct == null && known(r.week) && !handedOn.length && !recentH5;
   for (const k of handedOn) doc[k] = win(stored[k]);
   if (handedOn.length) {
