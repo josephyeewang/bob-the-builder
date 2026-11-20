@@ -87,7 +87,8 @@ import { readOnlyClient, tokenFile } from '../modules/M6-merge-gate/watch-only.m
 import { queueAlert } from '../modules/M11-dispatcher/alerts.mjs';
 import { writeRulesSnapshot } from '../modules/M11-dispatcher/budget.mjs';
 import { notWiredText, refusing } from './not-wired.mjs';
-import { NOT_WIRED_WORKER, cleanupProblem, hostLockOwnerProblem, workerPorts, workerUidProblem } from './worker-ports.mjs';
+import { NOT_WIRED_WORKER, cleanupProblem, hostLockOwnerProblem, sessionsNow, workerPorts, workerUidProblem } from './worker-ports.mjs';
+import { RUNNER_KINDS } from './owner-status.mjs';
 import { NOT_WIRED_REVIEW, reviewPorts } from './review-ports.mjs';
 import { NOT_WIRED_PHONE, phonePorts } from './phone-ports.mjs';
 
@@ -199,13 +200,12 @@ export async function recordAndRules(c, { who, log, fetchFn, now }) {
     rulesState: (p) => reader.state(p),
     // The engine reads the product's state from the Record's product document; none reads as paused (no starts).
     productState: (p) => rec?.read('product', p)?.doc ?? null,
-    // How many editing sessions run: the session list, not wired yet. A throw is "count unknown", which the engine refuses.
-    // TO-DO (L322, in the change that wires this): in M11 pass.mjs a Tier-1 card M10 refuses with its cap words
-    // ("editing cap reached for <p> (<n>)", "... on this Mac (<n>)") is refused at the rules.may step and never reaches
-    // capRefusal / tier1Waiting, so Tier-2 cards are not held behind it in amber. Make that step count it (capRefusal
-    // reading M10's words), with a test. Until this is wired every start is refused here as "count unknown", so no card
-    // gets the cap words.
-    running: refusing('running'),
+    // How many editing sessions run (L1325): runningCount, from the Record's claims and the worker runner's live sessions.
+    // A throw is "count unknown", which the engine refuses. STILL OWED (L322): in M11 pass.mjs a Tier-1 card M10 refuses
+    // with its cap words ("editing cap reached for <p> (<n>)", "... on this Mac (<n>)") is refused at the rules.may step
+    // and never reaches capRefusal / tier1Waiting, so in amber Tier-2 cards are not held behind it. It holds nothing
+    // unsafe (a refusal), and the first cards are Tier 2 on the test product.
+    running: (scope) => runningCount(scope, { rec, sessions: () => sessionsNow(c, rec, { now }) }),
     rolesDir: ROLES_DIR,
     clock: now,
   });
@@ -217,6 +217,40 @@ export async function recordAndRules(c, { who, log, fetchFn, now }) {
   ({ record: rec } = openRecord({ root: c.recordRoot, product: c.product, ownerUid: c.ownerUid, rules, alert: storeAlert, now }));
   await reader.refresh();
   return { rec, rules, gh, entry, reader, products: products.map((p) => p.product) };
+}
+
+// A card whose claim names a session holds a slot from the claim, written before the launch, until it leaves these
+// states; so a second ready card in the same pass already counts the first.
+const HOLDS_SLOT = Object.freeze(['claimed', 'running']);
+
+/**
+ * M10's running port (L1325): editing sessions for `scope` ({ product }, { product, undo: true }, or {} for the whole
+ * Mac). The union, by card, of (a) the Record's cards in claimed or running whose claim is a session and (b) the worker
+ * runner's live sessions of its kinds (editing, undo, script): a claim not yet launched counts, and so does a session
+ * still running after its card moved on. Review sessions are not editing ones and are left out. `undo` counts exact
+ * reverses only. Anything that can't be read throws, which the engine reads as "count unknown" and refuses: never 0
+ * by default. This Record is this Dispatcher's product only; the runner's list is the Mac's, so {} also counts other
+ * products' live sessions.
+ */
+export function runningCount(scope, { rec, sessions }) {
+  if (!rec || typeof rec.list !== 'function') throw new Error('the Record is not open');
+  const undo = scope?.undo === true;
+  const product = scope?.product;
+  if (product !== undefined && (typeof product !== 'string' || !product)) throw new Error('running: product must be a name');
+  const inScope = (p, isUndo) => (product === undefined || p === product) && (!undo || isUndo);
+  const held = new Set();
+  for (const { id, doc } of rec.list('card')) {
+    if (!HOLDS_SLOT.includes(doc?.state) || doc?.claim?.kind !== 'session') continue;
+    if (inScope(doc.product, doc.kind === 'exact_reverse')) held.add(`card:${id}`);
+  }
+  const live = sessions();
+  if (!Array.isArray(live)) throw new Error('the session list is not a list');
+  for (const s of live) {
+    if (!RUNNER_KINDS.includes(s?.kind)) continue;
+    if (!inScope(s.product, s.kind === 'undo')) continue;
+    held.add(typeof s.card === 'string' && s.card ? `card:${s.card}` : `session:${s.id}`);
+  }
+  return held.size;
 }
 
 /**
