@@ -92,10 +92,12 @@ export function bands({ rules, reading, now }) {
 export function currentBands({ rec, rules, account, now }) {
   const staleMs = minutes(rules, KEYS.staleAfterMin);
   // L1329 audit M1: an account whose sign-in the Sensors could not confirm (kept with signed_in null) has unknown usage
-  // whatever its last reading says, so a reading made before the sign-in went unconfirmed never holds a green band. The
-  // Sensors' writer always writes signed_in beside an account (state-facts.mjs), so the fact says it in so many words.
+  // whatever its last reading says, so a reading made before the sign-in went unconfirmed never holds a green band. It
+  // counts as unconfirmed when the fact says null or false, or names another account (the account changed between the
+  // caller's read and this one, #637 r2 m1). A fact written before signed_in existed says neither. A missing fact is left
+  // to the caller: every caller takes its account from that fact (tick.mjs signedInAccount), which starts nothing without it.
   const who = account ? sensorsFact(rec, ACCOUNT_FACT)?.doc : null;
-  const unconfirmed = Boolean(account) && who?.account === account && (who.signed_in === null || who.signed_in === false);
+  const unconfirmed = Boolean(account) && Boolean(who) && (who.account !== account || who.signed_in === null || who.signed_in === false);
   const reading = unconfirmed ? { ok: false, reason: `the sign-in of account ${account} is not confirmed` }
     : readFact(account ? sensorsFact(rec, USAGE_FACT(account)) : null, { account, now, staleMs });
   return bands({ rules, reading, now });

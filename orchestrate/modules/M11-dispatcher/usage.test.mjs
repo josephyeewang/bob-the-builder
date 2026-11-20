@@ -22,6 +22,9 @@ test('L1329 audit M1: an account whose sign-in is not confirmed has unknown usag
     assert.equal(mayStart({ b, kind: 'review', tier: 1, redRuns: [] }).ok, false, 'no Tier-1 review start');
     assert.equal(mayStart({ b, kind: 'editing', tier: 2, redRuns: [] }).ok, true, 'Tier 2 still starts');
   }
+  // #637 r2 m1: the account changed between the caller's read and this one: the old account's reading does not count.
+  const moved = recWith([['fact', USAGE_FACT('acct-a'), fresh], ['fact', 'signed-in-account', { account: 'acct-b', signed_in: true, reason: null, observed_at: new Date(T0).toISOString() }]]);
+  assert.equal(currentBands({ rec: moved, rules: R, account: 'acct-a', now: T0 }).band, 'unknown');
 });
 
 test('M2 plants: the band edges', () => {

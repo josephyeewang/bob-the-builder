@@ -63,7 +63,7 @@ Every outside effect (launching, stopping, typing into a session, git, alerts) i
 
 With two Claude accounts (R-1-89), every port that starts, lists, checks or stops a session goes through `accountPorts` in `account-ports.mjs`; see "Two Claude accounts" below for the contract.
 
-Facts the tick writes: `signed-in-account` is read (missing or stale: nothing starts; an account with `signed_in` not true: starts run on it, but its usage is unknown, so no Tier-1 start, L1329), `step-error-<step>` (one alert per distinct error, cleared on success), `last-full-pass` (when every step last ran and how each ended).
+Facts the tick writes: `signed-in-account` is read (missing or stale: nothing starts; an account with `signed_in` null: starts run on it, but its usage is unknown, so no Tier-1 start, L1329), `step-error-<step>` (one alert per distinct error, cleared on success), `last-full-pass` (when every step last ran and how each ended).
 
 ## Facts this folder reads or writes (the contracts)
 

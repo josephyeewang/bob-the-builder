@@ -39,8 +39,9 @@
 // No silent hold (L38): a missing or stale account reading, or a red or unknown usage band, is told to
 // Joe once per cause per day (pass.mjs `holdAlert`); a held undo, once per reason per day.
 //
-// The signed-in account comes from the record fact `signed-in-account` { account, observed_at }
-// (Sensors, lane 3). Missing, or older than usage.stale_after_min, means nothing new starts.
+// The signed-in account comes from the record fact `signed-in-account` { account, signed_in, observed_at }
+// (Sensors, lane 3). Missing, or older than usage.stale_after_min, means nothing new starts. An account with signed_in
+// null (the sign-in could not be confirmed) still starts work; usage.mjs counts its usage as unknown (L1329).
 
 import { tellRefused, watchWrites } from './refused-writes.mjs';
 import { KEYS, minutes, need, MissingKey, missingFor } from './keys.mjs';
