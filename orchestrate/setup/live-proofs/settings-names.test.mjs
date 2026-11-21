@@ -831,7 +831,7 @@ const runMain = async (argv, { deps, receipts }, extra = {}) => {
 test('L1128 m5: every stop after the config is read, a throw too, writes a receipt and ends NOT DONE, exit 1; the lock is let go', async () => {
   const S = mainSetup();
   const boom = (w) => () => { throw new Error(w); };
-  for (const [extra, why] of [[{ workerAccount: boom('keychain') }, /account in use can't be read \(keychain\)/], [{ sessionEnv: boom('no token') }, /variables can't be made \(no token\)/],
+  for (const [extra, why] of [[{ workerAccount: boom('keychain') }, /worker account or its sign-in file can't be read \(keychain\)/], [{ sessionEnv: boom('no token') }, /variables can't be made \(no token\)/],
     [{ makeBase: boom('disk full') }, /the run stopped: disk full/], [{ runAll: async () => { throw new Error('mid'); } }, /the run stopped: mid/]]) {
     const r = await runMain(['--config', '/c.json'], S, extra);
     assert.equal(r.code, 1, r.out); assert.match(r.last, /^NOT DONE/, r.out); assert.match(r.out, why);

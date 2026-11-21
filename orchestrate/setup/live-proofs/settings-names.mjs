@@ -102,7 +102,7 @@ const bashOnce = (cmd) => `Use the Bash tool to run exactly this shell command, 
 /**
  * One headless start's words. `o.settingsFile` is the --settings file; the rest say what differs from the plain run:
  * tools, mode (null: no --permission-mode), sources (false: no --setting-sources), mcp (false: no tool-server lock),
- * model (null: no --model, the account's own model, as a review start has), maxTurns, extra (words before the prompt),
+ * model (null: no --model, the account's own model, as a review start has), maxTurns, extra (words before --max-turns, so an option that takes several words can't take the prompt; L1333),
  * input (stream-json lines fed on stdin, in place of the prompt).
  */
 export function runArgs(o) {
@@ -583,11 +583,11 @@ export const NOT_TRIED = Object.freeze({
   [S.socksProxyPort]: 'no pair yet: set with httpProxyPort to the same port; shown with it by the live proof builder-proxy.mjs',
 });
 
-// Names the launcher no longer writes (L1114), shown and not counted. Each comes back only after its proof (R-0b-178).
+// Names the launcher no longer writes, shown and not counted (L1114). Empty since L1333 put enabledPlugins back; kept for the next one.
 export const NOT_USED = Object.freeze({});
 
 // The role read-back's names: what launch check 6 itself reads (L6): the start message comes at all, and shows each role's
-// tools, no tool server, no plugin, its skills and its mode.
+// tools, no tool server, no plugin but the pin's forced built-in (L1333), its skills and its mode.
 export const READBACK_NAMES = Object.freeze([F.print, F.outputFormat, F.streamJson, F.verbose, F.tools, F.permissionMode]);
 
 // ---- judging ----
@@ -952,7 +952,7 @@ export async function main(argv, { print = (t) => process.stdout.write(t), uid =
   // Every refusal from here on ends in a receipt and NOT DONE (L1128 m5), a throw too.
   // The account a worker start uses (runner-ports.mjs workerAccount, L1333): with the config's signinFile, the builder
   // sign-in token goes to every run, as it does to a real start; before L1333 the proof asked accountInUse, so no run was signed in.
-  let account; try { account = d.workerAccount(c); } catch (e) { return stop(`the account in use can't be read (${e?.message ?? e})`, c.pin); }
+  let account; try { account = d.workerAccount(c); } catch (e) { return stop(`the worker account or its sign-in file can't be read (${e?.message ?? e})`, c.pin); }
   let env = null; try { env = account?.account ? d.sessionEnv(c, account) : null; } catch (e) { return stop(`the sessions' variables can't be made (${e?.message ?? e})`, c.pin); }
   let claudeVersion = null; try { claudeVersion = d.claudeVersion(c.claudeBin, env); } catch { /* not readable */ }
   const bad = guardProblem({ c, uid, ownDirUid, claudeVersion, account });

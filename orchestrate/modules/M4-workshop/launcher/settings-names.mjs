@@ -160,13 +160,13 @@ export const CONFIRMED = Object.freeze({
 });
 
 /**
- * The plugins built into Claude Code that it turns on by itself (L1333; checked: claude-code 2.1.316, 2026-11-21).
+ * The plugins built into Claude Code that it turns on by itself (L1333; checked: claude-code 2.1.316, 2026-11-20).
  * `--setting-sources ""` does not stop them (L1114 assumed it did). Every role file switches each one off by its id
  * in enabledPlugins (false); on 2.1.316 that turns off all but cc-plugin-sec-default.
  */
 export const BUILTIN_PLUGIN_IDS = Object.freeze(['cc-plugin-sec-default@builtin', 'cc-plugin-agents-md@builtin', 'cc-plugin-telemetry@builtin', 'cc-plugin-plugin-authoring@builtin']);
 /**
- * Per pinned version, the built-in plugins no setting turns off (L1333): the only plugins launch check 6 lets through,
+ * Per pinned version, the built-in plugins no setting turns off (L1333; checked: claude-code 2.1.316): the only plugins launch check 6 lets through,
  * each by its exact name with path "builtin" and source "<name>@builtin", on that version alone. A new pin has none
  * until its proof shows what it loads.
  */
@@ -177,7 +177,7 @@ export const FORCED_BUILTIN_PLUGINS = Object.freeze({ '2.1.316': Object.freeze([
  */
 export const HEADLESS_UNLOADED = Object.freeze({ '2.1.316': Object.freeze(['AskUserQuestion']) });
 /**
- * The built-in skills disableBundledSkills leaves on (L1333; checked: claude-code 2.1.316, 2026-11-21): every role file
+ * The built-in skills disableBundledSkills leaves on (L1333; checked: claude-code 2.1.316, 2026-11-20): every role file
  * turns each one "off" in skillOverrides, which hides it from the model and from /name alike.
  */
 export const BUILTIN_SKILLS_OFF = Object.freeze(['design', 'doctor']);
