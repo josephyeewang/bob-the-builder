@@ -69,6 +69,7 @@ export const SETTINGS = Object.freeze({
   crossSessionInbound: 'crossSessionInbound',
   disableSkillShellExecution: 'disableSkillShellExecution',
   disableBundledSkills: 'disableBundledSkills',
+  skillOverrides: 'skillOverrides',
   apiKeyHelper: 'apiKeyHelper',
   disableAllHooks: 'disableAllHooks',
 });
@@ -158,6 +159,29 @@ export const CONFIRMED = Object.freeze({
   [SETTINGS.allowUnsandboxedCommands]: SANDBOX_BREAK_IT,
 });
 
+/**
+ * The plugins built into Claude Code that it turns on by itself (L1333; checked: claude-code 2.1.316, 2026-11-20).
+ * `--setting-sources ""` does not stop them (L1114 assumed it did). Every role file switches each one off by its id
+ * in enabledPlugins (false); on 2.1.316 that turns off all but cc-plugin-sec-default.
+ */
+export const BUILTIN_PLUGIN_IDS = Object.freeze(['cc-plugin-sec-default@builtin', 'cc-plugin-agents-md@builtin', 'cc-plugin-telemetry@builtin', 'cc-plugin-plugin-authoring@builtin']);
+/**
+ * Per pinned version, the built-in plugins no setting turns off (L1333; checked: claude-code 2.1.316): the only plugins launch check 6 lets through,
+ * each by its exact name with path "builtin" and source "<name>@builtin", on that version alone. A new pin has none
+ * until its proof shows what it loads.
+ */
+export const FORCED_BUILTIN_PLUGINS = Object.freeze({ '2.1.316': Object.freeze(['cc-plugin-sec-default']) });
+/**
+ * Per pinned version, the tools a headless (-p) start never loads, whatever --tools says (L1333; checked: claude-code
+ * 2.1.316): launch check 6 does not count one missing when the role lists it. Loaded, it still has to be on the role.
+ */
+export const HEADLESS_UNLOADED = Object.freeze({ '2.1.316': Object.freeze(['AskUserQuestion']) });
+/**
+ * The built-in skills disableBundledSkills leaves on (L1333; checked: claude-code 2.1.316, 2026-11-20): every role file
+ * turns each one "off" in skillOverrides, which hides it from the model and from /name alike.
+ */
+export const BUILTIN_SKILLS_OFF = Object.freeze(['design', 'doctor']);
+
 /** The ways a CONFIRMED entry may say a name was proven. */
 export const PROOF_KIND = /^(readback|break-it|spelling):./;
 /** The only names a spelling pair may confirm (L1114, audit L1124 m3): it shows the CLI reads the name, not what the
@@ -167,7 +191,7 @@ export const SPELLING_ONLY = Object.freeze([SETTINGS.failIfUnavailable, SETTINGS
 export const proofCounts = (name, by) => typeof by === 'string' && PROOF_KIND.test(by) && (!by.startsWith('spelling:') || SPELLING_ONLY.includes(name));
 
 // Keys whose children are data (plugin ids, variable names and values), not setting names.
-const DATA_KEYS = new Set([SETTINGS.enabledPlugins]);
+const DATA_KEYS = new Set([SETTINGS.enabledPlugins, SETTINGS.skillOverrides]);
 const VARS_KEY = SETTINGS.env;
 
 /** Every setting, hook field and hook event name in a rendered role file, plus its variable names. */

@@ -8,7 +8,7 @@
 // silent the start command must hold the one allowed sources limit (settings-names.mjs sourcesArgs), or no start.
 
 import { spawn } from 'node:child_process';
-import { FLAGS as F, INIT_FIELDS as I, ALLOWED_SETTING_SOURCES, MIN_CLAUDE_CODE, NO_FILE_SOURCES, noToolServerArgs, sourcesArgs } from './settings-names.mjs';
+import { FLAGS as F, INIT_FIELDS as I, ALLOWED_SETTING_SOURCES, MIN_CLAUDE_CODE, NO_FILE_SOURCES, FORCED_BUILTIN_PLUGINS, HEADLESS_UNLOADED, noToolServerArgs, sourcesArgs } from './settings-names.mjs';
 import { compareVersions } from './hooks-check.mjs';
 import { NEVER_TOOLS, ALWAYS_TOLERATED } from './role-profiles.mjs';
 
@@ -71,10 +71,18 @@ export function checkInit(init, { role, profile, pin, args }) {
   const never = tools.filter((t) => NEVER_TOOLS.includes(t));
   if (never.length) return refuse(`never-list tools loaded: ${never.join(', ')}`);
   const loaded = tools.filter((t) => !ALWAYS_TOLERATED.includes(t)).sort();
-  const want = [...profile.tools].sort();
+  // A tool a headless start never loads on this pin (HEADLESS_UNLOADED, L1333) is not counted missing; loaded, it must be on the role.
+  const unloaded = Object.hasOwn(HEADLESS_UNLOADED, pin) ? HEADLESS_UNLOADED[pin] : [];
+  const want = profile.tools.filter((t) => !(unloaded.includes(t) && !loaded.includes(t))).sort();
   if (JSON.stringify(loaded) !== JSON.stringify(want)) return refuse(`tools differ: loaded ${loaded.join(',')}, role has ${want.join(',')}`);
   if ((names(init[I.mcpServers]) ?? ['?']).length) return refuse('a tool server is loaded');
-  if ((names(init[I.plugins]) ?? ['?']).length) return refuse('a plugin is loaded');
+  // No plugin but this pin's forced built-ins (FORCED_BUILTIN_PLUGINS, L1333), each by exact name, path and source.
+  const plugins = Array.isArray(init[I.plugins]) ? init[I.plugins] : null;
+  if (!plugins) return refuse('start message plugins are not a list');
+  const forced = Object.hasOwn(FORCED_BUILTIN_PLUGINS, pin) ? FORCED_BUILTIN_PLUGINS[pin] : [];
+  const isForced = (x) => !!x && typeof x === 'object' && forced.includes(x.name) && x.path === 'builtin' && x.source === `${x.name}@builtin`;
+  const extra = plugins.filter((x) => !isForced(x));
+  if (extra.length) return refuse(`a plugin is loaded: ${extra.map((x) => (typeof x === 'string' ? x : x?.name ?? '?')).join(', ')}`);
   const skills = names(init[I.skills]);
   const wantSkills = [...(profile.skills ?? [])].sort();
   if (!skills || JSON.stringify([...skills].sort()) !== JSON.stringify(wantSkills)) return refuse(`skills differ: ${skills?.join(',') ?? '?'}`);

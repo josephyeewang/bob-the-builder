@@ -8,7 +8,7 @@
 
 import { writeFileSync, readFileSync, renameSync, realpathSync, lstatSync } from 'node:fs';
 import { join, dirname, basename, posix } from 'node:path';
-import { SETTINGS as S, HOOK_FIELDS as H, HOOK_EVENTS as E, ENV, REFUSED_SETTINGS } from './settings-names.mjs';
+import { SETTINGS as S, HOOK_FIELDS as H, HOOK_EVENTS as E, ENV, REFUSED_SETTINGS, BUILTIN_PLUGIN_IDS, BUILTIN_SKILLS_OFF } from './settings-names.mjs';
 import { hasShell, DESIGN_PROFILES, shadowKindsFor, OUTBOX_FILE } from './role-profiles.mjs';
 import { REVIEW_ROLES, RUNNER_ROLES } from '../../../shared/review-roles.mjs';
 import { noteInOutbox } from '../hooks/compact-note.mjs';
@@ -487,12 +487,15 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
     [S.hooks]: hooks,
     [S.env]: { [ENV.autoCompactWindow]: String(profile.compactWindow), [ENV.disableUpdates]: '1' },
     [S.disableClaudeAiConnectors]: true,
-    // No enabledPlugins (L1114): an empty map turns nothing on, `--setting-sources ""` loads no file that could turn a
-    // plugin on, and launch check 6 refuses a start whose start message lists a plugin. Its behaviour proof is R-0b-178,
-    // before it comes back. checkSettings below still refuses a role file that turns one on.
+    // The built-in plugins off (L1333, replacing L1114's "no enabledPlugins"): Claude Code turns them on by itself and
+    // `--setting-sources ""` does not stop it. Launch check 6 lets through only the one a pin can't turn off
+    // (FORCED_BUILTIN_PLUGINS). checkSettings below refuses a role file that turns any plugin on or leaves a built-in one on.
+    [S.enabledPlugins]: Object.fromEntries(BUILTIN_PLUGIN_IDS.map((id) => [id, false])),
     [S.crossSessionInbound]: 'refuse',
     [S.disableSkillShellExecution]: true,
     [S.disableBundledSkills]: true,
+    // The built-in skills disableBundledSkills leaves on, off by name (L1333): launch check 6 wants only the role's own skills.
+    [S.skillOverrides]: Object.fromEntries(BUILTIN_SKILLS_OFF.map((n) => [n, 'off'])),
   };
   if (!shell) settings[S.sandbox][S.network][S.allowedDomains] = [];
   return { ok: true, settings };
@@ -654,7 +657,9 @@ export function checkSettings(obj, { machineWide = false, profile = null, phase 
   if (obj[S.crossSessionInbound] !== 'refuse') return refuse('incoming messages are not refused');
   if (obj[S.disableSkillShellExecution] !== true) return refuse('skill shell lines are not off');
   if (obj[S.disableBundledSkills] !== true) return refuse('bundled skills are not off');
+  if (BUILTIN_SKILLS_OFF.some((n) => obj[S.skillOverrides]?.[n] !== 'off')) return refuse('a built-in skill is not turned off');
   if (Object.values(obj[S.enabledPlugins] ?? {}).some(Boolean)) return refuse('a plugin is on');
+  if (BUILTIN_PLUGIN_IDS.some((id) => obj[S.enabledPlugins]?.[id] !== false)) return refuse('a built-in plugin is not switched off');
   if (obj[S.env]?.[ENV.disableUpdates] !== '1') return refuse('updates are not off for the role');
   if (profile && obj[S.env]?.[ENV.autoCompactWindow] !== String(profile.compactWindow)) return refuse('compaction window differs from the profile');
   if (profile?.setupFileRefusals) {
