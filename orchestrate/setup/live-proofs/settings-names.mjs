@@ -794,7 +794,13 @@ export async function roleReadback({ base, pin, start, roles = Object.keys(DESIG
     writeFileSync(file, `${JSON.stringify(r.settings)}\n`);
     const args = roleArgs({ profile, settingsFile: file, model: RUN_MODEL });
     const out = await start(args, paths.copy);
-    const c = checkInit(findInit(out), { role, profile, pin, args });
+    // L1334: a role's own skills are put in place by its start, and no start that installs one is built yet (the front
+    // door's orchestrate skill). With --setting-sources "" claude 2.1.316 loads no skill from the home, the work folder or
+    // an --add-dir folder (checked: claude-code 2.1.316, 2026-11-21), so the read-back proves the role file with no skills of its own. This proves
+    // nothing about the skill: no front door start exists yet, and when one is built, check 6 there must compare the
+    // full profile (readback.mjs readBack, as review-launch.mjs does) or the skill is unchecked.
+    const fileOnly = { ...profile, skills: [] };
+    const c = checkInit(findInit(out), { role, profile: fileOnly, pin, args });
     if (!c.ok) bad.push(`${role}: ${c.reason}`);
   }
   return bad.length ? { ok: false, why: bad.join('; ') } : { ok: true };
@@ -953,7 +959,13 @@ export async function main(argv, { print = (t) => process.stdout.write(t), uid =
   // The account a worker start uses (runner-ports.mjs workerAccount, L1333): with the config's signinFile, the builder
   // sign-in token goes to every run, as it does to a real start; before L1333 the proof asked accountInUse, so no run was signed in.
   let account; try { account = d.workerAccount(c); } catch (e) { return stop(`the worker account or its sign-in file can't be read (${e?.message ?? e})`, c.pin); }
-  let env = null; try { env = account?.account ? d.sessionEnv(c, account) : null; } catch (e) { return stop(`the sessions' variables can't be made (${e?.message ?? e})`, c.pin); }
+  // sessionEnv answers { ok, env } or { ok: false, reason } (startEnv). Before L1334 the proof ran claude with that answer
+  // itself as its environment, so no run had PATH, HOME or the sign-in ("Not logged in" on every pair).
+  let env = null; try {
+    const built = account?.account ? d.sessionEnv(c, account) : null;
+    if (built && built.ok !== true) return stop(`the sessions' variables can't be made (${built.reason ?? 'no answer'})`, c.pin);
+    env = built?.env ?? null;
+  } catch (e) { return stop(`the sessions' variables can't be made (${e?.message ?? e})`, c.pin); }
   let claudeVersion = null; try { claudeVersion = d.claudeVersion(c.claudeBin, env); } catch { /* not readable */ }
   const bad = guardProblem({ c, uid, ownDirUid, claudeVersion, account });
   if (bad) return stop(bad, c.pin);
