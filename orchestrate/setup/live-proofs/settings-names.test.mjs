@@ -138,8 +138,9 @@ test('L1114: a spelling pair with no difference, or an account with no connector
   assert.equal(sp.result, 'PASS'); assert.equal(sp.proof, SPELLING_LABEL); assert.match(sp.by, /^spelling:settings-names\.mjs "/);
   assert.equal(lines.find((l) => l.name === 'deny').proof, undefined);
   assert.ok(report(spOnly, PIN).text.split('\n').some((l) => l.startsWith('PASS') && l.includes('failIfUnavailable') && l.includes(SPELLING_LABEL)));
-  // enabledPlugins: NOT USED, not counted.
-  assert.equal(lines.find((l) => l.name === 'enabledPlugins').result, 'NOT USED');
+  // enabledPlugins and skillOverrides stand on their own pairs (L1333; enabledPlugins was NOT USED from L1114).
+  assert.equal(lines.find((l) => l.name === 'enabledPlugins').result, 'PASS');
+  assert.equal(lines.find((l) => l.name === 'skillOverrides').result, 'PASS');
   // Every pair passing and the read-back passing leaves only allowUnsandboxedCommands (proven by the walls proof).
   assert.deepEqual(judgeNames({ outcomes: all, readback: { ok: true }, version: PIN, confirmed: {} }).filter((l) => l.result === 'NOT TRIED').map((l) => l.name), Object.keys(NOT_TRIED));
 });
@@ -816,7 +817,7 @@ const WITH_PROXY = Object.freeze({ ...CONFIRMED, ...PROXY_STAND_IN });
 function mainSetup() {
   const root = tempDir('orch-names-'); const own = join(root, 'state'); mkdirSync(own); const home = join(root, 'builder'); mkdirSync(join(home, '.claude'), { recursive: true });
   const c = { ownDir: own, home, claudeBin: '/opt/claude', pin: PIN };
-  const deps = { readConfig: () => c, accountInUse: () => ({ account: 'a', dir: join(home, '.claude') }), sessionEnv: () => ({}), claudeVersion: () => PIN,
+  const deps = { readConfig: () => c, workerAccount: () => ({ account: 'a', dir: join(home, '.claude') }), sessionEnv: () => ({}), claudeVersion: () => PIN,
     makeBase: () => { const b = join(root, 'runs'); mkdirSync(b, { recursive: true }); return b; },
     runAll: async () => ({ outcomes: Object.fromEntries(TESTS.map((t) => [t.id, { ok: true }])), readback: { ok: true } }), confirmed: WITH_PROXY };
   return { root, c, home, deps, receipts: join(root, 'receipts') };
@@ -830,7 +831,7 @@ const runMain = async (argv, { deps, receipts }, extra = {}) => {
 test('L1128 m5: every stop after the config is read, a throw too, writes a receipt and ends NOT DONE, exit 1; the lock is let go', async () => {
   const S = mainSetup();
   const boom = (w) => () => { throw new Error(w); };
-  for (const [extra, why] of [[{ accountInUse: boom('keychain') }, /account in use can't be read \(keychain\)/], [{ sessionEnv: boom('no token') }, /variables can't be made \(no token\)/],
+  for (const [extra, why] of [[{ workerAccount: boom('keychain') }, /account in use can't be read \(keychain\)/], [{ sessionEnv: boom('no token') }, /variables can't be made \(no token\)/],
     [{ makeBase: boom('disk full') }, /the run stopped: disk full/], [{ runAll: async () => { throw new Error('mid'); } }, /the run stopped: mid/]]) {
     const r = await runMain(['--config', '/c.json'], S, extra);
     assert.equal(r.code, 1, r.out); assert.match(r.last, /^NOT DONE/, r.out); assert.match(r.out, why);
@@ -855,7 +856,7 @@ test('L1128 m6: --restore looks in both account folders, with no account in use;
   // A backup beside a's file is put back though account b is in use, or none is.
   const sha = (await import('node:crypto')).createHash('sha256').update('{"a":1}\n').digest('hex');
   writeFileSync(`${a}${BACKUP_SUFFIX}`, '{"a":1}\n'); writeFileSync(`${a}${META_SUFFIX}`, JSON.stringify({ had: true, mode: 0o600, sha256: sha })); writeFileSync(a, '{"x":1}\n');
-  const r = await runMain(['--config', '/c.json', '--restore'], S, { accountInUse: () => { throw new Error('must not be read'); } });
+  const r = await runMain(['--config', '/c.json', '--restore'], S, { workerAccount: () => { throw new Error('must not be read'); } });
   assert.equal(r.code, 0, r.out); assert.match(r.out, /back as it was/); assert.equal(readFileSync(a, 'utf8'), '{"a":1}\n');
   // Account b's own file (not a link) with a backup is found too.
   const S2 = mainSetup(); const b2 = join(S2.home, '.claude-b'); mkdirSync(b2); const bf = join(b2, 'settings.json');
@@ -1169,5 +1170,21 @@ test('R-0b-178 plants: each way a lock-down setting could fail to hold turns its
     assert.match(o.why ?? o.notTried, why, id);
     const line = judgeNames({ outcomes: { [id]: o, [`spelling-${id}`]: { ok: true } }, readback: { ok: true }, version: PIN, confirmed: {} }).find((l) => l.name === id);
     assert.notEqual(line.result, 'PASS', `${id}: a spelling PASS does not carry a behaviour pair that failed`);
+  }
+});
+
+test('L1333: the proof signs its runs in as a worker start does (workerAccount on the config), and the prompt is always last, after --max-turns', async () => {
+  // workerAccount is handed the config itself, so its signinFile reaches sessionEnv as it does for a real start.
+  const S = mainSetup(); const seen = [];
+  await runMain(['--config', '/c.json'], S, {
+    workerAccount: (c) => { seen.push(['account', c]); return { account: 'a', dir: join(S.home, '.claude'), env: { T: 'x' }, signinToken: true }; },
+    sessionEnv: (c, who) => { seen.push(['env', who.signinToken]); return {}; },
+  });
+  assert.deepEqual(seen, [['account', S.c], ['env', true]]);
+  // Every pair's words: whatever extra a test adds, --max-turns and its number come right before the prompt (or stdin).
+  for (const t of TESTS.filter((x) => !x.byGuard)) for (const side of ['on', 'off']) {
+    const o = t.run(side, '/d', { sessionId: 's' }); const a = runArgs({ ...o, settingsFile: '/f' });
+    const at = a.lastIndexOf(F.maxTurns);
+    assert.equal(at, a.length - (o.input ? 2 + STDIN_ARGS.length : 3), `${t.id} ${side}: --max-turns is not right before the prompt`);
   }
 });

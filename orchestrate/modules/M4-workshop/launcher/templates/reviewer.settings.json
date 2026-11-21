@@ -147,7 +147,17 @@
     "DISABLE_UPDATES": "1"
   },
   "disableClaudeAiConnectors": true,
+  "enabledPlugins": {
+    "cc-plugin-sec-default@builtin": false,
+    "cc-plugin-agents-md@builtin": false,
+    "cc-plugin-telemetry@builtin": false,
+    "cc-plugin-plugin-authoring@builtin": false
+  },
   "crossSessionInbound": "refuse",
   "disableSkillShellExecution": true,
-  "disableBundledSkills": true
+  "disableBundledSkills": true,
+  "skillOverrides": {
+    "design": "off",
+    "doctor": "off"
+  }
 }

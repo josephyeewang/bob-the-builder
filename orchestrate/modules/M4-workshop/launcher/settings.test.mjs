@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { DESIGN_PROFILES, NEVER_TOOLS, checkProfile, profilePort, fakeProfilePort, sha256, hasShell } from './role-profiles.mjs';
 import { parseSnapshot, readSnapshot, makeSnapshot, snapshotHash, SNAPSHOT_MAX_AGE_MS } from '../hooks/snapshot.mjs';
 import { apart, phaseHosts, renderAllowRules, renderRoleSettings, checkSettings, writeRoleSettings, POLICY_HOOKS, HOOK_TIMEOUT, checkRunnerWall, runnerWallDeny, runnerWallDirs, runnerWallShell, bobFolderDeny, bobFolderShell, snapshotWallDeny, snapshotWallShell } from './render-settings.mjs';
-import { SETTINGS as S, ENV, HOOK_FIELDS as H, HOOK_EVENTS as E } from './settings-names.mjs';
+import { SETTINGS as S, ENV, HOOK_FIELDS as H, HOOK_EVENTS as E, BUILTIN_PLUGIN_IDS, BUILTIN_SKILLS_OFF } from './settings-names.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
 import { checkMachineWide } from './env-check.mjs';
 import { REVIEW_ROLES, RUNNER_ROLES } from '../../../shared/review-roles.mjs';
@@ -140,7 +140,9 @@ test('a worker settings file carries every lock-down field and passes the check'
   assert.equal(s[S.env][ENV.disableUpdates], '1');
   assert.equal(s[S.env][ENV.autoCompactWindow], '300000');
   assert.equal(s[S.disableClaudeAiConnectors], true);
-  assert.equal(Object.hasOwn(s, S.enabledPlugins), false, 'no enabledPlugins (L1114): nothing to turn on, and its name is not proven');
+  // The built-in plugins off and the built-in skills disableBundledSkills leaves on turned off (L1333).
+  assert.deepEqual(s[S.enabledPlugins], Object.fromEntries(BUILTIN_PLUGIN_IDS.map((id) => [id, false])));
+  assert.deepEqual(s[S.skillOverrides], Object.fromEntries(BUILTIN_SKILLS_OFF.map((n) => [n, 'off'])));
   assert.equal(s[S.crossSessionInbound], 'refuse');
   assert.equal(s[S.disableSkillShellExecution], true);
   assert.equal(s[S.disableBundledSkills], true);

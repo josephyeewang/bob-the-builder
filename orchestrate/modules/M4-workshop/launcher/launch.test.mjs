@@ -7,8 +7,8 @@ import { tempDir } from '../../../shared/test-tmp.mjs';
 import { join } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { DESIGN_PROFILES } from './role-profiles.mjs';
-import { REFUSED_ENV, SETTINGS as S, HOOK_FIELDS as H, HOOK_EVENTS as E } from './settings-names.mjs';
-import { renderRoleSettings, POLICY_HOOKS, bobFolderDeny, bobFolderShell } from './render-settings.mjs';
+import { REFUSED_ENV, SETTINGS as S, HOOK_FIELDS as H, HOOK_EVENTS as E, FORCED_BUILTIN_PLUGINS, HEADLESS_UNLOADED, BUILTIN_PLUGIN_IDS, BUILTIN_SKILLS_OFF } from './settings-names.mjs';
+import { renderRoleSettings, checkSettings, POLICY_HOOKS, bobFolderDeny, bobFolderShell } from './render-settings.mjs';
 import { roleArgs, checkInit, readBack, sourcesProblem } from './readback.mjs';
 import { sessionArgs } from './review-launch.mjs';
 import { roleEnv, checkRoleEnv, startEnv, PASS_ENV, LAUNCHER_ENV, ROLE_ENV_ALLOWED, checkMachineWide, listDropIns, readPlist, MANAGED_READERS, CLAUDE_FILE } from './env-check.mjs';
@@ -317,6 +317,51 @@ test('read-back: the Lead has exactly Read, Glob, Grep, Write and AskUserQuestio
   // thinking is the Front Door's list without Skill (review m7).
   assert.deepEqual([...DESIGN_PROFILES.thinking.tools].sort(), fd.tools.filter((t) => t !== 'Skill').sort());
   assert.equal(checkInit({ ...goodInit('thinking'), tools: [...goodInit('thinking').tools, 'Skill'] }, { role: 'thinking', profile: DESIGN_PROFILES.thinking }).ok, false);
+});
+
+test('L1333: on 2.1.316 only the forced built-in plugin is let through, by exact name, path and source; a headless start may lack AskUserQuestion', () => {
+  const PIN = '2.1.316';
+  const on = (role, extra = {}) => ({ ...goodInit(role), claude_code_version: PIN, ...extra });
+  const sec = { name: 'cc-plugin-sec-default', path: 'builtin', source: 'cc-plugin-sec-default@builtin' };
+  const w = DESIGN_PROFILES.worker;
+  assert.deepEqual(FORCED_BUILTIN_PLUGINS[PIN], ['cc-plugin-sec-default']);
+  assert.equal(checkInit(on('worker', { plugins: [sec] }), { role: 'worker', profile: w, pin: PIN }).ok, true);
+  // Any other plugin, a look-alike, a plain string, or the forced one on a pin that does not name it: refused, by name.
+  for (const [what, p] of [
+    ['another built-in', { name: 'cc-plugin-telemetry', path: 'builtin', source: 'cc-plugin-telemetry@builtin' }],
+    ['the name from a folder', { ...sec, path: '/tmp/x' }],
+    ['the name from a marketplace', { ...sec, source: 'cc-plugin-sec-default@market' }],
+    ['a plain string', 'cc-plugin-sec-default'],
+  ]) {
+    const c = checkInit(on('worker', { plugins: [sec, p] }), { role: 'worker', profile: w, pin: PIN });
+    assert.equal(c.ok, false, what); assert.match(c.reason, /^a plugin is loaded: /, what);
+  }
+  assert.match(checkInit(on('worker', { plugins: 'x' }), { role: 'worker', profile: w, pin: PIN }).reason, /plugins are not a list/);
+  assert.equal(checkInit({ ...goodInit('worker'), plugins: [sec] }, { role: 'worker', profile: w, pin: '2.1.300' }).ok, false);
+  assert.equal(checkInit({ ...goodInit('worker'), plugins: [sec] }, { role: 'worker', profile: w }).ok, false);
+  // AskUserQuestion: headless 2.1.316 never loads it, so a role listing it is not refused for its absence; loaded, it counts.
+  assert.deepEqual(HEADLESS_UNLOADED[PIN], ['AskUserQuestion']);
+  const lead = DESIGN_PROFILES.lead;
+  const noAsk = goodInit('lead').tools.filter((t) => t !== 'AskUserQuestion');
+  assert.equal(checkInit(on('lead', { tools: noAsk }), { role: 'lead', profile: lead, pin: PIN }).ok, true);
+  assert.equal(checkInit(on('lead'), { role: 'lead', profile: lead, pin: PIN }).ok, true);
+  // Another missing tool still refuses; on another pin the absence refuses; a role without it may not have it.
+  assert.equal(checkInit(on('lead', { tools: noAsk.filter((t) => t !== 'Grep') }), { role: 'lead', profile: lead, pin: PIN }).ok, false);
+  assert.equal(checkInit({ ...goodInit('lead'), tools: noAsk }, { role: 'lead', profile: lead, pin: '2.1.300' }).ok, false);
+  assert.equal(checkInit(on('worker', { tools: [...goodInit('worker').tools, 'AskUserQuestion'] }), { role: 'worker', profile: w, pin: PIN }).ok, false);
+});
+
+test('L1333: every role file switches the built-in plugins and leftover skills off, and the file check refuses one that does not', () => {
+  const s = NAMES('worker').settings;
+  assert.deepEqual(s.enabledPlugins, Object.fromEntries(BUILTIN_PLUGIN_IDS.map((id) => [id, false])));
+  assert.deepEqual(s.skillOverrides, Object.fromEntries(BUILTIN_SKILLS_OFF.map((n) => [n, 'off'])));
+  assert.equal(checkSettings(s, { profile: DESIGN_PROFILES.worker }).ok, true);
+  const without = (f) => { const x = structuredClone(s); f(x); return checkSettings(x, { profile: DESIGN_PROFILES.worker }); };
+  assert.match(without((x) => { delete x.enabledPlugins['cc-plugin-telemetry@builtin']; }).reason, /built-in plugin is not switched off/);
+  assert.match(without((x) => { delete x.enabledPlugins; }).reason, /built-in plugin is not switched off/);
+  assert.match(without((x) => { x.enabledPlugins['some@market'] = true; }).reason, /a plugin is on/);
+  assert.match(without((x) => { x.skillOverrides.doctor = 'name-only'; }).reason, /built-in skill is not turned off/);
+  assert.match(without((x) => { delete x.skillOverrides; }).reason, /built-in skill is not turned off/);
 });
 
 test('read-back: planted worker-bundle files are removed by check 2 before the start, so nothing they hold runs', async () => {

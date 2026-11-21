@@ -37,7 +37,7 @@
 // of it passed (L1128 M1): one NOT TRIED test leaves the name NOT TRIED.
 //
 // Every run uses the runner's own environment for a session (wiring/runner-ports.mjs sessionEnv: its PATH, the
-// sessions' home, the account in use) and `--setting-sources ""` (settings-names.mjs sourcesArgs) unless the test is
+// sessions' home, the account and sign-in a worker start uses: workerAccount) and `--setting-sources ""` (settings-names.mjs sourcesArgs) unless the test is
 // about the sources. One test writes the account's user settings file (<account folder>/settings.json, the one claude
 // reads through CLAUDE_CONFIG_DIR) and puts it back byte for byte, mode too, or removes it if it was not there (L1109).
 // The backup is the file's own bytes, beside it, with a small note of whether it was there and its mode. It refuses to
@@ -54,7 +54,7 @@
 // it NOT TRIED with the reason, never PASS. failIfUnavailable, strictAllowlist and crossSessionInbound each have a
 // break-it pair for what they stop (R-0b-178) as well as a spelling pair (L1114), and a name passes only when both did;
 // a PASS from the spelling pair alone (a test list without the behaviour pair) says "name confirmed (spelling pair)".
-// enabledPlugins is no longer written (L1114) and shows NOT USED, not counted.
+// enabledPlugins was not written from L1114 to L1333; it is back (the built-in plugins off) and proven by its own pair.
 // apiKeyHelper and disableAllHooks (REFUSED_SETTINGS) are not proven: the launcher refuses them in every role file, and
 // the run says so.
 // What claude does that this harness reads (its start message, its warnings, its result line) was read in the pinned
@@ -69,8 +69,8 @@ import { execFileSync, spawn as childSpawn } from 'node:child_process';
 import { readJobConfig } from '../../shared/job-config.mjs';
 import { makeLock } from '../../modules/M9-record/lock.mjs';
 import { checkRunnerConfig } from '../../wiring/runner-main.mjs';
-import { sessionEnv } from '../../wiring/runner-ports.mjs';
-import { ACCOUNT_NAMES, accountDir, accountInUse } from '../../modules/M4-workshop/launcher/accounts.mjs';
+import { sessionEnv, workerAccount } from '../../wiring/runner-ports.mjs';
+import { ACCOUNT_NAMES, accountDir } from '../../modules/M4-workshop/launcher/accounts.mjs';
 import { readResult } from '../../modules/M11-dispatcher/headless-result.mjs';
 import { FLAGS as F, SETTINGS as S, HOOK_FIELDS as H, HOOK_EVENTS as E, ENV, REFUSED_SETTINGS, CONFIRMED, SPELLING_ONLY, noToolServerArgs, proofCounts, sourcesArgs } from '../../modules/M4-workshop/launcher/settings-names.mjs';
 import { roleArgs, findInit, checkInit } from '../../modules/M4-workshop/launcher/readback.mjs';
@@ -112,7 +112,9 @@ export function runArgs(o) {
   a.push(F.tools, o.tools ?? 'Bash');
   if (o.mode !== null) a.push(F.permissionMode, o.mode ?? 'dontAsk');
   if (o.model !== null) a.push(F.model, o.model ?? RUN_MODEL);
-  a.push(F.maxTurns, String(o.maxTurns ?? 3), ...(o.extra ?? []), ...(o.input ? STDIN_ARGS : [o.prompt ?? 'Reply with the word ready.']));
+  // extra goes before --max-turns (L1333): --mcp-config takes every word after it up to the next option, so with the
+  // prompt right after it the prompt was read as a config file and the run never started.
+  a.push(...(o.extra ?? []), F.maxTurns, String(o.maxTurns ?? 3), ...(o.input ? STDIN_ARGS : [o.prompt ?? 'Reply with the word ready.']));
   return a;
 }
 
@@ -309,6 +311,9 @@ export function runProblem(r, want = {}) {
 }
 
 const PROBE_SERVER = 'orch-names-probe';
+// A built-in plugin a setting turns off, and a built-in skill disableBundledSkills leaves on (L1333; checked: claude-code 2.1.316).
+const PROBE_PLUGIN = 'cc-plugin-telemetry@builtin';
+const PROBE_SKILL = 'doctor';
 export const CONNECTORS_FALLBACK = 'the account has no claude.ai connector, so the pair can\'t show it. Fallback (b), L1114: '
   + 'take it out of the role files; --strict-mcp-config with an empty list keeps connectors out, and launch check 6 refuses a '
   + 'start whose start message lists any tool server';
@@ -447,6 +452,14 @@ export const TESTS = Object.freeze([
     run: (side) => ({ settings: { [S.disableBundledSkills]: side === 'on' } }),
     see: (side, dir, out) => { const i = init(out); return Array.isArray(i?.skills) ? i.skills.length : null; },
     judge: (on, off) => (Number.isInteger(on) && Number.isInteger(off) && on < off ? null : `skills listed: ${on} with it on, ${off} with it off; want fewer with it on`) },
+  { id: 'enabledPlugins', title: 'a built-in plugin set to false is not in the start message (L1333)', kind: 'readback', names: [S.enabledPlugins],
+    run: (side) => ({ settings: side === 'on' ? { [S.enabledPlugins]: { [PROBE_PLUGIN]: false } } : {}, tools: 'Read' }),
+    see: (side, dir, out) => { const i = init(out); return Array.isArray(i?.plugins) ? i.plugins.some((p) => p?.source === PROBE_PLUGIN) : null; },
+    judge: sameBut({ on: false, off: true }) },
+  { id: 'skillOverrides', title: 'a skill set "off" in skillOverrides is not in the start message (L1333)', kind: 'readback', names: [S.skillOverrides],
+    run: (side) => ({ settings: side === 'on' ? { [S.skillOverrides]: { [PROBE_SKILL]: 'off' } } : {}, tools: 'Read' }),
+    see: (side, dir, out) => { const i = init(out); return Array.isArray(i?.skills) ? i.skills.includes(PROBE_SKILL) : null; },
+    judge: sameBut({ on: false, off: true }) },
   { id: 'disableClaudeAiConnectors', title: 'no claude.ai connector is in the start message with them off (no tool-server lock)', kind: 'readback', names: [S.disableClaudeAiConnectors],
     run: (side) => ({ mcp: false, settings: side === 'on' ? { [S.disableClaudeAiConnectors]: true } : {} }),
     see: (side, dir, out) => { const i = init(out); return Array.isArray(i?.mcp_servers) ? i.mcp_servers.filter((s) => /^claude\.ai\b/i.test(String(s?.name ?? ''))).length : null; },
@@ -571,9 +584,7 @@ export const NOT_TRIED = Object.freeze({
 });
 
 // Names the launcher no longer writes (L1114), shown and not counted. Each comes back only after its proof (R-0b-178).
-export const NOT_USED = Object.freeze({
-  [S.enabledPlugins]: 'not in the role files (L1114): nothing to turn on; check 6 refuses a start listing a plugin; its proof is R-0b-178',
-});
+export const NOT_USED = Object.freeze({});
 
 // The role read-back's names: what launch check 6 itself reads (L6): the start message comes at all, and shows each role's
 // tools, no tool server, no plugin, its skills and its mode.
@@ -906,7 +917,7 @@ export const restoreCommand = (c, argv) => ['sudo', '-H', '-u', basename(c.home)
 
 const REAL = {
   readConfig: (path) => checkRunnerConfig(readJobConfig(path, { code: [], optionalCode: ['budget'], self: runnerSelf() })),
-  accountInUse, sessionEnv, makeLock, runAll,
+  workerAccount, sessionEnv, makeLock, runAll,
   claudeVersion: (bin, env) => /^(\d+\.\d+\.\d+)/.exec(execFileSync(bin, [F.version], { encoding: 'utf8', timeout: 30_000, env: env ?? {} }).trim())?.[1] ?? null,
   makeBase: () => mkdtempSync(join(tmpdir(), 'settings-names-proof-')),
   // The uid owning the runner's own folder, or null when it is not a plain folder or can't be read.
@@ -939,7 +950,9 @@ export async function main(argv, { print = (t) => process.stdout.write(t), uid =
     return 0;
   }
   // Every refusal from here on ends in a receipt and NOT DONE (L1128 m5), a throw too.
-  let account; try { account = d.accountInUse({ home: c.home }); } catch (e) { return stop(`the account in use can't be read (${e?.message ?? e})`, c.pin); }
+  // The account a worker start uses (runner-ports.mjs workerAccount, L1333): with the config's signinFile, the builder
+  // sign-in token goes to every run, as it does to a real start; before L1333 the proof asked accountInUse, so no run was signed in.
+  let account; try { account = d.workerAccount(c); } catch (e) { return stop(`the account in use can't be read (${e?.message ?? e})`, c.pin); }
   let env = null; try { env = account?.account ? d.sessionEnv(c, account) : null; } catch (e) { return stop(`the sessions' variables can't be made (${e?.message ?? e})`, c.pin); }
   let claudeVersion = null; try { claudeVersion = d.claudeVersion(c.claudeBin, env); } catch { /* not readable */ }
   const bad = guardProblem({ c, uid, ownDirUid, claudeVersion, account });
