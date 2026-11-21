@@ -8,7 +8,7 @@
 //                       (L781). Required: missing, it throws.
 //     whoIsSignedIn() → { account, signed_in, observed_at?, reason? }: signed_in false only when the answer says plainly
 //                       that the named account is signed out; null (couldn't tell) with the reason for everything else
-//     readUsage(account) → { source, h5, week, week_from, observed_at } | null
+//     readUsage(account) → { source, h5, week, week_from, observed_at, h5_none?: true } | null
 //
 // THE ANSWER'S OWN TIME (L728 M1). Both ports hand on the answer's observed_at, and state-facts.mjs stores the earlier of
 // it and its own read time. So M11's stale_after_min counts from when the owner's job asked Claude Code, never from
@@ -19,8 +19,10 @@
 // then starts nothing new (who is signed in) or keeps Tier-1 blocked (usage). `lastReason()` says why the last read
 // gave null, for the pass's problem line ("says so", L611).
 //
-// A missing 5-hour row stays null, never 0% (L611): readUsage hands it on as null figures, and M11 refuses a reading
-// without an h5 percent. The week is the highest weekly row (owner-answer.mjs), and `source` names that row.
+// A missing 5-hour row stays null, never 0% (L611). When the owner's answer says the report listed no 5-hour row at all
+// (`h5_none: true`, L1331: a clean report with a weekly row and no `session` row), readUsage hands that on, and M11
+// judges the band by the week alone. Any other gap (no weekly row, no reset time) is handed on as null figures, and M11
+// refuses it as unknown. The week is the highest weekly row (owner-answer.mjs), and `source` names that row.
 //
 // THE FILE IS A CLAIM (L614). The folder and file are the owner's user's, and work sessions may run as that user too.
 // The checks here stop a file from anyone else, one left writable to others, an old one and one dated ahead; they can't
@@ -85,7 +87,9 @@ export function shapeProblem(a) {
   if (a.usage_reason !== undefined && typeof a.usage_reason !== 'string') return 'usage_reason is not text';
   if (a.usage === null) return null;
   if (!a.usage || typeof a.usage !== 'object' || Array.isArray(a.usage)) return 'usage is not an object';
-  if (Object.keys(a.usage).some((k) => k !== 'h5' && k !== 'week' && k !== 'week_from')) return 'usage has a window this reader does not know';
+  if (Object.keys(a.usage).some((k) => !['h5', 'week', 'week_from', 'h5_none'].includes(k))) return 'usage has a window this reader does not know';
+  // L1331: written only as true, and only with no 5-hour figure and a weekly row (owner-answer.mjs parseUsageReport).
+  if (a.usage.h5_none !== undefined && (a.usage.h5_none !== true || a.usage.h5 != null || a.usage.week == null)) return 'h5_none is not true with no 5-hour row and a weekly one';
   if (a.usage.week_from != null && !(typeof a.usage.week_from === 'string' && ROW.test(a.usage.week_from))) return 'week_from is not a row this reader knows';
   for (const k of ['h5', 'week']) {
     const w = a.usage[k];
@@ -209,6 +213,7 @@ export function sensorsPorts({ file, ownerUid, now = () => new Date(), staleMs =
     let d = null; try { d = stored(account); } catch { d = null; }
     if (!d || !isTime(d.observed_at) || (d.h5?.used_pct == null && d.week?.used_pct == null)) return null;
     const w = (x) => (x ? { used_pct: x.used_pct ?? null, resets_at: x.resets_at ?? null } : null);
+    // Never the no-5-hour marker (L1331 r3): the reading refused here may itself have shown a 5-hour row.
     return { source: typeof d.source === 'string' ? d.source : null, h5: w(d.h5), week: w(d.week), observed_at: d.observed_at };
   };
   const read = () => {
@@ -247,10 +252,13 @@ export function sensorsPorts({ file, ownerUid, now = () => new Date(), staleMs =
       commit(account, 'session', h5);
       if (from) commit(account, 'week', week);
       // A reading with a part missing is still handed on (M11 refuses it as unknown), with the reason (L728 m4).
-      const gaps = [!h5 && 'no 5-hour row', h5 && !h5.resets_at && 'no 5-hour reset time', !week && 'no weekly row',
+      // A report that lists no 5-hour row (L1331) is not a gap: the week alone decides.
+      const none = a.usage.h5_none === true;
+      const gaps = [!h5 && !none && 'no 5-hour row', h5 && !h5.resets_at && 'no 5-hour reset time', !week && 'no weekly row',
         week && !week.resets_at && 'no weekly reset time'].filter(Boolean);
       if (gaps.length) why = `usage: the report had ${gaps.join(', ')}, so it stays unknown`;
-      return { source: from ? `${SOURCE} | week from ${from}` : SOURCE, h5, week, week_from: from, observed_at: a.observed_at };
+      return { source: from ? `${SOURCE} | week from ${from}` : SOURCE, h5, week, week_from: from, observed_at: a.observed_at,
+        ...(none ? { h5_none: true } : {}) };
     },
     lastReason: () => why,
   };

@@ -44,7 +44,7 @@ export const SHAPES = Object.freeze({
   'fact.network-up': reading,
   'fact.frontdoor-reachable': reading,
   'fact.signed-in-account': { account: 'id', signed_in: 'bool', reason: 'text', observed_at: 'time' },
-  'fact.usage': { account: 'id', observed_at: 'time', source: 'id', h5: usageWindow, week: usageWindow },
+  'fact.usage': { account: 'id', observed_at: 'time', source: 'id', h5: usageWindow, week: usageWindow, h5_none: 'bool', h5_hold_until: 'time' },
   'fact.power-source': { at: 'time', source: 'text', ups_present: 'bool', on_ups_power: 'bool', internal_battery: 'bool' },
   'fact.pr': { number: 'count', title: 'text', author: 'text', head_sha: 'id', state: 'id', merged: 'bool', merge_commit_sha: 'id',
     observed_at: 'time', base: 'text', branch: 'text',

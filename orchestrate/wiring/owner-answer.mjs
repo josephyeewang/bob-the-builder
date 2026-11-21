@@ -5,13 +5,14 @@
 // through a folder: `<answer folder>/owner-answer.json`. `sensors-ports.mjs` reads it on the `orchestrate` side.
 //
 //   ownerAnswer({ home, authStatus?, usage?, inUse?, now? }) → the answer (below); never throws
-//   parseUsageReport(text) → { ok: true, h5, week, week_from } | { ok: false, reason }
+//   parseUsageReport(text) → { ok: true, h5, week, week_from, h5_none? } | { ok: false, reason }
 //   writeAnswer({ to, answer, uid? }) → { ok: true } | { ok: false, reason }
 //   node owner-answer.mjs --to <file>     one round, run by the owner's job (placed by lane 4's setup); the home is the
 //                                         job's own, as it runs as the owner
 //
 // The answer: { v: 1, account: 'a'|'b'|null, signed_in: true|false|null, observed_at,
-//               usage: { h5: {used_pct, resets_at}|null, week: {used_pct, resets_at}|null, week_from } | null, usage_reason? }
+//               usage: { h5: {used_pct, resets_at}|null, week: {used_pct, resets_at}|null, week_from, h5_none?: true } | null,
+//               usage_reason? }
 // It never holds an email address, a token or Claude's raw output: only the named fields below.
 //
 // Usage comes from `claude -p /usage` (L611, tested 5 Nov 2026 on Claude Code 2.1.318: no model call, 0 tokens, and
@@ -19,7 +20,10 @@
 // doesn't qualify by default. Its rows are the server's: `session` is the 5-hour window. The week is the HIGHEST weekly
 // row, `weekly_all` or any model's `weekly_scoped` (L728 M2): a plan whose one model is at 100% this week is out for
 // that model, and reading only `weekly_all` would call it green. `week_from` names the row it came from ('weekly_all'
-// or 'weekly_scoped:<model>'). A missing row is null, never 0% (L611); on 5 Nov the live report had no `session` row.
+// or 'weekly_scoped:<model>'). A missing row is null, never 0% (L611). On 5 Nov and again on 20 Nov the live report had
+// no `session` row at all, even in active use: the plan lists no 5-hour limit. So a report this reads cleanly, with a
+// weekly row and no `session` row, says so with `h5_none: true` (L1331), and M11 then judges the band by the week
+// alone. It is written only then: a `session` row that can't be read refuses the whole report, as before.
 // A report this doesn't know is refused and says why, in `usage_reason`: a row kind other than the three known ones (a
 // renamed row is refused, never skipped; L728 m3), a percent outside 0 to 100, or percents that look like fractions
 // (every row at 1 or under while a row's severity is not `normal`; L728 m2).
@@ -63,6 +67,10 @@ const window = (row, name) => {
 };
 
 /** The stream-json output of `claude -p /usage` → the two windows. Anything it doesn't know is refused with why. */
+// The rate_limits keys seen on Claude Code's /usage report (20 Nov 2026, L1331 audit m1).
+const RL_KEYS = ['limits', 'extra_usage'];
+const REPORT_KEYS = ['session', 'rate_limits']; // usage_report's own keys then (r3 m2: a figure moved beside rate_limits)
+
 export function parseUsageReport(text) {
   if (typeof text !== 'string' || !text) return refuse('Claude Code gave no answer to /usage');
   let report;
@@ -101,7 +109,11 @@ export function parseUsageReport(text) {
     if (!top || c.w.used_pct > top.w.used_pct || (c.w.used_pct === top.w.used_pct && c.kind === 'weekly_all')) top = c;
   }
   if (!h5 && !top) return refuse('the /usage report has neither a session nor a weekly row');
-  return { ok: true, h5, week: top?.w ?? null, week_from: top ? rowName(top.row) : null };
+  const out = { ok: true, h5, week: top?.w ?? null, week_from: top ? rowName(top.row) : null };
+  // L1331: no session row in a clean report with a weekly row = the plan lists no 5-hour limit (not a 0% one). Only when
+  // the report and its rate_limits hold just the keys this reader knows: a 5-hour figure moved elsewhere must stay unknown.
+  if (!h5 && top && Object.keys(rl).every((k) => RL_KEYS.includes(k)) && Object.keys(report).every((k) => REPORT_KEYS.includes(k))) out.h5_none = true;
+  return out;
 }
 
 // 'weekly_all', or 'weekly_scoped:<model>' with the model's name cut to safe letters (the Record keeps it as an id).
@@ -128,7 +140,7 @@ export async function ownerAnswer({ home, authStatus = claudeAuthStatus(), usage
   if (answer.signed_in !== true) { answer.usage_reason = answer.signed_in === false ? 'not signed in' : 'who is signed in could not be read'; return answer; }
   let r;
   try { r = parseUsageReport(await usage(use.account, env)); } catch (e) { r = refuse(`the /usage read failed (${e?.message ?? e})`); }
-  if (r.ok) answer.usage = { h5: r.h5, week: r.week, week_from: r.week_from };
+  if (r.ok) answer.usage = { h5: r.h5, week: r.week, week_from: r.week_from, ...(r.h5_none === true ? { h5_none: true } : {}) };
   else answer.usage_reason = r.reason;
   return answer;
 }

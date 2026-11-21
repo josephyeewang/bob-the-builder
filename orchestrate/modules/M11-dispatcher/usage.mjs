@@ -2,7 +2,10 @@
 //
 // Reads the record fact `usage-<account>` that the Sensors (M12) write, through sensorsFact (only a reading Sensors
 // made counts). The fields read are READ_FACTS' (read-facts.mjs, L89):
-//   { account, h5: { used_pct, resets_at }, week: { used_pct, resets_at }, observed_at }
+//   { account, h5: { used_pct, resets_at }, week: { used_pct, resets_at }, observed_at, h5_none }
+// h5_none: true (L1331) means the plan's usage report listed no 5-hour row at all, which is no 5-hour limit, not an
+// unknown one: with no 5-hour figure, the 5-hour window is skipped and the week alone sets the band. A 5-hour figure that
+// is there (a stored window handed on) is still checked. Without the marker a missing 5-hour figure is unknown, as before.
 // and turns it into two separate values (M3): `band` (green | amber | red | unknown), which Joe's own
 // tabs read, and `own_building` (open | amber | full | unknown), which gates only the work the
 // Dispatcher itself starts. Writing red into `band` at the reserve line would stop Joe's tabs too.
@@ -38,14 +41,17 @@ export function readFact(fact, { account, now, staleMs }) {
   if (!Number.isFinite(seen)) return { ok: false, reason: 'the usage reading has no time' };
   if (seen > now + READING_FUTURE_MS) return { ok: false, reason: 'the usage reading is from the future' };
   if (now - seen > staleMs) return { ok: false, reason: 'the usage reading is stale' };
-  for (const [name, w, span] of [['5-hour', d.h5, H5_MS], ['week', d.week, WEEK_MS]]) {
+  const noH5 = d.h5_none === true && (d.h5 == null || d.h5.used_pct == null);
+  const windows = [['week', d.week, WEEK_MS]];
+  if (!noH5) windows.unshift(['5-hour', d.h5, H5_MS]);
+  for (const [name, w, span] of windows) {
     if (!w || !pct(w.used_pct)) return { ok: false, reason: `the ${name} figure is not a percent` };
     const r = time(w.resets_at);
     if (!Number.isFinite(r)) return { ok: false, reason: `the ${name} reset time is missing` };
     if (r <= now) return { ok: false, reason: `the ${name} window has reset since the reading` };
     if (r - now > span) return { ok: false, reason: `the ${name} reset time is further away than the window` };
   }
-  return { ok: true, week: d.week.used_pct, h5: d.h5.used_pct, weekResets: time(d.week.resets_at), observedAt: d.observed_at };
+  return { ok: true, week: d.week.used_pct, h5: noH5 ? null : d.h5.used_pct, weekResets: time(d.week.resets_at), observedAt: d.observed_at };
 }
 
 /**
@@ -62,7 +68,10 @@ export function bands({ rules, reading, now }) {
   if (!reading.ok) {
     return { band: 'unknown', own_building: 'unknown', pace: null, prodBlocked: true, read_at: null, reason: reading.reason };
   }
-  const { week, h5, weekResets } = reading;
+  const { week, weekResets } = reading;
+  // null = the plan lists no 5-hour limit (L1331, readFact): no 5-hour line applies. -1 is below every line.
+  const h5 = reading.h5 ?? null;
+  const h5n = h5 ?? -1;
   // Share of the week gone, from the weekly reset time (M1). Pace counts only once the floor is
   // passed (L13); before then only the week and 5-hour figures apply.
   const gone = 1 - (weekResets - now) / WEEK_MS;
@@ -71,21 +80,21 @@ export function bands({ rules, reading, now }) {
   const own = week >= unreserved ? 'full' : week >= (t.share / 100) * unreserved ? 'amber' : 'open';
   const why = [];
   let band = 'green';
-  if ((pace !== null && pace > t.redPace) || week >= t.redWeek || h5 >= t.redH5) {
+  if ((pace !== null && pace > t.redPace) || week >= t.redWeek || h5n >= t.redH5) {
     band = 'red';
     if (pace !== null && pace > t.redPace) why.push(`pace ${pace.toFixed(2)}`);
     if (week >= t.redWeek) why.push(`week ${week}%`);
-    if (h5 >= t.redH5) why.push(`5-hour ${h5}%`);
-  } else if ((pace !== null && pace > t.amberPace) || week >= t.amberWeek || h5 >= t.amberH5) {
+    if (h5n >= t.redH5) why.push(`5-hour ${h5}%`);
+  } else if ((pace !== null && pace > t.amberPace) || week >= t.amberWeek || h5n >= t.amberH5) {
     band = 'amber';
     if (pace !== null && pace > t.amberPace) why.push(`pace ${pace.toFixed(2)}`);
     if (week >= t.amberWeek) why.push(`week ${week}%`);
-    if (h5 >= t.amberH5) why.push(`5-hour ${h5}%`);
+    if (h5n >= t.amberH5) why.push(`5-hour ${h5}%`);
   }
   // Own building never moves `band` (M3: Joe's tabs read band). The review's M2 also lists it as an
   // amber trigger, but its own plant (week 50 → green) needs it kept apart; see README.
   if (own !== 'open') why.push(`own building ${own}`);
-  return { band, own_building: own, pace, week, h5, prodBlocked: week > t.prodAbove || h5 > t.prodAbove, read_at: reading.observedAt ?? null, reason: why.join(', ') || 'within every line' };
+  return { band, own_building: own, pace, week, h5, prodBlocked: week > t.prodAbove || h5n > t.prodAbove, read_at: reading.observedAt ?? null, reason: why.join(', ') || 'within every line' };
 }
 
 /** Reads the fact and works out the bands. */

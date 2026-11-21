@@ -9,7 +9,9 @@
 // The fact ids are M11's own (imported, not copied), and every fact passes the allow-list in fact-shapes.mjs.
 //
 // Ports (each may be async):
-//   readUsage(account)  → { h5: { used_pct, resets_at }, week: { used_pct, resets_at }, source, observed_at? } | null
+//   readUsage(account)  → { h5: { used_pct, resets_at }, week: { used_pct, resets_at }, source, observed_at?, h5_none? } | null
+//                         h5_none: true = the plan's report listed no 5-hour row at all (L1331), so M11 judges the band
+//                         by the week alone. The fact always stores h5_none: true only when the reading says so, else false.
 //   whoIsSignedIn()     → the account name, or { account, signed_in?, reason?, observed_at? }, or null when it can't be read
 // The account fact tells "nobody is signed in" apart from "couldn't tell" (L730, #289 r1 M1): signed_in is true (an
 // account of M4's), false (the port said plainly nobody is), or null (couldn't tell), and `reason` says why when it is
@@ -32,8 +34,10 @@ import { FACTS } from '../M11-dispatcher/phone-link.mjs';
 import { LIMIT_FACT } from '../M11-dispatcher/pass.mjs';
 import { ACCOUNT_NAMES } from '../M4-workshop/launcher/accounts.mjs';
 import { writePrFact } from './pr-facts.mjs';
+import { pastTime } from '../../shared/still-waiting.mjs';
 
 const stamp = (now) => now().toISOString();
+const H5_HOLD_MS = 5 * 3600e3; // one 5-hour window (L1331 r5)
 export const accountOk = (a) => typeof a === 'string' && ACCOUNT_NAMES.includes(a);
 const timeOrNull = (t) => (typeof t === 'string' && Number.isFinite(Date.parse(t)) ? t : null);
 // The earlier of our stamp and the port's own time; undefined when the port's time is there but unreadable.
@@ -74,6 +78,28 @@ export async function writeUsageFact(writer, readUsage, account, { now = () => n
   const open = (w) => known(w) && Date.parse(w.resets_at) > at;
   const doc = { kind: 'fact.usage', account, observed_at, source: r.source ?? null, h5: win(r.h5), week: win(r.week) };
   const handedOn = stored && timeOrNull(stored.observed_at) ? ['h5', 'week'].filter((k) => !known(r[k]) && open(stored[k])) : [];
+  // Always written (true or false), so every field M11 reads is stored (R-0b-168). True only when this reading itself
+  // says so and no stored 5-hour window is handed on beside it. Never handed on (L1331 r3): a failed or refused read can
+  // hide a 5-hour row the report showed, so the marker comes only from a fresh, accepted reading, and one failed read
+  // leaves usage unknown for that pass (it holds Tier-1 starts back; the safe side).
+  // r4: and only beside a complete week of its own (nothing handed on in its place), with no 5-hour figure in it.
+  // r5: and not while a hold is on. A reading with a 5-hour percent, or a week percent without a reset time, starts a
+  // 5-hour hold (`h5_hold_until`), and every write carries the hold on (blank and kept writes too), so what was seen is
+  // not forgotten after one more pass. A stored fact from before the field (a 5-hour percent, no hold) counts as held when
+  // read under 5 hours ago; its time through pastTime (I4), and one that can't be read or lies ahead counts as recent.
+  // A stored hold that can't be read is a fresh hold; one further than 5 hours ahead is cut to 5 hours (the safe side,
+  // without a stuck hold).
+  const storedAt = pastTime(stored?.observed_at, at);
+  let hold = 0;
+  if (stored?.h5_hold_until != null) {
+    const t = typeof stored.h5_hold_until === 'string' ? Date.parse(stored.h5_hold_until) : NaN;
+    hold = Number.isFinite(t) ? Math.min(t, at + H5_HOLD_MS) : at + H5_HOLD_MS;
+  } else if (stored?.h5?.used_pct != null) {
+    hold = storedAt === null ? at + H5_HOLD_MS : storedAt + H5_HOLD_MS;
+  }
+  if (r.h5?.used_pct != null || (r.week?.used_pct != null && !known(r.week))) hold = Math.max(hold, at + H5_HOLD_MS);
+  doc.h5_hold_until = hold > at ? new Date(hold).toISOString() : null;
+  doc.h5_none = r.h5_none === true && r.h5?.used_pct == null && known(r.week) && !handedOn.length && !(hold > at);
   for (const k of handedOn) doc[k] = win(stored[k]);
   if (handedOn.length) {
     doc.observed_at = relayed(observed_at, stored.observed_at);

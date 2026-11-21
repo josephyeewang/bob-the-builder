@@ -252,6 +252,87 @@ test('R-0b-168 usage and account: M11 reads the real usage and signed-in facts a
   assert.equal(signedInAccount({ rec, rules, now: T0 + 16 * MIN }).account, null);
 });
 
+test('L1331 r3: a failed read after a week-only reading hands the week on but never the no-5-hour marker, so that pass is unknown', async () => {
+  const rec = recWith();
+  const W = makeFactWriter(rec);
+  const weekOnly = (now) => ({ source: 'owner-answer', h5: null, week: { used_pct: 30, resets_at: iso(now + 3 * D) }, h5_none: true });
+  const blank = { source: null, h5: { used_pct: null, resets_at: null }, week: { used_pct: null, resets_at: null } }; // loop.mjs NO_USAGE
+  await writeUsageFact(W, async () => weekOnly(T0), ACCT, { now: clockAt(T0) });
+  const kept = await writeUsageFact(W, async () => blank, ACCT, { now: clockAt(T0 + 5 * MIN) });
+  assert.deepEqual(kept.handedOn, ['week']);
+  const doc = rec.read('fact', USAGE_FACT(ACCT)).doc;
+  assert.equal(doc.h5_none, false, 'a failed read may have hidden a 5-hour row');
+  assert.equal(doc.observed_at, iso(T0), 'the handed-on reading keeps the earlier time');
+  const r = readFact(rec.read('fact', USAGE_FACT(ACCT)), { account: ACCT, now: T0 + 6 * MIN, staleMs: 15 * MIN });
+  assert.deepEqual([r.ok, r.reason], [false, 'the 5-hour figure is not a percent']);
+  // The next accepted week-only reading is known again at once.
+  await writeUsageFact(W, async () => weekOnly(T0 + 10 * MIN), ACCT, { now: clockAt(T0 + 10 * MIN) });
+  assert.equal(readFact(rec.read('fact', USAGE_FACT(ACCT)), { account: ACCT, now: T0 + 11 * MIN, staleMs: 15 * MIN }).ok, true);
+  // A reading that says none while a stored 5-hour window is still open gets no marker: the stored figure is checked.
+  const rec6 = recWith(); const W6 = makeFactWriter(rec6);
+  await writeUsageFact(W6, async () => usageReading(T0), ACCT, { now: clockAt(T0) });
+  await writeUsageFact(W6, async () => weekOnly(T0 + 5 * MIN), ACCT, { now: clockAt(T0 + 5 * MIN) });
+  const d6 = rec6.read('fact', USAGE_FACT(ACCT)).doc;
+  assert.deepEqual([d6.h5.used_pct, d6.h5_none], [20, false]);
+  // A stored reading that listed a 5-hour row never lends the marker; a reading of its own that lacks it stays unknown.
+  const rec2 = recWith(); const W2 = makeFactWriter(rec2);
+  await writeUsageFact(W2, async () => usageReading(T0), ACCT, { now: clockAt(T0) });
+  await writeUsageFact(W2, async () => blank, ACCT, { now: clockAt(T0 + 5 * MIN) });
+  assert.equal(rec2.read('fact', USAGE_FACT(ACCT)).doc.h5_none, false);
+  const rec3 = recWith(); const W3 = makeFactWriter(rec3);
+  await writeUsageFact(W3, async () => weekOnly(T0), ACCT, { now: clockAt(T0) });
+  await writeUsageFact(W3, async () => ({ ...weekOnly(T0 + 5 * MIN), h5_none: undefined }), ACCT, { now: clockAt(T0 + 5 * MIN) });
+  assert.equal(rec3.read('fact', USAGE_FACT(ACCT)).doc.h5_none, false, 'a fresh week without the marker is not given it');
+  // r2 M1: a partial reading (a 5-hour percent, no reset times) in between never lends the marker on to a later failed read.
+  const rec4 = recWith(); const W4 = makeFactWriter(rec4);
+  await writeUsageFact(W4, async () => weekOnly(T0), ACCT, { now: clockAt(T0) });
+  await writeUsageFact(W4, async () => ({ source: 'owner-answer', h5: { used_pct: 99, resets_at: null }, week: { used_pct: 30, resets_at: null } }), ACCT, { now: clockAt(T0 + 5 * MIN) });
+  assert.equal(rec4.read('fact', USAGE_FACT(ACCT)).doc.h5_none, false, 'no marker beside a 5-hour figure');
+  await writeUsageFact(W4, async () => blank, ACCT, { now: clockAt(T0 + 10 * MIN) });
+  assert.equal(rec4.read('fact', USAGE_FACT(ACCT)).doc.h5_none, false);
+  assert.equal(readFact(rec4.read('fact', USAGE_FACT(ACCT)), { account: ACCT, now: T0 + 11 * MIN, staleMs: 15 * MIN }).ok, false, 'unknown, not green');
+  // A week of its own without a reset time (e.g. b's unknown-key case) is not blank either: no marker from the store.
+  const rec5 = recWith(); const W5 = makeFactWriter(rec5);
+  await writeUsageFact(W5, async () => weekOnly(T0), ACCT, { now: clockAt(T0) });
+  await writeUsageFact(W5, async () => ({ source: 'owner-answer', h5: null, week: { used_pct: 30, resets_at: null } }), ACCT, { now: clockAt(T0 + 5 * MIN) });
+  assert.equal(rec5.read('fact', USAGE_FACT(ACCT)).doc.h5_none, false);
+});
+
+test('L1331 r5: each marker guard on its own, and the 5-hour hold starts, carries on and ends', async () => {
+  const weekOnly = (now, over = {}) => ({ source: 'owner-answer', h5: null, week: { used_pct: 30, resets_at: iso(now + 3 * D) }, h5_none: true, ...over });
+  const blank = { source: null, h5: { used_pct: null, resets_at: null }, week: { used_pct: null, resets_at: null } };
+  const doc = (rec) => rec.read('fact', USAGE_FACT(ACCT)).doc;
+  const fresh = async (reading) => { const rec = recWith(); await writeUsageFact(makeFactWriter(rec), async () => reading, ACCT, { now: clockAt(T0) }); return doc(rec); };
+  // Each guard alone, with nothing stored: a 5-hour figure beside the marker; a week without a reset time; the plain case.
+  assert.equal((await fresh(weekOnly(T0, { h5: { used_pct: 10, resets_at: iso(T0 + 60 * MIN) } }))).h5_none, false);
+  assert.equal((await fresh(weekOnly(T0, { week: { used_pct: 30, resets_at: null } }))).h5_none, false);
+  assert.deepEqual([(await fresh(weekOnly(T0))).h5_none, (await fresh(weekOnly(T0))).h5_hold_until], [true, null]);
+  // A stored fact from before the hold field, with a 5-hour percent and a time that can't be read or lies ahead: held.
+  for (const at of ['not a time', iso(T0 + 2 * D)]) {
+    const rec = recWith(); const W = makeFactWriter(rec);
+    await writeUsageFact(W, async () => ({ ...usageReading(T0), observed_at: undefined }), ACCT, { now: clockAt(T0 - 10 * MIN) });
+    const put = rec.read('fact', USAGE_FACT(ACCT)); put.doc.observed_at = at; delete put.doc.h5_hold_until;
+    const get = (id) => (id === USAGE_FACT(ACCT) ? put.doc : rec.read('fact', id)?.doc);
+    await writeUsageFact({ put: W.put, get }, async () => weekOnly(T0), ACCT, { now: clockAt(T0) });
+    assert.equal(doc(rec).h5_none, false, at);
+  }
+  // The hold: started by a 5-hour figure, carried through a blank write, on at 4h59m, off at 5h01m.
+  const rec = recWith(); const W = makeFactWriter(rec);
+  await writeUsageFact(W, async () => ({ ...usageReading(T0), h5: { used_pct: 97, resets_at: null } }), ACCT, { now: clockAt(T0) });
+  assert.equal(doc(rec).h5_hold_until, iso(T0 + 300 * MIN));
+  await writeUsageFact(W, async () => blank, ACCT, { now: clockAt(T0 + MIN) });
+  assert.equal(doc(rec).h5_hold_until, iso(T0 + 300 * MIN), 'a blank write carries the hold');
+  await writeUsageFact(W, async () => weekOnly(T0 + 299 * MIN), ACCT, { now: clockAt(T0 + 299 * MIN) });
+  assert.equal(doc(rec).h5_none, false);
+  await writeUsageFact(W, async () => weekOnly(T0 + 301 * MIN), ACCT, { now: clockAt(T0 + 301 * MIN) });
+  assert.deepEqual([doc(rec).h5_none, doc(rec).h5_hold_until], [true, null]);
+  // A stored hold far ahead (or that can't be read) is cut to 5 hours, never stuck.
+  const put = rec.read('fact', USAGE_FACT(ACCT)); put.doc.h5_hold_until = iso(T0 + 30 * D);
+  const get = (id) => (id === USAGE_FACT(ACCT) ? put.doc : rec.read('fact', id)?.doc);
+  await writeUsageFact({ put: W.put, get }, async () => weekOnly(T0 + 302 * MIN), ACCT, { now: clockAt(T0 + 302 * MIN) });
+  assert.equal(doc(rec).h5_hold_until, iso(T0 + 602 * MIN));
+});
+
 test('L97 m-2: an account is one of M4\'s account names; anything else is stored as nobody, and usage is not written', async () => {
   const rec = recWith();
   for (const bad of ['account A', 'someone@example.com', 'band', '', null]) {

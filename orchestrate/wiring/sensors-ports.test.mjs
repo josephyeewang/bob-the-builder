@@ -9,7 +9,8 @@ import { readOwnerAnswer, sensorsPorts, storedUsage, ANSWER_STALE_MS } from './s
 import { sensorsPass } from '../modules/M12-sensors/loop.mjs';
 import { memoryRecord, makeRecord } from '../shared/record.mjs';
 import { writeUsageFact, writeSignedInAccount } from '../modules/M12-sensors/state-facts.mjs';
-import { readFact, USAGE_FACT } from '../modules/M11-dispatcher/usage.mjs';
+import { readFact, bands, USAGE_FACT } from '../modules/M11-dispatcher/usage.mjs';
+import { rulesWith } from '../modules/M11-dispatcher/fixtures.test-helper.mjs';
 import { ACCOUNT_FACT } from '../modules/M11-dispatcher/tick.mjs';
 import { shapeFact } from '../modules/M12-sensors/fact-shapes.mjs';
 import { makeFactWriter, knownDoc } from '../modules/M12-sensors/facts.mjs';
@@ -282,6 +283,54 @@ test('L728 m4: a reading with no weekly row or no reset time is handed on, and t
     assert.deepEqual([u.h5.used_pct, u.week, u.source], [4, null, 'claude /usage']);
     assert.match(p.lastReason(), /no 5-hour reset time, no weekly row, so it stays unknown/);
   } finally { w.done(); }
+});
+
+test('L1331: an answer that says no 5-hour row was listed reaches M11 as a week-only band, end to end; shape kept strict', async () => {
+  const W = { used_pct: 30, resets_at: '2026-11-07T22:59:59.000Z' };
+  const none = answer({ usage: { h5: null, week: W, week_from: 'weekly_all', h5_none: true } });
+  const w = place(none);
+  try {
+    const p = ports(w.file);
+    const u = await p.readUsage('a');
+    assert.deepEqual([u.h5, u.week, u.h5_none], [null, W, true]);
+    assert.equal(p.lastReason(), null, 'no 5-hour row listed is not a gap');
+    // Through the Sensors pass into the Record, then M11's reading and band.
+    const rec = memoryRecord();
+    const q = sensorsPorts({ file: w.file, ownerUid: UID, now: () => new Date(T0), acl: noAcl, stored: storedUsage(rec) });
+    await sensorsPass({ rec, ports: { whoIsSignedIn: q.whoIsSignedIn, readUsage: q.readUsage, probes: {} }, now: () => new Date(T0) });
+    const doc = rec.read('fact', USAGE_FACT('a'))?.doc;
+    assert.equal(doc?.h5_none, true);
+    const r = readFact({ doc }, { account: 'a', now: T0, staleMs: 15 * 60_000 });
+    assert.deepEqual([r.ok, r.h5, r.week], [true, null, 30]);
+    const b = bands({ rules: rulesWith(), reading: r, now: T0 });
+    assert.deepEqual([b.band, b.prodBlocked], ['green', false]);
+    // The old form (no marker) still stays unknown.
+    const old = { ...doc }; delete old.h5_none;
+    assert.match(readFact({ doc: old }, { account: 'a', now: T0, staleMs: 15 * 60_000 }).reason, /5-hour figure is not a percent/);
+  } finally { w.done(); }
+  // A 5-hour window stored earlier and still open is handed on (the marks are kept, L757), and M11 still checks it.
+  const w2 = place(answer());
+  try {
+    const rec = memoryRecord();
+    const run = async (n) => { const q = sensorsPorts({ file: w2.file, ownerUid: UID, now: () => new Date(T0 + n), acl: noAcl, stored: storedUsage(rec) });
+      await sensorsPass({ rec, ports: { whoIsSignedIn: q.whoIsSignedIn, readUsage: q.readUsage, probes: {} }, now: () => new Date(T0 + n) }); };
+    await run(0);
+    assert.equal(writeAnswer({ to: w2.file, answer: answer({ observed_at: new Date(T0 + 60_000).toISOString(), usage: { h5: null, week: answer().usage.week, week_from: 'weekly_all', h5_none: true } }) }).ok, true);
+    await run(60_000);
+    const doc = rec.read('fact', USAGE_FACT('a'))?.doc;
+    assert.deepEqual([doc.h5.used_pct, doc.h5_none, doc.observed_at], [40, false, new Date(T0).toISOString()]);
+    assert.equal(readFact({ doc }, { account: 'a', now: T0 + 60_000, staleMs: 15 * 60_000 }).h5, 40);
+  } finally { w2.done(); }
+  // The marker is refused unless it is exactly true, with no 5-hour figure and a weekly row: each case below breaks one of those.
+  for (const usage of [{ h5: null, week: W, week_from: 'weekly_all', h5_none: false },
+    { h5: answer().usage.h5, week: W, week_from: 'weekly_all', h5_none: true },
+    { h5: null, week: null, week_from: null, h5_none: true }]) {
+    const w3 = place(answer({ usage }));
+    try {
+      const r = readOwnerAnswer({ file: w3.file, ownerUid: UID, now: () => new Date(T0), acl: noAcl });
+      assert.equal(r.ok, false, JSON.stringify(usage)); assert.match(r.reason, /h5_none is not true/);
+    } finally { w3.done(); }
+  }
 });
 
 // L746 M-A (probe R2-283-A): each Sensors run is a new process, so the marks are the stored usage fact: run 2 refuses a
