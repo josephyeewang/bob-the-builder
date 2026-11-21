@@ -634,6 +634,17 @@ test('the role read-back renders every role, starts it with the sources limit, a
   assert.equal(one.ok, false);
 });
 
+test('L1334: the read-back proves a role with skills of its own (the front door) with none loaded, and still refuses one it does not own', async () => {
+  const base = tempDir('orch-names-');
+  const init = (role, skills) => { const p = DESIGN_PROFILES[role]; return `${JSON.stringify({ type: 'system', subtype: 'init', tools: [...p.tools],
+    mcp_servers: [], plugins: [], skills, setting_sources: ['managed', 'flag'], permissionMode: p.mode, claude_code_version: PIN })}\n`; };
+  assert.ok(DESIGN_PROFILES.front_door.skills?.length, 'the front door has a skill of its own');
+  const none = await roleReadback({ base, pin: PIN, roles: ['front_door', 'worker'], start: async (args) => init(args.join(' ').includes('Skill') ? 'front_door' : 'worker', []) });
+  assert.equal(none.ok, true, none.why);
+  const extra = await roleReadback({ base, pin: PIN, roles: ['front_door'], start: async () => init('front_door', ['doctor']) });
+  assert.equal(extra.ok, false); assert.match(extra.why, /front_door: skills differ: doctor/);
+});
+
 // ---- the guards ----
 
 test('guards: root, another user, no pin, the wrong claude, no account each stop the run', () => {
@@ -817,7 +828,7 @@ const WITH_PROXY = Object.freeze({ ...CONFIRMED, ...PROXY_STAND_IN });
 function mainSetup() {
   const root = tempDir('orch-names-'); const own = join(root, 'state'); mkdirSync(own); const home = join(root, 'builder'); mkdirSync(join(home, '.claude'), { recursive: true });
   const c = { ownDir: own, home, claudeBin: '/opt/claude', pin: PIN };
-  const deps = { readConfig: () => c, workerAccount: () => ({ account: 'a', dir: join(home, '.claude') }), sessionEnv: () => ({}), claudeVersion: () => PIN,
+  const deps = { readConfig: () => c, workerAccount: () => ({ account: 'a', dir: join(home, '.claude') }), sessionEnv: () => ({ ok: true, env: {} }), claudeVersion: () => PIN,
     makeBase: () => { const b = join(root, 'runs'); mkdirSync(b, { recursive: true }); return b; },
     runAll: async () => ({ outcomes: Object.fromEntries(TESTS.map((t) => [t.id, { ok: true }])), readback: { ok: true } }), confirmed: WITH_PROXY };
   return { root, c, home, deps, receipts: join(root, 'receipts') };
@@ -1178,9 +1189,14 @@ test('L1333: the proof signs its runs in as a worker start does (workerAccount o
   const S = mainSetup(); const seen = [];
   await runMain(['--config', '/c.json'], S, {
     workerAccount: (c) => { seen.push(['account', c]); return { account: 'a', dir: join(S.home, '.claude'), env: { T: 'x' }, signinToken: true }; },
-    sessionEnv: (c, who) => { seen.push(['env', who.signinToken]); return {}; },
+    sessionEnv: (c, who) => { seen.push(['env', who.signinToken]); return { ok: true, env: { PATH: '/p', HOME: '/h', ...who.env } }; },
+    claudeVersion: (bin, env) => { seen.push(['version', env]); return PIN; },
   });
-  assert.deepEqual(seen, [['account', S.c], ['env', true]]);
+  // L1334: claude gets the environment inside sessionEnv's answer, never the answer itself.
+  assert.deepEqual(seen, [['account', S.c], ['env', true], ['version', { PATH: '/p', HOME: '/h', T: 'x' }]]);
+  // A refusal from sessionEnv stops the proof with its reason, before any run.
+  const R = await runMain(['--config', '/c.json'], mainSetup(), { sessionEnv: () => ({ ok: false, reason: 'check 9 refused X' }) });
+  assert.equal(R.code, 1); assert.match(R.out, /variables can't be made \(check 9 refused X\)/);
   // Every pair's words: whatever extra a test adds, --max-turns and its number come right before the prompt (or stdin).
   for (const t of TESTS.filter((x) => !x.byGuard)) for (const side of ['on', 'off']) {
     const o = t.run(side, '/d', { sessionId: 's' }); const a = runArgs({ ...o, settingsFile: '/f' });

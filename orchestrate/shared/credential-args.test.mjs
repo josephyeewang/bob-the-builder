@@ -254,7 +254,7 @@ const REVIEWED = {
   "setup/live-proofs/settings-names.mjs unread run(…, d): findInit(out) is a call whose answer is not read @3aebf2ba": LIVE_TESTS,
   "setup/live-proofs/settings-names.mjs value secret @84764cfb": "a fixture file the live proof makes in its own temp folder, named `secret` (its text is the marker seen-<side>-7c1f): the word is a file name in a test prompt, not a credential",
   "setup/live-proofs/settings-names.mjs unread run(…, d): Object.freeze([ { id: 'allow', title: 'an allow rule lets a  is not read to its end @512c33e0": LIVE_TESTS,
-  "setup/live-proofs/settings-names.mjs unread runToEnd(…, c.claudeBin): checkInit(findInit(out), { role, profile, pin, args }) is a call whose answer is not read @0ce73cfe": CLAUDE_START,
+  "setup/live-proofs/settings-names.mjs unread runToEnd(…, c.claudeBin): checkInit(findInit(out), { role, profile: fileOnly, pin, arg is a call whose answer is not read @8d21ac83": CLAUDE_START,
   "setup/live-proofs/settings-names.mjs unread runToEnd's bin reaches childSpawn(…, bin), and runToEnd is called from other modules @1377338b": CLAUDE_START,
   "setup/live-proofs/settings-names.mjs unread runToEnd's args reaches childSpawn(…, args), and runToEnd is called from other modules @6ab99d41": CLAUDE_START,
   "setup/live-proofs/settings-names.mjs unread claudeVersion's bin reaches execFileSync(…, bin), and claudeVersion is called from other modules @97a91a5e": CLAUDE_VERSION,
