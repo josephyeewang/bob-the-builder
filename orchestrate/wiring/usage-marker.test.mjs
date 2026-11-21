@@ -63,3 +63,42 @@ test('L1331 r4: the marker needs a complete week of its own, and no 5-hour perce
   const live = await scenario(ans(T0 + 60_000, { h5: null, week: WEEK, week_from: 'weekly_all', h5_none: true }));
   assert.equal(live.doc.h5_none, true); assert.equal(live.band, 'green'); assert.equal(live.noted, false);
 });
+
+// r5: answers one minute apart (an answer of null: the read fails, the loop writes its blank reading); the band and fact
+// after each pass.
+async function steps(answers) {
+  const dir = tempDir('orch-steps-'); chmodSync(dir, 0o755); const file = join(dir, ANSWER_FILE);
+  const rec = memoryRecord(); const out = [];
+  try {
+    for (const [i, a] of answers.entries()) {
+      const n = i * 60_000;
+      if (a) assert.equal(writeAnswer({ to: file, answer: a }).ok, true); else rmSync(file, { force: true });
+      const q = sensorsPorts({ file, ownerUid: UID, now: () => new Date(T0 + n), acl: noAcl, stored: storedUsage(rec) });
+      await sensorsPass({ rec, ports: { whoIsSignedIn: q.whoIsSignedIn, readUsage: q.readUsage, probes: {} }, now: () => new Date(T0 + n) });
+      const doc = rec.read('fact', USAGE_FACT('a'))?.doc;
+      const r = readFact({ doc }, { account: 'a', now: T0 + n + 1000, staleMs: 15 * 60_000 });
+      out.push({ doc, band: bands({ rules: rulesWith(), reading: r, now: T0 + n + 1000 }).band });
+    }
+    return out;
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+}
+
+test('L1331 r5: what a reading showed holds the marker off for 5 hours, through every later write', async () => {
+  const none = (i, week = WEEK) => ans(T0 + i * 60_000, { h5: null, week, week_from: 'weekly_all', h5_none: true });
+  const h5NoReset = ans(T0, { h5: { used_pct: 97, resets_at: null }, week: WEEK, week_from: 'weekly_all' });
+  const refused = ans(T0 + 60_000, null, { usage_reason: 'the /usage report has a row of a kind this does not know (five_hour)' });
+  const cases = {
+    'A: a 5-hour figure without a reset time, then two week-only reports': [h5NoReset, none(1), none(2)],
+    'B: the same, with a refused report between': [h5NoReset, refused, none(2)],
+    'B2: the same, with a failed read between': [h5NoReset, null, none(2)],
+    'F: a 96% week without a reset time, then week-only 30%': [none(0), none(1, { used_pct: 96, resets_at: null }), none(2), none(3)],
+  };
+  for (const [name, answers] of Object.entries(cases)) {
+    const out = await steps(answers);
+    for (const [i, s] of out.entries()) if (i > 0) assert.notEqual(s.band, 'green', `${name}, pass ${i}: ${JSON.stringify(s)}`);
+    assert.equal(typeof out.at(-1).doc.h5_hold_until, 'string', name);
+  }
+  // The hold ends after 5 hours: the live plan reads green again then, and the hold field is cleared.
+  const out = await steps([none(0)]);
+  assert.deepEqual([out[0].band, out[0].doc.h5_hold_until], ['green', null]);
+});

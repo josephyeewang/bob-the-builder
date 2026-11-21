@@ -208,6 +208,11 @@
   },
   {
    "file": "modules/M12-sensors/state-facts.mjs",
+   "line": "const t = typeof stored.h5_hold_until === 'string' ? Date.parse(stored.h5_hold_until) : NaN;",
+   "why": "a hold's end lies ahead by design, which pastTime refuses (L1331 r5); one that can't be read is a fresh hold, and one further than 5 hours ahead is cut to 5 hours"
+  },
+  {
+   "file": "modules/M12-sensors/state-facts.mjs",
    "line": "const timeOrNull = (t) => (typeof t === 'string' && Number.isFinite(Date.parse(t)) ? t : null);",
    "why": "not a wait (L1157 d): checks the text is a time"
   },
