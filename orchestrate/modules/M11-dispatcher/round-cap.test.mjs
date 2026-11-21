@@ -27,7 +27,7 @@ function world(values) {
   let n = 0;
   const pass = () => withAlerts(rec, env.clock.t, () => {}, (alert) => dispatcherPass({
     rec, rules, now: env.clock.t, account: ACCT, sessions: [], probe: () => idle, host: HOST,
-    launch: async (x) => { n += 1; launched.push(x.card.id); return { ok: true, sessionId: x.sessionId, pid: 1000 + n, pidStart: 'start', pgid: 100 + n, head: HEAD, outbox: `/outbox-root/${x.product}/worker/${x.sessionId}` }; },
+    launch: async (x) => { n += 1; launched.push(x.card); return { ok: true, sessionId: x.sessionId, pid: 1000 + n, pidStart: 'start', pgid: 100 + n, head: HEAD, outbox: `/outbox-root/${x.product}/worker/${x.sessionId}` }; },
     stopGroup: async () => ({ ok: true, how: 'SIGTERM' }), saveWork: async () => ({ ok: true }), filesOf: () => [], alert,
   }));
   // The attempt failed (its tests failed): the card ends `failed`, the state a fix card fixes. Seeded, as M9's own

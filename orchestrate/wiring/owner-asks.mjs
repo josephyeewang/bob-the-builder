@@ -50,6 +50,22 @@ const name = (x) => typeof x === 'string' && x.length > 0;
 const realPid = (n) => Number.isInteger(n) && n > 1;
 
 /**
+ * What is wrong with a launch request before it is written, or null (L1332). `card` is the card's id, a string, never
+ * the card's Record document: the pass once sent the document and every start was refused before any request was
+ * written. pass.test.mjs and tick.test.mjs run the Dispatcher's test launches through this same check, so the two sides
+ * can't drift apart again.
+ */
+export function launchInputProblem({ card, kind, product, sessionId, undoCommit } = {}) {
+  if (typeof sessionId !== 'string' || !REQUEST_ID.test(sessionId)) return 'the launch names no session id the runner takes';
+  if (!RUNNER_KINDS.includes(kind)) return `the worker runner does not start ${JSON.stringify(kind)} sessions`;
+  // No leading dot (#328 r1 c1): '.' would name copiesRoot itself, as review-runner.mjs refuses too.
+  if (typeof card !== 'string' || !CARD_ID.test(card) || card.startsWith('.') || !productName(product)) return 'the launch names no card or product';
+  if (kind === 'undo' && !(typeof undoCommit === 'string' && UNDO_COMMIT.test(undoCommit))) return 'the undo launch names no reversed commit (40 hex)';
+  if (kind !== 'undo' && undoCommit !== undefined) return 'only an undo launch names a reversed commit';
+  return null;
+}
+
+/**
  * What is wrong with a start's answer, or null: the one definition both sides use (#358 r1 m1), the runner before it
  * lists a session and the Dispatcher's launch ask before it trusts one. sessionId the asked one, pid and pgid real, a
  * leader start time, head a commit id, base a commit id or left out (L825-2: a port that does not know it leaves it out,
@@ -126,12 +142,8 @@ export function ownerAsyncPorts({ statusFile, uid, outboxRoot, copiesRoot, write
   return {
     launch: async ({ card, kind, product, sessionId, undoCommit } = {}, { signal } = {}) => {
       // Before the request is written a throw reads as refused (owner-ports.mjs).
-      if (!REQUEST_ID.test(sessionId ?? '')) throw new Error('the launch names no session id the runner takes');
-      if (!RUNNER_KINDS.includes(kind)) throw new Error(`the worker runner does not start ${JSON.stringify(kind)} sessions`);
-      // No leading dot (#328 r1 c1): '.' would name copiesRoot itself, as review-runner.mjs refuses too.
-      if (!CARD_ID.test(card ?? '') || card.startsWith('.') || !productName(product)) throw new Error('the launch names no card or product');
-      if (kind === 'undo' && !(typeof undoCommit === 'string' && UNDO_COMMIT.test(undoCommit))) throw new Error('the undo launch names no reversed commit (40 hex)');
-      if (kind !== 'undo' && undoCommit !== undefined) throw new Error('only an undo launch names a reversed commit');
+      const bad = launchInputProblem({ card, kind, product, sessionId, undoCommit });
+      if (bad) throw new Error(bad);
       return ask(`launch-${sessionId}`, { launch: { card, kind, product, sessionId, ...(kind === 'undo' ? { undo_commit: undoCommit } : {}) } }, (a, s) => {
         const state = Object.hasOwn(s.requests, sessionId) ? s.requests[sessionId].state : undefined;
         // A refusal is the runner's once the request is used up by it: refused, or cancelled (a stop reached it before the

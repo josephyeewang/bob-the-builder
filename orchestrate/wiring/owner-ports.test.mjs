@@ -65,7 +65,7 @@ test('L741: the launch answer names every field the pass reads from it (pass.mjs
   assert.match(OWNER_PORTS.launch.fails, /the tick's limit answers and the card stays claimed/);
   // The call itself: the inputs the interface names.
   // L976: an undo's launch adds the reversed commit, and only an undo's.
-  assert.match(pass, /launch\(\{ card, kind, product, sessionId, \.\.\.\(kind === 'undo' \? \{ undoCommit: exact\.commit \} : \{\}\) \}\)/);
+  assert.match(pass, /launch\(\{ card: id, kind, product, sessionId, \.\.\.\(kind === 'undo' \? \{ undoCommit: exact\.commit \} : \{\}\) \}\)/);
   assert.match(OWNER_PORTS.launch.in, /\{ card, kind, product, sessionId, undoCommit\? \}/);
 });
 
