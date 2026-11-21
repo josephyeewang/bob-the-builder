@@ -547,7 +547,7 @@ export const HELD_BANDS = Object.freeze({ band: 'unknown', own_building: 'unknow
  *   sessions: the running sessions Mac-wide [{ id, product, kind, card, lead, role, head, pgid, bundle_files, runner_stop }] (head: a review session's, L946;
  *                                    runner_stop: a review session's only, 'stopped' | 'wanted' | 'failed', the stop its runner shows, L968)
  *   probe(s) -> { size, activity }   (transcript size incl. compactions, and the activity tracker)
- *   launch({ card, kind, product, sessionId, undoCommit? }) -> { ok, pid, pidStart, pgid, head, base, outbox, reason, signin, configDir }
+ *   launch({ card: id, kind, product, sessionId, undoCommit? }), card the card's id (a string; L1332) -> { ok, pid, pidStart, pgid, head, base, outbox, reason, signin, configDir }
  *                                    (M4 launch, through accountLaunch; it starts claude with the claimed sessionId;
  *                                    `outbox` is the full path of the session's own outbox folder, which it made)
  *   stopGroup(s, { signal }) -> { ok, how }  (stopProcessGroup on the session's group; `signal` aborts when the pass gives up on it)
@@ -954,7 +954,8 @@ async function starts({ rec, rules, now, b, running, launch, stopGroup, outboxRo
     // It may still start a session after the limit, so the card stays claimed, never back to ready (a
     // second start would make two sessions for one card); Joe is told, once a day.
     // An undo's launch carries the reversed commit exactReverse found from the card's source (L976), never a card field.
-    const l = await guarded(() => launch({ card, kind, product, sessionId, ...(kind === 'undo' ? { undoCommit: exact.commit } : {}) }), portDeadlineMs);
+    // `card` goes as its id (L1332): the runner takes a name, never the Record document.
+    const l = await guarded(() => launch({ card: id, kind, product, sessionId, ...(kind === 'undo' ? { undoCommit: exact.commit } : {}) }), portDeadlineMs);
     // Late is any answer marked timed out (guarded's own, or a port's), not only guarded's exact words (L744 1).
     if (!l?.ok && (l?.timedOut === true || l?.reason === `it did not answer within ${portDeadlineMs} ms`)) {
       out.refused.push([id, `launcher: ${l.reason}`]);

@@ -25,6 +25,7 @@ import { rulesWith, recWith, seed, change, setClock, usageFact, undoEntries, fil
 import { writeLog, queueFor, assertDropFirst, lateMark, handoffNote } from './fixtures.test-helper.mjs';
 import { FACTS, FD_RESTART_FACT, LINK_FACT } from './phone-link.mjs';
 import { goFingerprint } from '../M2-approvals/go.mjs';
+import { launchInputProblem } from '../../wiring/owner-asks.mjs';
 
 // The wiring module is loaded by its computed path; one shared call keeps the M2 reach scan's count at 1 (consume-ask ALLOWED).
 const loadWiring = (path) => import(path);
@@ -60,8 +61,9 @@ function world(entries = [], { over = {}, rules = rulesWith({}, allow), outboxRo
     proposals: () => ({ products: [], ownerUid: 501 }), outboxSessions: () => [], wait: async () => {}, startReadonly: async () => ({ ok: true }), replyToLead: async () => {},
     leads: () => [],
     product: 'p1', sessions: () => [...sessions], probe: () => idle, planReviewsRunning: () => [],
-    // The launcher starts the session the claim names (L72), as M4's does.
-    launch: async ({ card: c, kind, product, sessionId: id }) => { calls.launched.push(c.id); n += 1; sessions.push({ id, product, kind, card: c.id, pgid: 100 + n }); return { ok: true, sessionId: id, pid: 1000 + n, pidStart: `Mon Oct 29 12:0${n % 10}:00 2026`, pgid: 100 + n, head: HEAD, outbox: `/outbox-root/${product}/worker/${id}` }; },
+    // The launcher starts the session the claim names (L72), as M4's does. It first runs the owner runner's own input
+    // check (L1332): a looser fake once hid that the pass sent the card's Record document instead of its id.
+    launch: async (x) => { const bad = launchInputProblem(x); if (bad) throw new Error(`launch input: ${bad}`); const { card: c, kind, product, sessionId: id } = x; calls.launched.push(c); n += 1; sessions.push({ id, product, kind, card: c, pgid: 100 + n }); return { ok: true, sessionId: id, pid: 1000 + n, pidStart: `Mon Oct 29 12:0${n % 10}:00 2026`, pgid: 100 + n, head: HEAD, outbox: `/outbox-root/${product}/worker/${id}` }; },
     stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), hostLock: () => null, pauseLead: async () => {},
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => false, requestReview: ({ card }) => { calls.reviewers.push(card); return { ok: true, requestId: `Q-${++n}` }; },
     filesOf: filesOfCommits,
@@ -1228,7 +1230,7 @@ test('L47: a send that hangs delays no safety act and loses no alert', async () 
     alert: (t) => { order.push('alert'); return hang ? new Promise(() => {}) : sent.push(t); },
     sessions: () => running,
     stopGroup: async () => { order.push('stop'); return { ok: false, reason: 'EPERM' }; },
-    launch: async ({ card: c }) => { order.push(`launch ${c.id}`); return { ok: true, sessionId: 'S-U', pgid: 200, head: HEAD }; },
+    launch: async ({ card: c }) => { order.push(`launch ${c}`); return { ok: true, sessionId: 'S-U', pgid: 200, head: HEAD }; },
     alertSendMs: 50, stepDeadlineMs: 5000 } });
   const t0 = Date.now();
   const r = await w.pass();

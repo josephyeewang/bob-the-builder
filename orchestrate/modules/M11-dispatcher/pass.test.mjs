@@ -4,9 +4,10 @@ import assert from 'node:assert/strict';
 import { mkdirSync, realpathSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from '../../shared/test-tmp.mjs';
+import { launchInputProblem } from '../../wiring/owner-asks.mjs';
 import { STATES, FINAL_STATES } from '../../shared/record.mjs';
 import { STOP_QUIET_REASONS } from '../M4-workshop/launcher/review-runner.mjs';
-import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts, stopProcessGroup, guarded, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RUN, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0, UNKNOWN_FACT, REVIEW_STOP_FACT, REVIEW_STOP_RUNNER_REASON, REVIEW_STOP_AGAIN_MS, REVIEW_STOP_TELL_FACT, REVIEW_STOP_MAX_ASKS, HOST_COPY_FAIL, HOST_COPY_CAUSE, HOLD_FACT } from './pass.mjs';
+import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts as undoStarts0, stopProcessGroup, guarded, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RUN, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0, UNKNOWN_FACT, REVIEW_STOP_FACT, REVIEW_STOP_RUNNER_REASON, REVIEW_STOP_AGAIN_MS, REVIEW_STOP_TELL_FACT, REVIEW_STOP_MAX_ASKS, HOST_COPY_FAIL, HOST_COPY_CAUSE, HOLD_FACT } from './pass.mjs';
 import { USAGE_FACT, BAND_FACT } from './usage.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { retellWaits, WAIT_TELL_FACT } from './joe-waits.mjs';
@@ -19,7 +20,11 @@ import { REFUSED_FACT, tellRefused, watchWrites } from './refused-writes.mjs';
 import { change, parkOnLimit, rulesWith, realEngine, recWith, seed, usageFact, undoEntries, filesOfCommits, T0, MIN, H, iso, withAlerts, setClock } from './fixtures.test-helper.mjs';
 
 // Each step runs as the tick runs it: its alerts are queued, then sent once it is done (alerts.mjs, L47).
-const dispatcherPass = (a) => withAlerts(a.rec, a.now, a.alert ?? (() => {}), (alert) => dispatcherPass0({ ...a, alert }));
+// Every launch a test pass makes goes through the owner runner's own input check first (L1332): the fakes here once took
+// the card's Record document while the real runner takes its id, and every live start was refused.
+const checked = (launch) => (launch ? (x) => { const bad = launchInputProblem(x); if (bad) throw new Error(`launch input: ${bad}`); return launch(x); } : launch);
+const undoStarts = (a) => undoStarts0({ ...a, launch: checked(a.launch) });
+const dispatcherPass = (a) => withAlerts(a.rec, a.now, a.alert ?? (() => {}), (alert) => dispatcherPass0({ ...a, launch: checked(a.launch), alert }));
 const stopPass = (a) => withAlerts(a.rec, a.now, a.alert ?? (() => {}), (alert) => stopPass0({ ...a, alert }));
 const rulesMissingAlert = (a) => withAlerts(a.rec, a.now, a.alert ?? (() => {}), (alert) => rulesMissingAlert0({ ...a, alert }));
 
@@ -52,7 +57,7 @@ function world(entries = [], { usage = GREEN, over = {} } = {}) {
     rec: extra.rec ?? rec, rules: extra.rules ?? rules, now: T0 + min * MIN, account: ACCT, sessions: [...sessions],
     probe: (s) => probes.get(s.id) ?? idle,
     // The launcher starts the session the claim names and reports its process (L72), as M4's does.
-    launch: async (x) => { calls.launched.push(x.card.id); const a = launchAnswer(x); if (!a.ok) return a; n += 1; const id = 'sessionId' in a ? a.sessionId : x.sessionId; sessions.push({ id, product: x.product, kind: x.kind, card: x.card.id, pgid: 100 + n }); return { ok: true, sessionId: id, pid: 1000 + n, pidStart: `start-${n}`, pgid: 100 + n, head: 'head' in a ? a.head : 'h'.repeat(40), ...('base' in a ? { base: a.base } : {}), outbox: 'outbox' in a ? a.outbox : `/outbox-root/${x.product}/worker/${id}`, signin: a.signin, configDir: a.configDir, ...('product' in a ? { product: a.product } : {}) }; },
+    launch: async (x) => { calls.launched.push(x.card); const a = launchAnswer(x); if (!a.ok) return a; n += 1; const id = 'sessionId' in a ? a.sessionId : x.sessionId; sessions.push({ id, product: x.product, kind: x.kind, card: x.card, pgid: 100 + n }); return { ok: true, sessionId: id, pid: 1000 + n, pidStart: `start-${n}`, pgid: 100 + n, head: 'head' in a ? a.head : 'h'.repeat(40), ...('base' in a ? { base: a.base } : {}), outbox: 'outbox' in a ? a.outbox : `/outbox-root/${x.product}/worker/${id}`, signin: a.signin, configDir: a.configDir, ...('product' in a ? { product: a.product } : {}) }; },
     outboxRoot: extra.outboxRoot,
     stopGroup: extra.stopGroup ?? (async (s) => { calls.stops.push(s.id); const i = sessions.findIndex((x) => x.id === s.id); if (i >= 0) sessions.splice(i, 1); return { ok: true, how: 'SIGTERM' }; }),
     saveWork: async (s) => { calls.saves.push(s.id); return { ok: true }; },
@@ -1128,7 +1133,7 @@ test('L1045: undoStarts, the tick\'s own undo step, reads host.lock and holds ev
   const alert = fakeAlert();
   // Through the outbox and its send, as the tick does: a cause is marked told only once a copy is delivered.
   const ask = (hostLock) => withAlerts(rec, T0, alert, (queued) => undoStarts({ rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), now: T0, bands: { band: 'green', own_building: 'open', prodBlocked: false },
-    running: [], launch: async (x) => { launched.push(x.card.id); return { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/${x.product}/worker/${x.sessionId}`, pid: 4242, pidStart: 's4242', head: 'h'.repeat(40) }; }, filesOf: filesOfCommits, alert: queued, hostLock }));
+    running: [], launch: async (x) => { launched.push(x.card); return { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/${x.product}/worker/${x.sessionId}`, pid: 4242, pidStart: 's4242', head: 'h'.repeat(40) }; }, filesOf: filesOfCommits, alert: queued, hostLock }));
   const never = () => { throw Object.assign(new Error('the host.lock copier has never finished a run'), { code: HOST_COPY_FAIL }); };
   // L1048 m5: asked twice, as the tick asks every pass: nothing starts either time, and the undo is told once.
   for (const n of [1, 2]) {
@@ -1364,7 +1369,7 @@ test('r4 MAT-5: during an outage the undo starts start nothing', async () => {
   const rec = recWith([['product', 'p1', { state: 'active' }], ['fact', OUTAGE_FACT, { state: 'open' }], ...undoEntries('U-1')]);
   const launched = [];
   const r = await undoStarts({ rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), now: T0, bands: { band: 'green', own_building: 'open', prodBlocked: false },
-    running: [], launch: async (x) => { launched.push(x.card.id); return { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/${x.product}/worker/${x.sessionId}`, pid: 4242, pidStart: 's4242', head: 'h'.repeat(40) }; }, filesOf: filesOfCommits, alert: () => {} });
+    running: [], launch: async (x) => { launched.push(x.card); return { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/${x.product}/worker/${x.sessionId}`, pid: 4242, pidStart: 's4242', head: 'h'.repeat(40) }; }, filesOf: filesOfCommits, alert: () => {} });
   assert.deepEqual(launched, []);
   assert.deepEqual(r.started, []);
   assert.ok(r.notes.includes('outage: nothing starts'));
@@ -1373,7 +1378,7 @@ test('r4 MAT-5: during an outage the undo starts start nothing', async () => {
   const cur = rec.read('fact', OUTAGE_FACT);
   rec.write({ actor: 'dispatcher', entity: 'fact', id: OUTAGE_FACT, expectRev: cur.rev, doc: { state: 'ended' } });
   const r2 = await undoStarts({ rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), now: T0, bands: { band: 'green', own_building: 'open', prodBlocked: false },
-    running: [], launch: async (x) => { launched.push(x.card.id); return { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/${x.product}/worker/${x.sessionId}`, pid: 4242, pidStart: 's4242', head: 'h'.repeat(40) }; }, filesOf: filesOfCommits, alert: () => {} });
+    running: [], launch: async (x) => { launched.push(x.card); return { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/${x.product}/worker/${x.sessionId}`, pid: 4242, pidStart: 's4242', head: 'h'.repeat(40) }; }, filesOf: filesOfCommits, alert: () => {} });
   assert.deepEqual(r2.started, ['U-1']);
 });
 
@@ -1384,7 +1389,7 @@ test('L199: at editing cap 0 the undo start starts one undo per product; the sec
   const rules = rulesWith({ [K.editingPerProduct]: 0 }, { start_session: { decision: 'allow', reason: 'ok' } });
   const launched = [];
   const ask = (running) => undoStarts({ rec, rules, now: T0, bands: { band: 'green', own_building: 'open', prodBlocked: false }, running,
-    launch: async (x) => { launched.push([x.card.id, x.kind]); return { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/${x.product}/worker/${x.sessionId}`, pid: 4242, pidStart: 's4242', head: 'h'.repeat(40) }; },
+    launch: async (x) => { launched.push([x.card, x.kind]); return { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/${x.product}/worker/${x.sessionId}`, pid: 4242, pidStart: 's4242', head: 'h'.repeat(40) }; },
     filesOf: filesOfCommits, alert: fakeAlert() });
   const r = await ask([]);
   assert.deepEqual(r.started, ['U-1']);
@@ -1408,7 +1413,7 @@ test('#117 m2: an undo launch that times out leaves its card claimed; a second u
   const launched = [];
   const r = await undoStarts({ rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), now: T0,
     bands: { band: 'green', own_building: 'open', prodBlocked: false }, running: [],
-    launch: (x) => { launched.push(x.card.id); return new Promise(() => {}); }, filesOf: filesOfCommits, alert: fakeAlert(), portDeadlineMs: 50 });
+    launch: (x) => { launched.push(x.card); return new Promise(() => {}); }, filesOf: filesOfCommits, alert: fakeAlert(), portDeadlineMs: 50 });
   assert.deepEqual(launched, ['U-1']);
   assert.deepEqual(r.started, []);
   assert.equal(rec.read('card', 'U-1').doc.state, 'claimed');
@@ -1437,7 +1442,7 @@ function usageInto(rec) {
 test('r5 m1: a launch that never answers holds no other start; its card stays claimed and is told once a day', { timeout: 10_000 }, async () => {
   const w = world([card('C-A'), card('C-B', { product: 'p2', files: ['src/b.js'] })]);
   const run = (min) => dispatcherPass({ product: 'p1', rec: w.rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), now: T0 + min * MIN, account: ACCT, sessions: [], probe: () => idle,
-    launch: (x) => (x.card.id === 'C-A' ? new Promise(() => {}) : { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/${x.product}/worker/${x.sessionId}`, pid: 9, pidStart: 's9', pgid: 9, head: 'h'.repeat(40) }),
+    launch: (x) => (x.card === 'C-A' ? new Promise(() => {}) : { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/${x.product}/worker/${x.sessionId}`, pid: 9, pidStart: 's9', pgid: 9, head: 'h'.repeat(40) }),
     stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, alert: (t) => w.calls.alerts.push(t), portDeadlineMs: 50 });
   const r = await run(0);
   assert.deepEqual(r.started.map((x) => (Array.isArray(x) ? x[0] : x)), ['C-B'], JSON.stringify(r));
@@ -2566,7 +2571,7 @@ test('L976: the undo launch carries the reversed commit from its source; an edit
   const asked = [];
   w.refuseLaunch((x) => { asked.push(x); return { ok: true }; });
   await w.pass(0, { filesOf: () => ['src/a.js'] });
-  const by = Object.fromEntries(asked.map((x) => [x.card.id, x]));
+  const by = Object.fromEntries(asked.map((x) => [x.card, x]));
   assert.ok(by['U-1'] && by['C-1'], `both started: ${Object.keys(by)}`);
   assert.equal(by['U-1'].kind, 'undo');
   assert.equal(by['U-1'].undoCommit, SHA, 'the source\'s merge commit');
@@ -2589,4 +2594,10 @@ test('L1000: every card state is pinned to its review stop reason: cancelled is 
     assert.deepEqual(asked, want[state] ? [want[state]] : [], state);
     if (want[state] === 'card_final') assert.equal(FINAL_STATES.card.includes(state), true, `${state} is final`);
   }
+});
+
+test('L1332: the owner runner\'s input check refuses a Record document as the card, and takes its id', () => {
+  const x = { kind: 'editing', product: 'p', sessionId: '00000000-0000-4000-8000-000000000000' };
+  assert.equal(launchInputProblem({ ...x, card: { id: 'C-1', product: 'p' } }), 'the launch names no card or product');
+  assert.equal(launchInputProblem({ ...x, card: 'C-1' }), null);
 });
