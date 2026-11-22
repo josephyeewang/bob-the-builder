@@ -8,7 +8,8 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync, chmodSync
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { tempDir } from '../../shared/test-tmp.mjs';
-import { refusalSeen } from './settings-names.mjs';
+import { refusalSeen, WALLED, OFF_WALL_HOW, listenRecorder } from './settings-names.mjs';
+import { NAMES_PROOF_PORT, PROBE_FIRST, PROXY_PORTS, inRange } from '../../shared/builder-ports.mjs';
 import { BASH_OPT_OUT, GETS, callOutput, sentGets, wantOf, BACKUP_SUFFIX, BAD_EFFORT, CONNECTORS_FALLBACK, HOST, META_SUFFIX, PAGE, PEER_FROM, PEER_WORD, READY, REFUSAL, STDIN_ARGS, REPLAY_USER_MESSAGES, peerLine, peerTaken, replayed, saidWord, unbuildable, voidProblem, accountSettingsFiles, effortWarning, NOT_TRIED, NOT_USED, SPELLING_LABEL, misspell, READBACK_NAMES, TESTS, allNames, finish, guardProblem, judgeNames, main, report, restoreUserFile, roleReadback, runAll, runArgs, runProblem, runToEnd, withUserSettings, writeReceipt } from './settings-names.mjs';
 import { CONFIRMED, SETTINGS as SN, FLAGS as F, PROOF_KIND, REFUSED_SETTINGS, SPELLING_ONLY, noToolServerArgs, proofCounts, sourcesArgs, unconfirmedNames } from '../../modules/M4-workshop/launcher/settings-names.mjs';
 import { FIRST_ROUND_EFFORT, SEND_BACK_EFFORT } from '../../modules/M4-workshop/launcher/review-launch.mjs';
@@ -62,6 +63,8 @@ test('each test is a pair that differs in one thing, and every run limits the se
     assert.ok(differ, `${t.id}: the two sides are the same`);
     for (const [side, args, o] of [['on', a, on], ['off', b, off]]) {
       if (o.sources === false) assert.ok(!args.includes(F.settingSources), `${t.id} ${side}`);
+      // L1335: the skill pair reads the project's files only, so its project skill loads.
+      else if (o.sources === 'project') { assert.equal(t.id, 'disableSkillShellExecution'); assert.equal(args[args.indexOf(F.settingSources) + 1], 'project', t.id); }
       else assert.equal(sourcesProblem(args), null, `${t.id} ${side}: ${sourcesProblem(args)}`);
       if (o.input) { assert.deepEqual(args.slice(-STDIN_ARGS.length), [...STDIN_ARGS], `${t.id}: a stdin run ends with the input-format and replay words`); assert.equal(o.prompt, undefined, t.id); }
       else assert.equal(args[args.length - 1], o.prompt ?? 'Reply with the word ready.', `${t.id}: the prompt is last`);
@@ -81,7 +84,7 @@ test('every judge passes only what the setting does: nothing happening on both s
   // The spelling control (off) must be the normal run; the swapped pair, the name's side normal and the control not, is no.
   const sp = [['skipped|-', 'loaded|-'], ['loaded|-', 'loaded|-'], ['skipped|named', 'skipped|named'], ['loaded|named', 'loaded|named'], ['loaded|-', 'skipped|-'], ['loaded|-', 'loaded|named'], ['skipped|named', 'skipped|-'], ['skipped|- then loaded|-', 'loaded|-'], ['loaded|- then skipped|-', 'loaded|-']];
   const samples = { disableBundledSkills: [[3, 9], [9, 9], [9, 3], [null, 9]], disableClaudeAiConnectors: [[0, 2], [0, 0], [2, 2], [null, 2], [0, null], [null, null]], strictMcp: [[false, true], [false, false], [true, true], [null, true], [true, false], [null, null], [false, null]],
-    'spelling-failIfUnavailable': sp, 'spelling-strictAllowlist': sp, 'spelling-crossSessionInbound': sp,
+    'spelling-failIfUnavailable': sp, 'spelling-strictAllowlist': sp,
     strictAllowlist: [['A|-', 'A|B'], ['A|B', 'A|B'], ['A|-', 'A|-'], ['A|B', 'A|-'], ['-|-', 'A|B'], ['A|-', '-|B'], ['-|-', '-|-'], [null, 'A|B'], ['A|-', null]],
     crossSessionInbound: [['-|plain|-|ready', 'peer|plain|word|ready'], ['peer|plain|word|ready', '-|plain|-|ready'], ['-|plain|-|ready', '-|plain|-|ready'],
       ['peer|plain|-|ready', 'peer|plain|word|ready'], ['-|plain|word|ready', 'peer|plain|word|ready'], ['-|-|-|ready', 'peer|plain|word|ready'], ['-|plain|-|-', 'peer|plain|word|ready'],
@@ -101,7 +104,9 @@ test('every judge passes only what the setting does: nothing happening on both s
 });
 
 test('L1114: a spelling pair with no difference, or an account with no connector, is NOT TRIED with its reason, never PASS or FAIL', () => {
-  for (const id of ['spelling-failIfUnavailable', 'spelling-strictAllowlist', 'spelling-crossSessionInbound']) {
+  // L1335: crossSessionInbound has no spelling pair (2.1.316 takes a wrong-typed value under it silently).
+  assert.equal(TESTS.find((t) => t.id === 'spelling-crossSessionInbound'), undefined);
+  for (const id of ['spelling-failIfUnavailable', 'spelling-strictAllowlist']) {
     const t = byId(id);
     assert.equal(t.kind, 'spelling');
     assert.equal(t.judge('loaded|-', 'loaded|-')?.notTried?.includes('no difference'), true, id);
@@ -121,14 +126,16 @@ test('L1114: a spelling pair with no difference, or an account with no connector
   // judgeNames: the reason reaches the line; the fallback too.
   const all = Object.fromEntries(TESTS.map((t) => [t.id, { ok: true }]));
   const lines = judgeNames({ outcomes: { ...all, disableClaudeAiConnectors: { ok: null, notTried: CONNECTORS_FALLBACK, fallback: 'b' },
-    'spelling-crossSessionInbound': { ok: null, notTried: 'the spelling pair showed no difference (loaded|- both ways), so the name is not proven' } }, readback: { ok: true }, version: PIN, confirmed: {} });
+    'spelling-strictAllowlist': { ok: null, notTried: 'the spelling pair showed no difference (loaded|- both ways), so the name is not proven' } }, readback: { ok: true }, version: PIN, confirmed: {} });
   const conn = lines.find((l) => l.name === 'disableClaudeAiConnectors');
   assert.equal(conn.result, 'NOT TRIED'); assert.equal(conn.why, CONNECTORS_FALLBACK); assert.equal(conn.fallback, 'b');
-  assert.equal(lines.find((l) => l.name === 'crossSessionInbound').result, 'NOT TRIED');
+  assert.equal(lines.find((l) => l.name === 'strictAllowlist').result, 'NOT TRIED');
+  // L1335: crossSessionInbound stands on its break-it pair alone.
+  assert.equal(lines.find((l) => l.name === 'crossSessionInbound').result, 'PASS');
   // A not-tried outcome never borrows an older CONFIRMED entry.
-  const c = { crossSessionInbound: { by: 'spelling:settings-names.mjs "x"', version: PIN } };
-  assert.equal(judgeNames({ outcomes: { 'spelling-crossSessionInbound': { ok: null, notTried: 'the spelling pair showed no difference here' } }, version: PIN, confirmed: c })
-    .find((l) => l.name === 'crossSessionInbound').result, 'NOT TRIED');
+  const c = { strictAllowlist: { by: 'spelling:settings-names.mjs "x"', version: PIN } };
+  assert.equal(judgeNames({ outcomes: { 'spelling-strictAllowlist': { ok: null, notTried: 'the spelling pair showed no difference here' } }, version: PIN, confirmed: c })
+    .find((l) => l.name === 'strictAllowlist').result, 'NOT TRIED');
   // R-0b-178: with its behaviour pair passed too, the name stands on that pair, not on its spelling.
   const be = lines.find((l) => l.name === 'failIfUnavailable');
   assert.equal(be.result, 'PASS'); assert.equal(be.proof, undefined); assert.match(be.by, /^break-it:settings-names\.mjs "/);
@@ -275,16 +282,17 @@ test('m4: a cut-off run leaves the raw bytes and a note; --restore puts the file
 
 test('m5: every run ends with its own receipt; one that can\'t be written is NOT DONE and exit 1', () => {
   const all = Object.fromEntries(TESTS.map((t) => [t.id, { ok: true }]));
-  const res = { outcomes: all, readback: { ok: true }, gets: { 'api.github.com': 2, 'example.com': 3 } };
+  const res = { outcomes: all, readback: { ok: true }, gets: { 'api.github.com': 2, 'example.com': 3 }, asked: { 'example.com': 2 } };
+  const { 'proxy-httpProxyPort': _p, ...noProxy } = all;
   const home = tempDir('orch-names-'); let out = '';
   assert.equal(finish({ res, pin: PIN, base: null, home, at: 0, print: (t) => { out += t; }, confirmed: WITH_PROXY }), 0);
-  // Without a proof of the proxy port names the same run is NOT DONE: they stay NOT TRIED.
-  let out2 = ''; assert.equal(finish({ res, pin: PIN, base: null, home, at: 1, print: (t) => { out2 += t; } }), 1);
+  // Without a proxy pair's outcome the same run is NOT DONE: its name stays NOT TRIED (L1335).
+  let out2 = ''; assert.equal(finish({ res: { ...res, outcomes: noProxy }, pin: PIN, base: null, home, at: 1, print: (t) => { out2 += t; } }), 1);
   assert.match(out2, /NOT TRIED\s+httpProxyPort/); assert.match(out2.trimEnd().split('\n').at(-1), /^NOT DONE/);
   assert.match(out.trimEnd().split('\n').at(-1), /^PASS/);
   const path = out.match(/Written to (\S+)/)[1]; assert.ok(existsSync(path) && path.startsWith(home));
-  // L1171 M-1: the receipt's header has the asked-for GETs and the sent ones.
-  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8').split('\n')[0]).gets, { asked: { ...GETS }, sent: { 'api.github.com': 2, 'example.com': 3 } });
+  // L1171 M-1: the receipt's header has the asked-for GETs (L1335: those of the pairs this run ran) and the sent ones.
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8').split('\n')[0]).gets, { asked: { 'example.com': 2 }, sent: { 'api.github.com': 2, 'example.com': 3 } });
   out = '';
   assert.equal(finish({ res, pin: PIN, base: null, home: join(home, 'gone'), at: 0, print: (t) => { out += t; } }), 1);
   assert.match(out.trimEnd().split('\n').at(-1), /^NOT DONE.*receipt could not be written/);
@@ -343,7 +351,8 @@ test('L1166, L1169: every pair that asks for a Bash call reads only that exact c
       const o = t.run(side, d, { sessionId: 's', peerId: 'p', plainId: 'q' });
       const w = wantOf(t, side, d, o);
       // M3: a pair asks for Bash by its prompt or its tools; one that does must say which call it reads.
-      const asksBash = /\bBash\b/.test(String(o.prompt ?? '')) || /\bBash\b/.test(String(o.tools ?? ''));
+      // L1335: a pair that loads Bash only for a skill's own line (noBash) asks the model for none.
+      const asksBash = /\bBash\b/.test(String(o.prompt ?? '')) || (/\bBash\b/.test(String(o.tools ?? '')) && !w.noBash);
       if (!asksBash) {
         assert.notEqual(w?.tool, 'Bash', `${t.id} ${side}: reads a Bash call it never asks for`);
         // L1171 m-2: runArgs gives Bash when the pair names no tools, so a side that may use Bash and asks for no call
@@ -366,8 +375,8 @@ test('L1166, L1169: every pair that asks for a Bash call reads only that exact c
       else assert.ok(prompt.includes(`run ${w.needle}.`), `${t.id} ${side}: ${w.needle} is not the prompt's first command`);
     }
   }
-  assert.equal(n, 30, `${n} Bash sides`);
-  assert.equal(quiet, 32, `${quiet} sides that may use Bash and ask for none`);
+  assert.equal(n, 34, `${n} Bash sides`); // L1335: +4 the two proxy pairs
+  assert.equal(quiet, 32, `${quiet} sides that may use Bash and ask for none`); // L1335: +2 the skill pair, -2 the dropped spelling pair
   // L1171 m-1: the opt-outs, exactly; a new one must change this test. Each names a pair that asks for Bash and really
   // turns the default off on its side, and only there.
   assert.deepEqual(BASH_OPT_OUT, { maxTurns: { on: { once: 'turn' }, off: { once: false }, why: 'its off side makes two Bash calls by design: the second one\'s marker is what --max-turns 1 must stop' } });
@@ -384,7 +393,7 @@ test('L1166, L1169: every pair that asks for a Bash call reads only that exact c
   assert.match(run(`${cmd} || echo "Example Domain" > /x/got-b`), /no Bash call that is exactly/);
 });
 
-test('L1169 M4, L1171 M-1: the run asks for exactly GETS, per host: 2 to api.github.com, 4 to example.com, no third host', () => {
+test('L1169 M4, L1171 M-1: the pairs ask for exactly GETS, per host: 2 to api.github.com, 8 to example.com (L1335), no third host', () => {
   const d = '/x/run'; const count = {};
   for (const t of TESTS.filter((x) => !x.byGuard)) {
     for (const side of ['on', 'off']) {
@@ -395,13 +404,13 @@ test('L1169 M4, L1171 M-1: the run asks for exactly GETS, per host: 2 to api.git
     }
   }
   assert.deepEqual(count, { ...GETS });
-  assert.deepEqual(GETS, { 'api.github.com': 2, 'example.com': 4 });
+  assert.deepEqual(GETS, { 'api.github.com': 2, 'example.com': 8 });
   const src = readFileSync(new URL('./settings-names.mjs', import.meta.url), 'utf8');
-  assert.match(src, /header: \{ pin, runs: base \?\? null, ok: r\.ok, gets: \{ asked: GETS, sent: res\.gets \?\? null \} \}/, 'the receipt carries both counts');
+  assert.match(src, /header: \{ pin, runs: base \?\? null, ok: r\.ok, gets: \{ asked: res\.asked \?\? null, sent: res\.gets \?\? null \} \}/, 'the receipt carries both counts');
   // The run sheet says what is asked for, what reaches the hosts on an honest run, and that a retry can add more.
   const sheet = src.split('\n').slice(0, 20).join(' ').replace(/\s*\/\/\s*/g, ' ');
-  for (const x of ['asks for 2 GETs to api.github.com and 4 to example.com (GETS)', 'on an honest run 2 and 2 reach them',
-    'a retry, which voids its side, can add a few more within the turn limit', 'no other host', "plus Claude's own API traffic"]) assert.ok(sheet.includes(x), x);
+  for (const x of ['asks for 2 GETs to api.github.com and 8 to example.com (GETS)', 'this run asks for 4 to example.com', 'on an honest run 2 and 2 reach them',
+    'A retry, which voids its side, can add a few more within the turn limit', 'no other host', "plus Claude's own API traffic"]) assert.ok(sheet.includes(x), x);
   assert.doesNotMatch(src, /fewer reach the hosts/);
   // sentGets: every address a call's input holds, per host, a refused or retried one too; none from the model's words.
   const o = (...l) => [INIT, ...l, OK].join('\n');
@@ -573,8 +582,8 @@ test('plants: each way claude could ignore a name turns its test red', async () 
   // A claude that does nothing at all: every break-it and read-back test fails, none passes.
   const { outcomes } = await fakeRun({ tests: TESTS.filter((t) => !t.byGuard && !['sessionStart', 'restricted', 'settingSources', 'model', 'sessionId'].includes(t.id)) });
   for (const [id, o] of Object.entries(outcomes)) assert.ok(o.ok === false || (o.ok === null && o.notTried), `${id} passed with a claude that does nothing`);
-  // ...and the three spelling pairs, seeing no difference, are NOT TRIED, not PASS (L1114).
-  for (const id of ['spelling-failIfUnavailable', 'spelling-strictAllowlist', 'spelling-crossSessionInbound']) assert.equal(outcomes[id].ok, null, id);
+  // ...and the two spelling pairs, seeing no difference, are NOT TRIED, not PASS (L1114; L1335 dropped the third).
+  for (const id of ['spelling-failIfUnavailable', 'spelling-strictAllowlist']) assert.equal(outcomes[id].ok, null, id);
   // --version is proven only by the guard having passed.
   assert.equal((await fakeRun({ guardPassed: false, tests: [byId('version')] })).outcomes.version, undefined);
 });
@@ -798,7 +807,7 @@ test('L1128 m3, c1: the asked-for call is of the asked-for tool, and a bare comm
 });
 
 test('L1128 m4: a spelling pair\'s name side runs twice; skipped counts only when both runs agree (P4)', async () => {
-  const t = byId('spelling-crossSessionInbound');
+  const t = byId('spelling-strictAllowlist');
   const go = async (onSays) => {
     let n = 0; const dirs = [];
     const o = await runOne(t, async (args, { cwd }) => {
@@ -821,8 +830,7 @@ test('L1128 m4: a spelling pair\'s name side runs twice; skipped counts only whe
 });
 
 // main with stand-ins for what it reads; a config whose own folder is this user's.
-// Wall v2: the proxy port names have no pair here (NOT_TRIED); a stand-in run that must reach PASS stands them on a
-// confirmed entry, as a real run would once builder-proxy.mjs's proof is recorded in CONFIRMED.
+// Wall v2: before L1335 the proxy port names had no pair; the stand-in entry stays for the tests built on it.
 const PROXY_STAND_IN = Object.freeze(Object.fromEntries([SN.httpProxyPort, SN.socksProxyPort].map((n) => [n, { by: 'break-it:a stand-in for builder-proxy.mjs', version: PIN }])));
 const WITH_PROXY = Object.freeze({ ...CONFIRMED, ...PROXY_STAND_IN });
 function mainSetup() {
@@ -1095,7 +1103,7 @@ test('R-0b-178: each lock-down setting\'s pair differs only in the setting, with
   // strictAllowlist reads B from the one sandboxed call (L1160 M2).
   for (const sd of ['on', 'off']) { const w = s.expect(sd, d); assert.equal(w.sandboxed, true); assert.equal(w.once, true); }
   // The behaviour pair comes before the spelling pair, so a PASS stands on behaviour.
-  for (const n of ['failIfUnavailable', 'strictAllowlist', 'crossSessionInbound']) assert.ok(TESTS.findIndex((t) => t.id === n) < TESTS.findIndex((t) => t.id === `spelling-${n}`), n);
+  for (const n of ['failIfUnavailable', 'strictAllowlist']) assert.ok(TESTS.findIndex((t) => t.id === n) < TESTS.findIndex((t) => t.id === `spelling-${n}`), n);
 });
 
 test('R-0b-178: an honest stand-in passes each pair; the refusal it must show is the setting\'s own', async () => {
@@ -1203,4 +1211,128 @@ test('L1333: the proof signs its runs in as a worker start does (workerAccount o
     const at = a.lastIndexOf(F.maxTurns);
     assert.equal(at, a.length - (o.input ? 2 + STDIN_ARGS.length : 3), `${t.id} ${side}: --max-turns is not right before the prompt`);
   }
+});
+
+// ---- L1335 ----
+
+test('L1335: as the builder the walled pairs are not run; each counts only on its CONFIRMED entry, for this pin, naming that pair', async () => {
+  const walled = TESTS.filter((t) => t.walled).map((t) => t.id).sort();
+  assert.deepEqual(walled, ['allowedDomains', 'strictAllowlist']);
+  const root = tempDir('orch-names-'); const base = join(root, 'runs'); mkdirSync(base); let runs = 0;
+  const io = { claude: async () => { runs += 1; return { out: '', err: '' }; }, readbackAll: async () => ({ ok: true }), userFile: join(root, 's.json'), guardPassed: true, sleep: async () => {}, walled: true };
+  const r = await runAll({ base, io, tests: TESTS.filter((t) => t.walled) });
+  assert.equal(runs, 0, 'nothing ran');
+  for (const id of walled) { assert.equal(r.outcomes[id].ok, null); assert.equal(r.outcomes[id].walled, true); assert.equal(r.outcomes[id].notTried, WALLED); }
+  assert.deepEqual(r.asked, {});
+  const all = { ...Object.fromEntries(TESTS.map((t) => [t.id, { ok: true }])), ...r.outcomes };
+  const line = (confirmed, version = PIN) => judgeNames({ outcomes: all, readback: { ok: true }, version, confirmed });
+  const of = (ls, n) => ls.find((l) => l.name === n);
+  // The real CONFIRMED holds them for 2.1.316, each naming its own pair.
+  for (const n of [SN.network, SN.allowedDomains, SN.strictAllowlist]) assert.equal(of(line(CONFIRMED), n).result, 'PASS', n);
+  // Another pin, no entry, or an entry naming another pair: NOT TRIED, saying how to prove it.
+  const other = { ...CONFIRMED, [SN.allowedDomains]: { by: 'break-it:settings-names.mjs "the sandbox refuses a write outside the working folder"', version: PIN } };
+  for (const [ls, n] of [[line(CONFIRMED, '9.9.9'), SN.allowedDomains], [line({}), SN.strictAllowlist], [line(other), SN.allowedDomains]]) {
+    assert.equal(of(ls, n).result, 'NOT TRIED', n); assert.ok(of(ls, n).why.includes(OFF_WALL_HOW), n);
+  }
+  // strictAllowlist still needs its spelling pair too.
+  assert.equal(of(judgeNames({ outcomes: { ...all, 'spelling-strictAllowlist': { ok: false, why: 'x' } }, readback: { ok: true }, version: PIN }), SN.strictAllowlist).result, 'FAIL');
+  // Off the wall (no io.walled) they run.
+  const r2 = await runAll({ base, io: { ...io, walled: undefined }, tests: TESTS.filter((t) => t.walled) });
+  assert.ok(runs > 0); assert.notEqual(r2.outcomes.allowedDomains.walled, true);
+  assert.deepEqual(r2.asked, { 'api.github.com': 2, 'example.com': 4 });
+});
+
+test('L1335: one proxy pair per name reads whether the shell came to its listener, on the port in the builder range', async () => {
+  assert.ok(inRange(NAMES_PROOF_PORT) && NAMES_PROOF_PORT < PROBE_FIRST && !Object.values(PROXY_PORTS).includes(NAMES_PROOF_PORT));
+  for (const [name, other] of [[SN.httpProxyPort, SN.socksProxyPort], [SN.socksProxyPort, SN.httpProxyPort]]) {
+    const t = byId(`proxy-${name}`);
+    assert.deepEqual(t.names, [name]);
+    // The sides differ in the name alone; both set the other one, as a role file does (audit L1335 r1 M1).
+    const on = t.run('on', '/x', { port: 47008 }).settings.sandbox.network; const off = t.run('off', '/x', { port: 47008 }).settings.sandbox.network;
+    assert.equal(on[name], 47008); assert.equal(off[name], undefined); assert.equal(on[other], 47008); assert.equal(off[other], 47008);
+    assert.deepEqual(on.allowedDomains, off.allowedDomains);
+    if (name === SN.socksProxyPort) assert.match(t.run('on', '/x', { port: 1 }).prompt, /--proxy "\$FTP_PROXY"/);
+    // A claude that sends the shell to the port only when this name is set: PASS. One that ignores it: FAIL.
+    const go = async ({ honest = true, busy = false } = {}) => {
+      const root = tempDir('orch-names-'); const base = join(root, 'runs'); mkdirSync(base); const ports = [];
+      let hit = false;
+      const listen = async (port) => { if (busy) throw Object.assign(new Error('busy'), { code: 'EADDRINUSE' }); ports.push(port); hit = false; return { hits: () => (hit ? ['CONNECT example.com:443'] : []), close: async () => {} }; };
+      const claude = async (args) => {
+        const set = JSON.parse(readFileSync(args[args.indexOf('--settings') + 1], 'utf8')).sandbox.network;
+        if (honest ? set[name] : set[other]) hit = true;
+        const cmd = /Bash\((.*)\)$/.exec(JSON.parse(readFileSync(args[args.indexOf('--settings') + 1], 'utf8')).permissions.allow[0])[1];
+        return { out: [INIT, call('1', { command: cmd }), OK].join('\n'), err: '' };
+      };
+      const r = await runAll({ base, tests: [t], io: { claude, listen, recorderPort: 39008, readbackAll: async () => ({ ok: true }), userFile: join(root, 's.json'), sleep: async () => {} } });
+      return { o: r.outcomes[t.id], ports, asked: r.asked };
+    };
+    const good = await go(); assert.equal(good.o.ok, true, name); assert.deepEqual(good.o.seen, { on: true, off: false }); assert.deepEqual(good.ports, [39008, 39008]);
+    assert.deepEqual(good.asked, { 'example.com': 2 });
+    assert.equal((await go({ honest: false })).o.ok, false, name);
+    // A port it can't take leaves the side NOT TRIED, and that side's GETs are not counted as asked (audit L1335 r1 m3).
+    const busy = await go({ busy: true }); assert.equal(busy.o.ok, null); assert.match(busy.o.notTried, /could not listen on port 39008 \(EADDRINUSE\)/);
+    assert.deepEqual(busy.asked, {});
+  }
+});
+
+test('L1335: listenRecorder keeps what connects and gives the port back', async () => {
+  const net = await import('node:net');
+  const r = await listenRecorder(39117, ['127.0.0.1']);
+  await new Promise((ok) => { const s = net.connect(39117, '127.0.0.1', () => { s.write('CONNECT example.com:443 HTTP/1.1\r\n\r\n'); }); s.on('close', ok); s.on('error', ok); });
+  assert.ok(r.hits().some((h) => h.startsWith('CONNECT example.com:443')));
+  await r.close();
+  // Closed, the port can be taken again; a taken one throws.
+  const again = await listenRecorder(39117, ['127.0.0.1']);
+  await assert.rejects(listenRecorder(39117, ['127.0.0.1']), /EADDRINUSE/);
+  await again.close();
+  // An address the Mac lacks is skipped once one is taken (audit L1335 r1 m6); with none taken it throws.
+  const one = await listenRecorder(39117, ['127.0.0.1', '192.0.2.1']); await one.close();
+  await assert.rejects(listenRecorder(39117, ['192.0.2.1']), /EADDRNOTAVAIL/);
+});
+
+test('L1335: the pairs fixed on the Mini: sandbox and excludedCommands in bypass, compact after a message, the skill read from the project', () => {
+  const d = '/x/run';
+  for (const id of ['sandbox', 'excludedCommands']) for (const side of ['on', 'off']) assert.equal(byId(id).run(side, d).mode, 'bypassPermissions', id);
+  assert.deepEqual(byId('excludedCommands').run('on', d).settings.sandbox.excludedCommands, ['touch *']);
+  const c = byId('compact').run('on', d, { plainId: 'q', peerId: 'p' });
+  assert.equal(c.prompt, undefined); assert.equal(c.input.length, 2); assert.equal(JSON.parse(c.input[1]).message.content, '/compact');
+  const s = byId('disableSkillShellExecution');
+  const args = runArgs({ ...s.run('on', d), settingsFile: '/f' });
+  assert.equal(args[args.indexOf(F.settingSources) + 1], 'project');
+  assert.deepEqual(s.expect('on', d), { noBash: true });
+  // A Bash call the model makes on that pair voids the side.
+  assert.match(voidProblem({ out: [INIT, call('1', { command: 'touch x' }), OK].join('\n') }, { noBash: true }), /made a Bash call itself/);
+  assert.equal(voidProblem({ out: [INIT, OK].join('\n') }, { noBash: true }), null);
+  // A hook's block shows in permission_denials too, and counts as the hook's refusal.
+  assert.equal(REFUSAL.hook.deniedToo, true);
+  // ...and the check reads it (audit L1335 r2 m4): a denial with the hook's tool_result counts; a denial alone does not.
+  const cmd = 'touch /x/run/out/m';
+  const res = (denials) => JSON.stringify({ type: 'result', subtype: 'success', is_error: false, permission_denials: denials });
+  const tr = (text) => JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: '1', is_error: true, content: text }] } });
+  const want = { tool: 'Bash', needle: cmd, refused: 'hook' };
+  assert.equal(refusalSeen({ out: [INIT, call('1', { command: cmd }), tr('PreToolUse:Bash hook error: blocked'), res([{ tool_use_id: '1' }])].join('\n') }, want), true);
+  assert.equal(refusalSeen({ out: [INIT, call('1', { command: cmd }), tr('Permission denied'), res([{ tool_use_id: '1' }])].join('\n') }, want), false);
+});
+
+test('L1335: the off-wall run refuses root and the builder, runs the walled pairs and their spelling pairs at the pin, and prints the CONFIRMED lines', async () => {
+  const { main: offWall, WALLED_TESTS, OFF_WALL_TESTS, confirmedLines } = await import('./settings-names-off-wall.mjs');
+  assert.deepEqual(WALLED_TESTS.map((t) => t.id).sort(), ['allowedDomains', 'strictAllowlist']);
+  // strictAllowlist's entry stands on its spelling pair too (audit L1335 r1 m2, L1114).
+  assert.deepEqual(OFF_WALL_TESTS.map((t) => t.id).sort(), ['allowedDomains', 'spelling-strictAllowlist', 'strictAllowlist']);
+  const cfg = { claudeBin: '/c', pin: PIN };
+  const run = async (opts, deps = {}) => { let out = ''; const code = await offWall(['--config', '/cfg'], { print: (t) => { out += t; }, uid: 501, user: 'joe', home: tempDir('orch-offwall-'), ...opts, deps: { readConfig: () => cfg, version: () => PIN, makeBase: () => tempDir('orch-offwall-'), ...deps } }); return { code, out }; };
+  assert.match((await run({ uid: 0 })).out, /^NOT DONE: run it as your own user/);
+  assert.match((await run({ user: 'builder' })).out, /^NOT DONE: as builder these pairs show nothing/);
+  assert.match((await run({}, { version: () => '2.1.999' })).out, /not the pin 2\.1\.316/);
+  let tests;
+  const pass = await run({}, { runAll: async ({ tests: ts }) => { tests = ts; return { outcomes: Object.fromEntries(ts.map((t) => [t.id, { ok: true }])) }; } });
+  assert.equal(pass.code, 0); assert.deepEqual(tests, OFF_WALL_TESTS);
+  for (const t of WALLED_TESTS) for (const l of confirmedLines(t, PIN)) assert.ok(pass.out.includes(l), l);
+  // The lines it prints are the entries CONFIRMED holds.
+  for (const t of WALLED_TESTS) for (const n of t.names) assert.deepEqual(CONFIRMED[n], { by: `${t.kind}:settings-names.mjs "${t.title}"`, version: PIN }, n);
+  const half = await run({}, { runAll: async () => ({ outcomes: { allowedDomains: { ok: true }, strictAllowlist: { ok: null, notTried: 'x' }, 'spelling-strictAllowlist': { ok: true } } }) });
+  assert.equal(half.code, 1); assert.match(half.out, /NOT TRIED strictAllowlist/); assert.match(half.out.trimEnd().split('\n').at(-1), /^NOT DONE/);
+  // A failed spelling pair keeps strictAllowlist's line out, even with its walled pair passing.
+  const spelt = await run({}, { runAll: async () => ({ outcomes: { allowedDomains: { ok: true }, strictAllowlist: { ok: true }, 'spelling-strictAllowlist': { ok: false, why: 'x' } } }) });
+  assert.equal(spelt.code, 1); assert.ok(!spelt.out.includes(confirmedLines(byId('strictAllowlist'), PIN)[0])); assert.ok(spelt.out.includes(confirmedLines(byId('allowedDomains'), PIN)[0]));
 });

@@ -21,6 +21,9 @@ import { listsFrom } from '../builder-proxy.mjs';
 import { BUILDER } from '../layout.mjs';
 import { HOST } from '../../modules/M4-workshop/launcher/render-settings.mjs';
 
+/** What a live proof that reads the installed config prints when --config is missing (shared, I7). */
+export const NO_CONFIG = 'NOT DONE: give --config <full path of the installed worker-runner.json>; nothing was run\n';
+
 const SUDO = '/usr/bin/sudo';
 const CURL = '/usr/bin/curl';
 
@@ -43,7 +46,7 @@ const REAL = { euid: () => process.geteuid?.(), read: (p) => readFileSync(p, 'ut
 export function main(argv, { print = (t) => process.stdout.write(t), deps = REAL } = {}) {
   const arg = (k) => { const i = argv.indexOf(k); return i >= 0 ? argv[i + 1] : undefined; };
   const config = arg('--config');
-  if (!config || !config.startsWith('/')) { print('NOT DONE: give --config <full path of the installed worker-runner.json>; nothing was run\n'); return 1; }
+  if (!config || !config.startsWith('/')) { print(NO_CONFIG); return 1; }
   if (deps.euid() !== 0) { print(`NOT DONE: run with sudo (curl runs as the ${BUILDER} user); nothing was run\n`); return 1; }
   let lists; try { lists = listsFrom(JSON.parse(deps.read(config))); } catch (e) { print(`NOT DONE: ${config} can't be read (${e.code ?? e.message}); nothing was run\n`); return 1; }
   const allowed = arg('--allowed') ?? lists.session[0];

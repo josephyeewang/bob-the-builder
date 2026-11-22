@@ -157,6 +157,10 @@ export const CONFIRMED = Object.freeze({
   [SETTINGS.sandbox]: SANDBOX_BREAK_IT,
   [SETTINGS.sandboxEnabled]: SANDBOX_BREAK_IT,
   [SETTINGS.allowUnsandboxedCommands]: SANDBOX_BREAK_IT,
+  // L1335: the walled pairs, run off the builder account by settings-names-off-wall.mjs on the Mini, 2026-11-21.
+  [SETTINGS.network]: Object.freeze({ by: 'break-it:settings-names.mjs "an allowed host is reached from inside the sandbox, and only then"', version: '2.1.316' }),
+  [SETTINGS.allowedDomains]: Object.freeze({ by: 'break-it:settings-names.mjs "an allowed host is reached from inside the sandbox, and only then"', version: '2.1.316' }),
+  [SETTINGS.strictAllowlist]: Object.freeze({ by: 'break-it:settings-names.mjs "with strictAllowlist on, a host the project file allows is refused; without it, that host is reached (the --settings host, reached on both sides, is the control)"', version: '2.1.316' }),
 });
 
 /**
