@@ -92,7 +92,7 @@ test('no outbox or no bundle: nothing to push, nothing told', async () => {
   const r = await w.run();
   assert.deepEqual(w.calls, []);
   assert.equal(w.holds.length, 0);
-  assert.deepEqual(r, { pushed: [], waiting: [], refused: [], prs: [], told: 0, untold: [] });
+  assert.deepEqual(r, { pushed: [], waiting: [], declined: [], prs: [], told: 0, untold: [] });
 });
 
 test('another product\'s session, and a role with no card work, are left alone', async () => {
@@ -413,7 +413,7 @@ test('#536 r2 Minor 2: changed bytes that were refused for good are not pushed a
   w.put('fact', PUSH_FACT('C-1', 'a1'), { result: 'pushed', branch: 'card/C-1', tip: 'x', bundle_sha256: old, at: iso(T0 - 3600_000), last_refusal: { reason: 'secret found', at: iso(T0 - 60_000) } });
   const r = await w.run();
   assert.deepEqual(w.calls, [], 'the refused bytes are not pushed again');
-  assert.deepEqual(r.refused, [['C-1', 'secret found']]);
+  assert.deepEqual(r.declined, [['C-1', 'secret found']]);
   assert.ok(w.holds.some((h) => h.cause === PUSH_REFUSED_CAUSE('C-1', 'a1') && /not tried again until the work changes/.test(h.text)));
   // A refusal that may pass, of those bytes, is spaced RETRY_MS, then tried.
   w.put('fact', PUSH_FACT('C-1', 'a1'), { result: 'pushed', branch: 'card/C-1', tip: 'x', bundle_sha256: old, at: iso(T0 - 3600_000), last_refusal: { reason: 'GitHub is down', retry: true, at: iso(T0 - 60_000) } });
