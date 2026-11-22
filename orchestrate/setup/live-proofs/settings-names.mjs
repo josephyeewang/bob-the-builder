@@ -6,10 +6,13 @@
 //
 // (<installRoot> is the installed copy, <base>/install/orchestrate: setup/install.mjs installPaths.)
 //
-// Network: the run asks for 2 GETs to api.github.com and 4 to example.com (GETS), plain public pages; on an honest run
-// 2 and 2 reach them (the sandbox's proxy refuses the other two); a retry, which voids its side, can add a few more
-// within the turn limit; no other host; plus Claude's own API traffic. The receipt carries both: gets.asked, the
-// asked-for GETs (GETS), and gets.sent: GETs the session tried, per host (refused ones included).
+// Network: every pair together asks for 2 GETs to api.github.com and 8 to example.com (GETS), plain public pages. As the
+// builder the walled pairs are not run (L1335), so this run asks for 4 to example.com, all the proxy pairs', and
+// none reaches it (the on side's go to the proof's own listener, the off side's are cut off by the wall). Off the wall
+// (settings-names-off-wall.mjs) the walled pairs ask for 2 and 4, and on an honest run 2 and 2 reach them (the sandbox's
+// proxy refuses the other two). A retry, which voids its side, can add a few more within the turn limit; no other host;
+// plus Claude's own API traffic. The receipt carries both: gets.asked, the GETs this run's pairs asked for, and
+// gets.sent: GETs the session tried, per host (refused ones included).
 //
 // It prints one line per name: PASS, FAIL or NOT TRIED, with how it was proven or why not. A name no test ran is NOT
 // TRIED, never PASS. The receipt, settings-names-proof-<time>.jsonl in the user's home, holds the pin and one line per
@@ -51,8 +54,9 @@
 //
 // Names that no test can prove live yet stay NOT TRIED (L1109): a role file that writes one keeps failing launch check 0.
 // A test that could not show its name (a spelling pair with no difference, an account with no claude.ai connector) makes
-// it NOT TRIED with the reason, never PASS. failIfUnavailable, strictAllowlist and crossSessionInbound each have a
-// break-it pair for what they stop (R-0b-178) as well as a spelling pair (L1114), and a name passes only when both did;
+// it NOT TRIED with the reason, never PASS. failIfUnavailable and strictAllowlist each have a
+// break-it pair for what they stop (R-0b-178) as well as a spelling pair (L1114), and a name passes only when both did
+// (crossSessionInbound has only its break-it pair since L1335: 2.1.316 ignores a wrong-typed value under it);
 // a PASS from the spelling pair alone (a test list without the behaviour pair) says "name confirmed (spelling pair)".
 // enabledPlugins was not written from L1114 to L1333; it is back (the built-in plugins off) and proven by its own pair.
 // apiKeyHelper and disableAllHooks (REFUSED_SETTINGS) are not proven: the launcher refuses them in every role file, and
@@ -66,6 +70,8 @@ import { basename, dirname, join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { execFileSync, spawn as childSpawn } from 'node:child_process';
+import { createServer } from 'node:net';
+import { NAMES_PROOF_PORT } from '../../shared/builder-ports.mjs';
 import { readJobConfig } from '../../shared/job-config.mjs';
 import { makeLock } from '../../modules/M9-record/lock.mjs';
 import { checkRunnerConfig } from '../../wiring/runner-main.mjs';
@@ -97,17 +103,20 @@ export function allNames() {
 // ---- the runs ----
 
 const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+// The proof's own permission mode for the sandbox pairs (L1335); the launcher never writes it into a role file.
+const BYPASS = 'bypassPermissions';
 const bashOnce = (cmd) => `Use the Bash tool to run exactly this shell command, once, and nothing else: ${cmd}\nThen reply with the word done.`;
 
 /**
  * One headless start's words. `o.settingsFile` is the --settings file; the rest say what differs from the plain run:
- * tools, mode (null: no --permission-mode), sources (false: no --setting-sources), mcp (false: no tool-server lock),
+ * tools, mode (null: no --permission-mode), sources (false: no --setting-sources; 'project': the project's files only, L1335), mcp (false: no tool-server lock),
  * model (null: no --model, the account's own model, as a review start has), maxTurns, extra (words before --max-turns, so an option that takes several words can't take the prompt; L1333),
  * input (stream-json lines fed on stdin, in place of the prompt).
  */
 export function runArgs(o) {
   const a = [F.print, F.outputFormat, F.streamJson, F.verbose, F.settings, o.settingsFile];
-  if (o.sources !== false) a.push(...sourcesArgs());
+  if (o.sources === 'project') a.push(F.settingSources, 'project');
+  else if (o.sources !== false) a.push(...sourcesArgs());
   if (o.mcp !== false) a.push(...noToolServerArgs());
   a.push(F.tools, o.tools ?? 'Bash');
   if (o.mode !== null) a.push(F.permissionMode, o.mode ?? 'dontAsk');
@@ -183,8 +192,9 @@ const writeUse = (needle) => ({ tool: 'Write', needle });
 // stops the sandbox from being built and every command in it is refused; off, it is dropped with a warning.
 export const unbuildable = (dir) => join(dir, 'out', 'bad\u0000path');
 // strictAllowlist: host A in the --settings file, host B only in the project's file (L1152). Each side asks for one GET of
-// each host; allowedDomains asks for one GET of example.com on each side. So the run asks for 2 to api.github.com and 4
-// to example.com (GETS); on an honest run 2 and 2 reach them, as the proxy refuses example.com on strictAllowlist's on
+// each host; allowedDomains and the two proxy pairs (L1335) each ask for one GET of example.com on each side. So the
+// pairs ask for 2 to api.github.com and 8 to example.com (GETS); off the wall, on an honest run 2 and 2 of the walled pairs' 2 and 4
+// reach them, as the proxy refuses example.com on strictAllowlist's on
 // side and allowedDomains' off side; a retry, which voids its side, can add a few more within the turn limit; no other
 // host; plus Claude's own API traffic (L1169 M4, L1171 M-1). This is what is asked for, not a ceiling: `sentGets`
 // counts what was tried.
@@ -192,7 +202,12 @@ export const HOST = Object.freeze({ a: 'api.github.com', b: 'example.com' });
 const got = (dir, k) => join(dir, 'work', `got-${k}`);
 const fetchHost = (dir, k) => `curl -sSf -o ${got(dir, k)} https://${HOST[k]}`;
 /** Every GET the run asks claude to make, by host (L1169 M4); the test counts them from the pairs' own prompts. */
-export const GETS = Object.freeze({ 'api.github.com': 2, 'example.com': 4 });
+export const GETS = Object.freeze({ 'api.github.com': 2, 'example.com': 8 });
+/** The GETs one side's run asks for, by host, added into `into` (L1335: the receipt's asked count is the pairs that ran). */
+export const askedGets = (o, into) => {
+  for (const [, host] of [o?.prompt ?? '', ...(o?.input ?? [])].join('\n').matchAll(/https?:\/\/([a-z0-9.-]+)/gi)) into[host] = (into[host] ?? 0) + 1;
+  return into;
+};
 /** The GETs a run's transcript shows its tool calls tried, by host (L1171 M-1, L1172): each http(s) address in a call's
  * input. Tried, not reached: one the proxy refused counts too; a retry's counts, though it voids its side. */
 export const sentGets = (out, into = {}) => {
@@ -207,6 +222,8 @@ const holds = (p, text) => { try { return readFileSync(p, 'utf8').includes(text)
 export const fetched = (dir, k) => holds(got(dir, k), PAGE[k]);
 // allowedDomains: one GET of example.com, its page read as strictAllowlist reads it (L1169 M2).
 const fetchOne = (dir) => `curl -sSf -o ${join(dir, 'work', 'got')} https://${HOST.b}`;
+// L1335: the same fetch through the proxy claude names for SOCKS (socksProxyPort's only trace in the shell's variables).
+const fetchSocks = (dir) => `curl -sSf --proxy "$FTP_PROXY" -o ${join(dir, 'work', 'got')} https://${HOST.b}`;
 // crossSessionInbound: the message as another session's arrives, in the envelope 2.1.316 reads as one, fed on stdin.
 // Each line carries its own uuid, so claude's echo of it (REPLAY_USER_MESSAGES) is read for that line only. 2.1.316
 // drops a refused peer message before it is queued, so it is never echoed; an accepted one is echoed when its turn runs
@@ -255,7 +272,8 @@ export const REFUSAL = Object.freeze({
   permission: { denials: true, text: /denied/i },
   sandbox: { text: /operation not permitted|permission denied/i },
   network: { text: /blocked|not allowed|forbidden|denied|\b403\b/i },
-  hook: { text: /hook/i },
+  // L1335: 2.1.316 puts a hook's block in permission_denials too, and its tool result names the hook.
+  hook: { text: /hook/i, deniedToo: true },
   // failIfUnavailable (R-0b-178): claude refusing a command because the sandbox it must run in could not be built.
   required: { text: /Sandbox is required but failed to initialize/ },
 });
@@ -267,7 +285,7 @@ export function refusalSeen(r, want = {}) {
   const res = events(r?.out).filter((e) => e.type === 'result').at(-1);
   const denied = (res?.permission_denials ?? []).some((d) => ids.has(d?.tool_use_id));
   if (kind.denials && denied) return true;
-  if (!kind.denials && denied) return false;
+  if (!kind.denials && !kind.deniedToo && denied) return false;
   return toolResults(r?.out).some((t) => ids.has(t.tool_use_id) && t.is_error === true && kind.text.test(JSON.stringify(t.content ?? '')));
 }
 /**
@@ -275,7 +293,8 @@ export function refusalSeen(r, want = {}) {
  * setting's. `want.sandboxed`: any tool call asking to leave the sandbox (dangerouslyDisableSandbox set to anything but
  * false), or carrying its own allowed_domains, voids the side. `want.once`: the asked-for call must be the side's only
  * tool call (L1163 MAT-1), so what it shows came from that call and not from a retry, a `touch` or a write. Both are
- * bashExact's defaults (L1169). `once: 'turn'`: the only call in the asked-for call's turn (L1171 M-2).
+ * bashExact's defaults (L1169). `once: 'turn'`: the only call in the asked-for call's turn (L1171 M-2). `noBash`: Bash is
+ * loaded for a skill's own line, so any Bash call the model makes voids the side (L1335).
  */
 export function voidProblem(r, want = {}) {
   const uses = toolUses(r?.out);
@@ -283,6 +302,7 @@ export function voidProblem(r, want = {}) {
   // 2.1.316 honours a call's own allowed_domains only in auto mode (read, not run; checked: claude-code 2.1.316); these
   // runs are dontAsk, but a call carrying one is not the settings' list either way (L1166).
   if (want.sandboxed && uses.some((u) => u.input?.allowed_domains !== undefined)) return 'a tool call carried its own allowed_domains, so what it reached is not the settings\' list';
+  if (want.noBash && uses.some((u) => u.name === 'Bash')) return 'the model made a Bash call itself, so a mark it left is not the skill\'s own line';
   if (want.once === 'turn') {
     const turn = callTurns(r?.out); const mine = new Set(usesFor(r?.out, want).map((u) => turn.get(u.id)));
     const same = uses.filter((u) => mine.has(turn.get(u.id)));
@@ -379,9 +399,12 @@ export const TESTS = Object.freeze([
       prompt: `Use the Write tool, once, to write the word x to the file ${join(dir, 'out', 'mark')}. Then reply with the word done.` }),
     expect: (side, dir) => ({ ...writeUse(join(dir, 'out', 'mark')), refused: side === 'off' && 'permission' }),
     see: (side, dir) => there(join(dir, 'out', 'mark')), judge: sameBut({ on: true, off: false }) },
-  // sandbox: a command inside it, with a rule letting the command run.
+  // sandbox: a command inside it, with a rule letting the command run. L1335: in dontAsk a write outside the working
+  // folder is refused by the permission check whatever the allow rule says (the control never wrote), and an added folder
+  // is one the sandbox lets writes into too; bypassPermissions leaves the sandbox the only thing that can refuse it
+  // (checked: claude-code 2.1.316, 2026-11-21).
   { id: 'sandbox', title: 'the sandbox refuses a write outside the working folder', kind: 'break-it', names: [S.sandbox, S.sandboxEnabled],
-    run: (side, dir) => ({ settings: { [S.permissions]: { [S.allow]: ALLOW_TOUCH(join(dir, 'out', 'mark')) }, [S.sandbox]: { [S.sandboxEnabled]: side === 'on', [S.allowUnsandboxedCommands]: false } },
+    run: (side, dir) => ({ mode: BYPASS, settings: { [S.permissions]: { [S.allow]: ALLOW_TOUCH(join(dir, 'out', 'mark')) }, [S.sandbox]: { [S.sandboxEnabled]: side === 'on', [S.allowUnsandboxedCommands]: false } },
       prompt: bashOnce(`touch ${join(dir, 'out', 'mark')}`) }),
     expect: (side, dir) => ({ ...bashExact(`touch ${join(dir, 'out', 'mark')}`), refused: side === 'on' && 'sandbox' }),
     see: (side, dir) => there(join(dir, 'out', 'mark')), judge: sameBut({ on: false, off: true }) },
@@ -400,14 +423,32 @@ export const TESTS = Object.freeze([
     expect: (side, dir) => ({ ...bashExact(`cat ${join(dir, 'out', 'secret')}`), refused: side === 'on' && 'sandbox' }),
     see: (side, dir, out) => callOutput(out, bashExact(`cat ${join(dir, 'out', 'secret')}`)).includes(`seen-${side}-7c1f`), judge: sameBut({ on: false, off: true }) },
   { id: 'allowedDomains', title: 'an allowed host is reached from inside the sandbox, and only then', kind: 'break-it', names: [S.network, S.allowedDomains],
+    walled: true,
     run: (side, dir) => ({ settings: { [S.permissions]: { [S.allow]: [`Bash(${fetchOne(dir)})`] },
       [S.sandbox]: { [S.sandboxEnabled]: true, [S.allowUnsandboxedCommands]: false, [S.network]: { [S.allowedDomains]: side === 'on' ? [HOST.b] : [] } } },
     prompt: bashOnce(fetchOne(dir)) }),
     expect: (side, dir) => ({ ...bashExact(fetchOne(dir)), refused: side === 'off' && 'network' }),
     see: (side, dir) => holds(join(dir, 'work', 'got'), PAGE.b), judge: sameBut({ on: true, off: false }) },
+  // L1335: a builder session's role file points its shell at the builder proxy by these two names (wall v2). The proof
+  // listens on the port (recorder) and reads whether the shell's fetch came to it; the port is in the builder's range, so
+  // the pairs run as the builder under the wall too. One pair per name, each side setting the other name, as a role file
+  // does: on 2.1.316 httpProxyPort alone sends HTTP(S)_PROXY and ALL_PROXY to its port, and socksProxyPort shows only in
+  // FTP_PROXY (socks5h), RSYNC_PROXY and git's ssh ProxyCommand (checked: claude-code 2.1.316, 2026-11-21; a single pair
+  // with both on and both off could not tell a misread socksProxyPort, audit L1335 r1 M1).
+  ...[[S.httpProxyPort, S.socksProxyPort, fetchOne, 'the shell\'s fetch goes to the httpProxyPort port, and only then'],
+    [S.socksProxyPort, S.httpProxyPort, fetchSocks, 'a fetch through FTP_PROXY goes to the socksProxyPort port, and only then']].map(([name, other, cmd, title]) => ({
+    id: `proxy-${name}`, title, kind: 'break-it', names: [name], recorder: true,
+    run: (side, dir, x) => ({ settings: { [S.permissions]: { [S.allow]: [`Bash(${cmd(dir)})`] },
+      [S.sandbox]: { [S.sandboxEnabled]: true, [S.allowUnsandboxedCommands]: false,
+        [S.network]: { [S.allowedDomains]: [HOST.b], [other]: x?.port ?? NAMES_PROOF_PORT, ...(side === 'on' ? { [name]: x?.port ?? NAMES_PROOF_PORT } : {}) } } },
+    prompt: bashOnce(cmd(dir)) }),
+    expect: (side, dir) => bashExact(cmd(dir)),
+    see: (side, dir, out, x) => x?.reached ?? null, judge: sameBut({ on: true, off: false }) })),
   { id: 'excludedCommands', title: 'an excluded command runs outside the sandbox (the launcher refuses the setting; proven for its name)', kind: 'break-it', names: [S.excludedCommands],
-    run: (side, dir) => ({ settings: { [S.permissions]: { [S.allow]: ALLOW_TOUCH(join(dir, 'out', 'mark')) },
-      [S.sandbox]: { [S.sandboxEnabled]: true, ...(side === 'on' ? { [S.excludedCommands]: ['touch'] } : {}) } }, prompt: bashOnce(`touch ${join(dir, 'out', 'mark')}`) }),
+    // L1335: 'touch' alone matches only a bare touch; 'touch *' matches it with its argument (checked: claude-code
+    // 2.1.316, 2026-11-21). bypassPermissions as in the sandbox pair.
+    run: (side, dir) => ({ mode: BYPASS, settings: { [S.permissions]: { [S.allow]: ALLOW_TOUCH(join(dir, 'out', 'mark')) },
+      [S.sandbox]: { [S.sandboxEnabled]: true, ...(side === 'on' ? { [S.excludedCommands]: ['touch *'] } : {}) } }, prompt: bashOnce(`touch ${join(dir, 'out', 'mark')}`) }),
     expect: (side, dir) => ({ ...bashExact(`touch ${join(dir, 'out', 'mark')}`), refused: side === 'off' && 'sandbox' }),
     see: (side, dir) => there(join(dir, 'out', 'mark')), judge: sameBut({ on: true, off: false }) },
   // hooks
@@ -433,7 +474,9 @@ export const TESTS = Object.freeze([
     run: (side, dir) => ({ settings: side === 'on' ? markerHook(E.sessionStart, mark(dir, 'start')) : {} }),
     see: (side, dir) => there(mark(dir, 'start')), judge: sameBut({ on: true, off: false }) },
   { id: 'compact', title: 'PreCompact and PostCompact hooks run around a /compact', kind: 'break-it', names: [E.preCompact, E.postCompact],
-    run: (side, dir) => ({ maxTurns: 2, prompt: '/compact',
+    // L1335: /compact as the first message has nothing to compact ("No messages to compact") and no hook runs; a message
+    // first, then /compact, on stdin (checked: claude-code 2.1.316, 2026-11-21).
+    run: (side, dir, x) => ({ maxTurns: 3, input: [userLine('Reply with the word ready.', x?.plainId), userLine('/compact', x?.peerId)],
       settings: side === 'on' ? { [S.hooks]: { [E.preCompact]: [{ [H.hooks]: [hook(`touch ${q(mark(dir, 'pre'))}`)] }], [E.postCompact]: [{ [H.hooks]: [hook(`touch ${q(mark(dir, 'post'))}`)] }] } } : {} }),
     see: (side, dir) => `${there(mark(dir, 'pre')) ? 'pre' : '-'}/${there(mark(dir, 'post')) ? 'post' : '-'}`, judge: sameBut({ on: 'pre/post', off: '-/-' }) },
   // the variables, seen inside a Bash call
@@ -445,8 +488,13 @@ export const TESTS = Object.freeze([
     judge: sameBut({ on: '111', off: '000' }) },
   // the rest of the settings
   { id: 'disableSkillShellExecution', title: 'a skill\'s inline shell does not run when it is off', kind: 'break-it', names: [S.disableSkillShellExecution],
-    run: (side, dir) => ({ settings: side === 'on' ? { [S.disableSkillShellExecution]: true } : {}, prompt: '/proof-probe', tools: 'Skill', maxTurns: 1 }),
+    // L1335: with --setting-sources "" no project skill loads (L1334), and a skill's inline shell is a Bash call under the
+    // permission check: refused unless Bash is loaded and a rule allows it (checked: claude-code 2.1.316, 2026-11-21).
+    run: (side, dir) => ({ sources: 'project', tools: 'Skill,Bash', maxTurns: 1, prompt: '/proof-probe',
+      settings: { [S.permissions]: { [S.allow]: ALLOW_TOUCH(mark(dir, 'skill')) }, ...(side === 'on' ? { [S.disableSkillShellExecution]: true } : {}) } }),
     files: (side, dir) => ({ [join(dir, 'work', '.claude', 'skills', 'proof-probe', 'SKILL.md')]: `---\nname: proof-probe\ndescription: a probe\n---\n!\`touch ${mark(dir, 'skill')}\`\nReply with the word done.\n` }),
+    // Bash is loaded for the skill's line, not for the model: a Bash call the model makes itself voids the side (L1335).
+    expect: () => ({ noBash: true }),
     see: (side, dir) => there(mark(dir, 'skill')), judge: sameBut({ on: false, off: true }) },
   { id: 'disableBundledSkills', title: 'the start message lists fewer skills with the bundled ones off', kind: 'readback', names: [S.disableBundledSkills],
     run: (side) => ({ settings: { [S.disableBundledSkills]: side === 'on' } }),
@@ -525,7 +573,7 @@ export const TESTS = Object.freeze([
     judge: (on, off) => (on === false && off === false
       ? { notTried: 'the control did not run the command (no marker without the setting either), so the pair shows nothing' }
       : sameBut({ on: false, off: true })(on, off)) },
-  { id: 'strictAllowlist', title: 'with strictAllowlist on, a host the project file allows is refused; without it, that host is reached (the --settings host, reached on both sides, is the control)', kind: 'break-it', names: [S.strictAllowlist],
+  { id: 'strictAllowlist', walled: true, title: 'with strictAllowlist on, a host the project file allows is refused; without it, that host is reached (the --settings host, reached on both sides, is the control)', kind: 'break-it', names: [S.strictAllowlist],
     // Both sides without the sources limit, so the project file loads: the setting is the one difference.
     // allowUnsandboxedCommands is left unset (R-1-91): a --settings false makes 2.1.316 drop project and local
     // allowedDomains on both sides, so the off side could never reach the project's host and the pair could not pass
@@ -567,7 +615,9 @@ export const TESTS = Object.freeze([
   // Spelling pairs (L1114): the name confirmed, never its behaviour; each name also needs its behaviour pair above.
   spelling(S.failIfUnavailable, (k, v) => ({ [S.sandbox]: { [k]: v } })),
   spelling(S.strictAllowlist, (k, v) => ({ [S.sandbox]: { [S.network]: { [k]: v } } })),
-  spelling(S.crossSessionInbound, (k, v) => ({ [k]: v })),
+  // No crossSessionInbound spelling pair (L1335): 2.1.316 takes a wrong-typed value under the name silently, the same as
+  // under a misspelling (Joe's Mini run 2026-11-21: loaded|- both ways), so the pair can never show it; its break-it pair
+  // above shows what it does (checked: claude-code 2.1.316, 2026-11-21).
   { id: 'maxTurns', title: '--max-turns 1 stops before a second command; 4 lets it run', kind: 'break-it', names: [F.maxTurns],
     run: (side, dir) => ({ maxTurns: side === 'on' ? 1 : 4, settings: { [S.permissions]: { [S.allow]: [...ALLOW_TOUCH(mark(dir, 'a')), ...ALLOW_TOUCH(mark(dir, 'b'))] } },
       prompt: `Use the Bash tool to run ${touchIn(dir, 'a')}. After it has finished, use the Bash tool again, in a separate call, to run ${touchIn(dir, 'b')}. Then reply with the word done.` }),
@@ -576,11 +626,16 @@ export const TESTS = Object.freeze([
 ]);
 
 // Names with no live test yet, and why (L1109: left failing check 0, never assumed).
+/**
+ * L1335: the pairs that read Claude Code's own network filter (walled) show nothing as the builder: builder wall v2 keeps
+ * the builder's shell off every loopback port outside its range, and Claude Code's own proxy listens on one it picks. No
+ * builder session relies on that filter (a shell with hosts goes to the builder proxy; one with none is cut off), but its
+ * names are in the role files, so they are proven off the builder account with the same pin (settings-names-off-wall.mjs).
+ */
+export const WALLED = 'not run as the builder: the builder wall keeps its shell off the port Claude Code\'s own network filter listens on, so the pair would show nothing';
+export const OFF_WALL_HOW = 'run setup/live-proofs/settings-names-off-wall.mjs from an account that is not the builder, and add the lines it prints under "Add to CONFIRMED"';
 export const NOT_TRIED = Object.freeze({
   [S.allowUnsandboxedCommands]: 'no pair here: a command asking to leave the sandbox is a model\'s choice (its break-it test is the review walls proof)',
-  // Wall v2: read in 2.1.316's code, not proven by a pair yet. Its live proof is setup/live-proofs/builder-proxy.mjs.
-  [S.httpProxyPort]: 'no pair yet: a builder session\'s shell going through the allow-list proxy is shown by the live proof builder-proxy.mjs, not by a pair here',
-  [S.socksProxyPort]: 'no pair yet: set with httpProxyPort to the same port; shown with it by the live proof builder-proxy.mjs',
 });
 
 // Names the launcher no longer writes, shown and not counted (L1114). Empty since L1333 put enabledPlugins back; kept for the next one.
@@ -607,8 +662,16 @@ export function judgeNames({ outcomes, readback, version, confirmed = CONFIRMED,
     if (REFUSED_SETTINGS.includes(name)) { out.push({ name, result: 'REFUSED', why: 'not proven: the launcher refuses it in every role file (REFUSED_SETTINGS)' }); continue; }
     if (Object.hasOwn(NOT_USED, name)) { out.push({ name, result: 'NOT USED', why: NOT_USED[name] }); continue; }
     const by = []; const bad = []; const open = []; const missing = []; let ran = false; let spelt = false; let fallback;
+    const c = Object.hasOwn(confirmed, name) ? confirmed[name] : null;
     for (const t of tests.filter((x) => x.names.includes(name))) {
       const o = outcomes?.[t.id];
+      // L1335: a walled pair not run here stands only on its run off the builder account, recorded in CONFIRMED for this
+      // version and naming this very pair; otherwise the name is open, with how to prove it.
+      if (o?.walled === true) {
+        const mine = `${t.kind}:${PROOF} "${t.title}"`;
+        if (c && c.version === version && c.by === mine && proofCounts(name, c.by)) { ran = true; by.push(mine); } else open.push(`${o.notTried}; ${OFF_WALL_HOW}`);
+        continue;
+      }
       // Every test of a name must pass (L1128 M1): one that did not run, or could not show it, leaves the name open.
       if (!o) { missing.push(`"${t.title}" did not run`); continue; }
       // A pair that could not show the name (L1114) is as if not run, with its reason.
@@ -622,7 +685,6 @@ export function judgeNames({ outcomes, readback, version, confirmed = CONFIRMED,
       ran = true;
       if (readback.ok === true) by.push(`readback:${PROOF} "role read-back"`); else bad.push(`the role read-back: ${readback.why ?? 'no answer'}`);
     }
-    const c = Object.hasOwn(confirmed, name) ? confirmed[name] : null;
     if (bad.length) out.push(failN(name, bad.join('; ')));
     else if (by.length && !open.length && !missing.length) out.push({ ...pass(name, by[0], version), ...(spelt && by.every((b) => b.startsWith('spelling:')) ? { proof: SPELLING_LABEL } : {}) });
     else if (!ran && !open.length && c && c.version === version && proofCounts(name, c.by)) out.push({ ...pass(name, c.by, version), already: true });
@@ -715,26 +777,63 @@ const realFs = {
 // ---- running ----
 
 /**
+ * Listens on `port` at both loopback addresses and keeps the first bytes of each connection (L1335), for the proxy-ports
+ * pair: anything that connects is the run's shell, as nothing else is pointed at the port. → { hits(), close() }; throws
+ * when the port can't be taken (busy, or not this user's under the wall).
+ */
+export async function listenRecorder(port, hosts = ['127.0.0.1', '::1']) {
+  const hits = []; const servers = [];
+  const closeAll = () => Promise.all(servers.map((s) => new Promise((f) => s.close(() => f()))));
+  try {
+    for (const host of hosts) {
+      const s = createServer((sock) => {
+        hits.push('(connected)'); sock.on('error', () => {});
+        sock.once('data', (b) => { hits.push(b.subarray(0, 200).toString('latin1')); sock.destroy(); });
+        setTimeout(() => sock.destroy(), 5000).unref();
+      });
+      try { await new Promise((ok, no) => { s.once('error', no); s.listen(port, host, ok); }); } catch (e) {
+        // A loopback address this Mac does not have is skipped (curl tries the other); a busy port is not.
+        if (e?.code === 'EADDRNOTAVAIL' && servers.length) continue;
+        throw e;
+      }
+      servers.push(s);
+    }
+  } catch (e) { await closeAll(); throw e; }
+  return { hits: () => [...hits], close: closeAll };
+}
+
+/**
  * Runs every test, each side in a folder of its own under `base`, then the role read-back. `io.claude(args, { cwd })`
  * runs the pinned claude to its end → { out, err, code, signal, timedOut, error } (its stdout stream, its stderr, how it
  * ended); `io.readbackAll()` → { ok, why };
- * `io.userFile` is the user settings file; `io.fs` writes files. → { outcomes, readback, gets } (gets: sentGets over
+ * `io.userFile` is the user settings file; `io.fs` writes files; `io.walled` skips the walled pairs (L1335). → { outcomes,
+ * readback, gets, asked } (asked: askedGets over the sides run; gets: sentGets over
  * every run)
  */
 export async function runAll({ base, io, tests = TESTS }) {
-  const outcomes = {}; const gets = {};
+  const outcomes = {}; const gets = {}; const asked = {};
   for (const [i, t] of tests.entries()) {
     if (t.byGuard) { if (io.guardPassed === true) outcomes[t.id] = { ok: true }; continue; }
+    if (t.walled && io.walled) { outcomes[t.id] = { ok: null, walled: true, notTried: WALLED }; continue; }
     const seen = {}; const sick = []; const quiet = []; const bad = []; const loose = [];
     try {
       const runSide = async (side, k) => {
         // A neutral folder name (L1124 m2): the start message shows the folder, and it must not hold a name.
         const d = mkdtempSync(join(base, `run${i}-${side}-${k}-`));
-        const x = { sessionId: randomUUID(), peerId: randomUUID(), plainId: randomUUID() };
+        // L1335: a recorder pair's port; io.recorderPort is for tests and runs off the builder account (the wall keeps
+        // the builder's range to the builder).
+        const x = { sessionId: randomUUID(), peerId: randomUUID(), plainId: randomUUID(), ...(t.recorder ? { port: io.recorderPort ?? NAMES_PROOF_PORT } : {}) };
         mkdirSync(join(d, 'work'), { recursive: true }); mkdirSync(join(d, 'out'), { recursive: true });
         for (const [p, text] of Object.entries(t.files?.(side, d) ?? {})) { mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, text); }
         const o = t.run(side, d, x);
         if (o.sources === false) loose.push(side);
+        // L1335: a recorder pair listens while the side runs; a port it can't take leaves the side shown nothing.
+        let rec = null;
+        if (t.recorder) {
+          try { rec = await (io.listen ?? listenRecorder)(x.port); } catch (e) { sick.push(`the ${side} side: the proof could not listen on port ${x.port} (${e?.code ?? e?.message ?? e})`); return null; }
+        }
+        try {
+        askedGets(o, asked);
         const settingsFile = join(d, 'settings.json');
         writeFileSync(settingsFile, `${JSON.stringify(o.settings ?? {})}\n`);
         const args = runArgs({ ...o, settingsFile });
@@ -749,7 +848,9 @@ export async function runAll({ base, io, tests = TESTS }) {
         const problem = runProblem(r, want);
         if (problem) sick.push(`the ${side} side: ${problem}`);
         else if (want.refused && !refusalSeen(r, want)) quiet.push(side);
+        if (rec) x.reached = rec.hits().length > 0;
         return t.see(side, d, r?.out ?? '', x, r);
+        } finally { await rec?.close(); }
       };
       for (const side of ['on', 'off']) {
         const vals = [];
@@ -777,7 +878,7 @@ export async function runAll({ base, io, tests = TESTS }) {
   }
   let readback;
   try { readback = await io.readbackAll(); } catch (e) { readback = { ok: false, why: `the read-back could not run: ${e?.message ?? e}` }; }
-  return { outcomes, readback, gets };
+  return { outcomes, readback, gets, asked };
 }
 
 /** The roles' read-back (L6): each role's file rendered as the launcher renders it, started by roleArgs, its start
@@ -895,7 +996,7 @@ export function finish({ res, pin, base, home, at, print, confirmed = CONFIRMED 
   print(r.text);
   if (base) print(`The runs' folders are kept in ${base}.\n`);
   let receipt;
-  try { receipt = writeReceipt({ home, at, header: { pin, runs: base ?? null, ok: r.ok, gets: { asked: GETS, sent: res.gets ?? null } }, lines, outcomes: res.outcomes, readback: res.readback }); print(`Written to ${receipt}\n`); } catch (e) {
+  try { receipt = writeReceipt({ home, at, header: { pin, runs: base ?? null, ok: r.ok, gets: { asked: res.asked ?? null, sent: res.gets ?? null } }, lines, outcomes: res.outcomes, readback: res.readback }); print(`Written to ${receipt}\n`); } catch (e) {
     print(`${recordUnwritten(e)}, so the run can't be used.\n`);
     print(`NOT DONE on Claude Code ${pin}: the receipt could not be written${r.ok ? '' : `; ${r.verdict.replace(/^NOT DONE on Claude Code \S+: /, '')}`}\n`);
     return 1;
@@ -920,6 +1021,9 @@ export function accountSettingsFiles(home) {
 /** The command that puts a cut-off run's user settings file back: this run's own, with --restore (L1128 c3: the user is
  * the config's home folder's, the runner's user). */
 export const restoreCommand = (c, argv) => ['sudo', '-H', '-u', basename(c.home), process.execPath, selfPath() ?? PROOF, ...argv.filter((a) => a !== '--restore'), '--restore'].join(' ');
+
+/** The worker runner's config, read as the proof reads it (L1335: the off-wall run reads the same pin). */
+export const readRunnerConfigForProof = (path) => REAL.readConfig(path);
 
 const REAL = {
   readConfig: (path) => checkRunnerConfig(readJobConfig(path, { code: [], optionalCode: ['budget'], self: runnerSelf() })),
@@ -983,6 +1087,8 @@ export async function main(argv, { print = (t) => process.stdout.write(t), uid =
       claude: (args, { cwd, input }) => runToEnd(c.claudeBin, args, { cwd, env, input }),
       readbackAll: () => roleReadback({ base, pin: c.pin, start: (args, cwd) => runToInit(c.claudeBin, args, { cwd, env }) }),
       guardPassed: true, userFile, fs: realFs, sleep: (ms) => new Promise((r) => { setTimeout(r, ms); }),
+      // The guard holds this run to the builder, behind the wall: its walled pairs show nothing here (L1335).
+      walled: true,
     };
     res = await d.runAll({ base, io });
   } catch (e) {

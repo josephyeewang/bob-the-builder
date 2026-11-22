@@ -21,6 +21,12 @@ export const WALL_RANGE = Object.freeze({ first: 47000, last: 47999 });
  */
 export const PROXY_PORTS = Object.freeze({ session: 47000, install: 47001 });
 
+/**
+ * The port the settings-names proof listens on for its two proxy pairs (L1335): one of the spare ports between the
+ * proxy's and PROBE_FIRST, so a builder session's shell may reach it under the wall, as it reaches the proxy.
+ */
+export const NAMES_PROOF_PORT = WALL_RANGE.first + 8;
+
 /** Ports the wall's read-back may listen on: in the range, clear of the proxy's (and of a few kept spare). */
 export const PROBE_FIRST = WALL_RANGE.first + 16;
 
