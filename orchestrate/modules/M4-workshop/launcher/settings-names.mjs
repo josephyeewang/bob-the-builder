@@ -139,6 +139,7 @@ export const MIN_CLAUDE_CODE = '2.1.295';
 export const NAMES_CHECK_REFUSALS = Object.freeze({
   unconfirmed: 'setting names not confirmed',
   notLocked: 'the role file given to the names check',
+  noToolLock: 'the start has no empty tool-server lock',
 });
 /** Whether a launch's refusal reason is one of check 0's. */
 export const isNamesCheckRefusal = (reason) => Object.values(NAMES_CHECK_REFUSALS).some((p) => String(reason ?? '').startsWith(p));
@@ -151,7 +152,10 @@ export const isNamesCheckRefusal = (reason) => Object.values(NAMES_CHECK_REFUSAL
 // exact version, so a pin change makes every name unconfirmed until live proof L2 runs again.
 // Three names are proven, by the sandbox setting's break-it test (review-walls-proof.test.mjs, L91 (1)): with
 // `sandbox.enabled` and `allowUnsandboxedCommands: false` a call asking to leave the sandbox was refused, and with
-// `true` (the control) the same call wrote. Every other name is still unproven, so every launch still refuses.
+// `true` (the control) the same call wrote. L1336: every other name the role files write was proven by the
+// settings-names proof as the builder on the Mini (receipt settings-names-proof-2026-11-22T03-14-34-305Z.jsonl, UTC), each
+// entry naming the pair or read-back that proved it.
+const c = (by) => Object.freeze({ by, version: '2.1.316' });
 const SANDBOX_BREAK_IT = Object.freeze({ by: 'break-it:review-walls-proof.test.mjs "the sandbox setting"', version: '2.1.316' });
 export const CONFIRMED = Object.freeze({
   [SETTINGS.sandbox]: SANDBOX_BREAK_IT,
@@ -161,6 +165,54 @@ export const CONFIRMED = Object.freeze({
   [SETTINGS.network]: Object.freeze({ by: 'break-it:settings-names.mjs "an allowed host is reached from inside the sandbox, and only then"', version: '2.1.316' }),
   [SETTINGS.allowedDomains]: Object.freeze({ by: 'break-it:settings-names.mjs "an allowed host is reached from inside the sandbox, and only then"', version: '2.1.316' }),
   [SETTINGS.strictAllowlist]: Object.freeze({ by: 'break-it:settings-names.mjs "with strictAllowlist on, a host the project file allows is refused; without it, that host is reached (the --settings host, reached on both sides, is the control)"', version: '2.1.316' }),
+  // L1336: the builder's run on the Mini, 2026-11-21 Pacific (2026-11-22 UTC).
+  [FLAGS.print]: c("readback:settings-names.mjs \"role read-back\""),
+  [FLAGS.outputFormat]: c("readback:settings-names.mjs \"role read-back\""),
+  [FLAGS.streamJson]: c("readback:settings-names.mjs \"role read-back\""),
+  [FLAGS.verbose]: c("readback:settings-names.mjs \"role read-back\""),
+  [FLAGS.tools]: c("readback:settings-names.mjs \"role read-back\""),
+  [FLAGS.settings]: c("break-it:settings-names.mjs \"a SessionStart hook in the --settings file runs at the start\""),
+  [FLAGS.restricted]: c("break-it:settings-names.mjs \"--restricted loads no project settings file either\""),
+  [FLAGS.strictMcpConfig]: c("readback:settings-names.mjs \"with the tool-server lock, a project's own tool server is not in the start message; without it, it is\""),
+  [FLAGS.mcpConfig]: c("readback:settings-names.mjs \"a tool server given by --mcp-config is in the start message; with none given, it is not\""),
+  [FLAGS.permissionMode]: c("break-it:settings-names.mjs \"an allow rule lets a command run that the mode refuses\""),
+  [FLAGS.model]: c("readback:settings-names.mjs \"the start message names the model asked for\""),
+  [FLAGS.effort]: c("readback:settings-names.mjs \"--effort high is taken with no warning, and a made-up level is named in claude's warning\""),
+  [FLAGS.version]: c("readback:settings-names.mjs \"claude --version printed the pin before the run\""),
+  [FLAGS.maxTurns]: c("break-it:settings-names.mjs \"--max-turns 1 stops before a second command; 4 lets it run\""),
+  [FLAGS.sessionId]: c("readback:settings-names.mjs \"the start message carries the session id given\""),
+  [FLAGS.settingSources]: c("break-it:settings-names.mjs \"with --setting-sources \"\", no user, project or local settings file loads; without it, each does\""),
+  [SETTINGS.permissions]: c("break-it:settings-names.mjs \"an allow rule lets a command run that the mode refuses\""),
+  [SETTINGS.allow]: c("break-it:settings-names.mjs \"an allow rule lets a command run that the mode refuses\""),
+  [SETTINGS.deny]: c("break-it:settings-names.mjs \"a deny rule refuses a command an allow rule lets run\""),
+  [SETTINGS.ask]: c("break-it:settings-names.mjs \"an ask rule, with no one to ask, refuses a command an allow rule lets run\""),
+  [SETTINGS.defaultMode]: c("break-it:settings-names.mjs \"the settings' mode, with no --permission-mode, decides a file write\""),
+  [SETTINGS.additionalDirectories]: c("break-it:settings-names.mjs \"an added folder lets a file write outside the working folder\""),
+  [SETTINGS.failIfUnavailable]: c("break-it:settings-names.mjs \"with failIfUnavailable, a sandbox that can't be built as written refuses the command; without it, the bad entry is dropped and the command runs\""),
+  [SETTINGS.excludedCommands]: c("break-it:settings-names.mjs \"an excluded command runs outside the sandbox (the launcher refuses the setting; proven for its name)\""),
+  [SETTINGS.httpProxyPort]: c("break-it:settings-names.mjs \"the shell's fetch goes to the httpProxyPort port, and only then\""),
+  [SETTINGS.socksProxyPort]: c("break-it:settings-names.mjs \"a fetch through FTP_PROXY goes to the socksProxyPort port, and only then\""),
+  [SETTINGS.filesystem]: c("break-it:settings-names.mjs \"a denyWrite folder is refused inside the working folder\""),
+  [SETTINGS.denyRead]: c("break-it:settings-names.mjs \"a denyRead file can't be read by a command\""),
+  [SETTINGS.denyWrite]: c("break-it:settings-names.mjs \"a denyWrite folder is refused inside the working folder\""),
+  [SETTINGS.hooks]: c("break-it:settings-names.mjs \"a PreToolUse hook with a Bash matcher runs before the command\""),
+  [SETTINGS.env]: c("break-it:settings-names.mjs \"the settings' variables are set inside a Bash call\""),
+  [SETTINGS.enabledPlugins]: c("readback:settings-names.mjs \"a built-in plugin set to false is not in the start message (L1333)\""),
+  [SETTINGS.crossSessionInbound]: c("break-it:settings-names.mjs \"with crossSessionInbound refuse, claude takes a plain message but not one from another session; with accept, it takes both\""),
+  [SETTINGS.disableSkillShellExecution]: c("break-it:settings-names.mjs \"a skill's inline shell does not run when it is off\""),
+  [SETTINGS.disableBundledSkills]: c("readback:settings-names.mjs \"the start message lists fewer skills with the bundled ones off\""),
+  [SETTINGS.skillOverrides]: c("readback:settings-names.mjs \"a skill set \"off\" in skillOverrides is not in the start message (L1333)\""),
+  [HOOK_FIELDS.type]: c("break-it:settings-names.mjs \"a PreToolUse hook with a Bash matcher runs before the command\""),
+  [HOOK_FIELDS.command]: c("break-it:settings-names.mjs \"a PreToolUse hook with a Bash matcher runs before the command\""),
+  [HOOK_FIELDS.timeout]: c("break-it:settings-names.mjs \"a hook past its timeout is stopped before it writes\""),
+  [HOOK_FIELDS.onFailure]: c("break-it:settings-names.mjs \"a failing hook with onFailure block stops the command; with continue it runs\""),
+  [HOOK_FIELDS.matcher]: c("break-it:settings-names.mjs \"a PreToolUse hook with a Bash matcher runs before the command\""),
+  [HOOK_EVENTS.preToolUse]: c("break-it:settings-names.mjs \"a PreToolUse hook with a Bash matcher runs before the command\""),
+  [HOOK_EVENTS.preCompact]: c("break-it:settings-names.mjs \"PreCompact and PostCompact hooks run around a /compact\""),
+  [HOOK_EVENTS.postCompact]: c("break-it:settings-names.mjs \"PreCompact and PostCompact hooks run around a /compact\""),
+  [HOOK_EVENTS.sessionStart]: c("break-it:settings-names.mjs \"a SessionStart hook in the --settings file runs at the start\""),
+  [ENV.autoCompactWindow]: c("break-it:settings-names.mjs \"the settings' variables are set inside a Bash call\""),
+  [ENV.disableUpdates]: c("break-it:settings-names.mjs \"the settings' variables are set inside a Bash call\""),
 });
 
 /**

@@ -9,7 +9,9 @@ import { spawnSync } from 'node:child_process';
 import { DESIGN_PROFILES, NEVER_TOOLS, checkProfile, profilePort, fakeProfilePort, sha256, hasShell } from './role-profiles.mjs';
 import { parseSnapshot, readSnapshot, makeSnapshot, snapshotHash, SNAPSHOT_MAX_AGE_MS } from '../hooks/snapshot.mjs';
 import { apart, phaseHosts, renderAllowRules, renderRoleSettings, checkSettings, writeRoleSettings, POLICY_HOOKS, HOOK_TIMEOUT, checkRunnerWall, runnerWallDeny, runnerWallDirs, runnerWallShell, bobFolderDeny, bobFolderShell, snapshotWallDeny, snapshotWallShell } from './render-settings.mjs';
-import { SETTINGS as S, ENV, HOOK_FIELDS as H, HOOK_EVENTS as E, BUILTIN_PLUGIN_IDS, BUILTIN_SKILLS_OFF } from './settings-names.mjs';
+import { SETTINGS as S, ENV, HOOK_FIELDS as H, HOOK_EVENTS as E, BUILTIN_PLUGIN_IDS, BUILTIN_SKILLS_OFF, CONFIRMED, unconfirmedNames, noToolServerArgs } from './settings-names.mjs';
+import { roleArgs } from './readback.mjs';
+import { sessionArgs } from './review-launch.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
 import { checkMachineWide } from './env-check.mjs';
 import { REVIEW_ROLES, RUNNER_ROLES } from '../../../shared/review-roles.mjs';
@@ -139,7 +141,8 @@ test('a worker settings file carries every lock-down field and passes the check'
   assert.ok(s[S.permissions][S.deny].includes('Edit(//w/bob/**)'));
   assert.equal(s[S.env][ENV.disableUpdates], '1');
   assert.equal(s[S.env][ENV.autoCompactWindow], '300000');
-  assert.equal(s[S.disableClaudeAiConnectors], true);
+  // Not written (L1336, fallback (b)): the empty tool-server list and launch check 6 keep connectors out.
+  assert.equal(Object.hasOwn(s, S.disableClaudeAiConnectors), false);
   // The built-in plugins off and the built-in skills disableBundledSkills leaves on turned off (L1333).
   assert.deepEqual(s[S.enabledPlugins], Object.fromEntries(BUILTIN_PLUGIN_IDS.map((id) => [id, false])));
   assert.deepEqual(s[S.skillOverrides], Object.fromEntries(BUILTIN_SKILLS_OFF.map((n) => [n, 'off'])));
@@ -249,7 +252,6 @@ test('every lock-down field, broken one at a time, is caught by the check', () =
     (s) => { s[S.permissions][S.allow].push('Bash(npm *)'); },
     (s) => { s[S.permissions][S.allow].push('Read(//etc/**)'); },
     (s) => { s[S.permissions][S.defaultMode] = 'bypassPermissions'; },
-    (s) => { s[S.disableClaudeAiConnectors] = false; },
     (s) => { s[S.crossSessionInbound] = 'allow'; },
     (s) => { s[S.disableSkillShellExecution] = false; },
     (s) => { s[S.disableBundledSkills] = false; },
@@ -923,4 +925,47 @@ test('#439 r1 m3: checkRunnerWall refuses a rules snapshot whose folder resolves
   const own = { ...paths, snapshot: join(d, 's', 'own-snaps', 'rules.json') };
   const ok = render('worker', { paths: { ...own, workerRunner: runner } });
   assert.deepEqual(checkRunnerWall({ settings: ok.settings, workerRunner: runner, paths: own }), { ok: true });
+});
+
+test('L1336: every role\'s rendered role file and real start flags pass launch check 0 on the confirmed version, in every phase, with and without the builder proxy', () => {
+  // All confirmed names stand on one version: the pin they were proven on.
+  const versions = [...new Set(Object.values(CONFIRMED).map((c) => c.version))];
+  assert.equal(versions.length, 1, `CONFIRMED holds more than one version: ${versions.join(', ')}`);
+  const reviewish = new Set(['reviewer', 'auditor', 'plan_reviewer']);
+  const seenProxy = new Set();
+  for (const [role, profile] of Object.entries(DESIGN_PROFILES)) for (const phase of ['session', 'install', 'save']) for (const builderProxy of [false, true]) {
+    // A product host on the rules' list (and a registry host for the install), so a shell role really gets the proxy ports.
+    const r = renderRoleSettings({ productionFiles: [], proposalOutboxes: ['/w/proposals'], role, profile, rulesHosts: ['api.example.com'], registryHosts: ['registry.npmjs.org'],
+      phase, builderProxy, product: { commands: { test: 'npm test' }, hosts: ['api.example.com'] }, realpath: (p) => p, lstat: () => ({ isSymbolicLink: () => false }),
+      paths: { copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: reviewish.has(role) ? '/w/runner/snap/rules.json' : '/w/snap/rules.json',
+        node: '/w/node', notes: '/w/notes', bobFolder: '/w/bob', reviewWalls: { outboxRoot: '/w/reviews', runnerRoot: '/w/runner' }, ownerTaps: '/w/taps', reviewAgainConfig: '/w/ra.json',
+        deny: { proposals: ['/w/proposals'], secrets: ['/w/secrets'], claudeHome: '/h/.claude', ssh: '/h/.ssh', gh: '/h/.config/gh', robotKeys: '/w/keys', record: '/w/record', otherCopies: [] } } });
+    if (!r.ok) continue; // a phase a role has no use for is refused at render, never started
+    const sandbox = r.settings[S.sandbox] ?? {}; const net = sandbox[S.network] ?? {};
+    for (const n of [S.httpProxyPort, S.socksProxyPort]) if (Object.hasOwn(net, n)) seenProxy.add(n);
+    const where = `${role} ${phase} ${builderProxy ? 'proxy' : 'plain'}`;
+    // The flags of every real start: a session (first round and send-back) and the locked runs.
+    const starts = [sessionArgs({ profile, settingsFile: '/f', sessionId: 'x', prompt: 'p' }), sessionArgs({ profile, settingsFile: '/f', sessionId: 'x', prompt: 'p', earlier: 'e' }),
+      roleArgs({ profile, settingsFile: '/f' })];
+    for (const args of starts) {
+      const flags = args.filter((a) => a.startsWith('--'));
+      assert.deepEqual(unconfirmedNames({ settings: r.settings, flags, version: versions[0] }), [], where);
+      // The empty tool-server lock is on every start (the one guard on connectors since L1336).
+      const at = args.indexOf(noToolServerArgs()[0]);
+      assert.deepEqual(args.slice(at, at + 3), noToolServerArgs(), where);
+    }
+  }
+  // The proxy half is not hollow: some rendered file carries each proxy port name.
+  assert.deepEqual([...seenProxy].sort(), [S.httpProxyPort, S.socksProxyPort].sort());
+});
+
+test('L1336: a role file may leave disableClaudeAiConnectors out or turn connectors off, never on', () => {
+  const r = renderRoleSettings({ productionFiles: [], proposalOutboxes: ['/w/proposals'], role: 'worker', profile: DESIGN_PROFILES.worker, rulesHosts: [], product: { commands: { test: 'npm test' } },
+    paths: { copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/snap/rules.json', node: '/w/node', notes: '/w/notes',
+      deny: { proposals: ['/w/proposals'], secrets: ['/w/secrets'], claudeHome: '/h/.claude', ssh: '/h/.ssh', gh: '/h/.config/gh', robotKeys: '/w/keys', record: '/w/record', otherCopies: [] } },
+    realpath: (p) => p, lstat: () => ({ isSymbolicLink: () => false }) });
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(checkSettings(r.settings, { profile: DESIGN_PROFILES.worker }).ok, true);
+  assert.equal(checkSettings({ ...r.settings, [S.disableClaudeAiConnectors]: true }, { profile: DESIGN_PROFILES.worker }).ok, true);
+  for (const v of [false, 'false', 0, null]) assert.match(checkSettings({ ...r.settings, [S.disableClaudeAiConnectors]: v }, { profile: DESIGN_PROFILES.worker }).reason, /connectors are turned on/, String(v));
 });

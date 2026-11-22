@@ -335,8 +335,8 @@ const PROBE_SERVER = 'orch-names-probe';
 const PROBE_PLUGIN = 'cc-plugin-telemetry@builtin';
 const PROBE_SKILL = 'doctor';
 export const CONNECTORS_FALLBACK = 'the account has no claude.ai connector, so the pair can\'t show it. Fallback (b), L1114: '
-  + 'take it out of the role files; --strict-mcp-config with an empty list keeps connectors out, and launch check 6 refuses a '
-  + 'start whose start message lists any tool server';
+  + 'take it out of the role files; --strict-mcp-config with an empty list keeps connectors out (claude-code 2.1.316), and '
+  + 'launch check 0 refuses a start whose flags lack it';
 /** The name with two letters near its end swapped: a spelling the CLI can't know, holding none of the real one. */
 export const misspell = (n) => `${n.slice(0, -3)}${n.at(-2)}${n.at(-3)}${n.at(-1)}`;
 export const SPELLING_LABEL = 'name confirmed (spelling pair)';
@@ -638,8 +638,11 @@ export const NOT_TRIED = Object.freeze({
   [S.allowUnsandboxedCommands]: 'no pair here: a command asking to leave the sandbox is a model\'s choice (its break-it test is the review walls proof)',
 });
 
-// Names the launcher no longer writes, shown and not counted (L1114). Empty since L1333 put enabledPlugins back; kept for the next one.
-export const NOT_USED = Object.freeze({});
+// Names the launcher no longer writes, shown and not counted (L1114).
+export const NOT_USED = Object.freeze({
+  // L1336: fallback (b) of L1114, taken. The role files no longer write it; its pair still runs, for an account with a connector.
+  [S.disableClaudeAiConnectors]: `not in any role file: ${CONNECTORS_FALLBACK}`,
+});
 
 // The role read-back's names: what launch check 6 itself reads (L6): the start message comes at all, and shows each role's
 // tools, no tool server, no plugin but the pin's forced built-in (L1333), its skills and its mode.

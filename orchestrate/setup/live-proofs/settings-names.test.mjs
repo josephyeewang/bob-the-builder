@@ -127,8 +127,9 @@ test('L1114: a spelling pair with no difference, or an account with no connector
   const all = Object.fromEntries(TESTS.map((t) => [t.id, { ok: true }]));
   const lines = judgeNames({ outcomes: { ...all, disableClaudeAiConnectors: { ok: null, notTried: CONNECTORS_FALLBACK, fallback: 'b' },
     'spelling-strictAllowlist': { ok: null, notTried: 'the spelling pair showed no difference (loaded|- both ways), so the name is not proven' } }, readback: { ok: true }, version: PIN, confirmed: {} });
+  // L1336: fallback (b) taken, so the name is in no role file and the report says so, uncounted.
   const conn = lines.find((l) => l.name === 'disableClaudeAiConnectors');
-  assert.equal(conn.result, 'NOT TRIED'); assert.equal(conn.why, CONNECTORS_FALLBACK); assert.equal(conn.fallback, 'b');
+  assert.equal(conn.result, 'NOT USED'); assert.ok(conn.why.includes(CONNECTORS_FALLBACK));
   assert.equal(lines.find((l) => l.name === 'strictAllowlist').result, 'NOT TRIED');
   // L1335: crossSessionInbound stands on its break-it pair alone.
   assert.equal(lines.find((l) => l.name === 'crossSessionInbound').result, 'PASS');
@@ -286,8 +287,9 @@ test('m5: every run ends with its own receipt; one that can\'t be written is NOT
   const { 'proxy-httpProxyPort': _p, ...noProxy } = all;
   const home = tempDir('orch-names-'); let out = '';
   assert.equal(finish({ res, pin: PIN, base: null, home, at: 0, print: (t) => { out += t; }, confirmed: WITH_PROXY }), 0);
-  // Without a proxy pair's outcome the same run is NOT DONE: its name stays NOT TRIED (L1335).
-  let out2 = ''; assert.equal(finish({ res: { ...res, outcomes: noProxy }, pin: PIN, base: null, home, at: 1, print: (t) => { out2 += t; } }), 1);
+  // Without a proxy pair's outcome and with no CONFIRMED entry for it, the same run is NOT DONE: its name stays NOT
+  // TRIED (L1335). (With one, as CONFIRMED now holds, a name no pair of this run touched stands on it.)
+  let out2 = ''; assert.equal(finish({ res: { ...res, outcomes: noProxy }, pin: PIN, base: null, home, at: 1, print: (t) => { out2 += t; }, confirmed: {} }), 1);
   assert.match(out2, /NOT TRIED\s+httpProxyPort/); assert.match(out2.trimEnd().split('\n').at(-1), /^NOT DONE/);
   assert.match(out.trimEnd().split('\n').at(-1), /^PASS/);
   const path = out.match(/Written to (\S+)/)[1]; assert.ok(existsSync(path) && path.startsWith(home));
