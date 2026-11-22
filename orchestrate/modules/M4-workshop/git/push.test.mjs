@@ -1093,7 +1093,7 @@ test('#32 round 3 (L51): every push-script call that names the GitHub address pa
   const src = readFileSync(new URL('./push.mjs', import.meta.url), 'utf8');
   assert.match(src, /const auth = \{ extraConfig: tokenConfig\(token\), address: url \};/);
   const calls = src.split('\n').filter((l) => /\b(git|gitOk|gitDo|gitText|run)\(\[/.test(l) && /, url[,\]]/.test(l));
-  assert.equal(calls.length, 3, calls.join('\n'));
+  assert.equal(calls.length, 4, calls.join('\n')); // + refreshMain's fetch (L1338)
   for (const l of calls) assert.match(l, /\.\.\.auth \}/, l);
 });
 

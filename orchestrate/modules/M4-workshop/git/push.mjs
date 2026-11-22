@@ -130,6 +130,30 @@ export const plainError = (m) => String(m).replace(/\/[^\s'":]+/g, '<path>').sli
 export const PUSH_FACT = (card, att) => `push.${card}.${att}`;
 export const PROPOSAL_ATTEMPT = (sha) => `p-${sha.slice(0, 12)}`;
 export const githubUrl = (repo) => `https://github.com/${repo}.git`;
+
+/**
+ * Main fresh from GitHub into the mirror, with no work to push (L1338). The worker runner starts every copy from the
+ * mirror's main, and before this only a push fetched it, so a mirror set up empty stayed empty and no card could start.
+ * The robot's push pass runs this each round. → { ok: true, main } | { ok: false, reason } (never throws; no token in
+ * the reason: plainError).
+ */
+export async function refreshMain({ mirror, repo, getToken, testRemote }) {
+  try {
+    const m = checkMirror(mirror);
+    if (!m.ok) return { ok: false, reason: `mirror: ${m.reason}` };
+    let token;
+    try { token = await getToken(); } catch (e) { return { ok: false, reason: `no robot key: ${plainError(e?.message ?? e)}` }; }
+    if (typeof token !== 'string' || !token) return { ok: false, reason: 'no robot key for this product' };
+    const url = testRemote ? testRemote(repo) : githubUrl(repo);
+    const auth = { extraConfig: tokenConfig(token), address: url };
+    // The push's own fetch of main below, with the same flags (spelled out: the credential scan reads literal lists).
+    const r = await run(['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-auto-gc', '--no-recurse-submodules', url, '+refs/heads/main:refs/heads/main'], { gitDir: mirror, purpose: 'refresh-main', ...auth });
+    if (r.code !== 0) return { ok: false, reason: `could not fetch main from GitHub: ${plainError(r.stderr?.toString?.() ?? '')}` };
+    const h = await run(['rev-parse', '--verify', '-q', 'refs/heads/main^{commit}'], { gitDir: mirror, purpose: 'refresh-main' });
+    const main = h.code === 0 ? h.stdout.toString().trim() : null;
+    return main ? { ok: true, main } : { ok: false, reason: 'GitHub gave no main commit' };
+  } catch (e) { return { ok: false, reason: plainError(e?.message ?? e) }; }
+}
 export const bundleName = (card) => `bundle-${card}.bundle`;
 // The header's base64 form is its own secret (the token can't be seen in it as text), so it is registered too (secret-guard).
 export const tokenConfig = (token) => [['http.https://github.com/.extraHeader', `Authorization: Basic ${registerSecret(Buffer.from(`x-access-token:${registerSecret(token)}`).toString('base64'))}`]];

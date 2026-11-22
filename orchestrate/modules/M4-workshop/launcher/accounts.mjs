@@ -248,10 +248,10 @@ export function readAuthStatus(text, dir) {
 }
 
 /**
- * The owner's environment for a claude it runs, with the login name filled in when the job that started it left it out
- * (L1337). A launchd job's environment holds only what its file names, and without USER claude does not find the owner's
- * stored sign-in: `auth status` says loggedIn false and `-p` runs are signed out (checked: claude-code 2.1.316 and
- * 2.1.329; with USER alone added, loggedIn is true). LOGNAME goes with it, from the same account.
+ * The owner's environment for a claude it runs, with the login name filled in when whatever started it left it out
+ * (L1337). Without USER claude does not find the owner's stored sign-in: `auth status` says loggedIn false (checked:
+ * claude-code 2.1.316 and 2.1.329, run with only PATH and HOME). A guard, not the launchd fault it was first taken for:
+ * launchd gives a user's agent USER and LOGNAME itself (L1338 correction). LOGNAME goes with it, from the same account.
  */
 export function ownerEnv(base = process.env, who = () => userInfo().username) {
   const e = { ...base };

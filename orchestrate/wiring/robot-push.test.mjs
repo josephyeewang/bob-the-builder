@@ -189,7 +189,8 @@ test('L1115: with every part, one bundle becomes its card branch and one pull re
     const p = w.pass();
     assert.equal(isRefusing(p), false);
     const r = await p();
-    assert.deepEqual(r.refused, []);
+    assert.deepEqual(r.declined, []);
+    assert.equal(r.refused, undefined, 'robot-main reads any refused as the pass refusing (L1338)');
     assert.deepEqual(r.waiting, []);
     assert.deepEqual(r.pushed, ['C-1']);
     const tip = (await gitOk(['rev-parse', 'refs/heads/card/c-1'], { gitDir: w.cg.gitDir })).trim();
@@ -329,4 +330,33 @@ test('#536 r2 c2: the push script is given the owner\'s Mac user (hostLockUid) a
     assert.notEqual(d.ownerUid, ME + 1, 'never the Record\'s owner (the config\'s ownerUid)');
     assert.deepEqual(d.uids, { worker: BUILDER_UID });
   } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test('L1338: each round brings GitHub\'s main into the mirror with nothing to push; a failed fetch fails the pass, told', async () => {
+  const w = await wiredWorld();
+  try {
+    const mirror = mirrorPath({ base: w.root });
+    // The Mini's state: the mirror as setup makes it, with no main (plant: before L1338 nothing fetched it without work).
+    await gitOk(['update-ref', '-d', 'refs/heads/main'], { gitDir: mirror });
+    const ghMain = (await gitOk(['rev-parse', 'refs/heads/main'], { gitDir: w.gh })).trim();
+    const r = await w.pass()();
+    assert.deepEqual(r.pushed, [], 'no bundle: nothing pushed');
+    assert.equal(r.refused, undefined, 'an empty list is not the pass refusing');
+    assert.equal(r.main, ghMain);
+    assert.equal((await gitOk(['rev-parse', 'refs/heads/main'], { gitDir: mirror })).trim(), ghMain, 'the mirror now has main');
+    // GitHub unreachable: the pass fails (robot-main tells it), saying why, with no token in the words.
+    renameSync(w.gh, `${w.gh}.away`);
+    await assert.rejects(w.pass()(), (e) => /main could not be brought into the mirror: could not fetch main/.test(e.message) && !/fake-robot-token/.test(e.message));
+    renameSync(`${w.gh}.away`, w.gh);
+  } finally { rmSync(w.root, { recursive: true, force: true }); }
+});
+
+test('L1338: robot-main counts the push pass done when it declined nothing', async () => {
+  const rec = memoryRecord();
+  const passes = Object.fromEntries(ROBOT_PASSES.map((p) => [p, () => ({})]));
+  const r = await runPasses({ rec, passes: { ...passes, push: () => ({ pushed: [], waiting: [], declined: [], prs: [], told: 0, untold: [] }) }, now: () => Date.now() });
+  assert.equal(r.push.ok, true, r.push.error);
+  // The plant: the old answer's empty `refused` list read as a refusal, every round.
+  const old = await runPasses({ rec, passes: { ...passes, push: () => ({ refused: [] }) }, now: () => Date.now() });
+  assert.equal(old.push.ok, false);
 });

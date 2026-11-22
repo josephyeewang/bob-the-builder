@@ -33,6 +33,11 @@
 //                Dispatcher only reads it (cleanup's ls-tree and merge-base, review-ports filesOf).
 //   private      the scripts' private folder (privateFolder: this job's user's, 0700, writable).
 //
+// MAIN (L1338). Each round first brings GitHub's main into the mirror (push.mjs refreshMain, with the push's narrowed
+// token), whether or not anything waits to be pushed: the worker runner starts every copy from the mirror's main, which
+// nothing else fills. A fetch that fails still lets the round's pushes run (each fetches main again itself), then fails
+// the pass, so robot-main tells the owner on its usual hold cadence.
+//
 // THE PORTS createPushScript takes, as built here:
 //   productPlace   { repo: `<owner>/<repo>` from the products.json entry, mirror } for this robot's product only (L719 m5)
 //   getRobotToken  the push's narrowed token, as a string; a refused mint throws, which push.mjs reads as a wait
@@ -61,7 +66,7 @@
 // otherwise stops every push, told; the check shows that before the first card waits on it.
 
 import { dirname, resolve } from 'node:path';
-import { createPushScript } from '../modules/M4-workshop/git/push.mjs';
+import { createPushScript, refreshMain } from '../modules/M4-workshop/git/push.mjs';
 import { GIT_TIMEOUT_MS } from '../modules/M4-workshop/git/safe-git.mjs';
 import { SCAN_BUDGET_MS, SCAN_TIMEOUT_MS } from '../modules/M4-workshop/git/gitleaks.mjs';
 import { holdAlert } from '../modules/M11-dispatcher/pass.mjs';
@@ -182,9 +187,12 @@ export function pushWiring(c, { rec, rules, entry, tokenFor, fetchFn = globalThi
   });
 
   return async () => {
+    // L1338: main into the mirror every round, work or none; a failed fetch fails the pass after the pushes still ran.
+    const fresh = await refreshMain({ mirror, repo, getToken, ...(testRemote ? { testRemote } : {}) });
     const r = await pushPass({ rec, product: c.product, outboxRoot, pushCard, alert: outbox(rec, now()), now, prs, getToken, repos: [repo], hold });
     // A hold the queue refused is the pass's failure, so robot-main's own tell carries it (push-pass.mjs I5).
     if (r.untold.length) throw Object.assign(new Error(`the push pass's alerts could not be queued: ${r.untold.join(', ')}`), { tell: `untold: ${r.untold.join(', ')}` });
-    return r;
+    if (!fresh.ok) throw new Error(`main could not be brought into the mirror: ${fresh.reason}`);
+    return { ...r, main: fresh.main };
   };
 }

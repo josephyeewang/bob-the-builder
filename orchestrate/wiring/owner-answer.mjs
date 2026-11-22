@@ -47,7 +47,7 @@ const refuse = (reason) => ({ ok: false, reason });
 /** `claude -p /usage` for one account, as the owner. Its stdout, or null on any failure to run. */
 export function claudeUsage(claudeBin = 'claude') {
   return (name, env) => {
-    const e = ownerEnv(); // L1337: with the login name, or the owner's sign-in is not found under launchd
+    const e = ownerEnv(); // L1337: with the login name, or the owner's sign-in is not found
     delete e[CONFIG_VAR];
     if (env?.[CONFIG_VAR]) e[CONFIG_VAR] = env[CONFIG_VAR];
     const r = spawnSync(claudeBin, ['-p', '/usage', '--output-format', 'stream-json', '--verbose', '--no-session-persistence',

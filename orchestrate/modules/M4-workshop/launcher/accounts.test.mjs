@@ -300,7 +300,7 @@ test('accounts status: the answer is read for its four known fields only, so not
   assert.equal(readAuthStatus('{"loggedIn":"true"}', '/d').signedIn, false, 'the word, not the value true, is not signed in');
 });
 
-test('L1337: a claude the owner runs from a launchd job gets the login name, or its stored sign-in is not found', () => {
+test('L1337: a claude the owner runs with no login name in its environment gets it, or its stored sign-in is not found', () => {
   // Filled from the account when the job left it out; kept when it was there; nothing invented when the name can't be read.
   assert.deepEqual(ownerEnv({ PATH: '/p', HOME: '/h' }, () => 'joe'), { PATH: '/p', HOME: '/h', USER: 'joe', LOGNAME: 'joe' });
   assert.deepEqual(ownerEnv({ USER: 'a', LOGNAME: 'b' }, () => 'joe'), { USER: 'a', LOGNAME: 'b' });

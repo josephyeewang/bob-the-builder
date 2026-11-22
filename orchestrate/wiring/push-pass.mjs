@@ -7,7 +7,9 @@
 // a crash here does not stop the Dispatcher.
 //
 //   pushPass({ rec, product, outboxRoot, pushCard, alert, now, prs?, getToken?, repos?, hold?, drop?, stat?, hashOf?, maxPushes? })
-//     → { pushed: [card], waiting: [[card, why]], refused: [[card, why]], prs: [branch opened], told: n, untold: [cause] }
+//     → { pushed: [card], waiting: [[card, why]], declined: [[card, why]], prs: [branch opened], told: n, untold: [cause] }
+//   `declined`, never `refused`: robot-main reads any `refused` in a pass's answer as the pass refusing, so an empty
+//   list failed every round (L1338).
 //   prs: pr-writer.mjs prWriter (the same one pushCard's pullRequests.upsert is), getToken: the round's robot token,
 //   repos: this robot's product repos. With prs, step 6 runs each round.
 //
@@ -123,7 +125,7 @@ export async function pushPass({ rec, product, outboxRoot, pushCard, alert, now,
   // A list that can't be read is not "no sessions" (I1): the throw fails the pass, and robot-main tells it.
   const all = rec.list('session');
   if (!Array.isArray(all)) throw new Error('the Record\'s session list could not be read');
-  const out = { pushed: [], waiting: [], refused: [], prs: [], told: 0, untold: [] };
+  const out = { pushed: [], waiting: [], declined: [], prs: [], told: 0, untold: [] };
   const tell = (cause, text) => {
     let r;
     try { r = hold({ rec, cause, text, alert, now: t }); } catch { r = false; }
@@ -206,7 +208,7 @@ export async function pushPass({ rec, product, outboxRoot, pushCard, alert, now,
     // same only when the last answer was a refusal of them (#536 r2 Minor 2): a refusal after the bytes changed was of
     // these bytes, so they are not pushed again until the worker writes new ones. New bytes are a new try.
     const same = tried.at !== null && (!st.isFile() || st.mtimeMs <= tried.at) && (why !== 'bundle-changed' || Boolean(tried.refusal));
-    if (same && tried.refusal && !tried.refusal.retry) { tell(PUSH_REFUSED_CAUSE(card, att), say(`its push was refused: ${short(tried.refusal.reason)}. It is not tried again until the work changes`)); out.refused.push([card, tried.refusal.reason]); continue; }
+    if (same && tried.refusal && !tried.refusal.retry) { tell(PUSH_REFUSED_CAUSE(card, att), say(`its push was refused: ${short(tried.refusal.reason)}. It is not tried again until the work changes`)); out.declined.push([card, tried.refusal.reason]); continue; }
     // Any other try of these same bytes is spaced (#536 r1 M1): a wait, or a push made but not taken (its head).
     if (same && tn - tried.at < RETRY_MS) {
       const head = d?.result === 'pushed' && Boolean(d.head_refused);
@@ -253,7 +255,7 @@ export async function pushPass({ rec, product, outboxRoot, pushCard, alert, now,
       out.waiting.push([card, r?.reason]);
       tell(PUSH_WAIT_CAUSE(card, att), say(`its push waits: ${short(r?.reason)}. It is tried again every ${RETRY_MS / 60_000} minutes`));
     } else {
-      out.refused.push([card, r?.reason]);
+      out.declined.push([card, r?.reason]);
       clear(PUSH_WAIT_CAUSE(card, att));
       tell(PUSH_REFUSED_CAUSE(card, att), say(`its push was refused: ${short(r?.reason ?? 'no reason given')}. It is not tried again until the work changes`));
     }
