@@ -301,7 +301,12 @@ test('check 0 (L1108 I7): both refusals begin with a NAMES_CHECK_REFUSALS prefix
   const missing = await launch({ role: 'worker', profile: DESIGN_PROFILES.worker, checks: {}, start: async () => assert.fail('started') });
   assert.ok(none.reason.startsWith(NAMES_CHECK_REFUSALS.unconfirmed), none.reason);
   assert.ok(loose.reason.startsWith(NAMES_CHECK_REFUSALS.notLocked), loose.reason);
-  for (const r of [none, loose, missing]) { assert.equal(r.failedAt, 0); assert.equal(isNamesCheckRefusal(r.reason), true, r.reason); }
+  // L1336: a start whose flags lack the empty tool-server lock is refused, whatever else passes.
+  const noLock = [];
+  for (const drop of [FLAGS.strictMcpConfig, FLAGS.mcpConfig]) noLock.push(await launch({ role: 'worker', profile: DESIGN_PROFILES.worker, checks: {}, start: async () => assert.fail('started'),
+    names: { ...NAMES('worker'), flags: N_FLAGS.filter((f) => f !== drop) } }));
+  for (const r of noLock) assert.ok(r.reason.startsWith(NAMES_CHECK_REFUSALS.noToolLock), r.reason);
+  for (const r of [none, loose, missing, ...noLock]) { assert.equal(r.failedAt, 0); assert.equal(isNamesCheckRefusal(r.reason), true, r.reason); }
   for (const r of ['launch check 6 (headless read-back): no start message', '', undefined, 'x setting names not confirmed']) assert.equal(isNamesCheckRefusal(r), false, String(r));
 });
 

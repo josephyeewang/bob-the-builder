@@ -146,7 +146,6 @@
     "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "300000",
     "DISABLE_UPDATES": "1"
   },
-  "disableClaudeAiConnectors": true,
   "enabledPlugins": {
     "cc-plugin-sec-default@builtin": false,
     "cc-plugin-agents-md@builtin": false,

@@ -7,7 +7,7 @@
 import { readdirSync, readFileSync, lstatSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { sha256 } from './role-profiles.mjs';
-import { SETTINGS as S, unconfirmedNames, NAMES_CHECK_REFUSALS as NCR } from './settings-names.mjs';
+import { SETTINGS as S, FLAGS as F, unconfirmedNames, NAMES_CHECK_REFUSALS as NCR } from './settings-names.mjs';
 import { hasShell } from './role-profiles.mjs';
 import { checkSettings, bobFolderDeny, bobFolderShell } from './render-settings.mjs';
 import { REVIEW_ROLES, reviewUser } from './review-user.mjs';
@@ -56,6 +56,11 @@ export async function launch({ role, profile, checks, start, names, ctx = {}, ow
   }
   const left = names && typeof names === 'object' && names.settings ? unconfirmedNames(names) : ['(no role file given to the names check)'];
   if (left.length) return { ok: false, failedAt: 0, reason: `${NCR.unconfirmed} on the pinned Claude Code: ${left.join(', ')}`, log };
+  // L1336: with disableClaudeAiConnectors out of the role files, the empty tool-server lock on the start's own flags is
+  // what keeps claude.ai connectors and project tool servers out (checked: claude-code 2.1.316, --strict-mcp-config
+  // stops the headless connector fetch; re-check on upgrade). A start whose flags lack it is refused here.
+  const flags = Array.isArray(names.flags) ? names.flags : [];
+  if (!flags.includes(F.strictMcpConfig) || !flags.includes(F.mcpConfig)) return { ok: false, failedAt: 0, reason: `${NCR.noToolLock}: the start's flags lack ${F.strictMcpConfig} ${F.mcpConfig}`, log };
   // The object handed in must itself be a locked-down role file, so an empty or partial one cannot pass
   // check 0 (audit R-0b-44 round 2 MIN-1, round 3 MIN-4).
   const locked = checkSettings(names.settings, { profile });

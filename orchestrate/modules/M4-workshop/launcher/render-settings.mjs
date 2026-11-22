@@ -486,7 +486,10 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
     },
     [S.hooks]: hooks,
     [S.env]: { [ENV.autoCompactWindow]: String(profile.compactWindow), [ENV.disableUpdates]: '1' },
-    [S.disableClaudeAiConnectors]: true,
+    // No disableClaudeAiConnectors (L1336, fallback (b) of L1114; checked: claude-code 2.1.316, re-check on upgrade): the
+    // builder account has no connector, so its name can't be proven. Every start passes an empty tool-server list with
+    // --strict-mcp-config, which on that version also stops the headless connector fetch, and launch check 0 refuses a
+    // start whose flags lack it.
     // The built-in plugins off (L1333, replacing L1114's "no enabledPlugins"): Claude Code turns them on by itself and
     // `--setting-sources ""` does not stop it. Launch check 6 lets through only the one a pin can't turn off
     // (FORCED_BUILTIN_PLUGINS). checkSettings below refuses a role file that turns any plugin on or leaves a built-in one on.
@@ -653,9 +656,10 @@ export function checkSettings(obj, { machineWide = false, profile = null, phase 
   if (!snap || wallPath(snap) !== snap) return refuse('the role file\'s hooks do not name one rules snapshot, as a plain absolute path');
   const sw = snapshotWallProblem(obj, dirname(snap));
   if (sw) return refuse(sw);
-  if (obj[S.disableClaudeAiConnectors] !== true) return refuse('connectors are not off');
   if (obj[S.crossSessionInbound] !== 'refuse') return refuse('incoming messages are not refused');
   if (obj[S.disableSkillShellExecution] !== true) return refuse('skill shell lines are not off');
+  // L1336: the role files leave connectors to the start's tool-server lock; one that names the setting may only turn them off.
+  if (Object.hasOwn(obj, S.disableClaudeAiConnectors) && obj[S.disableClaudeAiConnectors] !== true) return refuse('connectors are turned on');
   if (obj[S.disableBundledSkills] !== true) return refuse('bundled skills are not off');
   if (BUILTIN_SKILLS_OFF.some((n) => obj[S.skillOverrides]?.[n] !== 'off')) return refuse('a built-in skill is not turned off');
   if (Object.values(obj[S.enabledPlugins] ?? {}).some(Boolean)) return refuse('a plugin is on');
