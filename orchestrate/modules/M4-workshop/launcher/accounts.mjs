@@ -33,7 +33,7 @@
 // `claude auth status` and drops the rest.
 
 import { chmodSync, closeSync, constants, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, symlinkSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, userInfo } from 'node:os';
 import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -247,6 +247,21 @@ export function readAuthStatus(text, dir) {
   };
 }
 
+/**
+ * The owner's environment for a claude it runs, with the login name filled in when the job that started it left it out
+ * (L1337). A launchd job's environment holds only what its file names, and without USER claude does not find the owner's
+ * stored sign-in: `auth status` says loggedIn false and `-p` runs are signed out (checked: claude-code 2.1.316 and
+ * 2.1.329; with USER alone added, loggedIn is true). LOGNAME goes with it, from the same account.
+ */
+export function ownerEnv(base = process.env, who = () => userInfo().username) {
+  const e = { ...base };
+  if (!e.USER || !e.LOGNAME) {
+    let name = null; try { name = who(); } catch { name = null; }
+    if (typeof name === 'string' && name) { e.USER ||= name; e.LOGNAME ||= name; }
+  }
+  return e;
+}
+
 /** `status` text. `authStatus(name, env)` runs `claude auth status --json` for one folder and returns its stdout or null. */
 export function statusText({ home = homedir(), authStatus }) {
   const tilde = (p) => (p.startsWith(home) ? `~${p.slice(home.length)}` : p);
@@ -272,7 +287,7 @@ export function statusText({ home = homedir(), authStatus }) {
 /** The real `claude auth status --json` for one folder: a time limit, no input, nothing inherited on screen. */
 export function claudeAuthStatus(claudeBin = 'claude') {
   return (name, env) => {
-    const e = { ...process.env };
+    const e = ownerEnv();
     delete e[CONFIG_VAR];
     if (env[CONFIG_VAR]) e[CONFIG_VAR] = env[CONFIG_VAR];
     const r = spawnSync(claudeBin, ['auth', 'status', '--json'], { env: e, encoding: 'utf8', timeout: 20_000, killSignal: 'SIGKILL', maxBuffer: 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });

@@ -36,7 +36,7 @@ import { dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
-import { accountInUse, accountEnv, accountDir, readAuthStatus, claudeAuthStatus, CONFIG_VAR } from '../modules/M4-workshop/launcher/accounts.mjs';
+import { accountInUse, accountEnv, accountDir, readAuthStatus, claudeAuthStatus, ownerEnv, CONFIG_VAR } from '../modules/M4-workshop/launcher/accounts.mjs';
 
 export const ANSWER_FILE = 'owner-answer.json';
 export const ANSWER_VERSION = 1;
@@ -47,7 +47,7 @@ const refuse = (reason) => ({ ok: false, reason });
 /** `claude -p /usage` for one account, as the owner. Its stdout, or null on any failure to run. */
 export function claudeUsage(claudeBin = 'claude') {
   return (name, env) => {
-    const e = { ...process.env };
+    const e = ownerEnv(); // L1337: with the login name, or the owner's sign-in is not found under launchd
     delete e[CONFIG_VAR];
     if (env?.[CONFIG_VAR]) e[CONFIG_VAR] = env[CONFIG_VAR];
     const r = spawnSync(claudeBin, ['-p', '/usage', '--output-format', 'stream-json', '--verbose', '--no-session-persistence',

@@ -8,7 +8,7 @@ import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { tempDir } from '../../../shared/test-tmp.mjs';
-import { ACCOUNTS, ACCOUNT_FILE, OWN, accountEnv, accountInUse, isSetUp, readAuthStatus, setupSecondFolder, useAccount } from './accounts.mjs';
+import { ACCOUNTS, ACCOUNT_FILE, OWN, accountEnv, accountInUse, isSetUp, readAuthStatus, setupSecondFolder, useAccount, ownerEnv, claudeAuthStatus } from './accounts.mjs';
 import { checkRoleEnv, roleEnv } from './env-check.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'accounts.mjs');
@@ -298,4 +298,25 @@ test('accounts status: the answer is read for its four known fields only, so not
   assert.deepEqual(readAuthStatus('[{"loggedIn":true}]', '/d'), { readable: false });
   assert.deepEqual(readAuthStatus('"signed in"', '/d'), { readable: false });
   assert.equal(readAuthStatus('{"loggedIn":"true"}', '/d').signedIn, false, 'the word, not the value true, is not signed in');
+});
+
+test('L1337: a claude the owner runs from a launchd job gets the login name, or its stored sign-in is not found', () => {
+  // Filled from the account when the job left it out; kept when it was there; nothing invented when the name can't be read.
+  assert.deepEqual(ownerEnv({ PATH: '/p', HOME: '/h' }, () => 'joe'), { PATH: '/p', HOME: '/h', USER: 'joe', LOGNAME: 'joe' });
+  assert.deepEqual(ownerEnv({ USER: 'a', LOGNAME: 'b' }, () => 'joe'), { USER: 'a', LOGNAME: 'b' });
+  assert.deepEqual(ownerEnv({ USER: 'a' }, () => 'joe'), { USER: 'a', LOGNAME: 'joe' });
+  assert.deepEqual(ownerEnv({ PATH: '/p' }, () => { throw new Error('no'); }), { PATH: '/p' });
+  assert.deepEqual(ownerEnv({ PATH: '/p' }, () => ''), { PATH: '/p' });
+  // The auth status run itself: a stand-in claude reports the USER it was handed, with the job's bare environment.
+  const dir = tempDir('orch-acct-user-');
+  const bin = join(dir, 'claude');
+  writeFileSync(bin, '#!/bin/sh\nprintf \'{"loggedIn":%s}\' "$( [ -n "$USER" ] && echo true || echo false )"\n'); chmodSync(bin, 0o755);
+  const keep = { USER: process.env.USER, LOGNAME: process.env.LOGNAME };
+  try {
+    delete process.env.USER; delete process.env.LOGNAME;
+    const out = claudeAuthStatus(bin)('a', {});
+    assert.equal(JSON.parse(out).loggedIn, true, 'a job with no USER still finds the sign-in');
+  } finally {
+    for (const [k, v] of Object.entries(keep)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  }
 });
