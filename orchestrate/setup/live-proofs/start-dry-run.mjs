@@ -33,7 +33,10 @@
 // (claimed or not: it is read as claimed for this run's session in memory only). Claude Code keeps its own transcript of
 // check 6's headless run in the workers' home, as it does for any start.
 // Capability note (Principle 9): the start's order is startPort's as of this commit; a stage added to startPort is run by
-// this dry run (it drives the real port) but is told under the stage before it until STAGES names it.
+// this dry run (it drives the real port) but is told under the stage after it until STAGES names it.
+// Stopped part way (Ctrl-C, a closed window, kill): SIGINT, SIGTERM and SIGHUP remove what it made, then it exits 1.
+// Only a kill -9 or a power cut can leave its files: names holding DRYRUN- in the runner's settings, copies and outbox
+// folders, which no start reads as its own; remove those by hand (the last line of a finished run says none were left).
 
 import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, renameSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -43,7 +46,8 @@ import { configFrom, heldOf, launchInputs, lockedWiring, readRunnerConfig, rootS
 import { cardStartCommit, chmodTree, liveWallProblem, mirrorMain, removeAll, sessionSettingsOf, startPort, workerAccount, workerPromptText, writeNew } from '../../wiring/runner-ports.mjs';
 import { walledLaunchSettings } from '../../wiring/runner-launch.mjs';
 import { loadMemory } from '../../wiring/runner-loop.mjs';
-import { RUNNER_ROLE_OF, live as isLive, runnerOutbox, runnerPlaces } from '../../wiring/owner-status.mjs';
+import { RUNNER_ROLE_OF, live as isLive, runnerCopy, runnerOutbox, runnerPlaces } from '../../wiring/owner-status.mjs';
+import { RUNNER_JOB_UMASK } from '../../wiring/runner-job.mjs';
 import { readCardFile } from '../../modules/M4-workshop/launcher/review-runner-main.mjs';
 import { prepareWorkerCopy } from '../../modules/M4-workshop/launcher/worker-copy.mjs';
 import { CHECKS, launch } from '../../modules/M4-workshop/launcher/launch.mjs';
@@ -110,53 +114,60 @@ export async function dryRun({ c, configWhy, product, card, io = {} }) {
   const sid = io.sessionId ?? drySessionId();
   const res = new Map();
   const standIns = [];
-  const set = (k, result, why) => { if (!res.has(k)) res.set(k, { stage: k, label: LABEL[k], result, ...(why ? { why } : {}), ...(standIns.length && result !== 'NOT TRIED' ? { on: [...standIns] } : {}) }); };
+  const progress = io.progress ?? (() => {});
+  const set = (k, result, why) => { if (!res.has(k)) { res.set(k, { stage: k, label: LABEL[k], result, ...(why ? { why } : {}), ...(standIns.length && result !== 'NOT TRIED' ? { on: [...standIns] } : {}) }); if (result !== 'NOT TRIED') progress(`${result} ${LABEL[k]}`); } };
   const pass = (k) => set(k, 'PASS');
   const fail = (k, why) => set(k, 'FAIL', why);
+  // A gate the real start stops at: told, and the rest goes on as though it had let the start through (a stand-in).
+  const failOn = (k, why, standIn) => { fail(k, why); standIns.push(standIn); };
   const made = new Set();
   let spawned = 0;
   let stopper = null;   // the stage whose failure stopped the run
   const stopAt = (k, why) => { fail(k, why); if (!stopper) stopper = k; };
   const fsReal = { mkdir: mkdirSync, rm: rmSync, writeNew, list: readdirSync, lstat: lstatSync, chmodTree, rename: renameSync, ...(io.fs ?? {}) };
   let copyPath = null;
+  io.onAbort?.(() => cleanup());
   try {
     if (!c) { stopAt('config', configWhy ?? 'no config'); return finish(); }
     pass('config');
     // Main's order: the roots, then launch checks 12 and 13's inputs. Main stops on either; the dry run tells and goes on.
     let why; try { why = (io.roots ?? ((x) => rootsProblem(x)))(c); } catch (e) { why = said(e); }
-    if (why) fail('roots', why); else pass('roots');
+    if (why) failOn('roots', why, 'the copies and outbox roots'); else pass('roots');
     const inputs = await (io.inputs ?? ((x) => launchInputs(x, { log })))(c);
     let budget = null; let bobManifest = null;
-    if (inputs?.problem) fail('inputs', inputs.problem);
+    if (inputs?.problem) failOn('inputs', inputs.problem, 'launch checks 12 and 13 with no inputs');
     else {
       ({ budget = null, bobManifest = null } = inputs ?? {});
       const missing = [c.budget !== undefined && !budget ? 'the budget module did not load' : null, c.bobManifest !== undefined && !bobManifest ? 'the Bob file list did not load' : null].filter(Boolean);
-      if (missing.length) fail('inputs', `${missing.join('; ')} (its launch check then has no port)`); else pass('inputs');
+      if (missing.length) failOn('inputs', `${missing.join('; ')} (its launch check then has no port)`, 'launch checks 12 and 13 with no inputs'); else pass('inputs');
     }
     // productHeld's three parts, each asked on its own (main asks them in this order and stops at the first).
     const wallGate = await (io.wallGate ?? ((x) => wallGateOf(x, { log })))(c);
     const snaps = (io.snapshots ?? ((x) => rootSnapshots(x, { log })))(c);
     const testProduct = io.testProduct ?? testProductProblem;
-    const ask = (k, f) => { let w; try { w = f(); } catch (e) { w = `it can't be checked (${said(e)})`; } if (w) fail(k, w); else pass(k); };
+    const ask = (k, f) => { let w; try { w = f(); } catch (e) { w = `it can't be checked (${said(e)})`; } if (w) failOn(k, w, `${LABEL[k]} (let through)`); else pass(k); };
     ask('wall', () => wallGate());
     ask('testProduct', () => testProduct(budget, product));
     ask('snapshot', () => snaps.held(product));
     const realHeld = heldOf(wallGate, budget, snaps.held, testProduct);
     // The other live sessions, as the runner's loop gives them to a start (worker-runner.mjs `live`): its listed live
     // sessions, and its waiting starts marked unstarted.
-    let live = null;
+    let live = null; let busy = null;
     try {
       const m = (io.memory ?? ((x) => loadMemory(x.memoryFile, { uid: process.getuid() })))(c);
       live = [...(Array.isArray(m?.sessions) ? m.sessions : []).filter((s) => s && typeof s === 'object' && isLive(s)).map((s) => ({ id: s.id, product: s.product })),
         ...Object.entries(m?.requests && typeof m.requests === 'object' ? m.requests : {}).filter(([, r]) => r?.state === 'waiting').map(([q, r]) => ({ id: q, product: r.product, unstarted: true }))];
+      // One session per card's copy (worker-runner.mjs, #358 r1 m4): a live listed one, or a start that may be on.
+      if ((Array.isArray(m?.sessions) ? m.sessions : []).some((s) => s && typeof s === 'object' && s.card === card && isLive(s))
+        || Object.values(m?.requests && typeof m.requests === 'object' ? m.requests : {}).some((r) => r?.state === 'waiting' && r.card === card)) busy = `card ${card} already has a session the runner started, or a start still on`;
       pass('memory');
-    } catch (e) { fail('memory', `it can't be read (${said(e)})`); set('liveWalls', 'NOT TRIED', 'the runner\'s memory could not be read'); }
+    } catch (e) { failOn('memory', `it can't be read (${said(e)})`, 'no other live sessions'); set('liveWalls', 'NOT TRIED', 'the runner\'s memory could not be read'); }
     const readSettings = io.readSettings ?? sessionSettingsOf(c.settingsDir);
     if (live) {
       const p = c.products?.[product];
       let w2;
       try { w2 = p ? liveWallProblem(live, product, { ...runnerPlaces({ copiesRoot: c.copiesRoot, outboxRoot: c.outboxRoot, product }), mirror: p.mirror }, readSettings) : null; } catch (e) { w2 = said(e); }
-      if (w2) fail('liveWalls', w2); else pass('liveWalls');
+      if (w2) failOn('liveWalls', w2, 'the other live sessions\' walls (let through)'); else pass('liveWalls');
     }
     // The card as the Record holds it; the start port is given it as claimed for this run's session (in memory only).
     const rc = (io.readCard ?? ((id) => readCardFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, card: id })))(card);
@@ -164,7 +175,12 @@ export async function dryRun({ c, configWhy, product, card, io = {} }) {
     if (rc.doc?.product !== product) { stopAt('card', rc.doc?.product === undefined ? 'the card names no product' : `the card is product ${rc.doc.product}'s`); return finish(); }
     const kind = kindOf(rc.doc);
     if (kind === 'undo') { stopAt('card', 'it is an undo card; the dry run does not try an undo\'s start (its reversed commit is the pass\'s to name)'); return finish(); }
-    pass('card');
+    set('card', 'PASS', `its state is ${rc.doc.state ?? 'not named'}; read as claimed for this run`);
+    // What the real start meets that a dry run, beside the card, would not: the runner's one session per card, and
+    // the card's own copy still there (prepareWorkerCopy refuses a copy folder that exists).
+    if (busy) failOn('request', busy, 'the card taken as free');
+    let ownCopy = null; try { ownCopy = runnerCopy({ copiesRoot: c.copiesRoot, product, card }); (io.fs?.lstat ?? lstatSync)(ownCopy); } catch { ownCopy = null; }
+    if (ownCopy) failOn('copy', `the card's own copy is still there, so the real start refuses: copy folder already exists (${ownCopy})`, 'a copy beside the card\'s own');
     const claimed = { ...rc.doc, state: 'claimed', claim: { ...(rc.doc.claim ?? {}), session_id: sid } };
 
     // ---- the start port, with the runner's own ports, each wrapped to tell its stage and keep going ----
@@ -398,7 +414,10 @@ export function guardProblem({ c, product, card, uid, ownDirUid }) {
   return null;
 }
 
-export async function main(argv, { print = (t) => process.stdout.write(t), uid = process.getuid?.(), readConfig = (f) => readRunnerConfig(f, selfPath()), io = {} } = {}) {
+export async function main(argv, { print = (t) => process.stdout.write(t), uid = process.getuid?.(), readConfig = (f) => readRunnerConfig(f, selfPath()), io = {},
+  umask = (m) => process.umask(m), say = (t) => process.stderr.write(t), signals = process } = {}) {
+  // The runner's job runs with this umask (runner-job.mjs); sudo's is 022, and check 1 refuses a copy others can read.
+  umask(RUNNER_JOB_UMASK);
   const product = arg(argv, '--product'); const card = arg(argv, '--card');
   let c = null; let configWhy;
   try { c = configFrom(readConfig(arg(argv, '--config'))); } catch (e) { configWhy = configUnreadable(e); }
@@ -407,7 +426,16 @@ export async function main(argv, { print = (t) => process.stdout.write(t), uid =
     const bad = guardProblem({ c, product, card, uid, ownDirUid: io.ownDirUid ?? ownDirUid });
     if (bad) { print(`The dry run did not run: ${bad}.\n`); return 1; }
   }
-  const out = await dryRun({ c, configWhy, product, card, io });
+  // Progress and the runner's own log lines as they come (the launch checks take minutes); the report follows.
+  // A stop part way removes what it made first.
+  let undo = null;
+  const onSignal = (sig) => { say(`\nStopped (${sig}): removing what the dry run made.\n`); try { undo?.(); } finally { process.exit(1); } };
+  const sigs = ['SIGINT', 'SIGTERM', 'SIGHUP'];
+  for (const s of sigs) signals.on(s, onSignal);
+  let out;
+  try {
+    out = await dryRun({ c, configWhy, product, card, io: { progress: (t) => say(`  ${t}\n`), log: (t) => say(`  (log) ${t}\n`), ...io, onAbort: (f) => { undo = f; io.onAbort?.(f); } } });
+  } finally { for (const s of sigs) signals.off(s, onSignal); }
   const r = report(out.results, { sessionId: out.sessionId });
   print(r.text);
   return r.ok ? 0 : 1;

@@ -334,6 +334,12 @@ pass. It exits 0 only when every stage passed. The launch checks run for real (t
 read-back, the smoke and baseline tests: a few minutes). It makes only what the real start makes, under its own
 `DRYRUN-` session id and a copy beside the card's own, and removes all of it at the end; it never writes the Record, the
 requests folder or the status file, and takes no runner lock. The card can be in any state.
+Each stage's line also shows as it is decided, while it runs. Stopped part way (Ctrl-C, a closed window), it removes
+what it made before it exits; only a `kill -9` or a power cut can leave files, named with `DRYRUN-`, in the runner's
+settings, copies and outbox folders, to remove by hand. While it runs, its settings files would stop the runner from
+restarting with an empty memory (the runner refuses settings files it has no session for), so run it while the runner
+is up. It runs as builder from a Terminal, not from launchd: it sets the runner job's umask itself, but the environment
+around it differs a little, so a check 6, 9 or 11 FAIL that names the environment is worth one real start to confirm.
 
 ## Part 4 — the watch-only week's rules copy and hourly job (R-0b-122)
 

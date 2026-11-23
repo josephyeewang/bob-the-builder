@@ -204,15 +204,52 @@ test('a throw before the start (its inputs): every stage after it NOT TRIED, cle
   } finally { w.done(); }
 });
 
-test('it touches nothing not its own: the card\'s own copy and another start\'s baseline copy stay', async () => {
+test('it touches nothing not its own: the card\'s own copy and another start\'s baseline copy stay; the own copy still there is the real start\'s refusal', async () => {
   const w = world();
   const cardCopy = join(w.mine.copies, 'C-1'); const other = join(w.mine.copies, 'C-1..baseline-0f8fad5b-d9cb-469f-a165-70867728950e');
   mkdirSync(cardCopy); mkdirSync(other);
   try {
     const out = await w.run();
+    const s = w.byStage(out);
     assert.equal(existsSync(cardCopy), true); assert.equal(existsSync(other), true);
-    assert.equal(w.byStage(out).start.result, 'PASS');
+    assert.equal(s.copy.result, 'FAIL'); assert.match(s.copy.why, /copy folder already exists/);
+    assert.equal(s.start.result, 'NOT TRIED');
+    assert.match(s.outbox.on.join(), /beside the card's own/, 'what ran after it says it ran on the stand-in');
     assert.ok(w.calls.some((x) => Array.isArray(x) && x[0] === 'prepare' && x[1] === dryCopyOf({ copiesRoot: w.c.copiesRoot, product: 'p1', card: 'C-1', sessionId: SID })));
+    assert.deepEqual(w.leftovers(), []);
+  } finally { w.done(); }
+});
+
+test('a card the runner already has a session or a waiting start for: the request stage FAILs, as the runner refuses it', async () => {
+  for (const mem of [{ sessions: [{ id: 'S-9', card: 'C-1', product: 'p1', state: 'running' }], requests: {} }, { sessions: [], requests: { q9: { state: 'waiting', card: 'C-1', product: 'p1' } } }]) {
+    const w = world();
+    try {
+      const out = await w.run({ memory: () => mem });
+      const s = w.byStage(out);
+      assert.equal(s.request.result, 'FAIL'); assert.match(s.request.why, /already has a session the runner started, or a start still on/);
+      assert.equal(s.start.result, 'NOT TRIED'); assert.equal(w.spawns, 0);
+    } finally { w.done(); }
+  }
+});
+
+test('a gate the real start stops at marks every later PASS as on a stand-in', async () => {
+  const w = world({ plant: { wall: 'the builder wall is down' } });
+  try {
+    const out = await w.run();
+    const s = w.byStage(out);
+    assert.equal(s.wall.result, 'FAIL');
+    assert.match((s.card.on ?? []).join(), /let through/);
+    assert.equal(report(out.results).ok, false);
+  } finally { w.done(); }
+});
+
+test('stopped part way (a signal): the abort hook removes what was made so far', async () => {
+  const w = world();
+  let undo = null; let during = null; let after = null;
+  try {
+    await w.run({ onAbort: (f) => { undo = f; }, deps: { ...w.io.deps, promptFor: () => { during = w.leftovers(); undo(); after = w.leftovers(); return 'do the card'; } } });
+    assert.ok(during.length >= 2, `the copy and the outbox were there: ${during}`);
+    assert.deepEqual(after, [], 'the abort hook removed them');
   } finally { w.done(); }
 });
 
@@ -239,8 +276,9 @@ test('a session id the Dispatcher never makes; the guard refuses root, another u
 });
 
 test('main: a config that can\'t be read is a FAIL line and exit 1, with every other stage NOT TRIED', async () => {
-  let text = '';
-  const code = await main(['--config', '/nope', '--product', 'p1', '--card', 'C-1'], { print: (t) => { text += t; }, uid: 603, readConfig: () => { throw new Error('ENOENT'); } });
+  let text = ''; const masks = []; const sigs = [];
+  const code = await main(['--config', '/nope', '--product', 'p1', '--card', 'C-1'], { print: (t) => { text += t; }, uid: 603, readConfig: () => { throw new Error('ENOENT'); }, umask: (m) => { masks.push(m); }, say: () => {}, signals: { on: (k) => sigs.push(k), off: (k) => sigs.splice(sigs.indexOf(k), 1) } });
+  assert.deepEqual(masks, [0o077], 'the runner job\'s umask, so check 1 sees a 0700 copy'); assert.deepEqual(sigs, [], 'its signal handlers are taken off');
   assert.equal(code, 1);
   assert.match(text, /^FAIL\s+the worker runner's config is read/m);
   assert.match(text, /NOT READY/);
