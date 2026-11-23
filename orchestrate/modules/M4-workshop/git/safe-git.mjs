@@ -576,8 +576,9 @@ export const MIRROR_READABLE = Object.freeze([Object.freeze(['core.sharedReposit
 /**
  * L1341: makes the mirror's git files readable by all, as MIRROR_READABLE writes them: files a writer left owner-only
  * (before that setting, or under any umask) get read bits, folders read and search bits. Only adds those bits, only on
- * plain files and folders this user owns (never through a link), under HEAD, packed-refs, refs/ and objects/. → { ok,
- * fixed } | { ok: false, reason } (never throws).
+ * plain files and folders this user owns (never through a link), everywhere in the mirror's folder: safe-git reads every
+ * folder there before any git call (linkOutside), so one owner-only folder git itself never needs (the Mini's `logs`,
+ * L1342) still refused every launch. → { ok, fixed } | { ok: false, reason } (never throws).
  */
 export function mirrorReadable(gitDir, { uid = process.getuid?.() } = {}) {
   let fixed = 0;
@@ -591,10 +592,15 @@ export function mirrorReadable(gitDir, { uid = process.getuid?.() } = {}) {
     if (want && (st.mode & want) !== want) {
       try { chmodSync(p, (st.mode & 0o7777) | want); fixed += 1; } catch (e) { if (e?.code !== 'ENOENT') throw e; return; }
     }
-    if (st.isDirectory()) for (const n of readdirSync(p)) visit(join(p, n));
+    if (!st.isDirectory()) return;
+    // A folder git removed since the lstat (a temporary or quarantine folder) is skipped, as a file is (L1342 r1).
+    let names;
+    try { names = readdirSync(p); } catch (e) { if (e?.code === 'ENOENT') return; throw e; }
+    for (const n of names) visit(join(p, n));
   };
   try {
-    for (const n of ['HEAD', 'packed-refs', 'refs', 'objects']) visit(join(gitDir, n));
+    // The folder itself too: safe-git lists it first (L1342 r1).
+    visit(gitDir);
     return { ok: true, fixed };
   } catch (e) { return { ok: false, reason: `the mirror could not be made readable: ${e?.code ?? e?.message ?? e}` }; }
 }
