@@ -54,7 +54,7 @@ const draftDoc = { state: 'draft', ...DOC, done_when: 'tests pass for R-1' };
 const draftCard = (w, id = 'C-1', over = {}) => must(w.t.record.write({ actor: 'owner_command', entity: 'card', id, expectRev: 0, doc: { ...draftDoc, ...over } }), `draft ${id}`);
 // A card put straight in the store as if a given writer made it (a seed, past the writer's checks).
 const stored = (w, id, doc, actor) => w.t.store.transaction((tx) => tx.commit([{ entity: 'card', id, doc }], { actor, kind: 'seed' }));
-const run = (w, over = {}) => withdrawCard({ ctx: w.t.ctx, cardId: 'C-1', reason: REASON, confirm: w.yes, ...over });
+const run = (w, over = {}) => withdrawCard({ ctx: w.t.ctx, cardId: 'C-1', reason: REASON, confirm: w.yes, wait: () => {}, ...over });
 const lastWriter = (w, id) => w.t.record.diary().filter((l) => l.entity === 'card' && l.id === id).at(-1);
 
 test('a ready card the go command made (R-S1-1\'s path) is withdrawn: cancelled with its reason, by owner_command, and the Dispatcher leaves it', async () => {
@@ -85,6 +85,70 @@ test('a draft card the go command made, with no go asked, is withdrawn from draf
   draftCard(w);
   assert.deepEqual(run(w), { ok: true, card: 'C-1', from: 'draft' });
   assert.equal(w.t.record.read('card', 'C-1').doc.state, 'cancelled');
+});
+
+// L1343 audit m1, m2: the owner reads and retypes between the first read and the write.
+const claimDoc = (w) => ({ kind: 'session', host: 'mac-a', session_id: 'S-9', claimed_at: new Date(w.t.clock.t).toISOString() });
+const claimNow = (w) => {
+  const c = w.t.record.read('card', 'C-1');
+  must(w.t.record.write({ actor: 'dispatcher', entity: 'card', id: 'C-1', expectRev: c.rev, doc: { ...c.doc, state: 'claimed', claim: claimDoc(w) }, kind: 'claim' }), 'claim');
+};
+const giveBack = (w) => must(w.t.record.release({ card: 'C-1', session_id: 'S-9', reason: 'launcher: not here' }), 'release');
+
+test('a Dispatcher pass that claims and gives back the card while the owner retypes: the card is read again and withdrawn', async () => {
+  const w = world();
+  await readyCard(w);
+  const r = run(w, { confirm: (a) => { claimNow(w); giveBack(w); return w.yes(a); } });
+  assert.deepEqual(r, { ok: true, card: 'C-1', from: 'ready' });
+  assert.equal(w.t.record.read('card', 'C-1').doc.state, 'cancelled');
+});
+
+test('a card held claimed by a pass when the owner confirms: the command waits until it is given back, then withdraws it', async () => {
+  const w = world();
+  await readyCard(w);
+  let waits = 0;
+  const r = run(w, { confirm: (a) => { claimNow(w); return w.yes(a); }, wait: () => { waits += 1; if (waits === 2) giveBack(w); } });
+  assert.deepEqual(r, { ok: true, card: 'C-1', from: 'ready' });
+  assert.equal(waits, 2);
+  assert.equal(w.t.record.read('card', 'C-1').doc.state, 'cancelled');
+});
+
+test('a card a pass keeps claimed (its session started): refused after the waits, nothing written', async () => {
+  const w = world();
+  await readyCard(w);
+  let waits = 0;
+  const r = run(w, { confirm: (a) => { claimNow(w); return w.yes(a); }, wait: () => { waits += 1; } });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /C-1 is claimed; only a draft or ready card is withdrawn/);
+  assert.ok(waits > 1);
+  assert.equal(w.t.record.read('card', 'C-1').doc.state, 'claimed');
+});
+
+test('a go ask raised for the card while the owner retypes: refused, the card stays as it was', async () => {
+  const src = world();
+  draftCard(src);
+  must(await raiseGo(src.t.ctx, { cardId: 'C-1', rows: ROWS, view: src.view, mainSha: src.M0 }), 'raise');
+  const asks = askStore(src.t.record).asks();
+  assert.equal(asks.length, 1);
+  const w = world();
+  draftCard(w);
+  const r = run(w, { confirm: (a) => { w.t.store.transaction((tx) => tx.commit([{ entity: 'ask', id: asks[0].id, doc: asks[0].doc }], { actor: 'approvals', kind: 'seed' })); return w.yes(a); } });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /your go is still being asked for card C-1/);
+  assert.equal(w.t.record.read('card', 'C-1').doc.state, 'draft');
+});
+
+test('a card changed after the owner was shown it: refused, nothing written', () => {
+  const w = world();
+  draftCard(w);
+  const r = run(w, { confirm: (a) => {
+    const c = w.t.record.read('card', 'C-1');
+    stored(w, 'C-1', { ...c.doc, what: 'something else' }, 'owner_command');
+    return w.yes(a);
+  } });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /C-1 changed after you were shown it/);
+  assert.equal(w.t.record.read('card', 'C-1').doc.state, 'draft');
 });
 
 test('plants: refused by the command with nothing written or shown', async () => {

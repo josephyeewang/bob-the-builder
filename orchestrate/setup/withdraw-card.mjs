@@ -39,6 +39,11 @@ export const WITHDRAW_WORDS = Object.freeze({ thing: 'withdrawal', doing: 'withd
 export const WITHDRAW_FROM = Object.freeze(['draft', 'ready']);
 const fail = (reason) => ({ ok: false, reason });
 const LIVE_ASK = Object.freeze(['open', 'pushed']);
+const WRITE_TRIES = 20;
+// A Dispatcher pass may hold a ready card as claimed for a moment while it tries a launch, then gives it back as it
+// was (M9 endClaim). The command waits that out rather than refusing (L1343 audit m1).
+const CLAIM_WAIT_MS = 3000;
+const sleepMs = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
 /** What the owner reads before retyping the id. */
 export function withdrawText({ product, cardId, card, reason }) {
@@ -55,12 +60,44 @@ export function withdrawText({ product, cardId, card, reason }) {
  * Everything after the process checks. ctx is an M2 context ({ record, rules, product }); confirm({ cardId, text,
  * words }) → { ok } (ttyConfirm in production). → { ok: true, card, from } | { ok: false, reason }
  */
-export function withdrawCard({ ctx, cardId, reason, confirm }) {
+export function withdrawCard({ ctx, cardId, reason, confirm, wait = sleepMs }) {
   const product = ctx.product;
   if (ctx.rules.flag(TEST_PRODUCT_KEY, { product }) !== true) return fail(notTestProductText(product));
   if (typeof cardId !== 'string' || !CARD_ID.test(cardId)) return fail('the card id must be one plain id (letters, digits, dots, dashes and underscores)');
   const why = cancelReasonProblem(reason);
   if (why) return fail(why);
+  const first = settled(ctx, cardId, product, wait);
+  if (!first.ok) return first;
+  const { card } = first;
+  const said = confirm({ cardId, text: withdrawText({ product, cardId, card, reason }), words: WITHDRAW_WORDS });
+  if (!said?.ok) return fail(said?.reason ?? 'the withdrawal was not confirmed');
+  // The owner reads and retypes between the first read and the write, and each Dispatcher pass claims and releases a
+  // ready card (raising its rev), so the card is read again after the retype: written only if it still says what the
+  // owner was shown, and no go ask for it opened meanwhile (L1343 audit m1, m2). A pass landing between this read and
+  // the write is tried again, waiting while a pass holds the card claimed.
+  let last = 'the card kept changing';
+  for (let n = 0; n < WRITE_TRIES; n += 1) {
+    const now = settled(ctx, cardId, product, wait);
+    if (!now.ok) return now;
+    if (JSON.stringify(now.card) !== JSON.stringify(card)) return fail(`card ${cardId} changed after you were shown it; nothing was withdrawn, run the command again`);
+    const w = ctx.record.write({ actor: 'owner_command', entity: 'card', id: cardId, expectRev: now.cur.rev, doc: { ...now.card, state: 'cancelled', cancel_reason: reason } });
+    if (w.ok) return { ok: true, card: cardId, from: card.state };
+    last = w.reason;
+  }
+  return fail(`the Record refused the withdrawal: ${last}; the Dispatcher may have been working on the card at that moment, so run the command again`);
+}
+
+/** cardNow, waiting while a Dispatcher pass holds the card claimed (it gives a refused launch back as it was). */
+function settled(ctx, cardId, product, wait) {
+  for (let n = 0; ; n += 1) {
+    const r = cardNow(ctx, cardId, product);
+    if (r.ok || n >= WRITE_TRIES || ctx.record.read('card', cardId)?.doc?.state !== 'claimed') return r;
+    wait(CLAIM_WAIT_MS);
+  }
+}
+
+/** The card as it is now, with every check that it may be withdrawn. → { ok: true, cur, card } | { ok: false, reason } */
+function cardNow(ctx, cardId, product) {
   const cur = ctx.record.read('card', cardId);
   if (!cur) return fail(`the Record has no card ${cardId}`);
   if (cur.corrupt || !cur.doc) return fail(unreadableCardText(cardId));
@@ -73,11 +110,7 @@ export function withdrawCard({ ctx, cardId, reason, confirm }) {
   if (!WITHDRAW_FROM.includes(card.state)) return fail(`card ${cardId} is ${card.state}; only a draft or ready card is withdrawn here (no session may hold it)`);
   const live = askStore(ctx.record).asks().filter((a) => a.doc.card === cardId && activeKind(a.doc.kind)?.go === true && LIVE_ASK.includes(a.doc.state));
   if (live.length) return fail(`your go is still being asked for card ${cardId} (ask ${live.map((a) => a.id).join(', ')}, ${live[0].doc.state}); M2 has no way for this command to withdraw an ask, so answer it or let it expire, then withdraw the card`);
-  const said = confirm({ cardId, text: withdrawText({ product, cardId, card, reason }), words: WITHDRAW_WORDS });
-  if (!said?.ok) return fail(said?.reason ?? 'the withdrawal was not confirmed');
-  const w = ctx.record.write({ actor: 'owner_command', entity: 'card', id: cardId, expectRev: cur.rev, doc: { ...card, state: 'cancelled', cancel_reason: reason } });
-  if (!w.ok) return fail(`the Record refused the withdrawal: ${w.reason}`);
-  return { ok: true, card: cardId, from: card.state };
+  return { ok: true, cur, card };
 }
 
 /** The command. Ports are for a test; production passes none. → exit code. */
