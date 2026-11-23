@@ -14,7 +14,7 @@ import * as noVerify from './no-verify-block.mjs';
 import * as prodGuard from './production-write-guard.mjs';
 import * as secret from './secret-file-block.mjs';
 import * as plain from './plain-files.mjs';
-import { fold } from './lib.mjs';
+import { fold, wordRe } from './lib.mjs';
 import { fold as pushFold } from '../git/push-refusals.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
 
@@ -219,14 +219,16 @@ test('L41 G1: a [^x] or [!x] set matches as the shell does, in both guards', () 
   const w = world();
   assert.equal(globRe(dot('e[^Q]v')).test(dot('env')), true);
   assert.equal(globRe(dot('e[!Q]v')).test(dot('env')), true);
-  assert.equal(globRe('[!a]').test('a'), false);
+  // A letter in a "not" set is left out since L1344 r2 (the lowered case hides `[!A]`); the "not" is kept for the rest.
+  assert.equal(globRe('[!.]').test('.'), false);
+  assert.equal(globRe('[!a]').test('a'), true);
   assert.equal(globRe('[]a]').test(']'), true, 'a ] first in the set is a plain ]');
   assert.equal(globRe('a[b').test('a[b'), true, 'an unclosed [ is a plain [');
   const caret = `${dot('e[^Q]v')}.production`;
   for (const c of [`cat ${caret}`, `echo x > ${caret}`, `rm -f ${caret}`, `cd .. && cat work/${caret}`, `cat ${dot('e[!Q]v')}.production`]) {
     blocked(prodGuard.decide(bash(c, w.work), w.args), c);
   }
-  passed(prodGuard.decide(bash(`cat ${dot('e[^n]v')}.production`, w.work), w.args), 'control: [^n] is not the n');
+  passed(prodGuard.decide(bash(`cat ${dot('env[^.]production')}`, w.work), w.args), 'control: [^.] excludes the . not the n');
   for (const c of [`cat ${dot('e[^Q]v')}`, `cat ${dot('[^a]sh')}/config`]) blocked(secret.decide(bash(c, w.work), w.args), c);
   blocked(secret.decide({ tool_name: 'Glob', tool_input: { pattern: `**/${dot('e[^Q]v')}` }, cwd: w.work }, w.args), 'Glob [^Q]');
 });
@@ -247,6 +249,13 @@ test('L41 (a): [ ] in a shell word is read as a pattern: route folders pass, a r
   for (const c of ['cat app/[id]/page.tsx', "ls 'app/[slug]/(group)'", 'cat app/[...all]/page.tsx']) passed(secret.decide(bash(c, w.work), w.args), c);
   for (const c of [`cat ${dot('[d-f]nv')}`, `cat ${dot('[a-z]nv')}.local`, `cat ${dot('[s]sh')}/config`]) blocked(secret.decide(bash(c, w.work), w.args), c);
   passed(secret.decide({ tool_name: 'Glob', tool_input: { pattern: 'app/[id]/**/*.tsx' }, cwd: w.work }, w.args), 'a route-folder search');
+  // L1344 r1: a range whose ends differ in letter case reads backwards once the case is lowered; it still blocks.
+  for (const c of [`cat ${dot('e[Z-n]v')}.local`, `cat ${dot('[Z-f]nv')}`]) blocked(secret.decide(bash(c, w.work), w.args), c);
+  for (const g of [`${dot('e[Z-n]v')}.local`, `**/${dot('e[Z-n]v')}.local`]) blocked(secret.decide({ tool_name: 'Glob', tool_input: { pattern: g }, cwd: w.work }, w.args), g);
+  for (const c of [`cat ${dot('[B-a]NV')}`, 'cat [B-a]D_RSA', `cat ${dot('git[z\\-a]credentials')}`, `cat ${dot('[V-v]nv')}`, 'cat id[A-a]rsa']) blocked(secret.decide(bash(c, w.work), w.args), c);
+  for (const g of [dot('[B-a]NV'), '**/[B-a]D_RSA', dot('[B-a]nv')]) blocked(secret.decide({ tool_name: 'Glob', tool_input: { pattern: g }, cwd: w.work }, w.args), g);
+  // A list in code text with a backwards range, naming no secret, passes.
+  passed(secret.decide(bash('ls [daily-digest.yml,nightly.yml]:', w.work), w.args), 'a backwards range naming no secret');
 });
 
 // Lead, deny by default for searches: a wildcard folder part, or a Grep (always every folder below), from a folder
@@ -387,6 +396,45 @@ test('L41 confirm: a letter class fails closed, a zsh group reads whole, a trail
   assert.throws(() => globRe('[[=e=]]'), /letter class/);
   assert.throws(() => globRe('[[.a.]]'), /letter class/);
   assert.equal(globRe('[a:]').test(':'), true, 'a plain : in a set is a letter');
+  // L1344: a backwards range no longer throws; it reads wider than the shell's, never narrower (L1344 r1: callers lower
+  // the letter case first, so `[Z-a]`, which zsh matches with `a`, arrives as `[z-a]`).
+  assert.equal(globRe('[z-a]x').test('ax'), true, 'a set with a backwards range is any one character');
+  assert.equal(globRe('[z-am]x').test('mx'), true);
+  assert.equal(globRe('[z-a]x').test('ab'), false, 'the rest of the word still has to match');
+  assert.equal(globRe('[!z-a]x').test('qx'), true, 'a "not" set with no member left is any one character');
+  assert.equal(globRe('[!z-a.]x').test('.x'), false, 'a "not" set keeps its members that are not letters');
+  // L1344 r2: callers lower the letter case first, so a set is read wider than the lowered text says.
+  assert.equal(globRe('[!n]', 'i').test('n'), true, '`[!N]` lowered: the shell matched `n`');
+  assert.equal(globRe('[!z-an]x', 'i').test('nx'), true);
+  assert.equal(globRe('[b-z]', 'i').test('a'), true, '`[B-z]` lowered: the shell matched `a`');
+  assert.equal(globRe('[b-z]', 'i').test('_'), true);
+  assert.equal(globRe('[0-9]').test('a'), false, 'a range between two digits is read as written');
+  assert.equal(globRe('[_-n]env', 'i').test('.env'), true, 'a range from a sign: bash 3.2 orders signs by language, so `.` may be in it');
+  assert.equal(globRe('[!0-9]').test('a'), true);
+  // L1344 r3: a range between letters is every letter and the signs between, with or without the case flag.
+  assert.equal(globRe('[b-a]').test('e'), true, '`[B-a]` lowered, read without the flag (the secret guard)');
+  assert.equal(globRe('[e-e]').test('a'), true, '`[E-e]` lowered to one letter: the shell matched `a` to `e` and `_`');
+  assert.equal(globRe('[e-e]').test('_'), true);
+  assert.equal(globRe('[e]').test('a'), false, 'a letter on its own is itself');
+  assert.equal(globRe('[9-0]').test('5'), false, 'a backwards range of digits holds only its ends and `-`');
+  assert.equal(globRe('[9-0]').test('-'), true, 'the shell\'s `[9\\-0]` arrives as `[9-0]` (L1344 r4)');
+  assert.equal(globRe('[z-a]').test('-'), true);
+  assert.equal(globRe('[a-c]').test('-'), true);
+  assert.equal(globRe('[!0-9]').test('5'), false);
+  assert.equal(globRe('.e[!]v').test('.env'), true, 'an unclosed `[!]` is any one character, as zsh reads it');
+  assert.equal(globRe('.e[!]v').test('.e[!]v'), true, '... and plain text, as bash reads it (L1344 r7)');
+  assert.equal(globRe('.e[^]v').test('.env'), true);
+  assert.equal(globRe('[^]x]').test(']'), false, '`[^]x]` is "not ] or x", in every shell');
+  assert.equal(globRe('[^]x]').test('a'), true);
+  assert.equal(globRe('[!]]').test(']'), false);
+  // L1344 r8: wordRe matches when either reading does: the lowered one keeps a full-width `］` a plain character.
+  assert.equal(wordRe('.e[n\uFF3Dx]v').test('.env'), true, 'the lowered reading: one set holding n, ］ and x');
+  assert.equal(wordRe('.E[N]V').test('.env'), true);
+  assert.equal(wordRe('.e[q]v').test('.env'), false);
+  assert.equal(globRe('[a-]').test('-'), true, 'a - last is a plain -');
+  assert.equal(globRe('[-a]').test('-'), true, 'a - first is a plain -');
+  assert.equal(globRe('[a-c]').test('b'), true);
+  assert.equal(globRe('[daily-digest.yml,nightly.yml]:').test('.env.local'), false, 'the live word cannot name a settings file');
   for (const c of [`cat ${w.work}/${dot('[[:alpha:]]nv.production')}`, `cat ${w.work}/${dot('e(n)v.production')}`, `cat ${w.work}/${dot('(x|q)nv.production')}`]) {
     blocked(prodGuard.decide(bash(c, w.outbox), w.args), `production: ${c}`);
     blocked(secret.decide(bash(c, w.outbox), w.args), `secret: ${c}`);

@@ -10,7 +10,7 @@
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { readdirSync, statSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
-import { isMain, runHook, MACHINE_WIDE_WAY_OUT, MANAGED_FILE, block, pass, toolPaths, shellCommands, shellWords, bothWords, programOf, landingPath, realFolder, inside, joinLines, unreadable, heredocs, expandBraces, fold, globRe } from './lib.mjs';
+import { isMain, runHook, MACHINE_WIDE_WAY_OUT, MANAGED_FILE, block, pass, toolPaths, shellCommands, shellWords, bothWords, programOf, landingPath, realFolder, inside, joinLines, unreadable, heredocs, expandBraces, fold, globRe, wordRe } from './lib.mjs';
 import { readHookSnapshot, readSnapshot } from './snapshot.mjs';
 
 // ---- whole-folder writes (LEAD-CALLS L41 G2: deny by default) ----
@@ -311,7 +311,7 @@ function judge(t, abs, deletes, protectedFiles, shielded, how = 'written') {
   const front = fixedFront(abs);
   let pp = null;
   if (first >= 0) {
-    try { pp = parts.slice(first).filter(Boolean).map((x) => (x === '**' ? '**' : globRe(fold(x), 'i'))); } catch { return `"${t}" holds a pattern the guard can't read`; }
+    try { pp = parts.slice(first).filter(Boolean).map((x) => (x === '**' ? '**' : wordRe(x))); } catch { return `"${t}" holds a pattern the guard can't read`; }
   }
   const folders = [front, realFolder(front) ?? front].map(fold);
   const reached = (x) => folders.some((d) => (pp ? x !== d && inside(x, d) && matchesFront(pp, x.slice(d.length).split(sep).filter(Boolean)) : inside(x, d)));
@@ -575,12 +575,40 @@ export function decide(input, args) {
     const at = [...wildRaw.matchAll(new RegExp(w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'))];
     return at.length > 0 && at.every((m) => m.index + w.length <= wildEnd && /(^|[\s;&|(])$/.test(wildRaw.slice(0, m.index)) && /^($|[\s;&|)])/.test(wildRaw.slice(m.index + w.length)));
   };
+  // L1344: a settings file's name as an item of a list in code text (`[a,.prod-settings]:`, `[".prod-settings",`). On
+  // each side of the name, past any quotes, stands a bracket or the word's start or end, or, past quotes and spaces, a
+  // comma; and on at least one side a real bracket (a list's words reach the guard one by one; L1344 r7: a word's edge
+  // with a comma on the other side is prose, `-m ".prod-settings, x: stop [L12]"`). The word,
+  // read as a pattern, does not name the file; before L1344 such a list was refused only when the reader threw on it.
+  // Prose is left to the other rules, as before: a quoted name in a message holding a bracket elsewhere
+  // (`-m "Ignore '.prod-settings' [L12]"`) passes (L1344 r3, r4, r6: blocking prose machine-wide stopped commit messages
+  // on the whole Mac). A name right against a bracket in a message (`[.prod-settings]`) is read as a list, and blocks.
+  const boundedName = (w) => {
+    const x = fold(w);
+    if (!/[[\]]/.test(x)) return false;
+    const side = (i, step) => {
+      while (x[i] !== undefined && /['"]/.test(x[i])) i += step;
+      if (x[i] === undefined) return 'edge';
+      if (x[i] === '[' || x[i] === ']') return 'bracket';
+      while (x[i] !== undefined && /['"\s]/.test(x[i])) i += step;
+      return x[i] === ',' ? 'comma' : null;
+    };
+    return envFiles.some((f) => {
+      const n = basename(f);
+      for (let i = x.indexOf(n); n && i >= 0; i = x.indexOf(n, i + 1)) {
+        const a = side(i - 1, -1); const b = side(i + n.length, 1);
+        if (a && b && (a === 'bracket' || b === 'bracket')) return true;
+      }
+      return false;
+    });
+  };
   const namesEnv = (w) => {
+    if (boundedName(w)) return true;
     const name = basename(w);
     // A name of stars alone (`dist/*`) names no file in particular (L46; round 3 MAT-14).
     if (!name || /^\*+$/.test(name)) return false;
     let re = null;
-    try { re = /[*?[]/.test(name) ? globRe(fold(name), 'i') : null; } catch { return true; }
+    try { re = /[*?[]/.test(name) ? wordRe(name) : null; } catch { return true; }
     if (!re) return envFiles.some((f) => basename(f) === fold(name));
     const dir = dirname(w);
     if (wildFolder === null || /[*?[~$]/.test(dir) || !expandedHere(w)) return envFiles.some((f) => re.test(basename(f)));

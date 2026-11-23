@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync, mkdirSync, chmodSync, linkSync, symlinkSync, realpathSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, basename } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { parseArgs, runHook, MANAGED_FILE, MACHINE_WIDE_WAY_OUT, shellCommands, unreadable } from './lib.mjs';
@@ -176,6 +176,82 @@ test('#487 r2 M1: in the machine-wide form, a wrapper, a string handed to a shel
   for (const c of ['grep vercel x', 'which vercel', 'cat vercel.json', 'git commit -m "fix vercel config"', 'ls vercel-notes',
     'timeout 300 npm test', 'find . -name x -exec rm {} \\;', 'ls | xargs wc -l', 'python3 -c "print(1)"', 'python3 -c "print(a[0]*2)"', 'echo hi | bash', 'sudo -u me ls']) {
     assert.deepEqual(bash(c), { block: false }, c);
+  }
+});
+
+// L1344 (seen live): code text holding a list such as `["daily-digest.yml", "nightly.yml"]` gave the word
+// `[daily-digest.yml,nightly.yml]:`, whose set holds the backwards range `y-d`. The pattern reader threw on it, and a
+// throw is read as "names a production settings file", so the command was blocked. The shell matches nothing with a
+// backwards range; the reader now reads such a set wider than any shell does, and real settings-file names still block.
+test('L1344: a set with a backwards range is read as the shell reads it: code text passes, a real settings-file name still blocks', () => {
+  const p = realpathSync(tempDir('m4-backwards-range-'));
+  const { d, f } = copyAt(makeSnapshot({ production: { env_files: [join(p, '.env.local'), join(p, '.env.production'), join(p, '.prod-settings')], programs: ['vercel'], hosts: ['prod.example.com'] }, secrets: { paths: [] } }));
+  for (const args of [wide(f), { snapshot: f, maxAgeMs: Infinity }]) {
+    const form = args.machineWide ? 'machine-wide' : 'role';
+    const bash = (command) => decide({ tool_name: 'Bash', cwd: d, tool_input: { command } }, args);
+    // Each blocked word with a backwards range used to be refused; none names a settings file.
+    for (const c of ['ls [daily-digest.yml,nightly.yml]:', 'ls [nightly.yml]:', 'ls [z-a]x', 'ls [!z-a]x']) {
+      assert.deepEqual(bash(c), { block: false }, `${form}: ${c}`);
+    }
+    // Real names still block, with a backwards range in the same word or the same command.
+    // A pattern is judged in the folder it is read in (#487 r2 m1), so those name the settings files' folder.
+    for (const c of ['cat .env.local', 'cp .env.production /tmp/x', `cat ${p}/.e[z-an]v.local`, 'cat [z-a]x .env.local', `cat ${p}/.env[y-d.]local`]) {
+      const r = bash(c);
+      assert.equal(r.block, true, `${form}: ${c}`); assert.match(r.reason, /production settings file/, `${form}: ${c}`);
+    }
+  }
+  // L1344 r1: a range whose ends differ in letter case is forward as written (`[Z-a]` holds `a`; zsh matches the file
+  // with it), though it reads backwards once the case is lowered. It still blocks, in both forms.
+  for (const args of [wide(f), { snapshot: f, maxAgeMs: Infinity }]) {
+    for (const c of [`cat ${p}/.env.loc[Z-a]l`, `cat ${p}/.e[Z-n]v.local`, `cat ${p}/.env.pro[Z-e]uction`,
+      // L1344 r2: a "not" set or a range from a capital is narrowed by the lowered case; each matches the file in zsh.
+      `cat ${p}/.e[!z-aN]v.production`, `cat ${p}/.e[!N]v.production`, `cat ${p}/.env.loc[^A]l`, `cat ${p}/.env.loc[B-z]l`,
+      `cat ${p}/.env.pro[E-z]uction`, `cat ${p}/.e[!]v.production`, `cat ${p}/.e[\\!n]v.local`,
+      // L1344 r3: a range between one letter's two cases, and a full-width `］` that lowers to `]`.
+      `cat ${p}/.env.lo[D-d]al`, `cat ${p}/.env.pro[E-e]uction`, `cat ${p}/.e[n\uFF3Dx]v.local`,
+      // L1344 r4: a quoted or escaped `-` in a set reaches the guard as a range dash.
+      `cat ${p}/.prod[9\\-0]settings`, `cat ${p}/.prod[z\\-a]settings`, `cat ${p}/.prod[z"-"a]settings`, `cat ${p}/.prod[b'-'a]settings`,
+      `cat ${p}/.prod[a\\-c]settings`, `rm -f ${p}/.prod[9\\-0]settings`,
+      // L1344 r6 (found on origin/main too): a set end, or a "not" set's letter, that folds to plain ASCII.
+      `cat ${p}/.env.loca[0-\uFF19]`, `cat ${p}/.env.loca[0-\u00B2]`, `cat ${p}/.env[!\uFF0E]local`, `cat ${p}/.env.loca[!\uFF10-\uFF19]`]) {
+      const r = decide({ tool_name: 'Bash', cwd: d, tool_input: { command: c } }, args);
+      assert.equal(r.block, true, `${args.machineWide ? 'machine-wide' : 'role'}: ${c}`);
+    }
+  }
+  // The role form also refuses removing the folder that holds a settings file, named with such a range.
+  const del = `rm -rf ${dirname(p)}/[Z-m]${basename(p).slice(1)}`;
+  assert.equal(decide({ tool_name: 'Bash', cwd: d, tool_input: { command: del } }, { snapshot: f, maxAgeMs: Infinity }).block, true, del);
+  // The live shape, in the machine-wide form (the role form refuses code handed to an interpreter for its own reasons).
+  const bash = (command) => decide({ tool_name: 'Bash', cwd: d, tool_input: { command } }, wide(f));
+  for (const c of [HD('python3 -', 'for wf in ["daily-digest.yml", "nightly.yml"]:\n    print(wf)'), HD('python3 -', 'for wf in ["nightly.yml"]:\n    print(wf)'),
+    // The same code given on the line (blocked before L1344 in this form).
+    'python3 -c \'for wf in ["daily-digest.yml", "nightly.yml"]: print(wf)\'', 'echo [daily-digest.yml,nightly.yml]:',
+    HD('cat >> x.test.ts', "import { a } from './a';\nconst xs = ['y-d', 'z-a'];\nexpect([xs[0], 'm-b']).toEqual(xs);"),
+    // A settings file's name only as part of a longer name is not that file.
+    HD('cat >> x.test.ts', "const k = ['my.env.local.bak', 'x.env.local'];\nprocess.env.local_y = k[0];"),
+    // Prose naming a settings file, in a message (L1344 r3: passed before L1344, and still does).
+    'git commit -m "stop reading .env.local in tests"', 'git commit -m "fix: .env.production, not prod"',
+    "git commit -m 'stop reading `.env.local` in tests'", 'git commit -m "fix: read (.env.local) only once"', `git commit -m "don't touch '.env.local'"`,
+    // L1344 r5: a message holding a letter the lowering changes, and a `?`, `*` or `[`, is read as before.
+    'git commit -m "Why does it stop\u2026? Fixed"', 'git commit -m "Is the na\u00efve read right?"', 'git commit -m "Docs: \u2122 mark?"',
+    'gh pr create --title x --body "- **Fix**: the read stopped\u2026 now"', 'ls ./notes-caf\u00e9*',
+    // L1344 r6: a look-alike that lowers to a pattern sign (‼, ！, ？, ／) in a message, and a quoted settings name in a
+    // message holding a bracket elsewhere.
+    'git commit -m "Shipped\u203C see [#12]"', 'git commit -m "\u4FEE\u590D\uFF01 [#12]"', 'git commit -m "a\uFF0Fb *note*"',
+    `git commit -m "Ignore '.env.local' in git [L12]"`, `git commit -m 'Stop reading ".env.local" [L1344]'`,
+    `gh pr create --title x --body "Keeps '.env.local' out [x]"`, `git commit -m "don't touch '.env.local' [L12]"`, 'git commit -m "Fix: x,y,.env.local [z]"',
+    // L1344 r7: `[!]` / `[^]` text that a later `]` closes, or in a message; a name at a message's edge beside a comma.
+    "sed -E 's/[^]]+//' notes.md", "grep -E '[^]]' file.txt", "grep '[!]' notes.md", 'echo "[!]"', 'git commit -m "Fix the [!] warning badge"',
+    'git commit -m "Regex [^] matches nothing in JS"', 'git commit -m "[L5] untrack .env.production,.env.local"',
+    'git commit -m ".env.local, .env.production: stop reading them [L12]"',
+    // L1344 r8: a settings name only as part of a longer name in a bracket.
+    'git commit -m "Add [.env.local.example] to the docs"']) {
+    assert.deepEqual(bash(c), { block: false }, c);
+  }
+  // A list in code that names a settings file blocks, with or without a backwards range in it (before L1344 only with).
+  for (const c of ['F=.env.local; cat "$F"', 'bash -c "cat .env*"', HD('python3 -', 'for f in ["z-a", ".env.local"]:\n    print(open(f).read())'),
+    HD('python3 -', 'for f in ["a", ".env.local"]:\n    print(open(f).read())')]) {
+    assert.match(bash(c).reason ?? '', /production settings file/, c);
   }
 });
 
