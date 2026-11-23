@@ -531,7 +531,10 @@ export function startPort(c, deps = {}) {
     others = [...new Set(others)];
     const r = p.render;
     const settingsFor = (at, box, deny, phase = {}) => walled({ kind, workerRunner: c.workerRunner, profile, product: r.product, rulesHosts: r.rulesHosts, productionFiles: r.productionFiles, proposalOutboxes: r.proposalOutboxes, ...phase,
-      paths: { ...r.paths, copy: at, outbox: box, deny: { ...(r.paths.deny ?? {}), otherCopies: [...(r.paths.deny?.otherCopies ?? []), ...deny] } } });
+      // The proposals wall (proposal-wall.mjs, L549): the rules' folders are the one list, passed as both the folders the
+      // render must find denied and the deny entries themselves; setup's config names them once, as proposalOutboxes (L1345).
+      paths: { ...r.paths, copy: at, outbox: box, deny: { ...(r.paths.deny ?? {}), otherCopies: [...(r.paths.deny?.otherCopies ?? []), ...deny],
+        proposals: [...new Set([...(r.paths.deny?.proposals ?? []), ...(Array.isArray(r.proposalOutboxes) ? r.proposalOutboxes : [])])] } } });
     const w = settingsFor(copy, outbox, others);
     if (!w?.ok) return undo(w?.reason ?? 'not walled: no answer');
     try { fs.writeNew(settingsFile, `${JSON.stringify(w.settings, null, 2)}\n`); ours.push(settingsFile); } catch (e) { return undo(`the settings file can't be written (${e?.code ?? e?.message})`); }
