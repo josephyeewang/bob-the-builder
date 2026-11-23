@@ -2177,11 +2177,14 @@ const D = ['dispatcher'];
 const A = ['approvals'];
 const G = ['merge_gate'];
 const W = ['workshop'];
+// L1343: the owner's withdraw command (setup/withdraw-card.mjs) cancels a card it made, only before any session holds it:
+// from draft or ready, nowhere else. The writer adds the rest (its own card, Tier 2, the test product, a reason).
+const AO = ['approvals', 'owner_command'];
 
 const MOVES = Object.freeze({
   card: freeze({
-    draft: { ready: D, cancelled: A },
-    ready: { claimed: D, waiting: D, cancelled: A },
+    draft: { ready: D, cancelled: AO },
+    ready: { claimed: D, waiting: D, cancelled: AO },
     // claimed → ready: the holder's release, a lapse or a dead owner's claim broken (always with the claim cleared).
     claimed: { running: D, ready: D, cancelled: A },
     // running → in_review: a worker's or a script's hand-in through its own outbox (L838), or the Dispatcher for a tab's
@@ -2283,6 +2286,8 @@ Object.defineProperties(__bob_e, {
   factFrom: { get: () => factFrom, enumerable: true },
   CARD_CREATORS: { get: () => CARD_CREATORS, enumerable: true },
   TEST_PRODUCT_KEY: { get: () => TEST_PRODUCT_KEY, enumerable: true },
+  CANCEL_REASON_MAX: { get: () => CANCEL_REASON_MAX, enumerable: true },
+  cancelReasonProblem: { get: () => cancelReasonProblem, enumerable: true },
   WRITERS: { get: () => WRITERS, enumerable: true },
   actorName: { get: () => actorName, enumerable: true },
   fieldsAllowed: { get: () => fieldsAllowed, enumerable: true },
@@ -2404,6 +2409,18 @@ const CARD_CREATORS = Object.freeze({
 // policy.mjs declares it; the writer and setup/go-card.mjs read it under this one name.
 const TEST_PRODUCT_KEY = 'product.test_product';
 
+// L1343: the reason an owner's withdraw command gives (cancel_reason): one plain line, so the diary and any later reader
+// show it as written. → null, or why not. The writer and setup/withdraw-card.mjs ask this one rule.
+const CANCEL_REASON_MAX = 300;
+function cancelReasonProblem(v) {
+  if (typeof v !== 'string' || !v.trim()) return 'a withdrawn card needs a reason (cancel_reason)';
+  if (v !== v.trim()) return 'the reason starts or ends with a space';
+  if (v.length > CANCEL_REASON_MAX) return `the reason is over ${CANCEL_REASON_MAX} characters`;
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(v)) return 'the reason must be one plain line (no line breaks or control characters)';
+  return null;
+}
+
 const f = (...a) => Object.freeze(a.flat());
 const createOnly = (fields = '*') => Object.freeze({ create: fields });
 const ANY = Object.freeze({ create: '*', update: '*' });
@@ -2436,10 +2453,14 @@ const WRITERS = Object.freeze({
       draftKinds: f('ordinary'),
       kinds: CARD_CREATORS.dispatcher,
     }),
-    // L1100: creates a Tier-2 card and never changes one (no update, no draft grant). No plan_sha256 or main_commit (Tier
-    // 1 only), no depends_on, merge request or needs_joe: the thin first-run card the owner's go is given on.
+    // L1100: creates a Tier-2 card. No plan_sha256 or main_commit (Tier 1 only), no depends_on, merge request or
+    // needs_joe: the thin first-run card the owner's go is given on. L1343: its one change is a withdrawal, of a card it
+    // made (own: the guard checks the card's first diary line), setting only cancel_reason; the move (draft or ready →
+    // cancelled, moves.mjs) and the rest (Tier 2, the test product, a plain reason) are the writer's.
     owner_command: Object.freeze({
       create: f('state', 'product', 'module', 'lane', 'kind', 'what', 'files', 'done_when', 'tier', 'brief', 'desired'),
+      update: f('cancel_reason'),
+      own: true,
       kinds: CARD_CREATORS.owner_command,
     }),
     worker: Object.freeze({ update: f('summary', 'report_ref') }),
@@ -2922,7 +2943,8 @@ const outboxKind = outboxKindOf;
 // Plain-script actors write under their own name; AI roles only through applyOutbox, as `<role>:<sessionId>`.
 // `joe` writes nothing in 0b (the owner acts through `approvals`); it stays a name so old diary lines still parse.
 // `owner_command` is the owner's own command on the Mac (setup/go-card.mjs, L1100): it creates one Tier-2 ordinary card
-// on the test product and nothing else (M9 permissions CARD_CREATORS and writer checkNewCard hold it to that).
+// on the test product (M9 permissions CARD_CREATORS and writer checkNewCard hold it to that), and (setup/withdraw-card.mjs,
+// L1343) withdraws one it made, draft or ready → cancelled with a reason, and nothing else (moves.mjs, writer checkCardUpdate).
 const SCRIPT_ACTORS = Object.freeze(['dispatcher', 'workshop', 'merge_gate', 'approvals', 'sensors', 'ledger',
   'live_check', 'joe', 'owner_command']);
 const AI_ROLES = Object.freeze(['lead', 'worker', 'reviewer', 'auditor', 'incident', 'scout', 'writer',

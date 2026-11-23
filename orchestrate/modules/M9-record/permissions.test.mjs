@@ -79,7 +79,9 @@ test('update: every listed field passes the field check for its actor and is ref
         if (clearing) doc.needs_joe = true;
         // Only a fact's or handoff's creator may update it (L118 M1), so those are seeded as the actor that updates.
         const owned = entity === 'fact' || entity === 'handoff';
-        if (owned) env.store.transaction((tx) => tx.commit([{ entity, id, doc }], { actor, kind: 'seed' }));
+        // The owner command changes only a card it made (L1343), so its card is seeded as its own: the field gate is
+        // what is under test here, not the `own` check before it.
+        if (owned || (entity === 'card' && actor === 'owner_command')) env.store.transaction((tx) => tx.commit([{ entity, id, doc }], { actor, kind: 'seed' }));
         else seed(env, entity, id, doc);
         const cur = env.record.read(entity, id);
         const r = env.record.write({ actor, entity, id, expectRev: cur.rev, doc: { ...cur.doc, [field]: clearing ? false : value(field) } });

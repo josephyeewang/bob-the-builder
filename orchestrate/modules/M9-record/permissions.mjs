@@ -114,6 +114,18 @@ export const CARD_CREATORS = Object.freeze({
 // policy.mjs declares it; the writer and setup/go-card.mjs read it under this one name.
 export const TEST_PRODUCT_KEY = 'product.test_product';
 
+// L1343: the reason an owner's withdraw command gives (cancel_reason): one plain line, so the diary and any later reader
+// show it as written. → null, or why not. The writer and setup/withdraw-card.mjs ask this one rule.
+export const CANCEL_REASON_MAX = 300;
+export function cancelReasonProblem(v) {
+  if (typeof v !== 'string' || !v.trim()) return 'a withdrawn card needs a reason (cancel_reason)';
+  if (v !== v.trim()) return 'the reason starts or ends with a space';
+  if (v.length > CANCEL_REASON_MAX) return `the reason is over ${CANCEL_REASON_MAX} characters`;
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(v)) return 'the reason must be one plain line (no line breaks or control characters)';
+  return null;
+}
+
 const f = (...a) => Object.freeze(a.flat());
 const createOnly = (fields = '*') => Object.freeze({ create: fields });
 const ANY = Object.freeze({ create: '*', update: '*' });
@@ -146,10 +158,14 @@ export const WRITERS = Object.freeze({
       draftKinds: f('ordinary'),
       kinds: CARD_CREATORS.dispatcher,
     }),
-    // L1100: creates a Tier-2 card and never changes one (no update, no draft grant). No plan_sha256 or main_commit (Tier
-    // 1 only), no depends_on, merge request or needs_joe: the thin first-run card the owner's go is given on.
+    // L1100: creates a Tier-2 card. No plan_sha256 or main_commit (Tier 1 only), no depends_on, merge request or
+    // needs_joe: the thin first-run card the owner's go is given on. L1343: its one change is a withdrawal, of a card it
+    // made (own: the guard checks the card's first diary line), setting only cancel_reason; the move (draft or ready →
+    // cancelled, moves.mjs) and the rest (Tier 2, the test product, a plain reason) are the writer's.
     owner_command: Object.freeze({
       create: f('state', 'product', 'module', 'lane', 'kind', 'what', 'files', 'done_when', 'tier', 'brief', 'desired'),
+      update: f('cancel_reason'),
+      own: true,
       kinds: CARD_CREATORS.owner_command,
     }),
     worker: Object.freeze({ update: f('summary', 'report_ref') }),

@@ -21,7 +21,7 @@ import { hostname } from 'node:os';
 import { basename } from 'node:path';
 import { CARD_KINDS, ENTITIES, FINAL_STATES, SESSION_ID, STATES, WAIT_FIELDS, WAIT_WHO, isNotARecord, isOpen, leadLaunchHead, makeRecord, missingFields, notARecord, otherProductReason, releaseData, timeoutFor } from '../../shared/record.mjs';
 import { claimCheck, fixPlanCheck, guardWrite, same, waitSince } from './guard.mjs';
-import { PLAN_INPUTS, TAB_HEARTBEAT_FAMILY, TAB_HEARTBEAT_WRITER, actorName, draftFields, factFrom, mayCreateKind } from './permissions.mjs';
+import { PLAN_INPUTS, TAB_HEARTBEAT_FAMILY, TAB_HEARTBEAT_WRITER, actorName, cancelReasonProblem, draftFields, factFrom, mayCreateKind } from './permissions.mjs';
 import { PLAN_FROZEN, hasItsGo, planCards } from './plan-cards.mjs';
 import { GO_FREE, readyCheck } from './ready.mjs';
 import { PASSES, headReviews, readOutboxFile, runnerLaunchFor, verdictFields, worstVerdict } from './outbox.mjs';
@@ -258,6 +258,16 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
   }
 
   function checkCardUpdate(tx, { id, old, doc, from, to, moving, changed, name, nowMs, ctx }) {
+    // L1343: the owner's withdraw command makes one change, a withdrawal: draft or ready → cancelled (moves.mjs), of a
+    // card it made (the guard's `own`), an ordinary Tier-2 card on the test product, with a plain reason.
+    if (name === 'owner_command') {
+      if (!moving || to !== 'cancelled' || !['draft', 'ready'].includes(from)) return no('an owner command changes a card only to withdraw it (draft or ready → cancelled)');
+      if (old.kind !== 'ordinary' || old.tier !== 2) return no('an owner command withdraws only an ordinary Tier-2 card');
+      // The key is written out (not TEST_PRODUCT_KEY) so required-keys.test can name every rules read here.
+      if (rules.flag('product.test_product', { product }) !== true) return no('an owner command withdraws cards only on a product whose rules mark it the test product (product.test_product)');
+      const why = cancelReasonProblem(doc.cancel_reason);
+      if (why) return no(why);
+    }
     if (old.kind === 'fix' && PLAN_INPUTS.some((f) => changed.includes(f))) return no('a fix card\'s plan is its root card\'s; it never changes');
     // The Lead edits the plan only of a card kind it may make (0b-2 audit MAT-1): a go-free card (exact_reverse,
     // research_copy) gets to ready with no go, so a changed plan on one would run with no go at all.

@@ -12,9 +12,13 @@
 // written. SUDO_UID is only an environment variable sudo sets; it says which user sudo let through, not who typed. The
 // retyped card id (step 4) is a second check that the owner read the card, not the guard.
 //
-// The card file is a JSON object: { id, product, module, kind: "ordinary", tier: 2, what, files, lane?, brief?,
+// The card file is a JSON object: { id, product, module, kind: "ordinary", tier: 2, what, files, brief, lane?,
 // desired? } (the owner_command create row of M9 permissions.mjs, less the two this command sets). The pass test is not
-// in it: it is the card's rows' (docs/blueprint/rows/<id>.yaml among its files), read at main.
+// in it: it is the card's rows' (docs/blueprint/rows/<id>.yaml among its files), read at main. The brief is required
+// (L1343): it is what the worker is given, an object { goal, done_when, files, not_in_scope } as M3 task-brief.mjs
+// checks it, its files the card's files and its done_when the pass test from the rows, so the worker reads the test
+// the reviewer checks. A card whose brief the runner can't put into a worker prompt is refused before anything is
+// written (R-S1-1 was written with a one-line text brief, and every launch of it was refused).
 //
 // WHAT IT DOES, in order, and refuses on any failure (I1: nothing is guessed):
 //   1. It runs as the Dispatcher's user (orchestrate), started through sudo by the owner: SUDO_UID is the config's
@@ -24,7 +28,9 @@
 //      Tier 2, of that product.
 //   3. Its rows are read at main the way the Merge Gate reads them (wiring/review-ports.mjs planRows), and its pass
 //      test is set to theirs (M2 doneBar), so the Dispatcher's pass has nothing to change and the go binds what was shown.
-//   4. The card, its files, its pass test and the plan's fingerprint are shown, and the owner retypes the card id at the
+//      The brief's done_when must be that same text, and the worker prompt is built from the card with the runner's own
+//      function (M5 worker-prompt.mjs, as wiring/runner-ports.mjs words it at launch); a card it can't word is refused.
+//   4. The card, its files, its pass test, its brief and the plan's fingerprint are shown, and the owner retypes the card id at the
 //      terminal. It is read from /dev/tty only, never stdin (L1096 Q11), and stdin must be a terminal too (L1132): with
 //      stdin piped or redirected, no terminal, or another id, nothing is written. That stops a pipe, not a determined
 //      program: a shell running as the owner can make a terminal of its own (`script`, or any pseudo-terminal) and type
@@ -50,6 +56,8 @@ import { fileURLToPath } from 'node:url';
 import { askStore } from '../modules/M2-approvals/ask-store.mjs';
 import { doneBar, raiseGo, recordGo } from '../modules/M2-approvals/go.mjs';
 import { answerByOwnerCommand, OWNER_COMMAND } from '../modules/M2-approvals/owner-command.mjs';
+import { briefProblems, briefText } from '../modules/M3-lead/task-brief.mjs';
+import { workerPrompt } from '../modules/M5-review-audit/worker-prompt.mjs';
 import { TEST_PRODUCT_KEY, WRITERS } from '../modules/M9-record/permissions.mjs';
 import { canonicalJson, planFingerprint, unfingerprinted } from '../shared/plan-fingerprint.mjs';
 import { TTY_PATH } from './layout.mjs';
@@ -78,51 +86,59 @@ const sha256 = (s) => createHash('sha256').update(s).digest('hex');
  * (dispatcher-setup writes orchestrate's uid; M9's Store Writer runs only as it), not the person: the owner's Mac user is
  * `hostLockUid` (host.lock's owner). A config whose Record is not the Dispatcher's user's is refused too.
  */
-export function whoFromConfig({ uid, sudoUid, dispatcherUid, config }) {
+export function whoFromConfig({ uid, sudoUid, dispatcherUid, config, usage = USAGE }) {
   if (config?.ownerUid !== dispatcherUid) return `the config's ownerUid (the Record's owner) is not the Dispatcher's user (${RUN_AS})`;
-  return whoProblem({ uid, sudoUid, dispatcherUid, ownerUid: config.hostLockUid });
+  return whoProblem({ uid, sudoUid, dispatcherUid, ownerUid: config.hostLockUid, usage });
 }
 
-/** Why this process may not give the go, or null. `sudoUid` is the SUDO_UID text sudo set; `ownerUid` the person's uid. */
-export function whoProblem({ uid, sudoUid, dispatcherUid, ownerUid }) {
+/**
+ * Why this process may not act for the owner, or null. `sudoUid` is the SUDO_UID text sudo set; `ownerUid` the
+ * person's uid; `usage` the command's own usage line (withdraw-card passes its own, L1343).
+ */
+export function whoProblem({ uid, sudoUid, dispatcherUid, ownerUid, usage = USAGE }) {
   if (!Number.isSafeInteger(dispatcherUid) || dispatcherUid <= 0) return 'the Dispatcher\'s user (orchestrate) could not be found on this Mac';
   if (!Number.isSafeInteger(ownerUid) || ownerUid <= 0 || ownerUid === dispatcherUid) return 'the config\'s hostLockUid is not the owner\'s user';
-  if (uid !== dispatcherUid) return `run it as the Dispatcher's user: ${USAGE}`;
+  if (uid !== dispatcherUid) return `run it as the Dispatcher's user: ${usage}`;
   if (typeof sudoUid !== 'string' || !/^[1-9][0-9]{0,9}$/.test(sudoUid)) return 'it was not started through sudo, so who ran it is unknown';
   if (Number(sudoUid) !== ownerUid) return `it was started through sudo by user ${sudoUid}, not by the owner`;
   return null;
 }
 
+// What the retype confirms: go-card's go (the default) or withdraw-card's withdrawal (L1343), in the owner's words.
+export const GO_WORDS = Object.freeze({ thing: 'go', doing: 'give a go', ask: 'To write this card and give your go', none: 'no go was given' });
+
 /**
  * The owner's retyped card id, read from the terminal only (L1096 Q11), with stdin a terminal too (L1132).
  * → { ok: true } | { ok: false, reason }. A second check that the owner read the card; the guard is sudo's password.
- * `open`, `isTty`, `stdinIsTty` and `show` (the prompt's writer) are for a test; production passes none.
+ * `words` says what is being confirmed (GO_WORDS by default). `open`, `isTty`, `stdinIsTty` and `show` (the prompt's
+ * writer) are for a test; production passes none.
  */
-export function ttyConfirm({ cardId, text, open = openTty, isTty = isatty, stdinIsTty = () => isatty(0), show = writeSync }) {
-  if (!stdinIsTty()) return fail('its input is piped or redirected, not the Terminal, so the go can\'t be confirmed. Run this yourself in the Terminal app; a session can\'t give a go');
+export function ttyConfirm({ cardId, text, words = GO_WORDS, open = openTty, isTty = isatty, stdinIsTty = () => isatty(0), show = writeSync }) {
+  if (!stdinIsTty()) return fail(`its input is piped or redirected, not the Terminal, so the ${words.thing} can't be confirmed. Run this yourself in the Terminal app; a session can't ${words.doing}`);
   let fd;
   try { fd = open(); } catch { fd = null; }
   if (fd === null || fd === undefined || !isTty(fd)) {
     if (fd !== null && fd !== undefined) closeSync(fd);
-    return fail('no terminal is attached, so the go can\'t be confirmed. Run this yourself in the Terminal app; a session can\'t give a go');
+    return fail(`no terminal is attached, so the ${words.thing} can't be confirmed. Run this yourself in the Terminal app; a session can't ${words.doing}`);
   }
   try {
-    show(fd, `${text}\n\nTo write this card and give your go, type the card id (${cardId}) and press Return. Anything else stops here: `);
+    show(fd, `${text}\n\n${words.ask}, type the card id (${cardId}) and press Return. Anything else stops here: `);
     const bytes = []; const one = Buffer.alloc(1);
     for (;;) {
       if (readSync(fd, one, 0, 1, null) !== 1) break;
       if (one[0] === 10 || one[0] === 13) break;
-      if (bytes.length >= MAX_LINE) return fail('the line typed was far longer than a card id; no go was given');
+      if (bytes.length >= MAX_LINE) return fail(`the line typed was far longer than a card id; ${words.none}`);
       bytes.push(one[0]);
     }
     const typed = Buffer.from(bytes).toString('utf8').trim();
-    return typed === cardId ? { ok: true } : fail(`the id typed was not ${cardId}; no go was given`);
+    return typed === cardId ? { ok: true } : fail(`the id typed was not ${cardId}; ${words.none}`);
   } finally { closeSync(fd); }
 }
 
 /**
  * The card file's text → { ok: true, id, doc } (doc without state and done_when) | { ok: false, reason }. Only the
- * listed fields; an ordinary Tier-2 card of `product` with a module, a what and a file list.
+ * listed fields; an ordinary Tier-2 card of `product` with a module, a what, a file list and a brief (L1343) that M3's
+ * brief check passes, listing the same files.
  */
 export function readCardFile(text, product) {
   let v;
@@ -136,6 +152,11 @@ export function readCardFile(text, product) {
   if (v.tier !== 2) return fail(`the card is Tier ${JSON.stringify(v.tier ?? null)}; this command makes a Tier-2 card only`);
   for (const k of ['module', 'what']) if (typeof v[k] !== 'string' || !v[k].trim()) return fail(`the card has no ${k}`);
   if (!Array.isArray(v.files) || !v.files.length || v.files.some((f) => typeof f !== 'string' || !f)) return fail('the card has no file list');
+  if (v.brief === undefined) return fail('the card has no brief: it needs { goal, done_when, files, not_in_scope }, what the worker is given');
+  const bad = briefProblems(v.brief);
+  if (bad.length) return fail(`the card's brief can't be given to a worker: ${bad.join('; ').slice(0, 400)}`);
+  const sorted = (a) => JSON.stringify([...a].sort());
+  if (sorted(v.brief.files) !== sorted(v.files)) return fail('the brief\'s files are not the card\'s files; list the same files in both');
   const { id, ...doc } = v;
   return { ok: true, id, doc };
 }
@@ -148,6 +169,8 @@ export function goText({ product, cardId, card, fingerprint }) {
     ...[...card.files].sort().map((f) => `  ${f}`),
     'Its pass test (from its rows):',
     ...String(card.done_when).split('\n').map((l) => `  ${l}`),
+    'The brief the worker is given:',
+    ...briefText(cardId, card.brief).split('\n').map((l) => (l ? `  ${l}` : '')),
     `Plan fingerprint: ${fingerprint}`,
     `The card is written by owner command, and this go is recorded as given by owner command (binding kind ${OWNER_COMMAND}), not as a phone tap.`,
   ].join('\n');
@@ -161,7 +184,7 @@ export function goText({ product, cardId, card, fingerprint }) {
  */
 export async function goCard({ ctx, cardText, sudoUid, readRows, view, mainSha, confirm }) {
   const product = ctx.product;
-  if (ctx.rules.flag(TEST_PRODUCT_KEY, { product }) !== true) return fail(`this command works only on a product whose rules mark it the test product (${TEST_PRODUCT_KEY}: true), and ${product}'s don't`);
+  if (ctx.rules.flag(TEST_PRODUCT_KEY, { product }) !== true) return fail(notTestProductText(product));
   const text = Buffer.isBuffer(cardText) ? cardText : Buffer.from(String(cardText ?? ''), 'utf8');
   if (text.length > MAX_CARD_FILE) return fail('the card file is far larger than a card');
   const f = readCardFile(text.toString('utf8'), product);
@@ -170,10 +193,14 @@ export async function goCard({ ctx, cardText, sudoUid, readRows, view, mainSha, 
   let rows;
   try { rows = await readRows({ product, cardId, doc: f.doc }); } catch (e) { return fail(`the card's rows could not be read: ${String(e?.message ?? e).slice(0, 300)}`); }
   const doc = { state: 'draft', ...f.doc, done_when: doneBar(rows) };
+  // The worker reads the brief's done_when, the reviewer checks the card's (L1343): one text.
+  if (doc.brief.done_when !== doc.done_when) return fail(`the brief's done_when is not the card's pass test from its rows; set it to exactly: ${JSON.stringify(doc.done_when).slice(0, 400)}`);
+  const words = promptProblem(product, cardId, doc);
+  if (words) return fail(`the runner could not give this card to a worker (${words}); nothing was written`);
   // A card already there is taken up only if this command made it and it is still the same draft (a rerun after a stop).
   const had = ctx.record.read('card', cardId);
   if (had) {
-    if (had.corrupt || !had.doc) return fail(`card ${cardId} is in the Record but can't be read`);
+    if (had.corrupt || !had.doc) return fail(unreadableCardText(cardId));
     const by = ctx.record.meta('card', cardId)?.createdBy ?? null;
     if (by !== OWNER_COMMAND) return fail(`card ${cardId} is already in the Record, made by ${by ?? 'an unknown writer'}; pick another id`);
     if (had.doc.state !== 'draft') return fail(`card ${cardId} is ${had.doc.state}; a go is given on a draft card`);
@@ -210,8 +237,45 @@ export async function goCard({ ctx, cardText, sudoUid, readRows, view, mainSha, 
   return { ok: true, card: cardId, ask: g.id, go: go.go, fingerprint: fp.sha256 };
 }
 
+// The worker prompt is built as the runner builds it at launch (wiring/runner-ports.mjs promptFor → M5 workerPrompt),
+// with a stand-in commit and outbox: the card's own fields are what can refuse it. → null, or why it can't be worded.
+const STAND_IN = Object.freeze({ head: '0'.repeat(40), outbox: '/var/empty/orchestrate-prompt-check' });
+// The two refusals go-card and withdraw-card share, worded once here (I7, L1343).
+export const notTestProductText = (product) => `this command works only on a product whose rules mark it the test product (${TEST_PRODUCT_KEY}: true), and ${product}'s don't`;
+export const unreadableCardText = (cardId) => `card ${cardId} is in the Record but can't be read`;
+
+export function promptProblem(product, cardId, doc) {
+  const p = workerPrompt({ role: 'worker', kind: 'editing', card: cardId, cardDoc: doc, product, ...STAND_IN });
+  return p.ok ? null : p.reason;
+}
+
 /** The Record as planRows reads it, with the planned card in it before it is written. */
 export const withPlannedCard = (rec, cardId, doc) => ({ ...rec, read: (entity, id) => (entity === 'card' && id === cardId ? { id, doc } : rec.read(entity, id)) });
+
+/**
+ * The Dispatcher's config at `path`, read and checked as its job reads it, with the process checks (whoFromConfig)
+ * passed; throws one plain reason otherwise. Shared with withdraw-card.mjs (L1343). Loaded inside, not at the top, so a
+ * test of the checks above needs none of the Mac's setup code.
+ */
+export async function ownerConfig(path, { uid, sudoUid, self, usage = USAGE }) {
+  const { readConfig } = await import('../modules/M11-dispatcher/main.mjs');
+  const { checkConfig } = await import('../wiring/dispatcher-wiring.mjs');
+  const { readUser } = await import('./users-folders.mjs');
+  const { realIo } = await import('./mac.mjs');
+  const c = readConfig(path, { self });
+  checkConfig(c);
+  const who = whoFromConfig({ uid, sudoUid, dispatcherUid: readUser(realIo(), RUN_AS).uid, config: c, usage });
+  if (who) throw new Error(who);
+  return c;
+}
+
+/** The Record and rules of that config's product, as an M2 context whose alerts are logged, not sent. `name`: the command's. */
+export async function ownerContext(c, { name, log, fetchFn, now }) {
+  const { recordAndRules } = await import('../wiring/dispatcher-wiring.mjs');
+  const { rec, rules, gh, entry } = await recordAndRules(c, { who: name, log, fetchFn, now });
+  const ctx = { record: rec, rules, product: c.product, now, alert: (a) => { log(`${name}: alert not sent: ${JSON.stringify(a)}`); return false; } };
+  return { rec, gh, entry, ctx };
+}
 
 /** The command. Ports are for a test; production passes none. → exit code. */
 export async function main(argv, {
@@ -220,21 +284,12 @@ export async function main(argv, {
 } = {}) {
   try {
     if (argv.length !== 2) throw new Error(`usage: ${USAGE}`);
-    // Loaded here, not at the top, so a test of the checks above needs none of the Mac's setup code.
-    const { readConfig } = await import('../modules/M11-dispatcher/main.mjs');
-    const { checkConfig, recordAndRules } = await import('../wiring/dispatcher-wiring.mjs');
     const { githubReads, planRows } = await import('../wiring/review-ports.mjs');
-    const { readUser } = await import('./users-folders.mjs');
-    const { realIo } = await import('./mac.mjs');
-    const c = readConfig(argv[0], { self });
-    checkConfig(c);
-    const who = whoFromConfig({ uid, sudoUid: env.SUDO_UID, dispatcherUid: readUser(realIo(), RUN_AS).uid, config: c });
-    if (who) throw new Error(who);
+    const c = await ownerConfig(argv[0], { uid, sudoUid: env.SUDO_UID, self });
     let cardText;
     try { cardText = readFileSync(argv[1]); } catch (e) { throw new Error(`the card file can't be read (${e?.code ?? 'unknown error'})`); }
-    const { rec, rules, gh, entry } = await recordAndRules(c, { who: 'go-card', log, fetchFn, now });
+    const { rec, gh, entry, ctx } = await ownerContext(c, { name: 'go-card', log, fetchFn, now });
     const reads = githubReads({ gh, entry });
-    const ctx = { record: rec, rules, product: c.product, now, alert: (a) => { log(`go-card: alert not sent: ${JSON.stringify(a)}`); return false; } };
     const readRows = ({ product, cardId, doc }) => planRows({ gh, entry, rec: withPlannedCard(rec, cardId, doc) })({ product, card: cardId });
     const r = await goCard({ ctx, cardText, sudoUid: Number(env.SUDO_UID), readRows,
       view: await reads.planView({ product: c.product }), mainSha: await reads.mainSha({ product: c.product }), confirm });
