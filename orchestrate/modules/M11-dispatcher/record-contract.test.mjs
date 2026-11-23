@@ -6,7 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { dispatcherPass } from './pass.mjs';
-import { actOnDead } from './tick.mjs';
+import { actOnDead, tick } from './tick.mjs';
 import { KEYS } from './keys.mjs';
 import { timeLimits, requestMerges, MERGE_REQUEST, ASK_REFUSED_FACT } from './merges.mjs';
 import { LIMIT_NO_ACCOUNT } from './pass.mjs';
@@ -17,6 +17,7 @@ import { USAGE_FACT } from './usage.mjs';
 import { recWith, rulesWith, usageFact, withAlerts } from './fixtures.test-helper.mjs';
 import { makeRules } from '../../shared/rules.mjs';
 import { machineId } from '../M9-record/lock.mjs';
+import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 // Rules with one reading replaced, built on makeRules (L148 item 1): num(), dec() and flag() read through the same
 // override, so a test never answers `get` alone while the code reads numbers through num().
 const overGet = (base, get) => makeRules({ get rev() { return base.rev; }, may: (a, s) => base.may(a, s), get, classify: (c) => base.classify(c) });
@@ -277,6 +278,36 @@ test('L72 (5): a claim with no process past claims.unlaunched_min lapses (once i
   assert.deepEqual(stopped, [c.claim.session_id]);
   assert.equal(w.rec.read('card', 'C-1').doc.state, 'ready');
   assert.equal(diaryKinds(w.rec, 'C-1').at(-1), 'claim_lapse');
+});
+
+// L1340 (seen live): the whole tick, on the real Record, with the outage step failing every pass on a health port not
+// wired yet. A claim whose launch never answered still lapses once its session id is stopped, and only then.
+test('L1340: a failed outage step does not hold a timed-out claim; the lapse still waits for the stop', async () => {
+  for (const stops of [true, false]) {
+    const w = world();
+    readyCard(w.env, 'C-1');
+    w.refuseLaunch(() => ({ ok: false, reason: 'it did not answer within 30000 ms' }));
+    await w.pass();
+    const sid = w.rec.read('card', 'C-1').doc.claim.session_id;
+    w.env.clock.t += 60 * MIN;
+    const asked = [];
+    const ports = {
+      product: PRODUCT, alert: fakeAlert(), board: () => [], healthy: () => { throw new Error('not wired yet: healthy (R-0b-162)'); },
+      stopSession: (id) => { asked.push(id); return stops; },
+    };
+    const r = await tick({ rec: w.rec, rules: w.rules, now: w.env.clock.t, ports });
+    assert.equal(r.steps.outage.ok, false, 'the outage step fails, as it did live');
+    assert.equal(r.steps.lapse.ok, true, r.steps.lapse.error);
+    assert.deepEqual(asked, [sid], 'the session the claim names is stopped first');
+    const c = w.rec.read('card', 'C-1').doc;
+    if (stops) {
+      assert.deepEqual(r.steps.lapse.result.lapsed.map((x) => [x.card, x.to]), [['C-1', 'ready']]);
+      assert.equal(c.state, 'ready');
+    } else {
+      assert.deepEqual(r.steps.lapse.result.lapsed, []);
+      assert.deepEqual([c.state, c.claim.session_id], ['claimed', sid], 'not stopped: the claim holds, so the card cannot run twice');
+    }
+  }
 });
 
 test('L72 (5): a double claim for one card is refused', async () => {

@@ -67,7 +67,7 @@ const NOT_REVIEW_USERS = "no review was asked for: the review runner's folder is
 // status is never trusted, and every step that reads it fails with exactly that (L925: "not known", never a list).
 const NOT_THE_RUNNERS = "the worker runner's folder is not owned by the worker runner's user (workerUid)";
 const EXPECTED_STEPS = Object.freeze({
-  stops: NOT_THE_RUNNERS, undo: 'ok', 'undo-starts': NOT_THE_RUNNERS, outage: NOT_THE_RUNNERS, intake: NOT_THE_RUNNERS, proposals: NW('proposals'), research: 'ok', leads: NW('leads'), approvals: 'ok', 'plan-go': 'ok',
+  stops: NOT_THE_RUNNERS, undo: 'ok', 'undo-starts': NOT_THE_RUNNERS, outage: NOT_THE_RUNNERS, lapse: 'ok', intake: NOT_THE_RUNNERS, proposals: NW('proposals'), research: 'ok', leads: NW('leads'), approvals: 'ok', 'plan-go': 'ok',
   pass: NOT_THE_RUNNERS, limits: NOT_REVIEW_USERS, merges: 'ok', waits: 'ok', 'lost-cards': 'ok', 'stuck-cards': 'ok', phone: 'ok', cleanup: NW(`cleanup.${NOT_WIRED_CLEANUP[0]}`),
 });
 
