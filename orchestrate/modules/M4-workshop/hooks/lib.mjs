@@ -455,6 +455,65 @@ export function expandBraces(word, cap = 64) {
   return out;
 }
 
+// One `[…]` set's body as a regular-expression set (L1344). Callers lower the letter case of a word before reading it
+// (fold), so a set here may be narrower than the one the shell read: `[Z-a]` (a forward range zsh matches with `a`)
+// arrives as the backwards `[z-a]`, `[B-z]` as `[b-z]` (no `a`), and `[!N]` (any letter but a capital N, so `n` too) as
+// `[!n]`. A guard must never read a word as naming fewer files than the shell does, so each set is read wider:
+//  - in a set, a range between two letters, whatever their case or order (`[E-e]`, `[B-a]`, `[y-d]`), is every letter
+//    of both cases and the signs between them (`A-z`), with or without the caller's letter-case flag (the secret
+//    guard reads without it; L1344 r3); a range between two digits is read as written, backwards matching nothing;
+//    any other range, or an end outside plain ASCII, makes the set any one character. Each range also holds `-` and
+//    both its ends: the guards see a word with its quotes and `\` taken out, so the shell's plain `[9\-0]` (9, - and 0)
+//    arrives as the range `[9-0]` (L1344 r4) (bash 3.2 orders signs by the language setting, so `[_-n]`
+//    there matches `.`; seen by a fuzz against the real shells, L1344 r2). Before L1344 a backwards range made the regular-expression engine throw, and every caller refuses on
+//    a throw, so code text such as a list `[daily-digest.yml,nightly.yml]` (holding `y-d`) was refused.
+//  - in a "not" set, letters, every range but one between two digits, and characters outside plain ASCII are left out, so the set excludes less; a "not" set left with nothing is any one character.
+// Both reads were checked by two fresh reviews against zsh 5.9 and bash 3.2 on this Mac (L1344 r1, r2). The shell
+// itself matches nothing with a range written backwards (`[z-a]x` matches no name); reading it wider only refuses more.
+const setEsc = (c) => c.replace(/[\\\]^[-]/g, '\\$&');
+const isLetter = (n) => (n >= 65 && n <= 90) || (n >= 97 && n <= 122);
+const isDigit = (n) => n >= 48 && n <= 57;
+function setRe(body, not) {
+  const parts = [];
+  const chars = [...body];
+  let any = false;
+  // A `\` in a set: the shell reads the next character plainly; here it is read as itself, as before (wider either way).
+  for (let k = 0; k < chars.length; k += 1) {
+    let lo = chars[k].codePointAt(0);
+    let hi = lo;
+    const ranged = chars[k + 1] === '-' && k + 2 < chars.length;
+    if (ranged) { hi = chars[k + 2].codePointAt(0); k += 2; }
+    if (lo > 127 || hi > 127) { if (!not) any = true; continue; }
+    if (not) {
+      // Left out: a letter, or any range but a forward one between two digits.
+      if (ranged ? !(isDigit(lo) && isDigit(hi) && lo < hi) : isLetter(lo)) continue;
+    } else if (ranged) {
+      if (!((isLetter(lo) && isLetter(hi)) || (isDigit(lo) && isDigit(hi)))) { any = true; continue; }
+      parts.push('\\-', setEsc(String.fromCodePoint(lo)), setEsc(String.fromCodePoint(hi)));
+      if (isLetter(lo)) { lo = 65; hi = 122; } else if (lo > hi) continue;
+    }
+    const a = setEsc(String.fromCodePoint(lo));
+    parts.push(lo === hi ? a : `${a}-${setEsc(String.fromCodePoint(hi))}`);
+  }
+  if (any || (not && !parts.length)) return '[\\s\\S]';
+  if (!parts.length) return '[^\\s\\S]';
+  return `[${not ? '^' : ''}${parts.join('')}]`;
+}
+
+/**
+ * A shell word as the guards read it, as a pattern with a `test`: a name matches when either of two readings matches,
+ * the word folded (look-alike letters made plain, as the guards fold the names they compare) and the word only lowered
+ * in letter case, each with the case flag (L1344 r3). The lowered reading is what the shell sees: a full-width `］` stays
+ * a letter, so `[n］x]` is one set, and a set end outside plain ASCII (`[0-９]`) makes the set any one character. The
+ * folded reading is the one the guards used before L1344. Neither reading refuses a word only because a look-alike is in
+ * it: a commit message holding `…`, `‼` or `！` and a `?` is one word (L1344 r5, r6). A reading that can't be built
+ * throws, which callers read as "blocked".
+ */
+export function wordRe(w) {
+  const both = [globRe(fold(w), 'i'), globRe(String(w).toLowerCase(), 'i')];
+  return { test: (s) => both.some((re) => re.test(s)) };
+}
+
 /**
  * A shell wildcard word as a pattern for one name: `*`, `?`, and `[…]` sets, where a leading `!` or `^` means
  * "not" and a `]` first in the set is a plain `]`, as in the shell. The one definition for both guards (L41 G1:
@@ -469,11 +528,15 @@ export function globRe(g, flags = '') {
     if (ch === '[') {
       const not = g[i + 1] === '!' || g[i + 1] === '^';
       const from = i + 1 + (not ? 1 : 0);
+      // `[!]…]` / `[^]…]`: a "not" set whose first member is `]`, in every shell (read below). An unclosed `[!]` / `[^]`
+      // is read both ways: zsh's empty "not" set (any one character), or bash's plain text (L1344 r2, r7: refusing every
+      // `[!]` blocked regex text such as `[^]]` and commit messages on the whole Mac).
+      if (not && g[from] === ']' && g.indexOf(']', from + 1) < 0) { s += `(?:[\\s\\S]|\\[\\${g[i + 1]}\\])`; i = from; continue; }
       const end = g.indexOf(']', from + 1);
       if (end > from) {
         // A letter class (`[[:alpha:]]`, `[[=e=]]`, `[[.a.]]`) is not modelled: callers refuse on the throw.
         if (/\[[:=.]/.test(g.slice(from, end + 1))) throw new Error('a letter class in a pattern');
-        s +=`[${not ? '^' : ''}${g.slice(from, end).replace(/[\\\]^[]/g, '\\$&')}]`;
+        s += setRe(g.slice(from, end), not);
         i = end;
         continue;
       }
