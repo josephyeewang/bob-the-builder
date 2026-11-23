@@ -9,8 +9,10 @@
 //   1. outage    — first, so a pass during an outage starts nothing and restarts nothing (R-0b-56).
 //                  Outside an outage its answer is acted on here: a dead session's card that is safe to
 //                  re-run has its claim broken by the Record (breakIfDead: back to `ready`, the starts below
-//                  pick it up); any other waits on Joe. Then the Record lapses claims whose session never
-//                  started (lapseClaims, claims.unlaunched_min), once that session id is stopped (L72).
+//                  pick it up); any other waits on Joe.
+//      lapse     — the Record lapses claims whose session never started (lapseClaims, claims.unlaunched_min),
+//                  once that session id is stopped (L72). Its own step (L1340): inside the outage step, a port
+//                  that failed there (board, healthy) held a claimed card forever. Not while an outage is open.
 //   2. intake    — outbox files, so the record is current before anything is decided on it (R-0b-56, 58).
 //      proposals — the owner's proposals folders (proposals-intake.mjs), with the research handler only (L615 grant 3,
 //                  R-0b-162): a research report goes onto its research_copy card. Claim and heartbeat files have no
@@ -68,7 +70,7 @@ import { planGoPass, plansAwaitingAnswer, PLAN_REVIEW_LEAD } from './plan-go.mjs
 import { proposalsPass } from './proposals-intake.mjs';
 import { researchHandler, researchPass } from './research-intake.mjs';
 
-export const STEPS = Object.freeze(['stops', 'undo', 'undo-starts', 'outage', 'intake', 'proposals', 'research', 'leads', 'approvals', 'plan-go', 'pass', 'limits', 'merges', 'waits', 'lost-cards', 'stuck-cards', 'phone', 'cleanup']);
+export const STEPS = Object.freeze(['stops', 'undo', 'undo-starts', 'outage', 'lapse', 'intake', 'proposals', 'research', 'leads', 'approvals', 'plan-go', 'pass', 'limits', 'merges', 'waits', 'lost-cards', 'stuck-cards', 'phone', 'cleanup']);
 // One product's Approvals pass gets this long (or the port `approvalsProductMs`); a hung one counts as failed and the
 // next product still runs (L221, lane 2's ask 2). The step's own deadline still bounds them all.
 export const APPROVALS_PRODUCT_MS = 30_000;
@@ -331,12 +333,17 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
     // Review of L759: a refused save of an outage pass loses its newly held deaths (undecided at the end); told the same way.
     if (o.passRefused) refusalReport({ rec, alert, now, lines: [], failureLog: failed('outage') })(`this outage pass could not be saved (${o.passRefused}), so sessions that died in it may not be decided when it ends`, 'outage-pass');
     const acted = o.outage ? [] : actOnDead({ rec, rules, now, restart: o.restart, asks: o.asks, cards: o.cards, alert, missing });
-    // A claim whose session never started lapses (the Record stops that session id first; L72). Not in an outage.
-    const lapse = o.outage ? null : rec.lapseClaims(now, { stopSession: p.stopSession });
-    if (lapse && !lapse.ok) throw new Error(`claims could not be lapsed: ${lapse.reason}`);
-    return { ...o, acted, lapsed: lapse?.lapsed ?? [] };
+    return { ...o, acted };
   });
   if (!outageOpen) outageOpen = outageInRecord();
+  // L1340: a claim whose session never started lapses (the Record stops that session id first, so the card can't run
+  // twice; L72). Not during an outage: this step's or, when that step failed, the Record's (read again just above).
+  await run('lapse', async () => {
+    if (outageOpen) return { lapsed: [], skipped: 'an outage is open' };
+    const lapse = rec.lapseClaims(now, { stopSession: p.stopSession });
+    if (!lapse?.ok) throw new Error(`claims could not be lapsed: ${lapse?.reason ?? 'no answer'}`);
+    return { lapsed: lapse.lapsed ?? [] };
+  });
   // A Lead's read-only helper goes through the one start gate (audit 0b-6 r2 MAT-2): the red band, the
   // read-only cap per Lead and an outage hold it here, whatever the wiring port does.
   const gatedReadonly = (start) => async (x) => {

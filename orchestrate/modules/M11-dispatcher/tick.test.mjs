@@ -87,7 +87,7 @@ test('MAT-1: one tick runs every step once, in the fixed order, and records the 
   const w = world([account(), usage()]);
   const r = await w.pass();
   assert.deepEqual(Object.keys(r.steps), STEPS);
-  assert.deepEqual(STEPS, ['stops', 'undo', 'undo-starts', 'outage', 'intake', 'proposals', 'research', 'leads', 'approvals', 'plan-go', 'pass', 'limits', 'merges', 'waits', 'lost-cards', 'stuck-cards', 'phone', 'cleanup']);
+  assert.deepEqual(STEPS, ['stops', 'undo', 'undo-starts', 'outage', 'lapse', 'intake', 'proposals', 'research', 'leads', 'approvals', 'plan-go', 'pass', 'limits', 'merges', 'waits', 'lost-cards', 'stuck-cards', 'phone', 'cleanup']);
   for (const s of STEPS) assert.equal(r.steps[s].ok, true, `${s}: ${r.steps[s].error}`);
   const last = w.rec.read('fact', LAST_PASS_FACT).doc;
   assert.equal(last.at, iso(T0));
@@ -358,8 +358,45 @@ test('MAT-1: every step is guarded, not only the first', async () => {
   // An unreadable session list fails the stops and the undo starts too: neither acts on a guess.
   const failed = ['stops', 'undo-starts', 'outage', 'intake', 'leads', 'pass', 'limits', 'cleanup'];
   for (const s of failed) assert.equal(r.steps[s].ok, false, s);
-  for (const s of ['undo', 'merges', 'phone']) assert.equal(r.steps[s].ok, true, s);
+  for (const s of ['undo', 'lapse', 'merges', 'phone']) assert.equal(r.steps[s].ok, true, s);
   assert.deepEqual(w.calls.alerts.map((a) => a.match(/Dispatcher's ([\w-]+) step/)?.[1]), failed);
+});
+
+// L1340 (seen live: R-S1-1 claimed for a day): the outage step failed every pass on a port not wired yet (healthy), and
+// the claim lapse sat inside it, so a claim whose launch never answered never lapsed. The lapse is its own step now.
+test('L1340: claims lapse in their own step, so a failed outage step does not hold a claimed card', async () => {
+  // The Record is frozen: the pass gets a copy whose lapseClaims records its call and gives the answer.
+  const spy = (w, answer = { ok: true, lapsed: [] }) => {
+    const seen = [];
+    const rec = { ...w.rec, lapseClaims: (now, opts) => { seen.push({ now, stopSession: opts?.stopSession }); return answer; } };
+    return { seen, pass: () => tick({ rec, rules: rulesWith({}, allow), now: T0, ports: w.ports }) };
+  };
+  // The outage step fails (its health port is not wired): the lapse still runs, at the pass's time, with the stop port.
+  const stopSession = () => true;
+  const w = world([account(), usage()], { over: { healthy: () => { throw new Error('not wired yet: healthy'); }, stopSession } });
+  const { seen, pass } = spy(w, { ok: true, lapsed: [{ card: 'C-1', to: 'ready' }] });
+  const r = await pass();
+  assert.equal(r.steps.outage.ok, false);
+  assert.equal(r.steps.lapse.ok, true, r.steps.lapse.error);
+  assert.deepEqual(r.steps.lapse.result.lapsed, [{ card: 'C-1', to: 'ready' }]);
+  assert.deepEqual(seen.map((x) => [x.now, x.stopSession]), [[T0, stopSession]]);
+  // An outage open in the Record holds the lapse, whether or not the outage step ran.
+  for (const healthy of [() => true, () => { throw new Error('not wired yet: healthy'); }]) {
+    const o = world([account(), usage(), ['fact', OUTAGE_FACT, { state: 'open', opened_at: iso(T0 - MIN) }]], { over: { healthy } });
+    const { seen: held, pass: po } = spy(o);
+    const ro = await po();
+    assert.equal(ro.steps.lapse.ok, true, ro.steps.lapse.error);
+    assert.deepEqual(held, [], 'nothing lapses during an outage');
+    assert.equal(ro.steps.lapse.result.skipped, 'an outage is open');
+  }
+  // A lapse the Record refuses fails its own step (told), and the steps after it still run.
+  const f = world([account(), usage(), card('C-2')]);
+  const rf = await spy(f, { ok: false, reason: 'the rules could not be read' }).pass();
+  assert.equal(rf.steps.lapse.ok, false);
+  assert.match(rf.steps.lapse.error, /claims could not be lapsed: the rules could not be read/);
+  assert.equal(rf.steps.pass.ok, true);
+  assert.ok(f.calls.launched.includes('C-2'));
+  assert.ok(f.calls.alerts.some((a) => /Dispatcher's lapse step failed/.test(a)), f.calls.alerts.join('\n'));
 });
 
 test('MIN-9: no signed-in account, or a stale one, starts nothing; the stops still run', async () => {
