@@ -406,13 +406,10 @@ export async function main(argv, { readConfig = (f) => readRunnerConfig(f, selfP
   let c;
   // The sha256 of the very bytes the config was read from (job-config.mjs readSha256), taken before the check copies it:
   // root's worker-rules job stamps the same on each snapshot, so one written from a changed config holds its product.
-  try { const raw = readConfig(argv[0]); c = { ...checkRunnerConfig(raw), sourceSha256: sourceOf(raw) }; } catch (e) { log(`the worker runner did not start: ${e.message}`); return 1; }
+  try { c = configFrom(readConfig(argv[0]), sourceOf); } catch (e) { log(`the worker runner did not start: ${e.message}`); return 1; }
   // The roots each deny is spelled from are their real paths (#378 r1 m4): the Mac's sandbox does not apply a deny reached
   // through a link (render-settings.mjs), so a root behind one would leave every product's folders open.
-  for (const k of ['copiesRoot', 'outboxRoot']) {
-    let real; try { real = realpath(c[k]); } catch (e) { log(`the worker runner did not start: ${k} can't be read (${e?.code ?? e?.message})`); return 1; }
-    if (real !== c[k]) { log(`the worker runner did not start: ${k} is reached through a link (it is ${real})`); return 1; }
-  }
+  { const why = rootsProblem(c, realpath); if (why) { log(`the worker runner did not start: ${why}`); return 1; } }
   try { c = realRenderPaths(c, { realpath, log }); } catch (e) { log(`the worker runner did not start: ${e.message}`); return 1; }
   // Launch checks 12 and 13's inputs (L1001): one loader, shared with the runLocked proof (L1092). Its own defaults are
   // the real ones; main passes a loader only when a test sets one (undefined takes launchInputs' default).
@@ -421,9 +418,7 @@ export async function main(argv, { readConfig = (f) => readRunnerConfig(f, selfP
   const { budget, bobManifest } = inputs;
   // The builder wall's gate (L1170 m5, L1193): its code is loaded once here; one that can't be loaded holds every start
   // (wallProblem says why at each), never lets one through. Asked before every start, and again just before claude starts.
-  let wall = null; let wallWhy;
-  try { wall = wallFrom(await loadWall()); } catch (e) { wallWhy = e?.message ?? String(e); log(`worker runner: the builder wall's code can't be loaded (${wallWhy}); every start is held until it can`); }
-  const wallGate = () => wallProblem({ file: c.wallStatus, wall, wallWhy, uid: process.getuid(), chain: (p) => chainProblem(p, { owner: 0 }), readRoot: (p) => readRootFile(p), now: Date.now, ...wallPorts });
+  const wallGate = await wallGateOf(c, { loadWall, wallPorts, log });
   let l; let held;
   // The runner's own folder is setup's, with the access the Dispatcher's reads need: only settings/ is made here (#364 m6).
   try { try { mkdirSync(c.settingsDir, { mode: 0o700 }); } catch (e) { if (e?.code !== 'EEXIST') throw e; } l = lock(c.ownDir); held = l.acquire(); } catch (e) {
@@ -437,7 +432,7 @@ export async function main(argv, { readConfig = (f) => readRunnerConfig(f, selfP
   const snaps = rootSnapshots(c, { log, problem: (s) => snapshotProblem(s) });
   let P;
   try {
-    P = portsOf(c, ports, { stopped: () => stopping, log, productHeld: wallHeld(wallGate, testProductHeld(budget, snaps.held, testProduct)), budget, bobManifest, account: signinTold(c, { log, ...(signinOf ? { account: signinOf } : {}) }) });
+    P = portsOf(c, ports, { stopped: () => stopping, log, productHeld: heldOf(wallGate, budget, snaps.held, testProduct), budget, bobManifest, account: signinTold(c, { log, ...(signinOf ? { account: signinOf } : {}) }) });
     // A memory that can't be read is the loop's to refuse; one read is checked for carried-over sessions first.
     let m = null; try { m = memory(c.memoryFile, { uid: process.getuid() }); } catch { m = null; }
     const why = m ? carriedOverProblem(c, m, { groupGone: P.groupGone }) : null;
@@ -510,6 +505,35 @@ export function updateRestart({ installRoot, from, realpath = (p) => realpathSyn
     return true;
   };
 }
+
+
+/** The config as main runs on it: checked (checkRunnerConfig), with the sha256 of the very bytes it was read from, taken
+ * before the check copies it (job-config.mjs readSha256): root's worker-rules job stamps the same on each snapshot, so one
+ * written from a changed config holds its product. Main's, and the start dry run's (L1346). Throws as the check does. */
+export const configFrom = (raw, sourceOf = readSha256) => ({ ...checkRunnerConfig(raw), sourceSha256: sourceOf(raw) });
+
+/** The copies and outbox roots are their own real paths (#378 r1 m4): the Mac's sandbox does not apply a deny reached
+ * through a link (render-settings.mjs), so a root behind one would leave every product's folders open. Main's check, and
+ * the start dry run's (L1346). → null or why the runner does not start. */
+export function rootsProblem(c, realpath = (p) => realpathSync.native(p)) {
+  for (const k of ['copiesRoot', 'outboxRoot']) {
+    let real; try { real = realpath(c[k]); } catch (e) { return `${k} can't be read (${e?.code ?? e?.message})`; }
+    if (real !== c[k]) return `${k} is reached through a link (it is ${real})`;
+  }
+  return null;
+}
+
+/** The builder wall's gate (L1170 m5, L1193): its code is loaded once; one that can't be loaded is logged, and the gate then
+ * holds every start (wallProblem says why), never lets one through. Main's, and the start dry run's (L1346). → () => why | null. */
+export async function wallGateOf(c, { loadWall = () => import('../setup/builder-wall.mjs'), wallPorts = {}, log = () => {} } = {}) {
+  let wall = null; let wallWhy;
+  try { wall = wallFrom(await loadWall()); } catch (e) { wallWhy = e?.message ?? String(e); log(`worker runner: the builder wall's code can't be loaded (${wallWhy}); every start is held until it can`); }
+  return () => wallProblem({ file: c.wallStatus, wall, wallWhy, uid: process.getuid(), chain: (p) => chainProblem(p, { owner: 0 }), readRoot: (p) => readRootFile(p), now: Date.now, ...wallPorts });
+}
+
+/** The start port's productHeld, as main builds it: the builder wall first, then the test-product gate, then the rules
+ * snapshot (`held`, rootSnapshots'). The start dry run (L1346) asks each part on its own too. */
+export const heldOf = (wallGate, budget, held, testProduct = testProductProblem) => wallHeld(wallGate, testProductHeld(budget, held, testProduct));
 
 /** The worker runner's config at `file`, read as its job reads it (shared/job-config.mjs): no code key, `budget` an
  * optional one. `self` is the reading script's own real path. The one reading, used by main and the runLocked proof (L1121 m1). */

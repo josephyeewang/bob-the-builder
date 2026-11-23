@@ -320,6 +320,21 @@ to sign in. Replace it as above.
 Checked on macOS 27.0.1 (these notes expire with an OS upgrade): `dscl . -read` of a missing key prints `No such key` on
 stderr with exit 0; opening a link with `O_NOFOLLOW|O_DIRECTORY` gives `ENOTDIR` (Linux: `ELOOP`).
 
+### The start dry run: every start check on one card at once (L1346)
+
+When the worker runner keeps refusing a card's start, the runner's log shows one reason per Dispatcher pass, so each gap
+costs a pass. The dry run runs the runner's own start on that card once, through every launch check, and stops where
+claude would be started. Run it on the Mini, as builder, from the installed copy:
+
+`sudo -H -u builder <installRoot>/bin/node <installRoot>/setup/live-proofs/start-dry-run.mjs --config <installRoot>/worker-runner.json --product <product> --card <card>`
+
+It prints one PASS, FAIL or NOT TRIED line per stage, then every failure. A failed stage is replaced by a stand-in where a
+later stage can still be tried; those later lines name the stand-ins they ran on, and nothing on a stand-in counts as a
+pass. It exits 0 only when every stage passed. The launch checks run for real (the install, one headless claude
+read-back, the smoke and baseline tests: a few minutes). It makes only what the real start makes, under its own
+`DRYRUN-` session id and a copy beside the card's own, and removes all of it at the end; it never writes the Record, the
+requests folder or the status file, and takes no runner lock. The card can be in any state.
+
 ## Part 4 — the watch-only week's rules copy and hourly job (R-0b-122)
 
 Config: an optional `"watch": { "repo": "<owner/name>", "rulesSha256": "<64 hex>", "app": { "id": "<digits>", "installation": "<digits>", "keyFile": "<name>" } }` in the root-owned config. Without it,

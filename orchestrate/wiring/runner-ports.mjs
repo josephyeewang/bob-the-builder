@@ -322,7 +322,7 @@ export async function mirrorMain(mirror, { run = git } = {}) {
 }
 
 // A file made new (never over one that is there, never through a link), 0o600.
-function writeNew(file, text) {
+export function writeNew(file, text) {
   const fd = openSync(file, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
   try { const b = Buffer.from(text, 'utf8'); for (let o = 0; o < b.length;) o += writeSync(fd, b, o, b.length - o); } finally { closeSync(fd); }
 }
@@ -406,7 +406,8 @@ export function liveWallProblem(live, product, places, read) {
  * walled, fs ({ mkdir, rm, writeNew, list, lstat, chmodTree, rename }), ownUid, stopped (true once the runner is stopping: nothing more is spawned,
  * #364 self-review M1), log (what is told, such as a throwaway that can't be removed), productHeld(product) → null or why
  * the product starts no session (runner-main.mjs rootSnapshots, L1226, behind the wall and test-product gates; asked first, before anything is read),
- * readSettings(id) → a live session's settings (#378 r1 M1).
+ * readSettings(id) → a live session's settings (#378 r1 M1), copyOf({ copiesRoot, product, card, sessionId }) → the copy's
+ * folder (runnerCopy; it must be in the product's copies folder).
  * The request: { card, kind, product, sessionId, live, undoCommit?, onGroup? } (live: the runner's other live sessions, liveWallProblem;
  * undoCommit: the reversed commit, 40 hex, an undo's only, L976; onGroup: told check 4's install process groups, #463 r3 m1).
  */
@@ -446,7 +447,7 @@ export function startPort(c, deps = {}) {
     startCommit = cardStartCommit, prepare = prepareWorkerCopy, checksFor = () => ({}), promptFor = workerPromptText,
     names = {}, account = () => workerAccount(c), spawn = childSpawn, pidStartOf = leaderStart, kill, there, launchFn = launch,
     walled = walledLaunchSettings, ownUid = () => process.getuid(), stopped = () => false, beforeStart, mainOf = mirrorMain,
-    readSettings = sessionSettingsOf(c.settingsDir), undoCheck = undoCommitProblem,
+    readSettings = sessionSettingsOf(c.settingsDir), undoCheck = undoCommitProblem, copyOf = runnerCopy,
   } = deps;
   const fs = { mkdir: mkdirSync, rm: rmSync, writeNew, list: readdirSync, lstat: lstatSync, chmodTree, rename: renameSync, ...(deps.fs ?? {}) };
   const log = deps.log ?? (() => {});
@@ -478,7 +479,10 @@ export function startPort(c, deps = {}) {
     let mine; let copy; let outbox;
     try {
       mine = runnerPlaces({ copiesRoot: c.copiesRoot, outboxRoot: c.outboxRoot, product });
-      copy = runnerCopy({ copiesRoot: c.copiesRoot, product, card });
+      // copyOf: the card's copy, runnerCopy's in production; the start dry run (setup/live-proofs/start-dry-run.mjs, L1346)
+      // names one of its own beside it, so it never takes the card's own copy. Either way it is in the product's copies folder.
+      copy = copyOf({ copiesRoot: c.copiesRoot, product, card, sessionId });
+      if (dirname(copy) !== mine.copies) throw new Error(`the copy ${copy} is not in product ${product}'s copies folder`);
       outbox = runnerOutbox({ outboxRoot: c.outboxRoot, product, role, sessionId });
     } catch (e) { return refuse(e.message); }
     const wall = liveWallProblem(live, product, { ...mine, mirror: p.mirror }, readSettings);
@@ -508,7 +512,7 @@ export function startPort(c, deps = {}) {
     // This card's throwaways left by an earlier start (#369 r2 m1): one session per card, so none of them runs now.
     // One that can't be removed is told and left until the next start; the new one has its own name, so the card is never stuck on it.
     try { for (const n of fs.list(mine.copies)) if (n.startsWith(`${card}..baseline-`)) removeAll(fs, join(mine.copies, n), log); } catch { /* listed again below */ }
-    let others; try { others = fs.list(mine.copies).filter((n) => n !== card).map((n) => join(mine.copies, n)); } catch (e) { return undo(`the product's copies folder can't be listed (${e?.code ?? e?.message})`); }
+    let others; try { others = fs.list(mine.copies).map((n) => join(mine.copies, n)).filter((f) => f !== copy); } catch (e) { return undo(`the product's copies folder can't be listed (${e?.code ?? e?.message})`); }
     // Every other folder under the copies root and the outbox root, whole (#378 m1): a product setup made but this config
     // leaves out, and anything left in the old flat layout, as well as the config's other products.
     for (const top of [c.copiesRoot, c.outboxRoot]) {
