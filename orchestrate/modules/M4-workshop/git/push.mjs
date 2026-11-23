@@ -43,7 +43,7 @@ import { lstatSync, openSync, fstatSync, readSync, writeSync, closeSync, mkdtemp
 import { createHash } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { join, isAbsolute } from 'node:path';
-import { git, checkMirror, checkGitVersion } from './safe-git.mjs';
+import { git, checkMirror, checkGitVersion, MIRROR_READABLE, mirrorReadable } from './safe-git.mjs';
 import { parseRawZ, refusedEntries } from './push-refusals.mjs';
 import { scanSecrets } from './gitleaks.mjs';
 import { allowList, maskPath } from './binary-files.mjs';
@@ -110,7 +110,9 @@ const gitAnswer = (r, about, final) => {
 // Tests only (createPushScript's testGit): { bin, timeouts: { <command>: ms }, failStart: [<command>] } for this run's git
 // calls, so a test can make one command stall past its time limit, fail to start, or answer as it likes.
 const gitTest = new AsyncLocalStorage();
-function run(args, opts) {
+// Every git call here is on the mirror, and other users read what it writes (L1341): MIRROR_READABLE on each.
+function run(args, given) {
+  const opts = { ...given, extraConfig: [...(given?.extraConfig ?? []), ...MIRROR_READABLE] };
   const t = gitTest.getStore();
   if (!t) return git(args, opts);
   const cmd = args[0];
@@ -151,7 +153,10 @@ export async function refreshMain({ mirror, repo, getToken, testRemote }) {
     if (r.code !== 0) return { ok: false, reason: `could not fetch main from GitHub: ${plainError(r.stderr?.toString?.() ?? '')}` };
     const h = await run(['rev-parse', '--verify', '-q', 'refs/heads/main^{commit}'], { gitDir: mirror, purpose: 'refresh-main' });
     const main = h.code === 0 ? h.stdout.toString().trim() : null;
-    return main ? { ok: true, main } : { ok: false, reason: 'GitHub gave no main commit' };
+    if (!main) return { ok: false, reason: 'GitHub gave no main commit' };
+    // L1341: files an earlier write left owner-only are made readable, so the worker runner can start from main.
+    const open = mirrorReadable(mirror);
+    return open.ok ? { ok: true, main, ...(open.fixed ? { madeReadable: open.fixed } : {}) } : { ok: false, reason: open.reason };
   } catch (e) { return { ok: false, reason: plainError(e?.message ?? e) }; }
 }
 export const bundleName = (card) => `bundle-${card}.bundle`;

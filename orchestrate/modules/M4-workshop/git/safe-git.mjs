@@ -15,7 +15,7 @@
 // Capability note: checked against Git 2.54.0 on 29 Oct 2026; requires git >= 2.42.
 
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, existsSync, readdirSync, lstatSync, statSync, realpathSync, rmSync, rmdirSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, existsSync, readdirSync, lstatSync, statSync, realpathSync, rmSync, rmdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, isAbsolute } from 'node:path';
 // Loaded for what it does on load: every program start in this process refuses a registered secret on its command line.
@@ -565,6 +565,39 @@ export async function checkGitVersion(opts = {}) {
 // The mirror's config must be exactly this. It holds nothing that names a program or a
 // remote: pushes name GitHub explicitly, and main is fetched by URL.
 export const MIRROR_CONFIG_TEMPLATE = '[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = true\n';
+
+// L1341: the mirror is written by the robot (umask 077) and read by other users: the worker runner (builder) starts every
+// copy from its main, and the reviewers read card branches. git writes refs and objects under the writer's umask, so a
+// fetch made them owner-only and every launch was refused ("the mirror has no main commit"). Every git write into the
+// mirror carries this setting, so what it writes can be read by all (never written: the mirror folder is 0755 by setup).
+// Passed per call, not in the mirror's config, whose exact text checkMirror holds to the template.
+export const MIRROR_READABLE = Object.freeze([Object.freeze(['core.sharedRepository', '0644'])]);
+
+/**
+ * L1341: makes the mirror's git files readable by all, as MIRROR_READABLE writes them: files a writer left owner-only
+ * (before that setting, or under any umask) get read bits, folders read and search bits. Only adds those bits, only on
+ * plain files and folders this user owns (never through a link), under HEAD, packed-refs, refs/ and objects/. → { ok,
+ * fixed } | { ok: false, reason } (never throws).
+ */
+export function mirrorReadable(gitDir, { uid = process.getuid?.() } = {}) {
+  let fixed = 0;
+  const visit = (p) => {
+    let st;
+    try { st = lstatSync(p); } catch (e) { if (e?.code === 'ENOENT') return; throw e; }
+    if (st.isSymbolicLink() || (uid !== undefined && st.uid !== uid)) return;
+    const want = st.isDirectory() ? 0o055 : st.isFile() ? 0o044 : 0;
+    // chmodSync follows a link, but only orchestrate can make entries in the mirror (its folders refuse others' writes),
+    // so nothing can swap a link in after the lstat. A file gone since the lstat (git replaced it) is skipped.
+    if (want && (st.mode & want) !== want) {
+      try { chmodSync(p, (st.mode & 0o7777) | want); fixed += 1; } catch (e) { if (e?.code !== 'ENOENT') throw e; return; }
+    }
+    if (st.isDirectory()) for (const n of readdirSync(p)) visit(join(p, n));
+  };
+  try {
+    for (const n of ['HEAD', 'packed-refs', 'refs', 'objects']) visit(join(gitDir, n));
+    return { ok: true, fixed };
+  } catch (e) { return { ok: false, reason: `the mirror could not be made readable: ${e?.code ?? e?.message ?? e}` }; }
+}
 
 /**
  * Checks the scripts' own mirror before each run. Refuses a config that differs from the

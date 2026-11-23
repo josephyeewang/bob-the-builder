@@ -193,6 +193,7 @@ export function pushWiring(c, { rec, rules, entry, tokenFor, fetchFn = globalThi
     // A hold the queue refused is the pass's failure, so robot-main's own tell carries it (push-pass.mjs I5).
     if (r.untold.length) throw Object.assign(new Error(`the push pass's alerts could not be queued: ${r.untold.join(', ')}`), { tell: `untold: ${r.untold.join(', ')}` });
     if (!fresh.ok) throw new Error(`main could not be brought into the mirror: ${fresh.reason}`);
-    return { ...r, main: fresh.main };
+    // L1341: a count here every round would mean some write still leaves mirror files owner-only; the pass's log shows it.
+    return { ...r, main: fresh.main, ...(fresh.madeReadable ? { madeReadable: fresh.madeReadable } : {}) };
   };
 }

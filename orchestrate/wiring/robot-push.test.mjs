@@ -3,12 +3,12 @@
 // off after GitHub took it is finished by the next round, never pushed twice or forced; the pass's own limit.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, fstatSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, fstatSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { join } from 'node:path';
 import { pushWorld, PRODUCT, scannerPinOf } from '../modules/M4-workshop/git/push-world.test-helper.mjs';
 import { createPushScript } from '../modules/M4-workshop/git/push.mjs';
-import { gitOk, initMirror, GIT_TIMEOUT_MS } from '../modules/M4-workshop/git/safe-git.mjs';
+import { gitOk, initMirror, mirrorReadable, MIRROR_READABLE, GIT_TIMEOUT_MS } from '../modules/M4-workshop/git/safe-git.mjs';
 import { SCAN_BUDGET_MS, SCAN_TIMEOUT_MS } from '../modules/M4-workshop/git/gitleaks.mjs';
 import { WATCHDOG_MARGIN_MS } from '../modules/M11-dispatcher/main.mjs';
 import { RETRY_MS } from './push-pass.mjs';
@@ -349,6 +349,84 @@ test('L1338: each round brings GitHub\'s main into the mirror with nothing to pu
     await assert.rejects(w.pass()(), (e) => /main could not be brought into the mirror: could not fetch main/.test(e.message) && !/fake-robot-token/.test(e.message));
     renameSync(`${w.gh}.away`, w.gh);
   } finally { rmSync(w.root, { recursive: true, force: true }); }
+});
+
+// L1341 (seen live): the robot runs with umask 077, so its fetch left the mirror's main and packs owner-only, and the
+// worker runner (builder) could not read them: every launch was refused "the mirror has no main commit".
+const unreadable = (dir) => {
+  const bad = [];
+  const walk = (p) => {
+    const st = lstatSync(p);
+    const want = st.isDirectory() ? 0o055 : 0o044;
+    if (!st.isSymbolicLink() && (st.mode & want) !== want) bad.push(`${p.slice(dir.length + 1)} ${(st.mode & 0o777).toString(8)}`);
+    if (st.isDirectory()) for (const n of readdirSync(p)) walk(join(p, n));
+  };
+  for (const n of ['HEAD', 'refs', 'objects']) walk(join(dir, n));
+  return bad;
+};
+test('L1341: under umask 077 a round leaves the mirror readable by others: new writes and what an earlier write left owner-only', async () => {
+  const w = await wiredWorld();
+  const was = process.umask(0o077);
+  try {
+    const mirror = mirrorPath({ base: w.root });
+    await gitOk(['update-ref', '-d', 'refs/heads/main'], { gitDir: mirror });
+    // An earlier fetch's leftovers, owner-only, as on the Mini: a pack and a folder.
+    await gitOk(['fetch', '-q', w.gh, '+refs/heads/main:refs/heads/old'], { gitDir: mirror });
+    for (const f of readdirSync(join(mirror, 'objects/pack'))) chmodSync(join(mirror, 'objects/pack', f), 0o400);
+    chmodSync(join(mirror, 'refs/heads'), 0o700);
+    assert.notDeepEqual(unreadable(mirror), [], 'the plant: owner-only files');
+    const r = await w.pass()();
+    assert.ok(r.main, JSON.stringify(r));
+    assert.deepEqual(unreadable(mirror), [], 'every ref, object and folder can be read by others');
+    // Never writable by others: only read bits were added.
+    assert.equal(lstatSync(join(mirror, 'refs/heads/main')).mode & 0o022, 0);
+  } finally { process.umask(was); rmSync(w.root, { recursive: true, force: true }); }
+});
+
+// The per-call setting on its own, without the repair: what the push pass writes after the round's refresh (card
+// bundles, held refs) is readable as git writes it. And push.mjs's one git wrapper adds it to every call.
+test('L1341: MIRROR_READABLE alone makes git\'s new mirror files readable under umask 077; push.mjs adds it to every call', async () => {
+  const w = await wiredWorld();
+  const was = process.umask(0o077);
+  try {
+    const m = join(w.root, 'm4-plain.git');
+    await initMirror(m);
+    await gitOk(['fetch', '-q', w.gh, '+refs/heads/main:refs/heads/main'], { gitDir: m, extraConfig: MIRROR_READABLE });
+    const files = [];
+    const walk = (p) => { const st = lstatSync(p); if (st.isDirectory()) { for (const n of readdirSync(p)) walk(join(p, n)); } else files.push([p.slice(m.length + 1), st.mode & 0o777]); };
+    walk(join(m, 'refs/heads')); walk(join(m, 'objects'));
+    const bad = files.filter(([, mode]) => (mode & 0o044) !== 0o044 || (mode & 0o022));
+    assert.ok(files.some(([p]) => p === 'refs/heads/main'), JSON.stringify(files));
+    assert.deepEqual(bad, [], 'every file git wrote can be read by others and written by none');
+  } finally { process.umask(was); rmSync(w.root, { recursive: true, force: true }); }
+  const src = readFileSync(new URL('../modules/M4-workshop/git/push.mjs', import.meta.url), 'utf8');
+  assert.match(src, /function run\(args, given\) \{\n\s*const opts = \{ \.\.\.given, extraConfig: \[\.\.\.\(given\?\.extraConfig \?\? \[\]\), \.\.\.MIRROR_READABLE\] \};/);
+  assert.equal((src.match(/[^.\w]git\(/g) ?? []).length, 2, 'git is called only inside run()');
+});
+
+test('L1341: mirrorReadable adds read bits only, never follows a link, and a missing part is fine', () => {
+  const d = tempDir('m4-mirror-readable-');
+  try {
+    mkdirSync(join(d, 'refs/heads'), { recursive: true, mode: 0o700 });
+    chmodSync(join(d, 'refs/heads'), 0o700);
+    writeFileSync(join(d, 'refs/heads/main'), 'x\n', { mode: 0o600 });
+    writeFileSync(join(d, 'HEAD'), 'ref: refs/heads/main\n', { mode: 0o640 });
+    const outside = join(d, 'outside');
+    writeFileSync(outside, 'x', { mode: 0o600 });
+    symlinkSync(outside, join(d, 'refs/heads/link'));
+    const r = mirrorReadable(d);
+    // refs and refs/heads (both made 0700 by the recursive mkdir), main and HEAD.
+    assert.deepEqual(r, { ok: true, fixed: 4 }, JSON.stringify(r));
+    assert.equal(lstatSync(join(d, 'refs')).mode & 0o777, 0o755);
+    assert.equal(lstatSync(join(d, 'refs/heads')).mode & 0o777, 0o755);
+    assert.equal(lstatSync(join(d, 'refs/heads/main')).mode & 0o777, 0o644);
+    assert.equal(lstatSync(join(d, 'HEAD')).mode & 0o777, 0o644);
+    assert.equal(lstatSync(outside).mode & 0o777, 0o600, 'a link is never followed');
+    assert.deepEqual(mirrorReadable(d), { ok: true, fixed: 0 }, 'a second run changes nothing');
+    // A file another user owns is left alone (here: a uid that is not ours).
+    chmodSync(join(d, 'HEAD'), 0o600);
+    assert.deepEqual(mirrorReadable(d, { uid: process.getuid() + 1 }), { ok: true, fixed: 0 });
+  } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
 test('L1338: robot-main counts the push pass done when it declined nothing', async () => {
