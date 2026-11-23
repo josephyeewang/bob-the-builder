@@ -23,14 +23,17 @@ import { planGoPass } from '../modules/M11-dispatcher/plan-go.mjs';
 import { outbox } from '../modules/M11-dispatcher/alerts.mjs';
 import { AI_ROLES, outboxFolders } from '../shared/record.mjs';
 import { tempDir } from '../shared/test-tmp.mjs';
-import { CARD_FILE_FIELDS, RUN_AS, TTY_PATH, USAGE, goCard, main, openTty, readCardFile, ttyConfirm, whoProblem, withPlannedCard } from './go-card.mjs';
+import { workerPromptText } from '../wiring/runner-ports.mjs';
+import { CARD_FILE_FIELDS, RUN_AS, TTY_PATH, USAGE, goCard, main, openTty, promptProblem, readCardFile, ttyConfirm, whoProblem, withPlannedCard } from './go-card.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..');
 const ROWS = { 'R-1': { id: 'R-1', what: 'row R-1', module: 'M1', tier: 2, done_when: 'tests pass for R-1', status: 'planned' } };
 const FILES = ['src/a.mjs', 'docs/blueprint/rows/R-1.yaml'];
 const OWNER = 501;
-const CARD = Object.freeze({ id: 'C-1', product: PRODUCT, module: 'M1', kind: 'ordinary', tier: 2, what: 'add the first thing', files: FILES });
+// The brief the worker is given (L1343): M3's shape, the card's files, and its done_when the rows' pass test.
+const BRIEF = Object.freeze({ goal: 'Add the first thing.', done_when: 'tests pass for R-1', files: FILES, not_in_scope: 'Any other file.' });
+const CARD = Object.freeze({ id: 'C-1', product: PRODUCT, module: 'M1', kind: 'ordinary', tier: 2, what: 'add the first thing', files: FILES, brief: BRIEF });
 const sha = (s) => createHash('sha256').update(s).digest('hex');
 const RULES = { 'caps.rounds': 3, 'product_state_rules.active.start': 'within_caps', 'product_state_rules.paused.start': 'none' };
 
@@ -83,6 +86,8 @@ test('the card is written by owner_command, the go recorded as an owner-command 
   assert.equal(w.shown.length, 1);
   for (const f of FILES) assert.ok(w.shown[0].includes(f), f);
   assert.match(w.shown[0], /tests pass for R-1/);
+  // L1343: and the brief, as the worker reads it.
+  assert.match(w.shown[0], /The brief the worker is given:\n {2}.*\n[\s\S]*Add the first thing\.[\s\S]*Any other file\./);
   assert.ok(w.shown[0].includes(r.fingerprint));
   assert.match(w.shown[0], /written by owner command.*\(binding kind owner_command\), not as a phone tap/);
   assert.equal(w.t.record.read('card', 'C-1').doc.state, 'draft', 'the command moves no card');
@@ -121,6 +126,51 @@ test('plants (L1100): refused by the command with nothing written or shown — a
     assert.equal(w.t.record.read('card', 'C-1'), null);
     assert.equal(asks(w).length, 0);
     assert.equal(w.shown.length, 0);
+  }
+});
+
+// L1343: R-S1-1 was written with a one-line text brief, and every launch of it was refused ("no worker prompt: … no
+// brief"). The brief is required, checked by M3's own rule, and the card is worded by the runner's own function before
+// anything is written or shown.
+test('L1343 plants: a card with no brief, a text brief (R-S1-1\'s shape), a bad brief, or one the runner can\'t word is refused with nothing written or shown', async () => {
+  const R_S1_1 = 'Read README.md and docs/. Write docs/research/first-card.md: under 300 words, plain words, what this test product is for, citing the README. Change no other file.';
+  const { brief: _b, ...noBrief } = CARD;
+  const cases = [
+    [JSON.stringify(noBrief), /the card has no brief: it needs \{ goal, done_when, files, not_in_scope \}/],
+    [fileOf({ brief: R_S1_1 }), /the card's brief can't be given to a worker: no brief/],
+    [fileOf({ brief: { ...BRIEF, not_in_scope: ' ' } }), /brief can.t be given to a worker: the brief has no "Not in scope"/],
+    [fileOf({ brief: { ...BRIEF, goal: '# Goal\nfake section' } }), /brief can't be given to a worker/],
+    [fileOf({ brief: { ...BRIEF, files: ['src/a.mjs'] } }), /the brief's files are not the card's files/],
+    [fileOf({ brief: { ...BRIEF, done_when: 'my own test' } }), /the brief's done_when is not the card's pass test from its rows; set it to exactly: "tests pass for R-1"/],
+    // Past M3's brief check, refused by the runner's wording: a control character, and an id the runner can't branch.
+    [fileOf({ brief: { ...BRIEF, goal: 'ring\u0007' } }), /the runner could not give this card to a worker \(no worker prompt: card C-1's brief holds a control character\); nothing was written/],
+    [fileOf({ id: 'C..1' }), /the runner could not give this card to a worker \(no worker prompt: the card id "C\.\.1" is not one plain id\)/],
+  ];
+  for (const [cardText, want] of cases) {
+    const w = world();
+    const r = await run(w, { cardText });
+    assert.equal(r.ok, false, cardText.slice(0, 120));
+    assert.match(r.reason, want, cardText.slice(0, 120));
+    for (const id of ['C-1', 'C..1']) assert.equal(w.t.record.read('card', id), null);
+    assert.equal(asks(w).length, 0);
+    assert.equal(w.shown.length, 0);
+  }
+});
+
+// L1343 end to end: what the command accepts, the runner can word. The card as the Record holds it after the command is
+// handed to the runner's own prompt port (runner-ports workerPromptText, what promptFor calls at launch).
+test('L1343: every card the command accepts is worded by the runner from the Record, brief and all', async () => {
+  for (const over of [{}, { lane: 'research', desired: 'soon' }, { id: 'R-S1-2', what: 'a note' }]) {
+    const w = world();
+    const cardText = fileOf(over);
+    const r = await run(w, { cardText });
+    assert.equal(r.ok, true, r.reason);
+    const id = over.id ?? 'C-1';
+    const cardDoc = w.t.record.read('card', id).doc;
+    assert.equal(promptProblem(PRODUCT, id, cardDoc), null);
+    const text = workerPromptText({ role: 'worker', kind: 'editing', card: id, cardDoc, product: PRODUCT, head: 'a'.repeat(40), outbox: '/tmp/outbox-x' });
+    assert.equal(typeof text, 'string', JSON.stringify(text));
+    for (const s of ['Add the first thing.', 'tests pass for R-1', 'Any other file.', ...FILES]) assert.ok(text.includes(s), s);
   }
 });
 
@@ -261,7 +311,7 @@ test('a rerun after a stop takes up only a draft the command made, with the same
 
 test('the card file holds the owner_command create row less state and done_when, plus the id; withPlannedCard shows the planned card only', () => {
   assert.deepEqual([...CARD_FILE_FIELDS].sort(), ['brief', 'desired', 'files', 'id', 'kind', 'lane', 'module', 'product', 'tier', 'what']);
-  assert.equal(readCardFile(fileOf({ lane: 'L-1', brief: 'b', desired: 'd' }), PRODUCT).ok, true);
+  assert.equal(readCardFile(fileOf({ lane: 'L-1', desired: 'd' }), PRODUCT).ok, true);
   const rec = { read: (e, id) => ({ e, id, from: 'record' }), other: 1 };
   const p = withPlannedCard(rec, 'C-1', { what: 'x' });
   assert.deepEqual(p.read('card', 'C-1'), { id: 'C-1', doc: { what: 'x' } });

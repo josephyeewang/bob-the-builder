@@ -19,11 +19,14 @@ const D = ['dispatcher'];
 const A = ['approvals'];
 const G = ['merge_gate'];
 const W = ['workshop'];
+// L1343: the owner's withdraw command (setup/withdraw-card.mjs) cancels a card it made, only before any session holds it:
+// from draft or ready, nowhere else. The writer adds the rest (its own card, Tier 2, the test product, a reason).
+const AO = ['approvals', 'owner_command'];
 
 export const MOVES = Object.freeze({
   card: freeze({
-    draft: { ready: D, cancelled: A },
-    ready: { claimed: D, waiting: D, cancelled: A },
+    draft: { ready: D, cancelled: AO },
+    ready: { claimed: D, waiting: D, cancelled: AO },
     // claimed → ready: the holder's release, a lapse or a dead owner's claim broken (always with the claim cleared).
     claimed: { running: D, ready: D, cancelled: A },
     // running → in_review: a worker's or a script's hand-in through its own outbox (L838), or the Dispatcher for a tab's

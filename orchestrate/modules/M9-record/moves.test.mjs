@@ -35,21 +35,28 @@ test('every state pair: illegal refused with no diary line, wrong actor refused,
       // A refused write leaves the document as it was, so one seed serves until a write succeeds.
       const id = entity === 'product' ? PRODUCT : `${entity}-${n++}`;
       seed(env, entity, id, baseDoc(entity, from, env));
+      // L1343: the owner command changes only a card it made (the guard's `own`, checked before the move), so it is
+      // walked on a card of its own; on anyone else's that check refuses it (pinned in setup/withdraw-card.test).
+      const ownId = `${id}-oc`;
+      const ownSeed = () => env.store.transaction((tx) => tx.commit([{ entity, id: ownId, doc: baseDoc(entity, from, env) }], { actor: 'owner_command', kind: 'seed' }));
+      if (entity === 'card') ownSeed();
       for (const to of STATES[entity]) {
         if (from === to) continue;
         const actors = moveActors(entity, from, to);
         const internal = INTERNAL_MOVES[entity]?.[from]?.includes(to);
         for (const actor of ACTORS) {
           const before = env.record.diary().length;
-          const cur = env.record.read(entity, id);
-          const r = env.record.write({ actor, entity, id, expectRev: cur.rev, doc: { ...cur.doc, state: to } });
+          const mine = entity === 'card' && actor === 'owner_command';
+          const at = mine ? ownId : id;
+          const cur = env.record.read(entity, at);
+          const r = env.record.write({ actor, entity, id: at, expectRev: cur.rev, doc: { ...cur.doc, state: to } });
           const where = `${entity} ${from} → ${to} as ${actor}: ${r.reason}`;
           if (internal) assert.match(r.reason ?? '', /made only by a claim break/, where);
           else if (!actors) { assert.equal(r.ok, false, where); assert.match(r.reason, /illegal move/, where); illegal++; }
           else if (!actors.includes(actor)) { assert.equal(r.ok, false, where); assert.match(r.reason, /may not move/, where); }
           else { legal++; if (!r.ok) assert.doesNotMatch(r.reason, GATE, where); }
           if (!r.ok) assert.equal(env.record.diary().length, before, `refused write left a diary line: ${where}`);
-          else { assert.equal(env.record.diary().length, before + 1, where); seed(env, entity, id, baseDoc(entity, from, env)); }
+          else { assert.equal(env.record.diary().length, before + 1, where); if (mine) ownSeed(); else seed(env, entity, id, baseDoc(entity, from, env)); }
         }
       }
     }
@@ -107,7 +114,8 @@ test('A4 on the real rules: M10 refuses a rules file with a non-final state miss
 
 // R-0b-21 "allowed ones pass": every legal move, by every listed script actor, succeeds once its condition holds.
 test('every legal move succeeds for each listed actor when its condition holds', () => {
-  const env = setup({ prefix: 'm9-legal-' });
+  // The test-product flag lets the owner command's withdrawal (L1343) pass; nothing else here reads it.
+  const env = setup({ prefix: 'm9-legal-', values: { 'product.test_product': true } });
   const t = env.clock.t;
   const ok = (r, where) => assert.ok(r.ok, `${where}: ${r.reason}`);
   seed(env, 'product', PRODUCT, { state: 'active' });
@@ -137,8 +145,13 @@ test('every legal move succeeds for each listed actor when its condition holds',
               doc.kind = 'exact_reverse';
               ok(env.record.write({ actor: 'merge_gate', entity: 'fact', id: `reverse-${id}`, expectRev: 0, doc: { type: 'undo_reverse', state: 'not_clean', reason: 'x', head: HEAD } }), 'reverse fact');
             }
-            goFreeCard(id, doc);
-            const next = { ...doc, state: to };
+            // L1343: the owner command withdraws only an ordinary Tier-2 card it made, with a reason.
+            const ownerCommand = actor === 'owner_command';
+            if (ownerCommand) {
+              doc.kind = 'ordinary';
+              env.store.transaction((tx) => tx.commit([{ entity: 'card', id, doc }], { actor: 'owner_command', kind: 'seed' }));
+            } else goFreeCard(id, doc);
+            const next = { ...doc, state: to, ...(ownerCommand ? { cancel_reason: 'made with the wrong brief' } : {}) };
             if (to === 'waiting') next.wait = waitTo(from === 'running' ? 'ready' : from);
             if (from === 'ready' && to === 'claimed') next.claim = { kind: 'session', host: 'mac-a', session_id: 'S-9' };
             if (from === 'claimed' && to === 'running') next.claim = { ...doc.claim, pid: 7, pid_start: 'x' };

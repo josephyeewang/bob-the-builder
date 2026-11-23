@@ -37,6 +37,8 @@ A plan file makes draft cards (R-0b-170, L460). `plan-<name>.json` from a Lead g
 
 Once a card has a `plan_sha256`, only a plan file can change its plan; a roadmap file trying to is refused (L490). A card's `brief` is frozen once it leaves draft. A plan changes only `ordinary` cards.
 
+The owner's own commands write as `owner_command` (L1100, L1343), on a product whose rules mark it the test product only. `setup/go-card.mjs` creates one ordinary Tier-2 draft card. `setup/withdraw-card.mjs` withdraws one that actor made: draft or ready → cancelled, setting only `cancel_reason` (one plain line, `cancelReasonProblem` in `permissions.mjs`). It changes no other card and no other field, and moves no card anywhere else.
+
 ## Facts: families and who may change them
 
 Every fact id belongs to one role's family (`FACT_FAMILIES` in `permissions.mjs`, lead call L74). An entry ending in `-` or `.` is a prefix; any other entry is that one id. A role creates a fact only in its own family, and no two roles' families overlap (`familyOverlaps()`, tested). A fact is changed only by the role that created it (the store keeps who wrote a document's first diary line). A reader that takes a fact as proof uses `factFrom(role, entry, family)`: the id must be in that role's family AND written by that role. The fact's `type` alone is never proof, since any role can write any type into its own family. Nothing that gates reads a workshop fact as proof.
