@@ -40,8 +40,8 @@ export const WITHDRAW_FROM = Object.freeze(['draft', 'ready']);
 const fail = (reason) => ({ ok: false, reason });
 const LIVE_ASK = Object.freeze(['open', 'pushed']);
 const WRITE_TRIES = 20;
-// A Dispatcher pass may hold a ready card as claimed for a moment while it tries a launch, then gives it back as it
-// was (M9 endClaim). The command waits that out rather than refusing (L1343 audit m1).
+// A Dispatcher pass may hold a ready card as claimed while it tries a launch: a refused launch gives it back as it was
+// (M9 endClaim), a started one keeps it. The command waits a bounded time for the first, then refuses (L1343 audit m1).
 const CLAIM_WAIT_MS = 3000;
 const sleepMs = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
@@ -60,13 +60,13 @@ export function withdrawText({ product, cardId, card, reason }) {
  * Everything after the process checks. ctx is an M2 context ({ record, rules, product }); confirm({ cardId, text,
  * words }) → { ok } (ttyConfirm in production). → { ok: true, card, from } | { ok: false, reason }
  */
-export function withdrawCard({ ctx, cardId, reason, confirm, wait = sleepMs }) {
+export function withdrawCard({ ctx, cardId, reason, confirm, wait = sleepMs, log = () => {} }) {
   const product = ctx.product;
   if (ctx.rules.flag(TEST_PRODUCT_KEY, { product }) !== true) return fail(notTestProductText(product));
   if (typeof cardId !== 'string' || !CARD_ID.test(cardId)) return fail('the card id must be one plain id (letters, digits, dots, dashes and underscores)');
   const why = cancelReasonProblem(reason);
   if (why) return fail(why);
-  const first = settled(ctx, cardId, product, wait);
+  const first = settled(ctx, cardId, product, wait, log);
   if (!first.ok) return first;
   const { card } = first;
   const said = confirm({ cardId, text: withdrawText({ product, cardId, card, reason }), words: WITHDRAW_WORDS });
@@ -77,21 +77,25 @@ export function withdrawCard({ ctx, cardId, reason, confirm, wait = sleepMs }) {
   // the write is tried again, waiting while a pass holds the card claimed.
   let last = 'the card kept changing';
   for (let n = 0; n < WRITE_TRIES; n += 1) {
-    const now = settled(ctx, cardId, product, wait);
+    const now = settled(ctx, cardId, product, wait, log);
     if (!now.ok) return now;
     if (JSON.stringify(now.card) !== JSON.stringify(card)) return fail(`card ${cardId} changed after you were shown it; nothing was withdrawn, run the command again`);
     const w = ctx.record.write({ actor: 'owner_command', entity: 'card', id: cardId, expectRev: now.cur.rev, doc: { ...now.card, state: 'cancelled', cancel_reason: reason } });
     if (w.ok) return { ok: true, card: cardId, from: card.state };
     last = w.reason;
+    // Only a pass landing between the read and the write is worth another try; any other refusal is final.
+    if (!/^changed since read/.test(String(w.reason))) break;
   }
   return fail(`the Record refused the withdrawal: ${last}; the Dispatcher may have been working on the card at that moment, so run the command again`);
 }
 
-/** cardNow, waiting while a Dispatcher pass holds the card claimed (it gives a refused launch back as it was). */
-function settled(ctx, cardId, product, wait) {
+/** cardNow, waiting while a Dispatcher pass holds the card claimed and that is the only thing in the way. */
+function settled(ctx, cardId, product, wait, log) {
   for (let n = 0; ; n += 1) {
     const r = cardNow(ctx, cardId, product);
-    if (r.ok || n >= WRITE_TRIES || ctx.record.read('card', cardId)?.doc?.state !== 'claimed') return r;
+    if (r.ok || !r.onlyClaimed) return r;
+    if (n >= WRITE_TRIES) return fail(`${r.reason}; waited ${(WRITE_TRIES * CLAIM_WAIT_MS) / 1000} s for the Dispatcher to give it back, so a session has probably started on it`);
+    if (n === 0) log(`withdraw-card: a Dispatcher pass holds card ${cardId} (claimed); waiting up to ${(WRITE_TRIES * CLAIM_WAIT_MS) / 1000} s for it to be given back…`);
     wait(CLAIM_WAIT_MS);
   }
 }
@@ -107,7 +111,7 @@ function cardNow(ctx, cardId, product) {
   if (card.product !== product) return fail(`card ${cardId} is not ${product}'s`);
   if (card.kind !== 'ordinary' || card.tier !== 2) return fail(`card ${cardId} is not an ordinary Tier-2 card`);
   if (card.state === 'cancelled') return fail(`card ${cardId} is already cancelled${card.cancel_reason ? ` (${card.cancel_reason})` : ''}`);
-  if (!WITHDRAW_FROM.includes(card.state)) return fail(`card ${cardId} is ${card.state}; only a draft or ready card is withdrawn here (no session may hold it)`);
+  if (!WITHDRAW_FROM.includes(card.state)) return { ...fail(`card ${cardId} is ${card.state}; only a draft or ready card is withdrawn here (no session may hold it)`), onlyClaimed: card.state === 'claimed' };
   const live = askStore(ctx.record).asks().filter((a) => a.doc.card === cardId && activeKind(a.doc.kind)?.go === true && LIVE_ASK.includes(a.doc.state));
   if (live.length) return fail(`your go is still being asked for card ${cardId} (ask ${live.map((a) => a.id).join(', ')}, ${live[0].doc.state}); M2 has no way for this command to withdraw an ask, so answer it or let it expire, then withdraw the card`);
   return { ok: true, cur, card };
@@ -123,7 +127,7 @@ export async function main(argv, {
     const [path, cardId, ...words] = argv;
     const c = await ownerConfig(path, { uid, sudoUid: env.SUDO_UID, self, usage: USAGE });
     const { ctx } = await ownerContext(c, { name: 'withdraw-card', log, fetchFn, now });
-    const r = withdrawCard({ ctx, cardId, reason: words.join(' '), confirm });
+    const r = withdrawCard({ ctx, cardId, reason: words.join(' '), confirm, log });
     if (!r.ok) throw new Error(r.reason);
     out(`Card ${r.card} withdrawn (${r.from} → cancelled), by owner command. No session will start on it.`);
     return 0;

@@ -124,6 +124,58 @@ test('a card a pass keeps claimed (its session started): refused after the waits
   assert.equal(w.t.record.read('card', 'C-1').doc.state, 'claimed');
 });
 
+test('a pass landing between the re-read and the write: the write is tried again and the card withdrawn', async () => {
+  const w = world();
+  await readyCard(w);
+  const real = w.t.record;
+  let writes = 0;
+  const record = { ...real, write: (a) => { if (a.actor === 'owner_command' && (writes += 1) === 1) { claimNow(w); giveBack(w); } return real.write(a); } };
+  const r = run(w, { ctx: { ...w.t.ctx, record } });
+  assert.deepEqual(r, { ok: true, card: 'C-1', from: 'ready' });
+  assert.equal(writes, 2);
+  assert.equal(real.read('card', 'C-1').doc.state, 'cancelled');
+});
+
+test('a refusal other than "changed since read" at the write is final: one try, nothing written', async () => {
+  const w = world();
+  await readyCard(w);
+  let writes = 0;
+  const real = w.t.record;
+  const record = { ...real, write: (a) => { if (a.actor !== 'owner_command') return real.write(a); writes += 1; return { ok: false, reason: 'owner_command may not do that' }; } };
+  const r = run(w, { ctx: { ...w.t.ctx, record } });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /the Record refused the withdrawal: owner_command may not do that/);
+  assert.equal(writes, 1);
+  assert.equal(w.t.record.read('card', 'C-1').doc.state, 'ready');
+});
+
+test('the wait says so once, and a card still claimed after it is refused naming the wait', async () => {
+  const w = world();
+  await readyCard(w);
+  const said = [];
+  const r = run(w, { confirm: (a) => { claimNow(w); return w.yes(a); }, log: (x) => said.push(x) });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /waited 60 s for the Dispatcher to give it back, so a session has probably started on it/);
+  assert.equal(said.length, 1);
+  assert.match(said[0], /a Dispatcher pass holds card C-1 \(claimed\); waiting up to 60 s/);
+});
+
+test('no wait when something other than a claim is in the way: a running card, or a claimed card the Lead made', async () => {
+  const claim = (w) => ({ kind: 'session', host: 'mac-a', session_id: 'S-1', claimed_at: new Date(w.t.clock.t).toISOString() });
+  for (const [name, arrange, want] of [
+    ['running', (w) => stored(w, 'C-1', { ...draftDoc, state: 'running', claim: claim(w) }, 'owner_command'), /C-1 is running; only a draft or ready card/],
+    ['claimed, made by the Lead', (w) => stored(w, 'C-1', { ...draftDoc, state: 'claimed', claim: claim(w) }, 'lead:L-1'), /made by lead:L-1/],
+  ]) {
+    const w = world();
+    arrange(w);
+    let waits = 0;
+    const r = run(w, { wait: () => { waits += 1; } });
+    assert.equal(r.ok, false, name);
+    assert.match(r.reason, want, name);
+    assert.equal(waits, 0, name);
+  }
+});
+
 test('a go ask raised for the card while the owner retypes: refused, the card stays as it was', async () => {
   const src = world();
   draftCard(src);
