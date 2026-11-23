@@ -353,7 +353,7 @@ test('step 5: a start makes the copy, the outbox and the walled settings, and an
     const wl = w.calls.find((c) => c[0] === 'walled')[1];
     assert.equal(wl.kind, 'editing'); assert.deepEqual(wl.workerRunner, w.c.workerRunner);
     assert.equal(wl.paths.copy, join(w.mine.copies, 'C-1')); assert.equal(wl.paths.outbox, join(w.mine.outboxes, 'worker', SID));
-    assert.deepEqual(wl.paths.deny, { secrets: ['/s'], otherCopies: [join(w.mine.copies, 'C-9'), join(w.mine.copies, `C-1..baseline-${SID}`)] }, 'every other card\'s copy of this product is denied, and the baseline\'s throwaway place');
+    assert.deepEqual(wl.paths.deny, { secrets: ['/s'], otherCopies: [join(w.mine.copies, 'C-9'), join(w.mine.copies, `C-1..baseline-${SID}`)], proposals: ['/prop'] }, 'every other card\'s copy of this product is denied, and the baseline\'s throwaway place; the rules\' proposals folders too (L1345)');
     const f = join(w.settingsDir, `${SID}.json`);
     assert.deepEqual(JSON.parse(readFileSync(f, 'utf8')), { s: 1 });
     assert.equal(statSync(f).mode & 0o777, 0o600);
@@ -565,6 +565,30 @@ test('#364 self-review M4: with M4\'s own launch(), names that pass check 0 and 
     assert.equal(a.ok, false); assert.match(a.reason, /^launch check 1 \(fresh copy\): no check is wired/);
     assert.equal(w.calls.some((c) => c[0] === 'spawn'), false);
     assert.deepEqual(w.left(), { copy: false, outbox: false, settings: false });
+  } finally { rmSync(w.d, { recursive: true, force: true }); rmSync(d0, { recursive: true, force: true }); }
+});
+
+test('L1345: the config setup writes names the proposals folders once (proposalOutboxes, no deny.proposals): the launch walls them and gets past the settings', async () => {
+  const d0 = realpathSync(tempDir('orch-rports-'));
+  const confirmed = {};
+  let made = null;
+  const w = world({ launchFn: launch, walled: (x) => { const r = walledLaunchSettings(x); made = r; if (r.ok) for (const n of namesIn(r.settings)) confirmed[n] = { by: 'readback:stand-in', version: '2.1.300' }; return r; },
+    names: { version: '2.1.300', confirmed } });
+  for (const f of Object.values(FLAGS)) if (f.startsWith('--')) confirmed[f] = { by: 'readback:stand-in', version: '2.1.300' };
+  const runner = { requestsDir: join(d0, 'requests'), statusFile: join(d0, 'state', 'status.json') };
+  mkdirSync(runner.requestsDir); mkdirSync(join(d0, 'state'));
+  w.c.workerRunner = runner;
+  // As setup/worker-runner-setup.mjs writes it: deny has no proposals entry; every product's folder is in proposalOutboxes.
+  w.c.products.p1.render = { paths: { hooksDir: '/w/hooks', snapshot: '/w/snapshots/rules.json', node: '/w/node', notes: '/w/notes', bobFolder: '/w/bob', mirror: '/w/mirror.git',
+    deny: { secrets: ['/w/secrets'], claudeHome: '/h/.claude', ssh: '/h/.ssh', gh: '/h/.config/gh', robotKeys: '/w/keys', record: '/w/record' } },
+  product: { commands: { test: 'npm test' }, hosts: [] }, rulesHosts: [], productionFiles: [], proposalOutboxes: ['/w/proposals/p1', '/w/proposals/p2'] };
+  try {
+    const a = await w.start();
+    assert.equal(made?.ok, true, made?.reason);
+    const text = JSON.stringify(made.settings);
+    for (const f of ['/w/proposals/p1', '/w/proposals/p2']) assert.ok(text.includes(`${f}/**`), `${f} is denied`);
+    assert.equal(a.ok, false); assert.match(a.reason, /^launch check 1 \(fresh copy\): no check is wired/);
+    assert.equal(w.calls.some((c) => c[0] === 'spawn'), false);
   } finally { rmSync(w.d, { recursive: true, force: true }); rmSync(d0, { recursive: true, force: true }); }
 });
 
