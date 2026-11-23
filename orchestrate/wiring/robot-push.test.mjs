@@ -361,7 +361,8 @@ const unreadable = (dir) => {
     if (!st.isSymbolicLink() && (st.mode & want) !== want) bad.push(`${p.slice(dir.length + 1)} ${(st.mode & 0o777).toString(8)}`);
     if (st.isDirectory()) for (const n of readdirSync(p)) walk(join(p, n));
   };
-  for (const n of ['HEAD', 'refs', 'objects']) walk(join(dir, n));
+  // L1342: the whole folder, as safe-git's own check before every git call reads it.
+  for (const n of readdirSync(dir)) walk(join(dir, n));
   return bad;
 };
 test('L1341: under umask 077 a round leaves the mirror readable by others: new writes and what an earlier write left owner-only', async () => {
@@ -374,10 +375,14 @@ test('L1341: under umask 077 a round leaves the mirror readable by others: new w
     await gitOk(['fetch', '-q', w.gh, '+refs/heads/main:refs/heads/old'], { gitDir: mirror });
     for (const f of readdirSync(join(mirror, 'objects/pack'))) chmodSync(join(mirror, 'objects/pack', f), 0o400);
     chmodSync(join(mirror, 'refs/heads'), 0o700);
+    // L1342: a folder git does not need for a read, but safe-git reads before every call (the Mini's reflog folder).
+    mkdirSync(join(mirror, 'logs/refs/heads'), { recursive: true, mode: 0o700 });
+    writeFileSync(join(mirror, 'logs/refs/heads/old'), '', { mode: 0o600 });
     assert.notDeepEqual(unreadable(mirror), [], 'the plant: owner-only files');
     const r = await w.pass()();
     assert.ok(r.main, JSON.stringify(r));
     assert.deepEqual(unreadable(mirror), [], 'every ref, object and folder can be read by others');
+    assert.equal(lstatSync(join(mirror, 'logs')).mode & 0o777, 0o755);
     // Never writable by others: only read bits were added.
     assert.equal(lstatSync(join(mirror, 'refs/heads/main')).mode & 0o022, 0);
   } finally { process.umask(was); rmSync(w.root, { recursive: true, force: true }); }
@@ -406,17 +411,24 @@ test('L1341: MIRROR_READABLE alone makes git\'s new mirror files readable under 
 
 test('L1341: mirrorReadable adds read bits only, never follows a link, and a missing part is fine', () => {
   const d = tempDir('m4-mirror-readable-');
+  const away = tempDir('m4-mirror-outside-');
   try {
     mkdirSync(join(d, 'refs/heads'), { recursive: true, mode: 0o700 });
     chmodSync(join(d, 'refs/heads'), 0o700);
     writeFileSync(join(d, 'refs/heads/main'), 'x\n', { mode: 0o600 });
     writeFileSync(join(d, 'HEAD'), 'ref: refs/heads/main\n', { mode: 0o640 });
-    const outside = join(d, 'outside');
+    mkdirSync(join(d, 'logs'), { mode: 0o700 });
+    chmodSync(join(d, 'logs'), 0o700);
+    const outside = join(away, 'outside');
     writeFileSync(outside, 'x', { mode: 0o600 });
     symlinkSync(outside, join(d, 'refs/heads/link'));
+    chmodSync(d, 0o700);
     const r = mirrorReadable(d);
-    // refs and refs/heads (both made 0700 by the recursive mkdir), main and HEAD.
-    assert.deepEqual(r, { ok: true, fixed: 4 }, JSON.stringify(r));
+    // refs and refs/heads (both made 0700 by the recursive mkdir), main and HEAD, and (L1342) any other entry, logs,
+    // and the folder itself.
+    assert.deepEqual(r, { ok: true, fixed: 4 + 1 + 1 }, JSON.stringify(r));
+    assert.equal(lstatSync(d).mode & 0o777, 0o755);
+    assert.equal(lstatSync(join(d, 'logs')).mode & 0o777, 0o755);
     assert.equal(lstatSync(join(d, 'refs')).mode & 0o777, 0o755);
     assert.equal(lstatSync(join(d, 'refs/heads')).mode & 0o777, 0o755);
     assert.equal(lstatSync(join(d, 'refs/heads/main')).mode & 0o777, 0o644);
@@ -426,7 +438,7 @@ test('L1341: mirrorReadable adds read bits only, never follows a link, and a mis
     // A file another user owns is left alone (here: a uid that is not ours).
     chmodSync(join(d, 'HEAD'), 0o600);
     assert.deepEqual(mirrorReadable(d, { uid: process.getuid() + 1 }), { ok: true, fixed: 0 });
-  } finally { rmSync(d, { recursive: true, force: true }); }
+  } finally { rmSync(d, { recursive: true, force: true }); rmSync(away, { recursive: true, force: true }); }
 });
 
 test('L1338: robot-main counts the push pass done when it declined nothing', async () => {
