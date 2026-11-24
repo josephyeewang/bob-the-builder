@@ -59,6 +59,7 @@ import { answerByOwnerCommand, OWNER_COMMAND } from '../modules/M2-approvals/own
 import { briefProblems, briefText } from '../modules/M3-lead/task-brief.mjs';
 import { workerPrompt } from '../modules/M5-review-audit/worker-prompt.mjs';
 import { TEST_PRODUCT_KEY, WRITERS } from '../modules/M9-record/permissions.mjs';
+import { CARD_ID } from '../modules/M9-record/outbox.mjs';
 import { canonicalJson, planFingerprint, unfingerprinted } from '../shared/plan-fingerprint.mjs';
 import { TTY_PATH } from './layout.mjs';
 
@@ -72,7 +73,10 @@ export const USAGE = 'sudo -k -u orchestrate node …/setup/go-card.mjs <the Dis
 // no terminal (go-card.test.mjs checks both).
 export { TTY_PATH };
 export const openTty = () => openSync(TTY_PATH, 'r+');
-const CARD_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+// The card id an owner's command takes (go-card and go.mjs; #659 audit 2): M9's one CARD_ID (no `..`, so it can't climb
+// out of a folder) and, stricter still, starting with a letter or digit and at most 128 long, as go-card always took.
+// Every id it takes is one the Record takes.
+export const ownerCardId = (s) => typeof s === 'string' && CARD_ID.test(s) && /^[A-Za-z0-9]/.test(s) && s.length <= 128;
 const MAX_LINE = 256;
 const MAX_CARD_FILE = 64 * 1024;
 // The fields the card file may hold: the Record actor's own create row (one source), less the two set here, plus the id.
@@ -146,7 +150,7 @@ export function readCardFile(text, product) {
   if (!v || typeof v !== 'object' || Array.isArray(v)) return fail('the card file is not one JSON object');
   const extra = Object.keys(v).filter((k) => !CARD_FILE_FIELDS.includes(k));
   if (extra.length) return fail(`the card file may not set ${extra.join(', ')}${extra.includes('done_when') ? ' (the pass test comes from the card\'s rows)' : ''}`);
-  if (typeof v.id !== 'string' || !CARD_ID.test(v.id)) return fail('the card id must be letters, digits, dots, dashes and underscores');
+  if (!ownerCardId(v.id)) return fail('the card id must be letters, digits, dots, dashes and underscores');
   if (v.product !== product) return fail(`the card is for product ${JSON.stringify(v.product ?? null)}, and this Dispatcher runs ${product}`);
   if (v.kind !== 'ordinary') return fail(`the card is a ${JSON.stringify(v.kind ?? null)} card; this command makes an ordinary card only`);
   if (v.tier !== 2) return fail(`the card is Tier ${JSON.stringify(v.tier ?? null)}; this command makes a Tier-2 card only`);
@@ -226,7 +230,7 @@ export async function goOnCard({ ctx, cardId, doc, rows, view, mainSha, sudoUid,
     if (!w.ok) return fail(`the Record refused the card: ${w.reason}`);
   }
   const g = await raiseGo(ctx, { cardId, rows, view, mainSha });
-  if (!g.ok) return fail(`the card is written, but the go could not be asked: ${g.reason}`);
+  if (!g.ok) return fail(`${write ? 'the card is written, but ' : ''}the go could not be asked: ${g.reason}`);
   const ask = askStore(ctx.record).ask(g.id);
   if (!ask) return fail(`ask ${g.id} could not be read back`);
   // Backstop: raiseGo fingerprints the same card the same way, so this can't fail while M2 is correct (L1111).

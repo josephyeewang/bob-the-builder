@@ -32,18 +32,18 @@ import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { doneBar } from '../modules/M2-approvals/go.mjs';
 import { TEST_PRODUCT_KEY } from '../modules/M9-record/permissions.mjs';
-import { CARD_ID } from '../modules/M9-record/outbox.mjs';
 import { canonicalJson } from '../shared/plan-fingerprint.mjs';
-import { DISPATCHER_SELF, RUN_AS, cantStartText, goOnCard, goRecordedText, notDraftText, notTestProductText, ownerConfig, ownerContext, promptProblem, rowsUnreadText, ttyConfirm, unreadableCardText } from './go-card.mjs';
+import { DISPATCHER_SELF, RUN_AS, cantStartText, goOnCard, goRecordedText, notDraftText, notTestProductText, ownerCardId, ownerConfig, ownerContext, promptProblem, rowsUnreadText, ttyConfirm, unreadableCardText } from './go-card.mjs';
 
 export const USAGE = `sudo -k -u ${RUN_AS} node …/setup/go.mjs <the Dispatcher's config> <card id>`;
 const fail = (reason) => ({ ok: false, reason });
+export const NOT_CHECKED_YET = 'the Dispatcher hasn\'t checked this card\'s plan yet; try again in a minute';
 const sha256 = (s) => createHash('sha256').update(s).digest('hex');
 
 /** The go on draft card `cardId`, from the Record. → goOnCard's answer, or { ok: false, reason }. */
 export async function goById({ ctx, cardId, sudoUid, readRows, view, mainSha, confirm }) {
   const product = ctx.product;
-  if (typeof cardId !== 'string' || !CARD_ID.test(cardId)) return fail('that is not a card id');
+  if (!ownerCardId(cardId)) return fail('that is not a card id');
   if (ctx.rules.flag(TEST_PRODUCT_KEY, { product }) !== true) return fail(notTestProductText(product));
   const had = ctx.record.read('card', cardId);
   if (!had) return fail(`there is no card ${cardId} in ${product}'s Record`);
@@ -53,26 +53,36 @@ export async function goById({ ctx, cardId, sudoUid, readRows, view, mainSha, co
   if (doc.kind !== 'ordinary' || doc.tier !== 2) return fail(`card ${cardId} is a ${doc.kind ?? 'kindless'} Tier-${doc.tier ?? '?'} card; this command gives the go on an ordinary Tier-2 card only`);
   let rows;
   try { rows = await readRows({ product, cardId }); } catch (e) { return fail(rowsUnreadText(e)); }
-  if (doneBar(rows) !== doc.done_when) return fail(`card ${cardId}'s pass test is not its rows' at main any more, so the go would bind a plan that changed; nothing was given`);
+  const bar = doneBar(rows);
+  // A Lead's card holds its plan's own pass test until the Dispatcher's next pass sets it from the rows (M11 plan-go.mjs
+  // doneFromRows); until then it is not checked, not changed (#659 audit 1).
+  if (bar !== doc.done_when && doc.done_when === doc.brief?.done_when) return fail(NOT_CHECKED_YET);
+  if (bar !== doc.done_when) return fail(`card ${cardId}'s pass test is not its rows' at main any more, so the go would bind a plan that changed; nothing was given`);
   const words = promptProblem(product, cardId, doc);
   if (words) return fail(cantStartText(words, 'no go was given'));
   return goOnCard({ ctx, cardId, doc, rows, view, mainSha, sudoUid, cardJsonSha256: sha256(canonicalJson(doc)), confirm, write: false });
+}
+
+/** The Record, GitHub reads and rows the go reads, after go-card's config and process checks. */
+async function wireRecord(configPath, { uid, sudoUid, self, log, fetchFn, now }) {
+  const { githubReads, planRows } = await import('../wiring/review-ports.mjs');
+  const c = await ownerConfig(configPath, { uid, sudoUid, self, usage: USAGE });
+  const { rec, gh, entry, ctx } = await ownerContext(c, { name: 'go', log, fetchFn, now });
+  const reads = githubReads({ gh, entry });
+  const readRows = ({ product, cardId }) => planRows({ gh, entry, rec })({ product, card: cardId });
+  return { ctx, readRows, view: await reads.planView({ product: c.product }), mainSha: await reads.mainSha({ product: c.product }) };
 }
 
 /** The command. Ports are for a test; production passes none. → exit code. */
 export async function main(argv, {
   env = process.env, uid = process.getuid(), now = () => Date.now(), fetchFn = globalThis.fetch,
   log = (s) => process.stderr.write(`${s}\n`), out = (s) => process.stdout.write(`${s}\n`), confirm = ttyConfirm, self = DISPATCHER_SELF,
+  wire = wireRecord, byId = goById,
 } = {}) {
   try {
     if (argv.length !== 2) throw new Error(`usage: ${USAGE}`);
-    const { githubReads, planRows } = await import('../wiring/review-ports.mjs');
-    const c = await ownerConfig(argv[0], { uid, sudoUid: env.SUDO_UID, self, usage: USAGE });
-    const { rec, gh, entry, ctx } = await ownerContext(c, { name: 'go', log, fetchFn, now });
-    const reads = githubReads({ gh, entry });
-    const readRows = ({ product, cardId }) => planRows({ gh, entry, rec })({ product, card: cardId });
-    const r = await goById({ ctx, cardId: argv[1], sudoUid: Number(env.SUDO_UID), readRows,
-      view: await reads.planView({ product: c.product }), mainSha: await reads.mainSha({ product: c.product }), confirm });
+    const { ctx, readRows, view, mainSha } = await wire(argv[0], { uid, sudoUid: env.SUDO_UID, self, log, fetchFn, now });
+    const r = await byId({ ctx, cardId: argv[1], sudoUid: Number(env.SUDO_UID), readRows, view, mainSha, confirm });
     if (!r.ok) throw new Error(r.reason);
     out(`Your go on card ${r.card} is recorded ${goRecordedText(r)}`);
     return 0;
