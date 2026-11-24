@@ -30,13 +30,14 @@
 // taken), the session's outbox, its settings files in the runner's settings folder, and check 11's throwaway copy. Every
 // removal, and every write the start port makes itself, is held to those names (any other is refused and told); the
 // launch checks write their own files inside the dry copy, and check 11 a smoke marker in the workers' home under this
-// run's id. All of it is removed at the end, on every path, a thrown error and a stop part way too; the last stage says whether anything was left. It never writes the Record, the
-// requests folder or the status file, takes no runner lock, needs no sudo of its own, and reads the card as it is
-// (claimed or not: it is read as claimed for this run's session in memory only). The claude CLI keeps its own transcript of
-// check 6's headless run in the workers' home, as it does for any start.
-// Stopped part way (Ctrl-C, Ctrl-\, a closed window, kill, or an error outside its own try): no further check starts,
-// the running one is waited for (and told NOT TRIED), then what it made is removed and it exits 1. Only a kill -9 or a
-// power cut can leave its files: names holding DRYRUN- in the runner's settings, copies and outbox
+// run's id. All of it is removed at the end, on every path, a thrown error and a stop part way too; the last stage says
+// whether anything was left. It never writes the Record, the requests folder or the status file, takes no runner lock,
+// needs no sudo of its own, and reads the card as claimed for this run's session in memory only. The claude CLI keeps
+// its own transcript of check 6's headless run in the workers' home, as it does for any start.
+// Stopped part way (Ctrl-C, Ctrl-\, a closed window, kill): nothing further is made and no further check starts, the
+// running one is waited for (and told NOT TRIED), then what it made is removed and it exits 1. An error outside its own
+// try removes what it made at once and exits 1, without waiting: a check's install or tests then running may go on in
+// their own process group until their time limit. Only a kill -9 or a power cut can leave its files: names holding DRYRUN- in the runner's settings, copies and outbox
 // folders, which no start reads as its own; remove those by hand (the last line of a finished run says none were left).
 
 // Capability note (Principle 9): the start's order is startPort's as of this commit; a stage added to startPort is run by
@@ -58,8 +59,8 @@ import { CHECKS, launch } from '../../modules/M4-workshop/launcher/launch.mjs';
 import { CONFIRMED, NAMES_CHECK_REFUSALS as NCR, unconfirmedNames } from '../../modules/M4-workshop/launcher/settings-names.mjs';
 import { accountDir, accountEnv } from '../../modules/M4-workshop/launcher/accounts.mjs';
 import { CARD_ID } from '../../modules/M9-record/outbox.mjs';
-import { kindOf, startRole } from '../../modules/M11-dispatcher/pass.mjs';
-import { riskOf } from '../../modules/M11-dispatcher/gate.mjs';
+import { NEVER_STARTED, kindOf } from '../../modules/M11-dispatcher/pass.mjs';
+import { OUTAGE_FACT } from '../../modules/M11-dispatcher/outage.mjs';
 import { configUnreadable, maskSignin, notInConfig, notOwnUser } from './before-run.mjs';
 import { cardTaken } from '../../wiring/worker-runner.mjs';
 
@@ -76,7 +77,7 @@ export const STAGES = Object.freeze([
   ['memory', 'the runner\'s memory is read (its other live sessions)'],
   ['liveWalls', 'every other live session is walled off from this product'],
   ['card', 'the card is read from the Record, is this product\'s, and is ready'],
-  ['rules', 'the rules allow the start (M10\'s start_session, as the Dispatcher\'s pass asks before it claims)'],
+  ['claimable', 'the Dispatcher would claim it: on the Record\'s ready list (its round, dependencies, product and go), a kind it starts, and no outage'],
   ['request', 'the start request is one the runner takes'],
   ['signin', 'the sign-in is read'],
   ['commit', 'the copy\'s start commit is read'],
@@ -143,7 +144,7 @@ export async function dryRun({ c, configWhy, product, card, io = {} }) {
   io.onAbort?.((sig) => { abortWhy = abortWhy ?? `the dry run was stopped (${sig})`; });
   io.onCrash?.(() => cleanup());
   // A stage that fails while a stop is landing (Ctrl-C reaches git in the Terminal's group): what it answered proves nothing.
-  const stopLanding = (k) => { if (abortWhy) set(k, 'NOT TRIED', `${abortWhy} while it ran`); };   // an error outside the run's own try: remove what it made before node ends
+  const stopLanding = (k) => { if (abortWhy) set(k, 'NOT TRIED', `${abortWhy} while it ran`); };
   try {
     if (!c) { stopAt('config', configWhy ?? 'no config'); return finish(); }
     pass('config');
@@ -200,17 +201,20 @@ export async function dryRun({ c, configWhy, product, card, io = {} }) {
     if (rc.doc.state === 'ready') set('card', 'PASS', 'its state is ready; read as claimed for this run');
     else if (rc.doc.state === 'claimed') failOn('card', 'it is claimed already: the Dispatcher has handed it to a session, whose start may be on now; try it when it is ready', 'the card read as claimed for this run');
     else failOn('card', `its state is ${rc.doc.state ?? 'not named'}: the Dispatcher starts only a ready card`, 'the card read as claimed');
-    // M10's start_session, asked as the Dispatcher's pass asks it (pass.mjs), with the card as the pass holds it.
-    const rules = budget?.rules;
-    if (!rules || typeof rules.may !== 'function') set('rules', 'NOT TRIED', 'the Dispatcher\'s rules are not loaded (the config names no budget, or it did not load)');
+    // The Dispatcher claims only what its pass takes (pass.mjs): a card on the Record's own ready list (ready, no claim,
+    // and its readiness check: round, dependencies, the product's state, the owner's go), of a kind it starts, with no
+    // outage open. Read through the budget's Record, the one launch check 12 reads. Its other holds before it claims
+    // (M10's start_session, the host lock's copy, the amber Tier-1 queue) are not asked here; check 12 is (the caps).
+    const brec = budget?.rec;
+    if (!brec || typeof brec.ready !== 'function') set('claimable', 'NOT TRIED', 'the Dispatcher\'s Record is not loaded (the config names no budget, or it did not load)');
     else {
-      let may;
+      let why = null;
       try {
-        const cardDoc = { id: card, ...rc.doc };
-        let readAt = null; try { readAt = budget.bandsNow?.()?.read_at ?? null; } catch { readAt = null; }
-        may = rules.may('start_session', { product, card: cardDoc, role: startRole(kind), tier: riskOf(rules, cardDoc).tier, editing: true, ...(readAt ? { usage: { read_at: readAt } } : {}) });
-      } catch (e) { may = { decision: 'refuse', reason: `could not be asked (${said(e)})` }; }
-      if (may?.decision === 'allow') pass('rules'); else failOn('rules', `rules: ${may?.reason ?? 'no answer'}`, 'the rules taken as allowing the start');
+        if (NEVER_STARTED.includes(rc.doc.kind)) why = `a ${rc.doc.kind} card is never started by the Dispatcher`;
+        else if (brec.read('fact', OUTAGE_FACT)?.doc?.state === 'open') why = 'an outage is open: the Dispatcher starts nothing';
+        else if (!brec.ready().some((x) => x.id === card)) why = 'it is not on the Record\'s ready list (not ready, claimed, or its round, dependencies, product state or go hold it)';
+      } catch (e) { why = `it can't be checked (${said(e)})`; }
+      if (why) failOn('claimable', why, 'the card taken as one the Dispatcher would claim'); else pass('claimable');
     }
     // What the real start meets that a dry run, beside the card, would not: the runner's one session per card, and
     // the card's own copy still there (prepareWorkerCopy refuses a copy folder that exists).
@@ -278,18 +282,21 @@ export async function dryRun({ c, configWhy, product, card, io = {} }) {
         return { account: 'a', dir: accountDir(c.home, 'a'), env: accountEnv(c.home, 'a') };
       },
       startCommit: async (x) => {
+        if (abortWhy) { set('commit', 'NOT TRIED', abortWhy); throw new Error(abortWhy); }
         try { const h = await baseCommit(x); pass('commit'); return h; } catch (e) { stopLanding('commit'); stopAt('commit', said(e)); throw e; }
       },
       mainOf: async (m) => {
         mainCalls += 1;
         if (mainCalls === 1) {
           reach('main');
+          if (abortWhy) { set('main', 'NOT TRIED', abortWhy); throw new Error(abortWhy); }
           try { const h = await baseMain(m); pass('main'); return h; } catch (e) { stopLanding('main'); stopAt('main', said(e)); throw e; }
         }
         return baseMain(m);
       },
       prepare: async (x) => {
         if (x.dest !== copyPath) return abortWhy ? refuse(abortWhy) : basePrepare(x);   // check 11's throwaway copy: none after a stop
+        if (abortWhy) { set('copy', 'NOT TRIED', abortWhy); return refuse(abortWhy); }
         let r; try { r = await basePrepare(x); } catch (e) { r = refuse(said(e)); }
         if (!r?.ok) {
           stopLanding('copy');

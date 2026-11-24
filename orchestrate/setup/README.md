@@ -334,9 +334,13 @@ pass. It exits 0 only when every stage passed (or does not apply to this card). 
 read-back, the smoke and baseline tests: a few minutes). It makes only what the real start makes, under its own
 `DRYRUN-` session id and a copy beside the card's own, and removes all of it at the end; it never writes the Record, the
 requests folder or the status file, and takes no runner lock. The card must be ready: the Dispatcher starts no other (a claimed card is another session's, whose start may be on now), so any other state is a FAIL, and the
-install, claude and tests are then not run. Nor are they when the Dispatcher's own gates before it claims refuse the
-card: M10's start_session (its own stage) and launch check 12 (the budget, the caps, the files), which the dry run asks
-before the checks that run code.
+install, claude and tests are then not run. Nor are they when the Dispatcher would not claim the card (it is not on the
+Record's ready list, its kind is one the Dispatcher never starts, or an outage is open), or when launch check 12 (the
+budget, the caps, the files no other card holds) refuses it: the dry run asks check 12 before the checks that run code.
+The Dispatcher's other holds before it claims are not asked: M10's start_session (the product's own start rules), the
+host lock's copy and the amber Tier-1 queue. Nor is whether the runner is up on its current config: run setup.mjs
+daemons check first, and restart the runner after a config or install change, or a real start is refused there even
+after ALL PASS.
 Each stage's line also shows as it is decided, while it runs. Stopped part way (Ctrl-C, a closed window), it removes
 what it made before it exits; only a `kill -9` or a power cut can leave files, named with `DRYRUN-`, in the runner's
 settings, copies and outbox folders, to remove by hand. While it runs, its settings files would stop the runner from

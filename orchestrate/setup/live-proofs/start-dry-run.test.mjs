@@ -34,8 +34,9 @@ function world({ plant = {} } = {}) {
   w.io = {
     sessionId: SID,
     roots: () => plant.roots ?? null,
-    inputs: async () => ({ budget: plant.noBudget ? null : { rules: { may: (k, x) => { w.calls.push(['may', k, x.role, x.tier, x.card?.id]); return plant.may ? { decision: 'refuse', reason: plant.may } : { decision: 'allow' }; },
-      classify: () => ({ tier: 1, risky: [] }) }, bandsNow: () => ({ read_at: '2026-11-23T00:00:00Z' }) }, bobManifest: null }),
+    inputs: async () => ({ budget: plant.noBudget ? null : { rec: {
+      ready: () => { if (plant.readyThrows) throw new Error(plant.readyThrows); return plant.notReady ? [{ id: 'C-2', doc: {} }] : [{ id: 'C-1', doc: {} }]; },
+      read: (e, id) => (e === 'fact' && id === 'outage' && plant.outage ? { doc: { state: 'open' } } : null) } }, bobManifest: null }),
     wallGate: async () => () => plant.wall ?? null,
     snapshots: () => ({ held: () => plant.snapshot ?? null }),
     testProduct: () => plant.testProduct ?? null,
@@ -311,23 +312,35 @@ test('stopped while check 11 runs: its baseline throwaway copy is refused (no te
   } finally { w.done(); }
 });
 
-test('the Dispatcher\'s own gates before it claims: M10 refusing, or check 12 refusing, stops the install, claude and tests', async () => {
-  {
-    const w = world({ plant: { may: 'the product is paused' } });
+test('a card the Dispatcher would not claim, or check 12 refusing, stops the install, claude and tests', async () => {
+  const cases = [
+    [{ notReady: true }, /not on the Record's ready list/],
+    [{ outage: true }, /an outage is open/],
+    [{ readyThrows: 'the store is locked' }, /can't be checked \(the store is locked\)/],
+  ];
+  for (const [plant, why] of cases) {
+    const w = world({ plant });
     try {
       const s = w.byStage(await w.run());
-      assert.equal(s.rules.result, 'FAIL'); assert.match(s.rules.why, /rules: the product is paused/);
-      assert.deepEqual(w.calls.find((x) => Array.isArray(x) && x[0] === 'may'), ['may', 'start_session', 'worker', 1, 'C-1']);
-      for (const n of [4, 6, 11]) assert.equal(w.ran[n], undefined, `check ${n} not run`);
+      assert.equal(s.claimable.result, 'FAIL', JSON.stringify(plant)); assert.match(s.claimable.why, why);
+      for (const n of [4, 6, 11]) assert.equal(w.ran[n], undefined, `check ${n} not run (${JSON.stringify(plant)})`);
       assert.equal(s.check12.result, 'PASS', 'the checks that only read still run');
       assert.deepEqual(w.leftovers(), []); assert.equal(w.spawns, 0);
+    } finally { w.done(); }
+  }
+  for (const kind of ['lead_daily_card', 'research_copy']) {
+    const w = world();
+    try {
+      const s = w.byStage(await w.run({ readCard: (id) => ({ ok: true, doc: { id, state: 'ready', product: 'p1', kind } }) }));
+      assert.equal(s.claimable.result, 'FAIL', kind); assert.match(s.claimable.why, /never started by the Dispatcher/);
+      for (const n of [4, 6, 11]) assert.equal(w.ran[n], undefined, `check ${n} not run (${kind})`);
     } finally { w.done(); }
   }
   {
     const w = world({ plant: { checks: { 12: 'its files overlap card C-2, which is running' } } });
     try {
       const s = w.byStage(await w.run());
-      assert.equal(s.rules.result, 'PASS');
+      assert.equal(s.claimable.result, 'PASS');
       for (const n of [4, 6, 11]) { assert.equal(w.ran[n], undefined, `check ${n} not run`); assert.match(s[`check${n}`].why, /check 12, the Dispatcher's own start gate, refuses it now \(its files overlap/); }
       assert.equal(s.check12.result, 'FAIL'); assert.equal(s.start.result, 'NOT TRIED');
       assert.deepEqual(w.leftovers(), []); assert.equal(w.spawns, 0);
@@ -337,10 +350,23 @@ test('the Dispatcher\'s own gates before it claims: M10 refusing, or check 12 re
     const w = world({ plant: { noBudget: true } });
     try {
       const s = w.byStage(await w.run());
-      assert.equal(s.rules.result, 'NOT TRIED'); assert.match(s.rules.why, /rules are not loaded/);
-      for (const n of [4, 6, 11]) assert.equal(w.ran[n], undefined, `check ${n} not run without the rules`);
+      assert.equal(s.claimable.result, 'NOT TRIED'); assert.match(s.claimable.why, /Record is not loaded/);
+      for (const n of [4, 6, 11]) assert.equal(w.ran[n], undefined, `check ${n} not run without the Record`);
     } finally { w.done(); }
   }
+});
+
+test('a stop before the copy is made: nothing more is made (no copy, no outbox, no settings), and nothing is left', async () => {
+  const w = world();
+  let stop = null;
+  try {
+    const out = await w.run({ onAbort: (f) => { stop = f; }, deps: { ...w.io.deps, startCommit: async () => { w.calls.push('startCommit'); stop('SIGINT'); return HEAD; } } });
+    const s = w.byStage(out);
+    assert.equal(w.calls.filter((x) => Array.isArray(x) && x[0] === 'prepare').length, 0, 'no copy made after the stop');
+    assert.equal(s.copy.result, 'NOT TRIED'); assert.equal(s.check4.result, 'NOT TRIED');
+    assert.ok(!out.results.some((r) => r.result === 'FAIL'));
+    assert.deepEqual(out.made, []); assert.deepEqual(w.leftovers(), []); assert.equal(w.spawns, 0);
+  } finally { w.done(); }
 });
 
 test('busy is asked again before the code runs: a start of this card that appeared meanwhile stops checks 4, 6 and 11', async () => {
