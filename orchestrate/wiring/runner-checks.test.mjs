@@ -613,7 +613,7 @@ test('L1352 live: a real claude under dontAsk runs check 11\'s smoke: the write 
       sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false, network: { allowedDomains: [], strictAllowlist: true } } })}\n`);
     const x = { role: 'worker', profile: DESIGN_PROFILES.worker, sessionId: 'S-1', copy, reviewHome: home, claudeBin: liveClaude,
       settings: { file, settings: {} }, spawn: childSpawn, env: { ...process.env }, probeMs: 120_000 };
-    x.lockedRun = smokeRunOf(x);
+    x.smokeRunOf = smokeRunOf;
     assert.deepEqual(await reviewChecks(x)[11](), { ok: true });
     assert.deepEqual(readdirSync(d).sort(), ['S-1.json', 'copy', 'home'], 'the job\'s own settings file is removed after');
   } finally { rmSync(d, { recursive: true, force: true }); }
