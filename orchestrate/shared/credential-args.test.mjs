@@ -54,7 +54,7 @@ const GITLEAKS_ARGS = "runScanner's words: a gitleaks subcommand (version, git, 
 const CLAUDE_VERSION = "claude's path (the worker runner config's claudeBin, or the one the proof is handed), asked only --version";
 const LIVE_TESTS = "settings-names' TESTS: each run(side, dir) gives claude fixed flags (with, per test, an --effort level, the --mcp-config JSON of an empty or test tool-server list, or a random --session-id), the path of a settings file written in the proof's own temp folder (the settings object goes in the file, not on the command line) and a prompt made of fixed text and paths in that folder (dir)";
 const SHARED = { SETUP_CFG, SETUP_IO, DESTRUCTURED, GIT_ANSWER, RECORD_DOC, CLAUDE_START, INSTALL_PATHS, PROOF_ROWS, CAPTURE_TOOL, REVIEW_CONFIG, GITLEAKS_SETUP, GITLEAKS_ARGS, CLAUDE_VERSION, LIVE_TESTS };
-const SHARED_COUNT = { SETUP_CFG: 4, SETUP_IO: 17, DESTRUCTURED: 9, GIT_ANSWER: 15, RECORD_DOC: 17, CLAUDE_START: 14, INSTALL_PATHS: 13, PROOF_ROWS: 31, CAPTURE_TOOL: 6, REVIEW_CONFIG: 4, GITLEAKS_SETUP: 2, GITLEAKS_ARGS: 1, CLAUDE_VERSION: 4, LIVE_TESTS: 3 };
+const SHARED_COUNT = { SETUP_CFG: 4, SETUP_IO: 17, DESTRUCTURED: 9, GIT_ANSWER: 15, RECORD_DOC: 17, CLAUDE_START: 14, INSTALL_PATHS: 13, PROOF_ROWS: 31, CAPTURE_TOOL: 6, REVIEW_CONFIG: 4, GITLEAKS_SETUP: 2, GITLEAKS_ARGS: 1, CLAUDE_VERSION: 3, LIVE_TESTS: 3 };
 const REVIEWED = {
   "modules/M11-dispatcher/cleanup.mjs unread git(…, ['merge-base', '--is-ancestor', a.merge_commit, 'refs/heads/): rec.list('merge') is a call whose answer is not read @d02e91a1": "rec is the Record store: rec.list('merge') gives merge records, whose merge_commit is a 40-hex commit id (checked before git sees it), and rec.list('product') gives product ids",
   "modules/M11-dispatcher/cleanup.mjs unread mirrorTree's sha reaches git(…, ['ls-tree', '-r', '-z', '--full-tree', sha]), and mirrorTree is called from other modules @879170a7": "mirrorTree(git, mirror, sha): git ls-tree on a commit id; its callers pass a card's recorded commit",
@@ -254,7 +254,6 @@ const REVIEWED = {
   "setup/live-proofs/runlocked.mjs unread childSpawn(…, bin): a parameter of an unnamed function @12b29354": CLAUDE_START,
   "setup/live-proofs/runlocked.mjs unread childSpawn(…, args): a parameter of an unnamed function @878dbc18": CLAUDE_START,
   "setup/live-proofs/runlocked.mjs unread run(…, log) @5ed0d222": "underLock hands run the proof's own temp folder and a function that writes the proof's log lines",
-  "setup/live-proofs/runlocked.mjs unread execFileSync(…, c.claudeBin): checkRunnerConfig(readRunnerConfig(arg(argv, '--config'), se is a call whose answer is not read @a958a5f7": CLAUDE_VERSION,
   "setup/live-proofs/runlocked.mjs unread verifyBundle's mirror reaches spawnSync(…, ['--git-dir', mirror, 'bundle', 'verify', file]), and verifyBundle is called from other modules @5d821cdd": "git bundle verify on two paths: the runner config's mirror and the bundle the proof's own run left in its outbox",
   "setup/live-proofs/settings-names.mjs unread run(…, d): findInit(out) is a call whose answer is not read @3aebf2ba": LIVE_TESTS,
   "setup/live-proofs/settings-names.mjs value secret @db0aa401": "a fixture file the live proof makes in its own temp folder, named `secret` (its text is the marker seen-<side>-7c1f): the word is a file name in a test prompt, not a credential",

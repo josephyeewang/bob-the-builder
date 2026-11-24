@@ -9,7 +9,7 @@ import { spawn } from 'node:child_process';
 import { makeLock } from '../modules/M9-record/lock.mjs';
 import { loginJobPlist } from '../modules/M11-dispatcher/login-job.mjs';
 import { statusOf, statusText } from '../setup/builder-wall.mjs';
-import { DENY_KEYS, personUserProblem, carriedOverProblem, checkRunnerConfig, hookStoreOf, launchInputs, lockedOf, lockedWiring, readRunnerConfig, startDeps, listenStop, main, readRootFile, realRunnerPorts, testProductHeld, testProductProblem, workerCheckInputs } from './runner-main.mjs';
+import { DENY_KEYS, personUserProblem, carriedOverProblem, checkRunnerConfig, realRenderPaths, updateRestart, hookStoreOf, launchInputs, lockedOf, lockedWiring, readRunnerConfig, startDeps, listenStop, main, readRootFile, realRunnerPorts, testProductHeld, testProductProblem, workerCheckInputs } from './runner-main.mjs';
 import { SIGNIN_TOKEN_VAR, checkRoleEnv } from '../modules/M4-workshop/launcher/env-check.mjs';
 import { workerSnapshotProblem } from './runner-checks.mjs';
 import { rulesText } from '../setup/worker-rules.mjs';
@@ -281,6 +281,96 @@ test('#378 r1 m4: main does not start when the copies or outbox root is reached 
     assert.equal(ran, false);
     assert.equal(await main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: () => config(d), log: (s) => logs.push(s), run, onStop: () => {} }), 0, logs.join('\n'));
     assert.equal(ran, true);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test('L1347: main gives the sessions the real paths of the tool places setup names through the install link, and stops on one it can\'t read', async () => {
+  const d = roots(tempDir('orch-rmain-'));
+  try {
+    mkdirSync(join(d, 'runner'));
+    mkdirSync(join(d, 'install.v-1', 'hooks'), { recursive: true }); mkdirSync(join(d, 'install.v-1', 'bin'));
+    writeFileSync(join(d, 'install.v-1', 'bin', 'node'), '');
+    symlinkSync(join(d, 'install.v-1'), join(d, 'current'));
+    const paths = { deny: DENY(d), hooksDir: join(d, 'current', 'hooks'), node: join(d, 'current', 'bin', 'node'), notes: join(d, 'current', 'notes-not-yet') };
+    const cfg = () => config(d, { products: { p1: { repo: 'o/p1', mirror: join(d, 'mirror'), render: { paths } } } });
+    const logs = []; let got = null;
+    const code = await main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: cfg, log: (s) => logs.push(s), onStop: () => {},
+      portsOf: (cc, ports, o) => { got = cc; return realRunnerPorts(cc, ports, o); }, run: async () => {} });
+    assert.equal(code, 0, logs.join('\n'));
+    const q = got.products.p1.render.paths;
+    assert.equal(q.hooksDir, join(d, 'install.v-1', 'hooks'));
+    assert.equal(q.node, join(d, 'install.v-1', 'bin', 'node'));
+    assert.equal(q.notes, join(d, 'current', 'notes-not-yet'), 'a place not there yet is left for the wall');
+    assert.deepEqual(q.deny, paths.deny);
+    assert.ok(logs.some((l) => /p1's hooksDir is reached through a link; its sessions are given its real path/.test(l)), logs.join('\n'));
+    // A read that fails other than "not there" stops the runner before anything runs.
+    let ran = false;
+    const code2 = await main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: cfg, log: (s) => logs.push(s), onStop: () => {}, run: async () => { ran = true; },
+      realpath: (x) => { if (x === paths.hooksDir) { const e = new Error('denied'); e.code = 'EACCES'; throw e; } return realpathSync.native(x); } });
+    assert.equal(code2, 1); assert.equal(ran, false);
+    assert.match(logs.at(-1), /did not start: product p1's render\.paths\.hooksDir can't be read \(EACCES\)/);
+    // The one function main uses, which the runLocked proof also calls: the config given is left as it was.
+    const c0 = checkRunnerConfig(cfg());
+    const r = realRenderPaths(c0);
+    assert.equal(r.products.p1.render.paths.node, join(d, 'install.v-1', 'bin', 'node'));
+    assert.equal(c0.products.p1.render.paths.node, paths.node);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test('L1348: the runner stops for a restart once the install link names another version than its code and nothing only it holds is on', () => {
+  let at = '/i/v-1'; let q = 0; let t = 0; const logs = [];
+  const rp = (p) => { if (p === '/code') return '/i/v-1'; assert.equal(p, '/i/cur'); if (at === null) { const e = new Error('gone'); e.code = 'ENOENT'; throw e; } return at; };
+  const u = updateRestart({ installRoot: '/i/cur', from: '/code', realpath: rp, log: (x) => logs.push(x), waiting: () => q, now: () => t });
+  const idle = { state: { sessions: [], saves: {}, installs: {} }, pending: new Map() };
+  assert.equal(u(idle), false, 'same version: no stop');
+  assert.equal(u(undefined), false); assert.equal(u({}), false);
+  at = '/i/v-2';
+  // What only this process holds keeps it: a start or save still on, a kept save or install group, a request waiting.
+  const on = [
+    { state: { sessions: [] }, pending: new Map([['x', {}]]) },
+    { state: { sessions: [], saves: { s: { pgid: 1 } } }, pending: new Map() },
+    { state: { sessions: [], installs: { s: { pgid: 1 } } }, pending: new Map() },
+  ];
+  for (const x of on) assert.equal(u(x), false, JSON.stringify(x.state));
+  q = 1; assert.equal(u(idle), false, 'a request waiting'); q = 0;
+  assert.equal(logs.filter((l) => /newer version is installed \(\/i\/v-2\); it restarts on it once no start, save or request is on/.test(l)).length, 1, logs.join('\n'));
+  // Told again every ten minutes while it waits.
+  t = 600_000; assert.equal(u(on[0]), false);
+  assert.equal(logs.filter((l) => /it restarts on it once/.test(l)).length, 2);
+  // A link that can't be read now changes nothing.
+  at = null; assert.equal(u(idle), false); at = '/i/v-2';
+  // Running sessions, and ended ones with an open outbox, carry over: they don't hold it (#378 path).
+  const sessions = { state: { sessions: [{ id: 'b' }, { id: 'c', alive: true }, { id: 'd', alive: false, ended: true, outbox_open: true }], saves: {}, installs: {} }, pending: new Map() };
+  assert.equal(u(sessions), true);
+  assert.match(logs.at(-1), /no start, save or request is on; it stops, and the Mac starts it again on the new version within a minute/);
+  // The version is the running code's: the link moved before the runner read it doesn't make it look current.
+  at = '/i/v-2'; const u3 = updateRestart({ installRoot: '/i/cur', from: '/code', realpath: rp });
+  assert.equal(u3(idle), true, 'code is v-1, the link is v-2');
+  // No code folder to read never restarts, and says so.
+  const l2 = []; const u2 = updateRestart({ installRoot: '/i/cur', realpath: rp, log: (x) => l2.push(x) });
+  assert.match(l2[0], /own code folder can't be read now, so it won't restart itself/);
+  assert.equal(u2(idle), false);
+});
+
+test('L1348: main hands the loop a stop that is the update restart as well as SIGTERM, and returns 0 when it stops', async () => {
+  const d = roots(tempDir('orch-rmain-'));
+  try {
+    mkdirSync(join(d, 'runner'));
+    mkdirSync(join(d, 'v-1')); mkdirSync(join(d, 'v-2')); symlinkSync(join(d, 'v-1'), join(d, 'install'));
+    const logs = []; let seen = null;
+    const run = async (ctx) => {
+      const idle = { state: { sessions: [], saves: {}, installs: {} }, pending: new Map() };
+      assert.equal(ctx.stopWhen(idle), false, 'not moved yet');
+      rmSync(join(d, 'install')); symlinkSync(join(d, 'v-2'), join(d, 'install'));
+      // A request waiting in the runner's own requests folder holds the stop; read from the config's folder.
+      mkdirSync(join(d, 'requests'), { recursive: true }); writeFileSync(join(d, 'requests', 'r-1.json'), '{}');
+      assert.equal(ctx.stopWhen(idle), false, 'a request is waiting');
+      rmSync(join(d, 'requests', 'r-1.json'));
+      seen = ctx.stopWhen(idle);
+    };
+    const code = await main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: () => config(d), log: (s) => logs.push(s), run, onStop: () => {}, codeRoot: () => join(d, 'v-1') });
+    assert.equal(code, 0, logs.join('\n'));
+    assert.equal(seen, true, logs.join('\n'));
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 

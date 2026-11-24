@@ -92,6 +92,12 @@ test('step 4: the memory is loaded once; a missing file is a first run, and a me
   assert.match(v.notes.join('\n'), /no memory file yet: a first run/);
   assert.deepEqual(slept, [RUNNER_TICK_MS, RUNNER_TICK_MS]);
   assert.deepEqual(state.sessions, []);
+  // L1348: stopWhen is told the memory and the starts still on, each time it is asked.
+  const t = world(); const asked = []; let j = 0;
+  t.ports.outboxDrained = async () => true;
+  await runRunner({ ...t.ctx(), stopWhen: (x) => { asked.push(x); return j >= 1; }, sleep: async () => { j += 1; }, load: (f, o) => loadMemory(f, o) });
+  assert.ok(asked.length >= 2 && asked.every((x) => x && typeof x.state === 'object' && x.pending instanceof Map), 'stopWhen was not told the state and pending');
+  assert.ok(Array.isArray(asked.at(-1).state.sessions));
   const u = world(); let k = 0;
   await runRunner({ ...u.ctx({ ports: { ...u.ports, outboxDrained: undefined } }), stopWhen: () => k >= 1, sleep: async () => { k += 1; } });
   assert.match(u.notes.join('\n'), /a worker runner tick failed \(the worker runner has no outboxDrained port\)/);

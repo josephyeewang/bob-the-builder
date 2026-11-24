@@ -48,7 +48,7 @@ import { readJobConfig, readSha256 } from '../shared/job-config.mjs';
 import { makeLock } from '../modules/M9-record/lock.mjs';
 import { PRODUCT, runnerPlaces } from '../shared/product-paths.mjs';
 import { foldKey } from '../shared/plan-fingerprint.mjs';
-import { loadMemory, processGroupPorts, runRunner } from './runner-loop.mjs';
+import { listRequests, loadMemory, processGroupPorts, runRunner } from './runner-loop.mjs';
 import { drainedPort, liveWallProblem, pauseLeadPort, productWallGap, saveSettingsName, saveWorkPort, sessionEnv, sessionSettingsOf, sizePort, startPort, workerAccount } from './runner-ports.mjs';
 import { workerChecks, workerSnapshotProblem } from './runner-checks.mjs';
 import { withoutAge } from '../modules/M4-workshop/hooks/snapshot.mjs';
@@ -396,6 +396,7 @@ export function rootSnapshots(c, { log = () => {}, problem = workerSnapshotProbl
  * → the exit code.
  */
 export async function main(argv, { readConfig = (f) => readRunnerConfig(f, selfPath()), lock = (dir) => makeLock({ dir, timeoutMs: 2_000 }),
+  codeRoot = () => { const f = selfPath(); return f ? dirname(dirname(f)) : null; },
   ports = {}, run = runRunner, log = (s) => process.stderr.write(`${new Date().toISOString()} ${s}\n`), onStop = listenStop,
   realpath = (p) => realpathSync.native(p), memory = loadMemory, asUser = () => personUserProblem(process.getuid(), readGroups(), readName()), snapshotProblem = workerSnapshotProblem, sourceOf = readSha256,
   pinnedProblem, loadBudget, readManifest, portsOf = realRunnerPorts, hooksOf = hookStoreOf, testProduct = testProductProblem,
@@ -412,6 +413,7 @@ export async function main(argv, { readConfig = (f) => readRunnerConfig(f, selfP
     let real; try { real = realpath(c[k]); } catch (e) { log(`the worker runner did not start: ${k} can't be read (${e?.code ?? e?.message})`); return 1; }
     if (real !== c[k]) { log(`the worker runner did not start: ${k} is reached through a link (it is ${real})`); return 1; }
   }
+  try { c = realRenderPaths(c, { realpath, log }); } catch (e) { log(`the worker runner did not start: ${e.message}`); return 1; }
   // Launch checks 12 and 13's inputs (L1001): one loader, shared with the runLocked proof (L1092). Its own defaults are
   // the real ones; main passes a loader only when a test sets one (undefined takes launchInputs' default).
   const inputs = await launchInputs(c, { pinnedProblem, loadBudget, readManifest, log });
@@ -430,6 +432,7 @@ export async function main(argv, { readConfig = (f) => readRunnerConfig(f, selfP
   if (held.broke) log('the last worker runner\'s lock was left by a runner that is gone; it was broken');
   let stopping = false;
   onStop(() => { stopping = true; });
+  const updated = updateRestart({ installRoot: c.installRoot, from: codeRoot(), realpath, log, waiting: () => listRequests(c.requestsDir).length });
   // Each product's rules snapshot, root's (L1226): checked at each start, a product whose snapshot fails held, failing closed.
   const snaps = rootSnapshots(c, { log, problem: (s) => snapshotProblem(s) });
   let P;
@@ -445,11 +448,67 @@ export async function main(argv, { readConfig = (f) => readRunnerConfig(f, selfP
       if (hooks.broken) log(`worker runner: ${hooks.broken}; no Lead, Front Door or Mini Base session is typed into until it is fixed by hand`);
     }
     await run({ ...(hooks ? { hooks } : {}), requestsDir: c.requestsDir, statusFile: c.statusFile, memoryFile: c.memoryFile, orchestrateUid: c.orchestrateUid, uid: process.getuid(),
-      outboxRoot: c.outboxRoot, copiesRoot: c.copiesRoot, claimMs: c.claimMs, ports: P, note: log, stopWhen: () => stopping });
+      outboxRoot: c.outboxRoot, copiesRoot: c.copiesRoot, claimMs: c.claimMs, ports: P, note: log, stopWhen: (x) => stopping || updated(x) });
     return 0;
   } catch (e) { log(`the worker runner stopped: ${e?.message ?? e}`); return 1; } finally {
     try { l.release(held.nonce); } catch { /* gone */ }
   }
+}
+
+/** The tool places every session is given (hooks, node, notes, Bob: RENDER_PATHS), as their real paths (L1347). Setup
+ * names them through the install's link, which the updater points at each new version; the wall refuses a session folder
+ * reached through a link (render-settings.mjs), since the Mac's sandbox reads the real path. Read once, when the runner
+ * (or a proof that starts sessions as it does: live-proofs/runlocked.mjs) starts, so every session it starts gets the
+ * places the link named then, until a restart. A place not there yet is left as named, for the wall to decide (it refuses
+ * a folder reached through a link). The updater keeps the version before the current one, so a runner not restarted
+ * across two updates finds its places gone and every start is refused: updateRestart restarts it once nothing is on.
+ * → a new config (the one given is not changed); a place that can't be read throws. */
+export function realRenderPaths(c, { realpath = (p) => realpathSync.native(p), log = () => {} } = {}) {
+  const products = {};
+  for (const [name, p] of Object.entries(c.products)) {
+    const paths = { ...p.render.paths };
+    for (const k of RENDER_PATHS) {
+      if (paths[k] === undefined) continue;
+      let real; try { real = realpath(paths[k]); } catch (e) {
+        if (e?.code === 'ENOENT') continue;
+        throw new Error(`product ${name}'s render.paths.${k} can't be read (${e?.code ?? e?.message})`);
+      }
+      if (real !== paths[k]) log(`worker runner: product ${name}'s ${k} is reached through a link; its sessions are given its real path ${real}`);
+      paths[k] = real;
+    }
+    products[name] = { ...p, render: { ...p.render, paths } };
+  }
+  return { ...c, products };
+}
+
+/** The runner's restart onto a newer version (L1348). The updater repoints the install link and keeps only the version
+ * before the current one, and nothing restarts the runner, so one left running would, two updates later, find its own
+ * code and its sessions' tool places (realRenderPaths) gone. So: once the install link names another version than the
+ * code this runner runs (`from`: its own code folder's real path, never the link read later, which a flip can move),
+ * and nothing is on that only this process holds (no start or save still on, no save or install group kept, no request
+ * waiting in the requests folder), the loop stops and main returns 0; launchd's StartInterval starts the job again within
+ * a minute, on the new version. Sessions running carry over (carriedOverProblem, the #378 path); their tool places are
+ * the old version's either way. While it waits it says so, and again every ten minutes. A link that can't be read now
+ * changes nothing; with no `from` it never restarts itself (the owner restarts it by hand, as before).
+ * → stopWhen's part: ({ state, pending }) → true to stop. */
+export function updateRestart({ installRoot, from, realpath = (p) => realpathSync.native(p), log = () => {}, waiting = () => 0, now = Date.now }) {
+  let mine = null; if (from) { try { mine = realpath(from); } catch { mine = null; } }
+  if (mine === null) log(`worker runner: its own code folder can't be read now, so it won't restart itself onto a newer version; restart it by hand after an update`);
+  let told = -Infinity;
+  return (x) => {
+    if (mine === null || !x?.state) return false;
+    let at; try { at = realpath(installRoot); } catch { return false; }
+    if (at === mine) return false;
+    const s = x.state;
+    let queued; try { queued = waiting(); } catch { queued = 0; }
+    const on = (x.pending?.size ?? 0) > 0 || Object.keys(s.saves ?? {}).length > 0 || Object.keys(s.installs ?? {}).length > 0 || queued > 0;
+    if (on) {
+      if (now() - told >= 600_000) { log(`worker runner: a newer version is installed (${at}); it restarts on it once no start, save or request is on`); told = now(); }
+      return false;
+    }
+    log(`worker runner: a newer version is installed (${at}) and no start, save or request is on; it stops, and the Mac starts it again on the new version within a minute`);
+    return true;
+  };
 }
 
 /** The worker runner's config at `file`, read as its job reads it (shared/job-config.mjs): no code key, `budget` an
@@ -504,4 +563,6 @@ const invoked = (() => { try { return process.argv[1] ? realpathSync.native(proc
 // import, and its imports reach back here (setup/worker-runner-setup.mjs imports checkRunnerConfig), so an awaited
 // main() waited on this file while this file waited on main(), and node exited 13 with nothing said, once a minute.
 // A throw from main exits 1 at once, as an uncaught one did.
-if (invoked && invoked === selfPath()) main(process.argv.slice(2)).then((code) => { process.exitCode = code; }, (e) => { process.stderr.write(`${e?.stack ?? e}\n`); process.exit(1); });
+// A runner that stopped itself for an update (L1348) must really exit, or launchd counts the job as running and never
+// starts it again: an unref'd timer ends the process 5 s after main returns, should some handle still hold it.
+if (invoked && invoked === selfPath()) main(process.argv.slice(2)).then((code) => { process.exitCode = code; setTimeout(() => process.exit(code), 5_000).unref(); }, (e) => { process.stderr.write(`${e?.stack ?? e}\n`); process.exit(1); });
