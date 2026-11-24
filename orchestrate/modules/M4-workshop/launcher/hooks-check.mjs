@@ -63,10 +63,20 @@ function splitCommand(cmd) {
   return cmd.slice(0, -HOOK_FAILS_CLOSED.length).split(' ');
 }
 
-/** The production guard's harmful probe: run the first program the rules list as production. */
+/**
+ * The production guard's harmful probe: run the first program the rules list as production. Rules that list none (a
+ * product with no production, L1356) still get a call the guard refuses whatever the rules say: FLOOR_PROBE, a string
+ * handed to `sh -c`, which the role form refuses as a class (hooks/lib.mjs `unreadable`, R-0b-44 round 2 MAT-1) before
+ * it reads a production name. That refusal is the floor the lock-down's own exception (LOCKED_JOB_COMMAND) is carved
+ * from, so it is the one least likely to change; `rm` of the session's folder (folderWriteWhy) is the other rule-free
+ * refusal, but it is a path rule with more cases. Only the role form refuses it: the machine-wide form
+ * (--machine-wide) reads production names only, so with empty rules it refuses nothing, and check 7 probes the role
+ * hooks alone.
+ */
+export const FLOOR_PROBE = Object.freeze({ tool_name: 'Bash', tool_input: Object.freeze({ command: '/bin/sh -c true' }) });
 export const productionProbe = (rules) => {
   const prog = rules?.production?.programs?.[0];
-  return typeof prog === 'string' ? { tool_name: 'Bash', tool_input: { command: `${prog} deploy` } } : null;
+  return typeof prog === 'string' ? { tool_name: 'Bash', tool_input: { command: `${prog} deploy` } } : FLOOR_PROBE;
 };
 
 /**

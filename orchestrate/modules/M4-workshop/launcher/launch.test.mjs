@@ -13,7 +13,8 @@ import { roleArgs, checkInit, readBack, sourcesProblem } from './readback.mjs';
 import { sessionArgs } from './review-launch.mjs';
 import { roleEnv, checkRoleEnv, startEnv, PASS_ENV, LAUNCHER_ENV, ROLE_ENV_ALLOWED, checkMachineWide, listDropIns, readPlist, MANAGED_READERS, CLAUDE_FILE } from './env-check.mjs';
 import { userInfo } from 'node:os';
-import { HOOKS_SOURCE, installHooks, checkHooks, checkVersion, pinnedBinary, productionProbe, checkSnapshot } from './hooks-check.mjs';
+import { HOOKS_SOURCE, installHooks, checkHooks, checkVersion, pinnedBinary, productionProbe, FLOOR_PROBE, checkSnapshot } from './hooks-check.mjs';
+import { LOCKED_JOB_COMMAND, unreadable } from '../hooks/lib.mjs';
 import { emptyOutbox, readOutboxFile } from './outbox.mjs';
 import { namesIn, unconfirmedNames, FLAGS, sourcesArgs, NAMES_CHECK_REFUSALS, isNamesCheckRefusal } from './settings-names.mjs';
 import { CHECKS, launch, installStep, needsInstall, checkBobFolder, lockedRunCommand, smokeTest, baselineTest } from './launch.mjs';
@@ -693,7 +694,7 @@ test('L900 check 10: the real readers list drop-ins as claude does and convert m
 
 // ---- check 7: hooks and version (R-0b-37, 40) ----
 
-function hookWorld(role = 'worker') {
+function hookWorld(role = 'worker', rulesOver = null) {
   const root = tmp();
   const source = join(root, 'source'); cpSync(HOOKS_SOURCE, source, { recursive: true });
   for (const n of readdirSync(source)) if (n.endsWith('.test.mjs')) rmSync(join(source, n));
@@ -706,7 +707,7 @@ function hookWorld(role = 'worker') {
   // In a folder of its own (L921: the snapshot's wall shuts its whole folder); for a review role, inside the runner's folder.
   const snapDir = join(root, RUNNER_ROLES.includes(role) ? 'rr' : 'snapshots'); mkdirSync(snapDir);
   const snapshot = join(snapDir, 'rules.json');
-  const rules = { production: { env_files: [join(root, 'prod.env')], programs: ['fakehost'], hosts: ['db.prod.example.net'] }, secrets: { paths: [keys] } };
+  const rules = rulesOver ?? { production: { env_files: [join(root, 'prod.env')], programs: ['fakehost'], hosts: ['db.prod.example.net'] }, secrets: { paths: [keys] } };
   writeFileSync(snapshot, makeSnapshot(rules));
   const profile = DESIGN_PROFILES[role];
   const r = renderRoleSettings({ productionFiles: [], proposalOutboxes: ['/w/proposals'], role, profile, paths: { copy, outbox, hooksDir, snapshot, node: process.execPath, ownerTaps: '/w/owner-taps', reviewAgainConfig: '/w/review-again.json', notes, deny: { proposals: ['/w/proposals'], secrets: [keys] }, reviewWalls: { outboxRoot: join(root, 'ro'), runnerRoot: join(root, 'rr') } }, product: { commands: { test: 'npm test' } } });
@@ -714,6 +715,30 @@ function hookWorld(role = 'worker') {
   const check = (over = {}) => checkHooks({ settings: r.settings, hooksDir, source, kinds: profile.outbox, copy, outbox, harmfulProduction: productionProbe(rules), timeoutMs: 1500, ...over });
   return { root, source, hooksDir, outbox, settings: r.settings, check, rules };
 }
+
+// L1356: orchestrate-test's rules rightly list no production program, host or settings file, and check 7 refused every
+// launch for it: "no harmful probe for the production-write-guard hook". The probe is now the guard's rule-free floor.
+test('L1356: check 7 with rules naming no production: the guard\'s floor is the harmful probe; a working guard passes, an always-passing one is caught', () => {
+  const empty = { production: { env_files: [], programs: [], hosts: [] }, secrets: { paths: [] } };
+  assert.deepEqual(productionProbe(empty), FLOOR_PROBE);
+  assert.deepEqual(productionProbe({}), FLOOR_PROBE, 'no production block at all: the same floor');
+  assert.equal(LOCKED_JOB_COMMAND.test(FLOOR_PROBE.tool_input.command), false, 'not the lock-down\'s one allowed shape');
+  assert.match(unreadable(FLOOR_PROBE.tool_input.command), /sh -c/);
+  for (const role of ['worker', 'lead', 'front_door']) {
+    const w = hookWorld(role, empty);
+    const r = w.check();
+    assert.equal(r.ok, true, `${role}: ${r.reason}`);
+  }
+  // A guard that lets everything through is still caught with empty rules.
+  const w = hookWorld('worker', empty);
+  for (const d of [w.source, w.hooksDir]) writeFileSync(join(d, 'production-write-guard.mjs'), 'process.exit(0);\n');
+  assert.match(w.check().reason, /the production-write-guard hook answered 0 to a harmful call/);
+  // The rule-based probe is unchanged when the rules name a program.
+  assert.deepEqual(productionProbe({ production: { programs: ['fakehost'] } }), { tool_name: 'Bash', tool_input: { command: 'fakehost deploy' } });
+  // And the guard refuses the floor probe as itself, by its own words.
+  const g = hookWorld('worker', empty);
+  assert.match(g.check({ harmfulProduction: { tool_name: 'Bash', tool_input: { command: 'true' } } }).reason, /answered 0 to a harmful call/, 'a harmless call as the harmful one is caught: the probe is what proves it');
+});
 
 test('check 7: the installed hooks pass, for a worker and for the Lead', () => {
   for (const role of ['worker', 'lead', 'front_door']) {
