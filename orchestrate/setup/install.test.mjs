@@ -11,7 +11,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { gitOk } from '../modules/M4-workshop/git/safe-git.mjs';
 import { SCRIPTS, reviewDaemonPlists, updaterPlist } from '../modules/M4-workshop/launcher/review-daemons.mjs';
-import { NODE, RUNNER_CONFIG, STAMP, UPDATER_CONFIG } from '../modules/M4-workshop/launcher/install-check.mjs';
+import { HOOK_MODULE, NODE, RUNNER_CONFIG, STAMP, UPDATER_CONFIG, hooksProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { MUST_KEEP, readUpdaterConfig } from '../modules/M4-workshop/launcher/review-updater.mjs';
 import { pinnedBinary } from '../modules/M4-workshop/launcher/hooks-check.mjs';
 import { realIo, writeNewFile } from './mac.mjs';
@@ -263,7 +263,17 @@ test('install: the real updater accepts the layout; every item passes; the work 
   assert.equal(failed(checkInstall(w.mac, w.cfg)).length, 0, JSON.stringify(failed(checkInstall(w.mac, w.cfg))));
   assert.equal(existsSync(w.mac.at(`${BASE}/install-work`)), false, 'work folder left behind');
   const folder = realCopy(w); const copy = copyOf(w);
-  for (const n of [NODE, UPDATER_CONFIG, RUNNER_CONFIG, 'modules/M4-workshop/launcher/review-wiring.mjs', 'claude-bin', 'hooks/h.sh', 'a.txt']) assert.ok(existsSync(join(copy, n)), n);
+  for (const n of [NODE, UPDATER_CONFIG, RUNNER_CONFIG, 'modules/M4-workshop/launcher/review-wiring.mjs', 'claude-bin', 'hooks/guard.mjs', 'a.txt']) assert.ok(existsSync(join(copy, n)), n);
+  // L1354: the copy's hooks are made from its own module hooks (tests left out), never the extras' folder carried in.
+  assert.ok(!existsSync(join(copy, 'hooks/h.sh')) && !existsSync(join(copy, 'hooks/guard.test.mjs')));
+  assert.equal(readFileSync(join(copy, 'hooks/guard.mjs'), 'utf8'), readFileSync(join(copy, 'modules/M4-workshop/hooks/guard.mjs'), 'utf8'));
+  // And check-install says so; a hook that is not the copy's own fails that row by name.
+  const hookRow = () => checkInstall(w.mac, w.cfg).find((x) => /hooks\/ is its own modules\/M4-workshop\/hooks/.test(x.what));
+  assert.equal(hookRow()?.ok, true, JSON.stringify(hookRow()));
+  const g = join(copy, 'hooks/guard.mjs'); const was = readFileSync(g);
+  writeFileSync(g, `${was}// older\n`);
+  assert.equal(hookRow().ok, false); assert.match(hookRow().why, /hook guard\.mjs differs from the module copy: the next update makes them again, or run add-to-install/);
+  writeFileSync(g, was);
   assert.ok(existsSync(join(folder, STAMP)), 'the stamp is at the top of the versioned folder'); assert.ok(existsSync(join(folder, 'scripts/blueprint/yaml-lite.mjs')), 'the outside file is beside the copy');
   const stamp = readFileSync(join(folder, STAMP), 'utf8').trim();
   assert.match(stamp, /^[0-9a-f]{40}$/);
@@ -2071,7 +2081,7 @@ test('add-to-install: a program swapped after the plan is caught at the copy, an
 test('add-to-install: as root, a runner config someone else owns is refused, as install refuses it', async () => {
   const w = await readyToAdd(); w.mac.sourceOwner = w.mac.rootUid + 1;
   const r = w.run(ADD); assert.equal(r.code, 1, r.text); assert.match(r.text, /nothing was changed/);
-  assert.ok(!existsSync(join(w.root, 'hooks/guard.mjs')));
+  assert.ok(!existsSync(pinnedBinary(w.root, PIN)));
 });
 
 test('add-to-install: no update, no flip, no launchctl, no job file; every other file of the copy is byte for byte the same', async () => {
@@ -2224,7 +2234,7 @@ test('add-to-install: a dry run lists the steps and changes nothing; the flags b
   }
 });
 
-test('add-to-install: the next real update carries claude-code and hooks across, and the runner config still passes', async () => {
+test('add-to-install: the next real update carries claude-code across and makes the hooks again, and the runner config still passes', async () => {
   const w = await readyToAdd(); assert.equal(w.run(ADD).code, 0);
   const uc = JSON.parse(readFileSync(join(w.root, UPDATER_CONFIG), 'utf8')); uc.address = w.bare;
   writeFileSync(join(w.root, UPDATER_CONFIG), JSON.stringify(uc));
@@ -2239,6 +2249,7 @@ test('add-to-install: the next real update carries claude-code and hooks across,
   assert.equal(readFileSync(join(w.root, 'a.txt'), 'utf8'), 'two\n');
   assert.equal(readFileSync(pinnedBinary(w.root, PIN), 'utf8'), PROGRAM);
   assert.deepEqual(readdirSync(join(w.root, 'hooks')), ['guard.mjs']);
+  assert.equal(hooksProblem(join(w.root, 'hooks'), join(w.root, HOOK_MODULE)), null, 'the new copy\'s own hooks (L1354)');
 });
 
 // The live failure (Nov 2026): with a workerRunner entry, install's keep list named worker-runner.json, which install never

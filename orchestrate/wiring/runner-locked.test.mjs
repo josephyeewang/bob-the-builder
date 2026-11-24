@@ -12,11 +12,12 @@ import { tempDir } from '../shared/test-tmp.mjs';
 import { pushWorld } from '../modules/M4-workshop/git/push-world.test-helper.mjs';
 import { createSaveWork } from '../modules/M4-workshop/git/save-work.mjs';
 import { bundleName } from '../modules/M4-workshop/git/push.mjs';
-import { JOBS_DIR, JOB_ACK_WAIT_MS, LOCKED_JOBS, LOCKED_MS, LOCKED_SAVE_MS, RESULT_MAX_BYTES, SAVE_DELAYS_MS, GUARD, ackFile, groupFile, guardedRun, jobGuard, jobSettings, processInfo, jobSettingsFile, lockedCommand, lockedJobOf, lockedRule, jobFile, jobGroupProblem, lockedRunner, readGroupRecord, runToEnd, settingsSha, claudeEnd, sayable, hearing, resultWords, SAID_MAX } from './runner-locked.mjs';
+import { JOBS_DIR, JOB_ACK_WAIT_MS, LOCKED_JOBS, LOCKED_MS, LOCKED_SAVE_MS, RESULT_MAX_BYTES, SAVE_DELAYS_MS, GUARD, ackFile, groupFile, guardedRun, jobGuard, jobSettings, processInfo, jobSettingsFile, lockedCommand, lockedJobOf, lockedRule, jobFile, jobGroupProblem, lockedRunner, readGroupRecord, runToEnd, settingsSha, claudeEnd, sayable, hearing, resultWords, toolErrorWords, TOOL_SAID_MAX, SAID_MAX } from './runner-locked.mjs';
 import { EventEmitter } from 'node:events';
 import { SAVE_DEADLINE_MS } from '../modules/M11-dispatcher/pass.mjs';
 import { LOCKED_PROMPT } from '../modules/M4-workshop/launcher/launch.mjs';
 import { POLICY_HOOKS } from '../modules/M4-workshop/launcher/render-settings.mjs';
+import { walledLaunchSettings } from './runner-launch.mjs';
 import { DESIGN_PROFILES, outboxKindsFor } from '../modules/M4-workshop/launcher/role-profiles.mjs';
 import { makeSnapshot } from '../modules/M4-workshop/hooks/snapshot.mjs';
 import { LOCKED_JOB_COMMAND, guardBesideHooks, unreadable } from '../modules/M4-workshop/hooks/lib.mjs';
@@ -570,10 +571,34 @@ test('L1351: sayable hides key-shaped runs, URL sign-ins and keeps one short pri
 });
 
 test('L1351: resultWords reads the last result event; a strange subtype is not shown; no event is null', () => {
-  assert.deepEqual(resultWords('{"type":"result","subtype":"error_max_turns","is_error":true}'), { sub: 'error_max_turns', why: '' });
-  assert.deepEqual(resultWords('{"type":"result","subtype":"X; rm","is_error":true,"result":"boom"}'), { sub: 'a subtype not shown', why: 'boom' });
+  assert.deepEqual(resultWords('{"type":"result","subtype":"error_max_turns","is_error":true}'), { sub: 'error_max_turns', why: '', denied: null });
+  assert.deepEqual(resultWords('{"type":"result","subtype":"X; rm","is_error":true,"result":"boom"}'), { sub: 'a subtype not shown', why: 'boom', denied: null });
   assert.equal(resultWords('not json\n{"type":"assistant"}'), null);
   const h = hearing(); assert.equal(h.said(), ''); // never listened: nothing said
+});
+
+// L1354: on the Mini the install's claude ended "result error_max_turns" and nothing more, while a stale hook had refused
+// its one command. The refusal now says the tool's own last error (the hook's words) and how many calls were denied.
+test('L1354: a job that was refused says the hook\'s words and the number of permission denials, not only error_max_turns', async () => {
+  // The two events as claude wrote them on the Mini, 24 Nov 2026 (paths shortened; checked: claude-code 2.1.316).
+  const hook = '/x/orchestrate.v-abc/orchestrate/bin/node /x/orchestrate.v-abc/orchestrate/hooks/production-write-guard.mjs --role worker --outbox /x/outbox || exit 2';
+  const out = [
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: "/bin/sh '/x/guard.sh' 'a' 'a.ok' 200 'dHJ1ZQ=='" } }] } }),
+    JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', is_error: true,
+      content: `PreToolUse:Bash hook error: [${hook}]: [orchestrate] blocked: "sh" runs commands the guard can't see; write the command out plainly` }] } }),
+    JSON.stringify({ type: 'result', subtype: 'error_max_turns', is_error: true, permission_denials: [{ tool_name: 'Bash' }] }),
+  ].join('\n');
+  assert.equal(toolErrorWords(out), 'PreToolUse:Bash hook error: [orchestrate] blocked: "sh" runs commands the guard can\'t see; write the command out plainly');
+  const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter() });
+  const h = hearing(); h.listen(child); child.stdout.emit('data', `${out}\n`);
+  const said = h.said();
+  assert.equal(said, 'result error_max_turns, 1 permission denial: the tool said \'PreToolUse:Bash hook error: [orchestrate] blocked: \'sh\' runs commands the guard can\'t see; write the command out plainly\'');
+  assert.match(claudeEnd({ exitCode: 1, said }), /blocked: 'sh' runs commands the guard can't see/);
+  // Only a failed tool call is said; a long one is cut to TOOL_SAID_MAX before it is made safe to show.
+  assert.equal(toolErrorWords(JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', is_error: false, content: 'fine' }] } })), '');
+  assert.equal(toolErrorWords(JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', is_error: true, content: [{ type: 'text', text: 'y '.repeat(300) }] }] } })).length, TOOL_SAID_MAX);
+  // Two denials, counted.
+  assert.equal(resultWords(JSON.stringify({ type: 'result', subtype: 'error_max_turns', permission_denials: [{}, {}] })).denied, 2);
 });
 
 // ---- L1352: one plain command, allowed by one exact rule ----
@@ -747,6 +772,7 @@ const versions = (d, ...names) => {
     installHooks(join(root, 'hooks'), HOOKS_SOURCE);
     mkdirSync(join(root, 'modules', 'M4-workshop', 'jobs'), { recursive: true });
     writeFileSync(join(root, 'modules', 'M4-workshop', 'jobs', 'guard.sh'), readFileSync(GUARD));
+    installHooks(join(root, 'modules', 'M4-workshop', 'hooks'), HOOKS_SOURCE);   // the version's module hooks (L1354)
     at[v] = root;
   }
   return at;
@@ -814,6 +840,64 @@ test('#666 r2 M1: jobGuard: no hooks, the runner\'s own guard; hooks in two fold
     return assert.rejects(guardedRun({ spawn: () => { throw new Error('started'); }, claudeBin: '/x/claude', settingsFile, inner: 'true', profile: DESIGN_PROFILES.worker, cwd: d, env: {}, ms: 1000, label: 'the job',
       gfile: groupFile({ cwd: d, job: 'install', sessionId: 'S-1', run: 'ab' }) }), (e) => e.beforeRun === true && /no lock-down guard beside its hooks folder/.test(e.message));
   } finally { setTimeout(() => rmSync(d, { recursive: true, force: true }), 2000); }
+});
+
+// L1354: the Mini's hooks/ was from 15 Nov (the updater carried it forward), so its Bash hooks refused the guard's command
+// and launch check 4 ended in a bare error_max_turns. A hooks folder that is not its version's own module hooks is now
+// refused before claude starts, naming the hook.
+test('L1354: stale hooks (not their version\'s own module hooks) are refused by name before any job starts', async () => {
+  const d = realpathSync(tempDir('orch-stale-'));
+  try {
+    const at = versions(d, 'abc');
+    const hooks = join(at.abc, 'hooks');
+    assert.equal(jobGuard(hookSettings(hooks)), join(at.abc, 'modules', 'M4-workshop', 'jobs', 'guard.sh'), 'the same hooks: let through');
+    // Run from the repository the hooks folder is the module folder itself: nothing to compare.
+    assert.equal(jobGuard(hookSettings(join(JOBS_DIR, '..', 'hooks'))), GUARD);
+    // One hook from an older version.
+    writeFileSync(join(hooks, 'lib.mjs'), `${readFileSync(join(hooks, 'lib.mjs'), 'utf8')}// older\n`);
+    assert.throws(() => jobGuard(hookSettings(hooks)), /hooks folder .* is not its version's own hooks \(hook lib\.mjs differs from the module copy\): the next update makes them again, or run add-to-install/);
+    writeFileSync(join(hooks, 'lib.mjs'), readFileSync(join(at.abc, 'modules', 'M4-workshop', 'hooks', 'lib.mjs')));
+    // A hook the version has that the folder lacks, and one it has that the version doesn't.
+    rmSync(join(hooks, 'merge-guard.mjs')); writeFileSync(join(hooks, 'old-hook.mjs'), '// gone from the module\n');
+    assert.throws(() => jobGuard(hookSettings(hooks)), /different files from the module copy \(missing: merge-guard\.mjs; extra: old-hook\.mjs\)/);
+    // guardedRun refuses before claude starts.
+    const settingsFile = join(d, 'S-1.json'); writeFileSync(settingsFile, `${JSON.stringify({ ...hookSettings(hooks), permissions: {}, sandbox: sandbox() })}\n`);
+    await assert.rejects(guardedRun({ spawn: () => { throw new Error('started'); }, claudeBin: '/x/claude', settingsFile, inner: 'true', profile: DESIGN_PROFILES.worker, cwd: d, env: {}, ms: 1000, label: 'the job',
+      gfile: groupFile({ cwd: d, job: 'install', sessionId: 'S-1', run: 'ab' }) }), (e) => e.beforeRun === true && /missing: merge-guard\.mjs/.test(e.message));
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+// L1354: no live claude. The worker's settings as the runner renders them (walledLaunchSettings), written to a file and
+// read back; every PreToolUse hook whose matcher takes Bash is run as claude runs it (sh -c "<its command>", the tool call
+// on stdin); the command is the install's, with the guard jobGuard finds from those settings.
+test('L1354: lockedCommand\'s output gets through every Bash hook of a rendered worker settings file, run as claude runs them', () => {
+  const d = realpathSync(tempDir('orch-rendered-'));
+  try {
+    const at = versions(d, 'abc');
+    const link = join(d, 'orchestrate'); symlinkSync(at.abc, link);
+    const p = (...a) => join(d, ...a);
+    for (const x of ['snap', 'copy', 'outbox', 'notes', 'bob', 'requests', 'runner', 'settings']) mkdirSync(p(x));
+    writeFileSync(p('snap', 'rules.json'), makeSnapshot({ production: { env_files: [p('prod', 'settings.production')], programs: ['fakedb'], hosts: ['db.prod.example.net'] }, secrets: { paths: [p('keys')] } }));
+    const paths = { hooksDir: realpathSync(join(link, 'hooks')), snapshot: p('snap', 'rules.json'), node: process.execPath, notes: p('notes'), bobFolder: p('bob'), mirror: p('mirror.git'), copy: p('copy'), outbox: p('outbox'),
+      deny: { proposals: [p('proposals')], secrets: [p('keys')], claudeHome: p('h', 'c'), ssh: p('h', 's'), gh: p('h', 'g'), robotKeys: p('k'), record: p('record'), otherCopies: [] } };
+    const w = walledLaunchSettings({ kind: 'editing', workerRunner: { requestsDir: p('requests'), statusFile: p('runner', 'status.json') }, profile: DESIGN_PROFILES.worker,
+      product: { commands: { install: 'npm ci', test: 'npm test' } }, rulesHosts: [], productionFiles: [], proposalOutboxes: [p('proposals')], phase: 'install', registryHosts: [], paths });
+    assert.equal(w.ok, true, w.reason);
+    const file = p('settings', 'S-1.json'); writeFileSync(file, `${JSON.stringify(w.settings, null, 2)}\n`);
+    const settings = JSON.parse(readFileSync(file, 'utf8'));
+    const bash = settings.hooks.PreToolUse.filter((m) => m.matcher === '*' || m.matcher.split('|').includes('Bash')).flatMap((m) => m.hooks.map((h) => h.command));
+    assert.deepEqual(bash.map((c) => c.match(/\/hooks\/([a-z-]+)\.mjs /)[1]).sort(), ['merge-guard', 'no-verify-block', 'production-write-guard', 'secret-file-block']);
+    const guard = jobGuard(settings);
+    assert.equal(guard, join(at.abc, 'modules', 'M4-workshop', 'jobs', 'guard.sh'));
+    const cwd = p('copy');
+    const run = (command) => bash.map((c) => spawnSync('/bin/sh', ['-c', c], { input: JSON.stringify({ tool_name: 'Bash', tool_input: { command }, cwd }), encoding: 'utf8', timeout: 10_000 }));
+    const gfile = groupFile({ cwd, job: 'install', sessionId: 'S-1', run: 'ab' });
+    const ok = run(lockedCommand({ gfile, inner: `( npm ci ); /bin/echo $? > '${jobFile({ cwd, job: 'install', sessionId: 'S-1' })}'`, guard }));
+    assert.deepEqual(ok.map((r) => r.status), [0, 0, 0, 0], ok.map((r) => r.stderr).join(''));
+    // The same hooks still refuse the guard run through a plain sh line (the hook's words are what claude passes back).
+    const no = run(`sh -c 'npm ci'`);
+    assert.ok(no.some((r) => r.status === 2 && /blocked/.test(r.stderr)), no.map((r) => r.stderr).join(''));
+  } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
 test('#666 r2 m1: a claude that ended its turn without running the command is tried once more, fresh; never twice, never after the guard started', async () => {

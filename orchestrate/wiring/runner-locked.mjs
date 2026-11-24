@@ -49,7 +49,7 @@
 // The 10 minutes of LOCKED_MS (and check 11's BASELINE_MS, guardedRun, #463 r2 M3) is our own cap, a choice, not a tool
 // limit (#463 r3 m2): the Bash tool's longest wait is BASH_MAX_TIMEOUT_MS when it is set (2.1.317, 2.1.322, 2.1.316), and the runner
 // sets it to the job's limit. A product whose tests need longer splits its test command, or the cap is raised here.
-import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -68,6 +68,7 @@ import { lstartIso } from '../modules/M9-record/lock.mjs';
 import { ASK_POLL_MS } from './owner-asks.mjs';
 import { SETTINGS as S, HOOK_FIELDS as H } from '../modules/M4-workshop/launcher/settings-names.mjs';
 import { guardBesideHooks } from '../modules/M4-workshop/hooks/lib.mjs';
+import { hooksProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
 
 export const LOCKED_JOBS = Object.freeze(['save-work', 'install']);
 /**
@@ -310,8 +311,9 @@ export function sayable(text) {
   return t.length > SAID_MAX ? `…${t.slice(-SAID_MAX)}` : t;
 }
 
-/** What claude's own result says (stream-json's last `result` event) → { sub, why } (sub: its subtype when it is a plain
- *  name, else 'a subtype not shown'; why: its error words when it failed), or null with no result event. */
+/** What claude's own result says (stream-json's last `result` event) → { sub, why, denied } (sub: its subtype when it is a
+ *  plain name, else 'a subtype not shown'; why: its error words when it failed; denied: how many tool calls it lists as
+ *  refused, `permission_denials`, or null when it lists none), or null with no result event. */
 export function resultWords(stdout) {
   const lines = String(stdout ?? '').split('\n').map((l) => l.trim()).filter(Boolean).reverse();
   for (const l of lines) {
@@ -319,9 +321,29 @@ export function resultWords(stdout) {
     if (e?.type !== 'result') continue;
     const sub = typeof e.subtype === 'string' && /^[a-z_]{1,40}$/.test(e.subtype) ? e.subtype : 'a subtype not shown';
     const errs = Array.isArray(e.errors) ? e.errors.filter((x) => typeof x === 'string').join('; ') : '';
-    return { sub, why: errs || (e.is_error === true && typeof e.result === 'string' ? e.result : '') };
+    return { sub, why: errs || (e.is_error === true && typeof e.result === 'string' ? e.result : ''), denied: Array.isArray(e.permission_denials) ? e.permission_denials.length : null };
   }
   return null;
+}
+
+/** The words of the last tool call that failed (L1354): stream-json's last `tool_result` with is_error, as a hook's
+ *  refusal comes back ("PreToolUse:Bash hook error: [<the hook's command>]: <its words>", seen on claude-code 2.1.316 on
+ *  the Mini, 24 Nov 2026; checked: claude-code 2.1.316), the hook's command left out so its words show, its first
+ *  TOOL_SAID_MAX characters, or '' with none. A refusal from a hook otherwise hides behind claude's bare "error_max_turns". */
+export const TOOL_SAID_MAX = 200;
+export function toolErrorWords(stdout) {
+  const lines = String(stdout ?? '').split('\n').map((l) => l.trim()).filter(Boolean).reverse();
+  for (const l of lines) {
+    let e; try { e = JSON.parse(l); } catch { continue; }
+    const parts = Array.isArray(e?.message?.content) ? e.message.content : [];
+    for (const c of [...parts].reverse()) {
+      if (c?.type !== 'tool_result' || c.is_error !== true) continue;
+      const text = typeof c.content === 'string' ? c.content
+        : Array.isArray(c.content) ? c.content.filter((x) => x?.type === 'text' && typeof x.text === 'string').map((x) => x.text).join(' ') : '';
+      return text.replace(/\s+/g, ' ').trim().replace(/^(\S+ hook error): \[.*?\]: /, '$1: ').slice(0, TOOL_SAID_MAX);
+    }
+  }
+  return '';
 }
 
 /** Claude's output, heard through its pipes: the last HEARD_OUT_MAX of stdout and HEARD_ERR_MAX of stderr. listen(child)
@@ -344,7 +366,9 @@ export function hearing({ drainMs = HEARD_DRAIN_MS } = {}) {
       end();
       const r = resultWords(out);
       const free = sayable([r?.why, err.trim() ? `stderr: ${err.trim()}` : ''].filter(Boolean).join('; '));
-      return [r ? `result ${r.sub}` : '', free].filter(Boolean).join(': ');
+      const tool = sayable(toolErrorWords(out));
+      const denied = r?.denied ? `${r.denied} permission denial${r.denied === 1 ? '' : 's'}` : '';
+      return [[r ? `result ${r.sub}` : '', denied].filter(Boolean).join(', '), [tool ? `the tool said '${tool}'` : '', free].filter(Boolean).join('; ')].filter(Boolean).join(': ');
     },
     stop: end,
   };
@@ -427,6 +451,11 @@ export const jobSettingsFile = (settingsFile, run) => {
  * the hooks' own guardBesideHooks, so it is the guard those hooks let through. Settings naming no hook get the runner's
  * own (GUARD; no hook is there to accept or refuse it). Hooks in more than one folder, a hook command not in render-
  * settings' form (`<node> <hooks folder>/<name>.mjs …`), or a hooks folder with no guard beside it: a throw.
+ * Stale hooks (L1354): a hooks folder that is not, byte for byte, the module hooks of its own version (beside the guard,
+ * <version>/modules/M4-workshop/hooks) is a throw naming the scripts, before anything runs. Such hooks may lack what the
+ * job's command needs to get through (LOCKED_JOB_COMMAND), which would end in claude's bare "error_max_turns"; and they
+ * would fail launch check 7 anyway, which comes after check 4's install. So every lock-down job (the install, the smoke,
+ * the baseline, a save) says it first, by name. Run from the repository the hooks folder is the module folder itself.
  */
 export function jobGuard(settings) {
   const dirs = new Set();
@@ -446,6 +475,10 @@ export function jobGuard(settings) {
   const [dir] = dirs;
   const g = guardBesideHooks(dir);
   if (!g) throw new Error(`there is no lock-down guard beside its hooks folder ${dir}`);
+  const mod = join(dirname(g), '..', 'hooks');
+  let same = false; try { same = realpathSync.native(dir) === realpathSync.native(mod); } catch { /* compared below */ }
+  const stale = same ? null : hooksProblem(dir, mod);
+  if (stale) throw new Error(`its hooks folder ${dir} is not its version's own hooks (${stale}): the next update makes them again, or run add-to-install`);
   return g;
 }
 

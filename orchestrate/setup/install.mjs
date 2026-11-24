@@ -21,7 +21,7 @@ import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { LABEL, SCRIPTS } from '../modules/M4-workshop/launcher/review-daemons.mjs';
-import { MODULE_HOMES, NODE, RUNNER_CONFIG, RUNNER_MODULES, STAMP, UPDATER_CONFIG, aclProblem, copyModuleProblem, currentCopy, installProblem, readInstallStamp } from '../modules/M4-workshop/launcher/install-check.mjs';
+import { HOOK_MODULE, MODULE_HOMES, NODE, RUNNER_CONFIG, RUNNER_MODULES, STAMP, UPDATER_CONFIG, aclProblem, hooksProblem, copyModuleProblem, currentCopy, installProblem, readInstallStamp } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { MUST_KEEP, RUNNER_NAMES, readUpdaterConfig } from '../modules/M4-workshop/launcher/review-updater.mjs';
 import { installHooks, pinnedBinary } from '../modules/M4-workshop/launcher/hooks-check.mjs';
 import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.mjs';
@@ -291,8 +291,8 @@ const ADDING = '.adding';
  * `updater.json` and `review.json`. Everything is made under a temporary name first and review.json goes last, so a cut-off
  * run leaves the copy working, and a second run finishes it. No update, no flip, no launchctl, no job file: what the
  * watch-only job runs stays byte for byte as it was.
- * The hooks come from the copy's own modules, so they match it. `keep` carries them across an update as they are: when an
- * update changes a hook, launch check 7 refuses by name until this runs again.
+ * The hooks come from the copy's own modules, so they match it. Once `hooks` is in `keep`, every update makes them again
+ * from the new copy's own modules (review-updater.mjs swapIn, L1354), so a hook change needs no second run of this.
  */
 export function planAddToInstall(io, cfg, { pin, sha256, readSource }) {
   const P = installPaths(cfg);
@@ -304,7 +304,7 @@ export function planAddToInstall(io, cfg, { pin, sha256, readSource }) {
   const copy = join(P.install, relative(realpathSync(io.at(P.install)), cur.real));   // the real folder, by its own name: the link can't redirect a step
   const inCopy = io.at(P.installRoot);
   const source = pinnedBinary(cfg.base, pin);
-  const hookSource = join(copy, 'modules/M4-workshop/hooks');
+  const hookSource = join(copy, HOOK_MODULE);
   const problems = [];
   // The pin the role tool lists were checked on, as review-config asks (#243 audit m1): found here, not when the runner starts.
   const pinWhy = pinProblem(pin); if (pinWhy) problems.push(pinWhy);
@@ -418,5 +418,11 @@ export function checkInstall(io, cfg, { main = null, watchOnly = false } = {}) {
     if (old?.warn || now?.unknownOnly) out.push({ ok: true, warn: true, what, why: old?.warn ?? now.why }); else item((old?.fail ?? now.why) === null, what, old?.fail ?? now.why);
   }
   for (const n of RUNNER_NAMES) if (rc && typeof rc[n] === 'string') { let here = true; try { io.lstatReal(rc[n]); } catch { here = false; } item(here, `review.json's ${n} exists in the copy`, `${rc[n]} is missing`); }
+  // L1354: the hooks every session gets are this copy's own module hooks, byte for byte (each update makes them so; a copy
+  // from before that change has old ones until its next update, or add-to-install).
+  if (rc !== null && typeof rc.hooksDir === 'string' && rc.hooksDir === join(root, HOOKS)) {
+    const why = hooksProblem(io.at(join(P.installRoot, HOOKS)), io.at(join(P.installRoot, HOOK_MODULE)));
+    item(why === null, `the copy's ${HOOKS}/ is its own ${HOOK_MODULE}, byte for byte`, `${why}: the next update makes them again, or run add-to-install`);
+  }
   return out;
 }

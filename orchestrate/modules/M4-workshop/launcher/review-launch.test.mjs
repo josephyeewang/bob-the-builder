@@ -88,6 +88,7 @@ function world({ role = 'reviewer', smoke = 'sandboxed', init = initFor(role) } 
   // The lock-down guard beside the hooks, as installed (<version>/modules/M4-workshop/jobs; #666 r2 M1: jobGuard finds it there).
   mkdirSync(join(root, 'modules', 'M4-workshop', 'jobs'), { recursive: true });
   cpSync(join(HOOKS_SOURCE, '..', 'jobs', 'guard.sh'), join(root, 'modules', 'M4-workshop', 'jobs', 'guard.sh'));
+  installHooks(join(root, 'modules', 'M4-workshop', 'hooks'), source);   // and the module hooks they were made from (L1354)
   const snapshot = join(d('rr'), 'rules.json');
   const rules = { production: { env_files: [join(root, 'prod.cfg')], programs: ['fakehost'], hosts: ['db.prod.example.net'] }, secrets: { paths: [keys] } };
   writeSnapshot(snapshot, rules); // the runner's pass writes it before any start (readyProblem)

@@ -13,7 +13,7 @@ import { spawnSync } from 'node:child_process';
 import { tempDir } from '../../../shared/test-tmp.mjs';
 import { gitOk, callLog, ROOT_PATH, safeGitEnv } from '../git/safe-git.mjs';
 import { SCRIPTS, UPDATE_EVERY_S, updaterPlist } from './review-daemons.mjs';
-import { STAMP, SOURCE, OUTSIDE_FILES, NODE, UPDATER_CONFIG, RUNNER_CONFIG, installProblem, chainProblem, currentCopy, aclProblem, versionName, mainSeenFile, readMainSeen, readInstallStamp,
+import { STAMP, SOURCE, OUTSIDE_FILES, NODE, UPDATER_CONFIG, RUNNER_CONFIG, HOOKS_ITEM, hooksProblem, installProblem, chainProblem, currentCopy, aclProblem, versionName, mainSeenFile, readMainSeen, readInstallStamp,
   nextMainSeen, behindSince, copyReady, oldInstall, shellQuote } from './install-check.mjs';
 import { updateOnce, writeNew, leftovers as updaterLeftovers, parseTree, parseBatch, readUpdaterConfig, main, MAIN, PREVIOUS, CLONE_MADE,
   cloneLocks, gitIsRunning, gitToolsProblem, previousCopy, clearLeftovers } from './review-updater.mjs';
@@ -107,6 +107,60 @@ const leftovers = (w) => readdirSync(dirname(w.installRoot)).filter((n) => ![bas
 // The stamp sits at the top of the versioned folder, beside orchestrate/ and the outside files (L92 item 4).
 const stampOf = (w) => readFileSync(join(dirname(w.installRoot), vOf(linkOf(w)), STAMP), 'utf8').trim();
 const moveMain = async (w, text) => { w.put('orchestrate/a.txt', text); const m = await w.commit(`main: ${text.trim()}`); await w.push(MAIN); return m; };
+
+// L1354: the Mini's hooks/ stayed at the copy add-to-install made on 15 Nov through every later update (keep carried it),
+// so a hook change never reached it and the lock-down's command was refused by the old hooks. The hooks are now made
+// from each new version's own module hooks.
+const HOOK = 'modules/M4-workshop/hooks';
+async function hookWorld() {
+  const w = await world();
+  w.c.keep = [...KEEP, HOOKS_ITEM];
+  writeFileSync(join(w.keepSeed, UPDATER_CONFIG), `${JSON.stringify(w.c)}\n`);
+  w.put(`orchestrate/${HOOK}/production-write-guard.mjs`, '// v1\n');
+  w.put(`orchestrate/${HOOK}/production-write-guard.test.mjs`, '// its test, never copied\n');
+  const m = await w.commit('hooks v1'); await w.push(MAIN);
+  return { ...w, mainHooks: m };
+}
+
+test('L1354: each update makes the copy\'s hooks from its own module hooks; a session on the old copy keeps the old ones', async () => {
+  const w = await hookWorld();
+  const r1 = await updateOnce(w.c, { ...w.o, first: w.keepSeed });
+  assert.equal(r1.ok, true, r1.reason);
+  const hooks = join(w.installRoot, HOOKS_ITEM);
+  assert.deepEqual(readdirSync(hooks), ['production-write-guard.mjs'], 'the scripts only, from the module, none from the seed');
+  assert.equal(readFileSync(join(hooks, 'production-write-guard.mjs'), 'utf8'), '// v1\n');
+  assert.equal(statSync(join(hooks, 'production-write-guard.mjs')).mode & 0o777, 0o755);
+  assert.equal(statSync(hooks).mode & 0o777, 0o755);
+  assert.equal(hooksProblem(hooks, join(w.installRoot, HOOK)), null);
+  const old = realpathSync(hooks);   // a session started now names its hooks by this real path (realRenderPaths)
+  writeFileSync(join(old, 'stray.mjs'), '// only in the old copy\n');
+  // main changes a hook and adds one.
+  w.put(`orchestrate/${HOOK}/production-write-guard.mjs`, '// v2\n');
+  w.put(`orchestrate/${HOOK}/new-guard.mjs`, '// new\n');
+  const m2 = await w.commit('hooks v2'); await w.push(MAIN);
+  const r2 = await updateOnce(w.c, w.o);
+  assert.equal(r2.ok, true, r2.reason); assert.equal(r2.changed, true); assert.equal(stampOf(w), m2);
+  assert.deepEqual(readdirSync(hooks).sort(), ['new-guard.mjs', 'production-write-guard.mjs'], 'the new version\'s hooks, nothing carried over');
+  assert.equal(readFileSync(join(hooks, 'production-write-guard.mjs'), 'utf8'), '// v2\n');
+  assert.equal(hooksProblem(hooks, join(w.installRoot, HOOK)), null);
+  assert.equal(installProblem(dirname(realpathSync(w.installRoot)), [], { owner: ME, top: dirname(realpathSync(w.installRoot)) }), null, 'the new copy, its hooks too, is the owner\'s alone');
+  // The copy it replaced is kept (PREVIOUS), its hooks as they were, for a session still running on it.
+  assert.equal(readFileSync(join(old, 'production-write-guard.mjs'), 'utf8'), '// v1\n');
+  assert.ok(existsSync(join(old, 'stray.mjs')));
+});
+
+test('L1354: a version with no module hooks to make the folder from is not put in place; the old copy stays whole', async () => {
+  const w = await hookWorld();
+  assert.equal((await updateOnce(w.c, { ...w.o, first: w.keepSeed })).ok, true);
+  const before = linkOf(w);
+  rmSync(join(w.seed, 'orchestrate', HOOK), { recursive: true, force: true });
+  await w.commit('hooks gone'); await w.push(MAIN);
+  const r = await updateOnce(w.c, w.o);
+  assert.equal(r.ok, false); assert.match(r.reason, /the new copy was not made/);
+  assert.equal(linkOf(w), before, 'no flip');
+  assert.equal(readFileSync(join(w.installRoot, HOOKS_ITEM, 'production-write-guard.mjs'), 'utf8'), '// v1\n');
+  assert.deepEqual(leftovers(w), [], 'the half-made folder is removed');
+});
 
 test('item 19: the install step copies main\'s orchestrate folder, the copy\'s own items and the stamp, and runs nothing from it', async () => {
   const w = await world();
