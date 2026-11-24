@@ -144,7 +144,8 @@ test('L1343 plants: a card with no brief, a text brief (R-S1-1\'s shape), a bad 
     [fileOf({ brief: { ...BRIEF, done_when: 'my own test' } }), /the brief's done_when is not the card's pass test from its rows; set it to exactly: "tests pass for R-1"/],
     // Past M3's brief check, refused by the runner's wording: a control character, and an id the runner can't branch.
     [fileOf({ brief: { ...BRIEF, goal: 'ring\u0007' } }), /the runner could not give this card to a worker \(no worker prompt: card C-1's brief holds a control character\); nothing was written/],
-    [fileOf({ id: 'C..1' }), /the runner could not give this card to a worker \(no worker prompt: the card id "C\.\.1" is not one plain id\)/],
+    // Refused at the id itself since #659 audit 2 (M9's CARD_ID, no `..`), before the runner is asked.
+    [fileOf({ id: 'C..1' }), /the card id must be letters, digits, dots, dashes and underscores/],
   ];
   for (const [cardText, want] of cases) {
     const w = world();

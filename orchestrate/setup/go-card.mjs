@@ -59,6 +59,7 @@ import { answerByOwnerCommand, OWNER_COMMAND } from '../modules/M2-approvals/own
 import { briefProblems, briefText } from '../modules/M3-lead/task-brief.mjs';
 import { workerPrompt } from '../modules/M5-review-audit/worker-prompt.mjs';
 import { TEST_PRODUCT_KEY, WRITERS } from '../modules/M9-record/permissions.mjs';
+import { CARD_ID } from '../modules/M9-record/outbox.mjs';
 import { canonicalJson, planFingerprint, unfingerprinted } from '../shared/plan-fingerprint.mjs';
 import { TTY_PATH } from './layout.mjs';
 
@@ -72,7 +73,10 @@ export const USAGE = 'sudo -k -u orchestrate node …/setup/go-card.mjs <the Dis
 // no terminal (go-card.test.mjs checks both).
 export { TTY_PATH };
 export const openTty = () => openSync(TTY_PATH, 'r+');
-const CARD_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+// The card id an owner's command takes (go-card and go.mjs; #659 audit 2): M9's one CARD_ID (no `..`, so it can't climb
+// out of a folder) and, stricter still, starting with a letter or digit and at most 128 long, as go-card always took.
+// Every id it takes is one the Record takes.
+export const ownerCardId = (s) => typeof s === 'string' && CARD_ID.test(s) && /^[A-Za-z0-9]/.test(s) && s.length <= 128;
 const MAX_LINE = 256;
 const MAX_CARD_FILE = 64 * 1024;
 // The fields the card file may hold: the Record actor's own create row (one source), less the two set here, plus the id.
@@ -146,7 +150,7 @@ export function readCardFile(text, product) {
   if (!v || typeof v !== 'object' || Array.isArray(v)) return fail('the card file is not one JSON object');
   const extra = Object.keys(v).filter((k) => !CARD_FILE_FIELDS.includes(k));
   if (extra.length) return fail(`the card file may not set ${extra.join(', ')}${extra.includes('done_when') ? ' (the pass test comes from the card\'s rows)' : ''}`);
-  if (typeof v.id !== 'string' || !CARD_ID.test(v.id)) return fail('the card id must be letters, digits, dots, dashes and underscores');
+  if (!ownerCardId(v.id)) return fail('the card id must be letters, digits, dots, dashes and underscores');
   if (v.product !== product) return fail(`the card is for product ${JSON.stringify(v.product ?? null)}, and this Dispatcher runs ${product}`);
   if (v.kind !== 'ordinary') return fail(`the card is a ${JSON.stringify(v.kind ?? null)} card; this command makes an ordinary card only`);
   if (v.tier !== 2) return fail(`the card is Tier ${JSON.stringify(v.tier ?? null)}; this command makes a Tier-2 card only`);
@@ -191,32 +195,42 @@ export async function goCard({ ctx, cardText, sudoUid, readRows, view, mainSha, 
   if (!f.ok) return f;
   const cardId = f.id;
   let rows;
-  try { rows = await readRows({ product, cardId, doc: f.doc }); } catch (e) { return fail(`the card's rows could not be read: ${String(e?.message ?? e).slice(0, 300)}`); }
+  try { rows = await readRows({ product, cardId, doc: f.doc }); } catch (e) { return fail(rowsUnreadText(e)); }
   const doc = { state: 'draft', ...f.doc, done_when: doneBar(rows) };
   // The worker reads the brief's done_when, the reviewer checks the card's (L1343): one text.
   if (doc.brief.done_when !== doc.done_when) return fail(`the brief's done_when is not the card's pass test from its rows; set it to exactly: ${JSON.stringify(doc.done_when).slice(0, 400)}`);
   const words = promptProblem(product, cardId, doc);
-  if (words) return fail(`the runner could not give this card to a worker (${words}); nothing was written`);
+  if (words) return fail(cantStartText(words, 'nothing was written'));
   // A card already there is taken up only if this command made it and it is still the same draft (a rerun after a stop).
   const had = ctx.record.read('card', cardId);
   if (had) {
     if (had.corrupt || !had.doc) return fail(unreadableCardText(cardId));
     const by = ctx.record.meta('card', cardId)?.createdBy ?? null;
     if (by !== OWNER_COMMAND) return fail(`card ${cardId} is already in the Record, made by ${by ?? 'an unknown writer'}; pick another id`);
-    if (had.doc.state !== 'draft') return fail(`card ${cardId} is ${had.doc.state}; a go is given on a draft card`);
+    if (had.doc.state !== 'draft') return fail(notDraftText(cardId, had.doc.state));
     const { round: _r, ...stored } = had.doc;
     if (canonicalJson(stored) !== canonicalJson(doc)) return fail(`card ${cardId} is already in the Record with another plan; pick another id`);
   }
+  return goOnCard({ ctx, cardId, doc, rows, view, mainSha, sudoUid, cardJsonSha256: sha256(text), confirm, write: !had });
+}
+
+/**
+ * The go itself, once the card is checked: its plan's fingerprint is shown and the id retyped, the card written when
+ * `write` (go-card's new card), the go asked as the Dispatcher asks it, answered by this owner's command with
+ * `cardJsonSha256`, and recorded. Shared with go.mjs, the go on a card already in the Record (Track A step 9).
+ */
+export async function goOnCard({ ctx, cardId, doc, rows, view, mainSha, sudoUid, cardJsonSha256, confirm, write }) {
+  const product = ctx.product;
   const fp = planFingerprint({ product, card_id: cardId, tier: doc.tier, files: doc.files, done_when: doc.done_when, plan_sha256: doc.plan_sha256, main_commit: doc.main_commit });
   if (!fp.ok) return fail(unfingerprinted(fp.reason));
   const said = confirm({ cardId, text: goText({ product, cardId, card: doc, fingerprint: fp.sha256 }) });
   if (!said?.ok) return fail(said?.reason ?? 'the go was not confirmed');
-  if (!had) {
+  if (write) {
     const w = ctx.record.write({ actor: 'owner_command', entity: 'card', id: cardId, expectRev: 0, doc });
     if (!w.ok) return fail(`the Record refused the card: ${w.reason}`);
   }
   const g = await raiseGo(ctx, { cardId, rows, view, mainSha });
-  if (!g.ok) return fail(`the card is written, but the go could not be asked: ${g.reason}`);
+  if (!g.ok) return fail(`${write ? 'the card is written, but ' : ''}the go could not be asked: ${g.reason}`);
   const ask = askStore(ctx.record).ask(g.id);
   if (!ask) return fail(`ask ${g.id} could not be read back`);
   // Backstop: raiseGo fingerprints the same card the same way, so this can't fail while M2 is correct (L1111).
@@ -229,7 +243,7 @@ export async function goCard({ ctx, cardText, sudoUid, readRows, view, mainSha, 
     const b = ask.doc.answer?.binding;
     if (b?.kind !== OWNER_COMMAND || b.sudo_uid !== sudoUid) return fail(`ask ${g.id} is already ${ask.doc.state}, and not by your owner command; this command can't finish it`);
   } else {
-    const a = answerByOwnerCommand(ctx, g.id, { sudoUid, cardJsonSha256: sha256(text) });
+    const a = answerByOwnerCommand(ctx, g.id, { sudoUid, cardJsonSha256 });
     if (!a.ok) return a;
   }
   const go = recordGo(ctx, g.id);
@@ -243,6 +257,11 @@ const STAND_IN = Object.freeze({ head: '0'.repeat(40), outbox: '/var/empty/orche
 // The two refusals go-card and withdraw-card share, worded once here (I7, L1343).
 export const notTestProductText = (product) => `this command works only on a product whose rules mark it the test product (${TEST_PRODUCT_KEY}: true), and ${product}'s don't`;
 export const unreadableCardText = (cardId) => `card ${cardId} is in the Record but can't be read`;
+// And the ones go.mjs, the go on a card already in the Record, shares (Track A step 9).
+export const notDraftText = (cardId, state) => `card ${cardId} is ${state}; a go is given on a draft card`;
+export const rowsUnreadText = (e) => `the card's rows could not be read: ${String(e?.message ?? e).slice(0, 300)}`;
+export const cantStartText = (words, none) => `the runner could not give this card to a worker (${words}); ${none}`;
+export const goRecordedText = (r) => `(go ${r.go}, fingerprint ${r.fingerprint.slice(0, 12)}), by owner command, not a phone tap. The Dispatcher moves the card to ready on its next pass.`;
 
 export function promptProblem(product, cardId, doc) {
   const p = workerPrompt({ role: 'worker', kind: 'editing', card: cardId, cardDoc: doc, product, ...STAND_IN });
@@ -294,7 +313,7 @@ export async function main(argv, {
     const r = await goCard({ ctx, cardText, sudoUid: Number(env.SUDO_UID), readRows,
       view: await reads.planView({ product: c.product }), mainSha: await reads.mainSha({ product: c.product }), confirm });
     if (!r.ok) throw new Error(r.reason);
-    out(`Card ${r.card} written and its go recorded (go ${r.go}, fingerprint ${r.fingerprint.slice(0, 12)}), by owner command, not a phone tap. The Dispatcher moves the card to ready on its next pass.`);
+    out(`Card ${r.card} written and its go recorded ${goRecordedText(r)}`);
     return 0;
   } catch (e) {
     log(`go-card: ${String(e?.message ?? e).slice(0, 500)}`);
