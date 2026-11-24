@@ -19,8 +19,9 @@
 //      from git's objects: no checkout, no work tree; copies in the copy's own items that are not in the repository
 //      (`keep`: its node, its configs, the claude program; never the wiring, L132 M-1) from the copy in place, except the
 //      hooks folder (HOOKS_ITEM), which it makes from the new folder's own module hooks (copyHookScripts, L1354), so a hook
-//      change reaches the Mac with the update that brings it; then writes the commit stamp last, at the top of the
-//      versioned folder;
+//      change reaches the Mac with the update that brings it (a worker-runner session, which names its hooks by real
+//      path, keeps the old copy's; a Front Door tab, which names them through the link, gets the new ones); then writes
+//      the commit stamp last, at the top of the versioned folder;
 //   5. checks the new folder is root's alone (`installProblem`) and holds what the runner's config names in the copy
 //      (its wiring, the claude program, the hooks), then flips the copy's link to its `orchestrate/` with one rename. The folder it
 //      replaced is kept through one more update (`PREVIOUS`, L75 (a)): a review session started on it names its node

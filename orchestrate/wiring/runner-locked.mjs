@@ -329,8 +329,9 @@ export function resultWords(stdout) {
 /** The words of the last tool call that failed (L1354): stream-json's last `tool_result` with is_error, as a hook's
  *  refusal comes back ("PreToolUse:Bash hook error: [<the hook's command>]: <its words>", seen on claude-code 2.1.316 on
  *  the Mini, 24 Nov 2026; checked: claude-code 2.1.316), the hook's command left out so its words show, its first
- *  TOOL_SAID_MAX characters, or '' with none. A refusal from a hook otherwise hides behind claude's bare "error_max_turns". */
+ *  TOOL_SAID_MAX characters, or '' with none or when the last failed call is not a hook's refusal. A refusal from a hook otherwise hides behind claude's bare "error_max_turns". */
 export const TOOL_SAID_MAX = 200;
+const HOOK_REFUSAL = /^\S+ hook error: /;
 export function toolErrorWords(stdout) {
   const lines = String(stdout ?? '').split('\n').map((l) => l.trim()).filter(Boolean).reverse();
   for (const l of lines) {
@@ -340,7 +341,11 @@ export function toolErrorWords(stdout) {
       if (c?.type !== 'tool_result' || c.is_error !== true) continue;
       const text = typeof c.content === 'string' ? c.content
         : Array.isArray(c.content) ? c.content.filter((x) => x?.type === 'text' && typeof x.text === 'string').map((x) => x.text).join(' ') : '';
-      return text.replace(/\s+/g, ' ').trim().replace(/^(\S+ hook error): \[.*?\]: /, '$1: ').slice(0, TOOL_SAID_MAX);
+      // Only a hook's refusal is quoted (#667 audit): any other failed call is the job's own output (a save's git push,
+      // say), which may hold a short secret `sayable` can't see. That leaves only the denial count.
+      const flat = text.replace(/\s+/g, ' ').trim();
+      if (!HOOK_REFUSAL.test(flat)) return '';
+      return flat.replace(/^(\S+ hook error): \[.*?\]: /, '$1: ').slice(0, TOOL_SAID_MAX);
     }
   }
   return '';

@@ -45,8 +45,10 @@ export const NODE = 'bin/node';
 // The copy's hooks folder (L1354): one of the copy's own items, at the top of the copy, holding the hook scripts every
 // session's settings name (setup/layout.mjs COPY_HOOKS is this name). It is made from the same version's module hooks
 // (HOOK_MODULE): by add-to-install, and by the updater on every update (review-updater.mjs swapIn), never carried over
-// from the copy it replaces, so a hook change on main reaches the Mac with the update that brings it. A session started
-// on the old copy keeps that copy's folder, by its real path, while it runs (hooks/lib.mjs guardBesideHooks).
+// from the copy it replaces, so a hook change on main reaches the Mac with the update that brings it. A worker-runner
+// session names the folder by its real path (wiring realRenderPaths), so one started on the old copy keeps that copy's
+// folder while it runs (hooks/lib.mjs guardBesideHooks). A Front Door tab names it through the link (setup/front-door.mjs),
+// so it reads the new version's hooks from the flip on.
 export const HOOKS_ITEM = 'hooks';
 export const HOOK_MODULE = 'modules/M4-workshop/hooks';
 /** A hook script: a .mjs file that is not a test. Only these are copied, and compared with the copy's folder. */

@@ -595,8 +595,17 @@ test('L1354: a job that was refused says the hook\'s words and the number of per
   assert.equal(said, 'result error_max_turns, 1 permission denial: the tool said \'PreToolUse:Bash hook error: [orchestrate] blocked: \'sh\' runs commands the guard can\'t see; write the command out plainly\'');
   assert.match(claudeEnd({ exitCode: 1, said }), /blocked: 'sh' runs commands the guard can't see/);
   // Only a failed tool call is said; a long one is cut to TOOL_SAID_MAX before it is made safe to show.
-  assert.equal(toolErrorWords(JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', is_error: false, content: 'fine' }] } })), '');
-  assert.equal(toolErrorWords(JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', is_error: true, content: [{ type: 'text', text: 'y '.repeat(300) }] }] } })).length, TOOL_SAID_MAX);
+  const res = (content, isError = true) => JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', is_error: isError, content }] } });
+  assert.equal(toolErrorWords(res('fine', false)), '');
+  assert.equal(toolErrorWords(res([{ type: 'text', text: `PreToolUse:Bash hook error: ${'y '.repeat(300)}` }])).length, TOOL_SAID_MAX);
+  // #667 audit: a failed call that is not a hook's refusal (the job's own output, a save's git push) is never quoted: the
+  // denial count alone is said.
+  const push = res('Exit code 1\nremote: Invalid username or token abc123XYZ\nfatal: Authentication failed for https://github.com/o/r.git');
+  assert.equal(toolErrorWords(push), '');
+  const c2 = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter() });
+  const h2 = hearing(); h2.listen(c2);
+  c2.stdout.emit('data', `${push}\n${JSON.stringify({ type: 'result', subtype: 'error_max_turns', is_error: true, permission_denials: [{ tool_name: 'Bash' }] })}\n`);
+  assert.equal(h2.said(), 'result error_max_turns, 1 permission denial');
   // Two denials, counted.
   assert.equal(resultWords(JSON.stringify({ type: 'result', subtype: 'error_max_turns', permission_denials: [{}, {}] })).denied, 2);
 });
