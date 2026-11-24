@@ -18,12 +18,11 @@
 //   5. starts claude in the tab with the same settings and flags, in the outbox, with the terminal handed to it as is
 //      (no tmux, no screen reading).
 //
-// The Front Door's skill (L1334): with the settings sources limited to none (--setting-sources ""), claude 2.1.316 loads
-// no skill but through --plugin-dir, which check 6 refuses as a plugin (checked: claude-code 2.1.316, 2026-11-23: the
-// rendered settings and the full profile give "skills differ"). So while the profile names the Skill tool and the
-// orchestrate skill, check 6 refuses every start, by design: no start runs with a skill it can't see. A profile with no
-// Skill tool and no skills gets the skill's text as part of its prompt instead (--append-system-prompt-file, the copy's
-// own root-owned SKILL.md). Which way it goes is the lead's ruling (M4's profile and M10's role file are another lane's).
+// The Front Door's skill (L1334, ruled option a): with the settings sources limited to none (--setting-sources ""),
+// claude 2.1.316 loads no skill but through --plugin-dir, which check 6 refuses as a plugin (checked: claude-code
+// 2.1.316, 2026-11-23). So the profile has no Skill tool and no skills, and every start, check 6's and the tab's, gives
+// the skill's text as part of the prompt (--append-system-prompt-file, the installed copy's own root-owned SKILL.md).
+// A profile that still names a skill or the Skill tool is refused before anything is made.
 //
 // Not here: the read-back of what was filed (step 7) and the go (step 9, setup/go.mjs, through sudo).
 
@@ -40,9 +39,10 @@ import { FLAGS as F, noToolServerArgs, sourcesArgs } from '../modules/M4-worksho
 import { NODE, RUNNER_CONFIG } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { FRONT_DOOR_ROLE, frontDoorFolder, frontDoorSessionId } from '../modules/M1-front-door/sessions.mjs';
 import { installPaths } from './install.mjs';
-import { keysPath, outboxRootPath, ownerTapsPath, privatePath, proposalsParentOf, storePath, workerRulesPath } from './layout.mjs';
+import { ROOT_CONFIG_PATH, keysPath, outboxRootPath, ownerTapsPath, privatePath, proposalsParentOf, storePath, workerRulesPath } from './layout.mjs';
 
-export const SETUP_FILE = '/Library/orchestrate-setup.json';
+/** The setup config root reads (layout.mjs's one name for it). */
+export const SETUP_FILE = ROOT_CONFIG_PATH;
 export const SETTINGS_NAME = '.settings.json';
 /** The skill's text in the installed copy (root's, so the AI can't change what it is told). */
 export const SKILL_FILE = join('modules', 'M1-front-door', 'skill', 'orchestrate', 'SKILL.md');
@@ -87,23 +87,23 @@ export function frontDoorPlaces(cfg, rc, { product, ownerHome }) {
   } };
 }
 
-/** Whether the profile gets its skill as prompt text: only with no Skill tool and no skill of its own (see the header). */
-export const skillAsPrompt = (profile) => !profile.tools.includes('Skill') && !(profile.skills ?? []).length;
+/** A profile that names a skill or the Skill tool (L1334: the skill is prompt text only). → the reason, or null. */
+export const skillProblem = (profile) => (profile.tools.includes('Skill') || (profile.skills ?? []).length
+  ? 'the Front Door\'s profile names a skill or the Skill tool, and its skill is given as prompt text only (L1334)' : null);
 
 /** The interactive start: the role's flags as check 6 read them back, without the headless ones, plus the session's own. */
 export function interactiveArgs({ profile, settingsFile, model, sessionUuid, name, skillFile }) {
   const a = [F.tools, profile.tools.join(','), F.settings, settingsFile, ...sourcesArgs(), ...noToolServerArgs(), F.permissionMode, profile.mode];
   if (profile.restricted) a.push(F.restricted);
   if (model) a.push(F.model, model);
-  a.push('--session-id', sessionUuid, '--name', name);
-  if (skillAsPrompt(profile)) a.push('--append-system-prompt-file', skillFile);
+  a.push('--session-id', sessionUuid, '--name', name, '--append-system-prompt-file', skillFile);
   return a;
 }
 
-/** The headless args for check 6: roleArgs, with the skill's prompt file when the interactive start has one. */
+/** The headless args for check 6: roleArgs, with the skill's prompt file as the tab has it, the prompt kept last. */
 function checkArgs({ profile, settingsFile, model, skillFile }) {
   const a = roleArgs({ profile, settingsFile, model });
-  return skillAsPrompt(profile) ? [...a.slice(0, -1), '--append-system-prompt-file', skillFile, a.at(-1)] : a;
+  return [...a.slice(0, -1), '--append-system-prompt-file', skillFile, a.at(-1)];
 }
 
 /** The environment claude gets: the tab's own basics, nothing else. */
@@ -130,6 +130,8 @@ function placesFor({ product, setupFile }, io) {
  */
 export async function startFrontDoor({ product, setupFile = SETUP_FILE, profile = DESIGN_PROFILES[FRONT_DOOR_ROLE], model = FRONT_DOOR_MODEL }, io) {
   const no = (reason) => ({ ok: false, reason });
+  const sp = skillProblem(profile);
+  if (sp) return no(sp);
   const pl = placesFor({ product, setupFile }, io);
   if (!pl.ok) return pl;
   const P = pl.places;
@@ -142,7 +144,10 @@ export async function startFrontDoor({ product, setupFile = SETUP_FILE, profile 
   const settingsFile = join(outbox, SETTINGS_NAME);
   try { io.writeFile(settingsFile, `${JSON.stringify(r.settings, null, 1)}\n`, 0o600); } catch (e) { return undo(`the settings can't be written (${e?.code ?? e?.message})`); }
   const env = frontDoorEnv(io.env);
-  const c6 = await io.check({ claudeBin: P.claudeBin, args: checkArgs({ profile, settingsFile, model, skillFile: P.skillFile }), env, cwd: outbox, role: FRONT_DOOR_ROLE, profile, pin: P.pin });
+  // A check that throws is a refusal too: the folder goes, so intake never takes a tab that never ran (#657 audit m4).
+  let c6;
+  try { c6 = await io.check({ claudeBin: P.claudeBin, args: checkArgs({ profile, settingsFile, model, skillFile: P.skillFile }), env, cwd: outbox, role: FRONT_DOOR_ROLE, profile, pin: P.pin }); }
+  catch (e) { c6 = { ok: false, reason: `it failed (${String(e?.message ?? e).slice(0, 200)})` }; }
   if (!c6?.ok) return undo(`launch check 6 refused the Front Door: ${c6?.reason ?? 'no answer'}. Nothing was started`);
   const code = await io.run(P.claudeBin, interactiveArgs({ profile, settingsFile, model, sessionUuid: io.uuid(), name: `Front Door ${product}`, skillFile: P.skillFile }), { cwd: outbox, env });
   return { ok: true, sessionId, outbox, code };

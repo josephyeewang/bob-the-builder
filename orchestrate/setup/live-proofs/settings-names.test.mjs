@@ -645,12 +645,13 @@ test('the role read-back renders every role, starts it with the sources limit, a
   assert.equal(one.ok, false);
 });
 
-test('L1334: the read-back proves a role with skills of its own (the front door) with none loaded, and still refuses one it does not own', async () => {
+test('L1334: the read-back proves the front door with no skill loaded, and still refuses one it does not own', async () => {
   const base = tempDir('orch-names-');
   const init = (role, skills) => { const p = DESIGN_PROFILES[role]; return `${JSON.stringify({ type: 'system', subtype: 'init', tools: [...p.tools],
     mcp_servers: [], plugins: [], skills, setting_sources: ['managed', 'flag'], permissionMode: p.mode, claude_code_version: PIN })}\n`; };
-  assert.ok(DESIGN_PROFILES.front_door.skills?.length, 'the front door has a skill of its own');
-  const none = await roleReadback({ base, pin: PIN, roles: ['front_door', 'worker'], start: async (args) => init(args.join(' ').includes('Skill') ? 'front_door' : 'worker', []) });
+  assert.equal(DESIGN_PROFILES.front_door.skills, undefined, 'L1334 option a: the front door names no skill');
+  const fdTools = DESIGN_PROFILES.front_door.tools.join(',');
+  const none = await roleReadback({ base, pin: PIN, roles: ['front_door', 'worker'], start: async (args) => init(args.includes(fdTools) ? 'front_door' : 'worker', []) });
   assert.equal(none.ok, true, none.why);
   const extra = await roleReadback({ base, pin: PIN, roles: ['front_door'], start: async () => init('front_door', ['doctor']) });
   assert.equal(extra.ok, false); assert.match(extra.why, /front_door: skills differ: doctor/);

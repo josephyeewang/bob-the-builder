@@ -463,7 +463,7 @@ test('C (L739): a runner folder that is gone, a link or not the review user\'s i
 const OWNER = ME + 2; const T = Date.parse('2026-11-10T12:00:00Z');
 const fakeSt = ({ uid = OWNER, dir = false, link = false } = {}) => ({ uid, mode: dir ? 0o755 : 0o644, nlink: 1, isDirectory: () => dir, isFile: () => !dir, isSymbolicLink: () => link });
 const SIZE = { tokens: 9, compactions: 0, turnEnded: true, endedAt: null, openTools: [] };
-function syncWorld({ sessions, requests, review = { running: [] }, rec = { read: () => null }, folder = fakeSt({ dir: true }), acl = null, statusText } = {}) {
+function syncWorld({ sessions, requests, review = { running: [] }, rec = { read: () => null }, folder = fakeSt({ dir: true }), acl = null, statusText, extraIo = {} } = {}) {
   const w = mirrorWorld();
   const c = w.config;
   const row = (id, product, more = {}) => ({ id, product, kind: 'editing', card: 'C-7', lead: null, role: 'worker', pgid: 70, signin: 's', config_dir: '/cfg', bundle_files: [],
@@ -479,6 +479,7 @@ function syncWorld({ sessions, requests, review = { running: [] }, rec = { read:
     requestsAcl: (p) => { assert.equal(p, c.workerRequestsDir); return acl; },
     writeFile: (path, text) => writes.push([path, text]),
     reviewStatus: typeof review === 'function' ? review : () => review,
+    ...extraIo,
   };
   return { c, io, row, writes, ports: runnerSyncPorts({ config: c, rec, now: () => T }, io) };
 }
@@ -822,4 +823,12 @@ test('Track A step 6: outboxSessions adds this product\'s Front Door tabs, by th
   const got = ws.ports.outboxSessions();
   assert.deepEqual(got.map((x) => x.sessionId), ['S-1', mine], 'the runner\'s first; another product\'s tab and odd names left out');
   assert.deepEqual(got[1], { sessionId: mine, role: 'front_door', outbox: join(fd, mine), uid: ws.c.hostLockUid, card: null, product: P });
+});
+
+test('#657 audit m2: a Front Door folder that can\'t be read loses only the Front Door\'s tabs this pass, never the runner\'s hand-ins', () => {
+  const said = [];
+  const ws = syncWorld({ extraIo: { frontDoorList: () => { throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }); }, log: (t) => said.push(t) } });
+  assert.deepEqual(ws.ports.outboxSessions().map((x) => x.sessionId), ['S-1']);
+  assert.equal(said.length, 1);
+  assert.match(said[0], /Front Door's tabs could not be read this pass.*EACCES/);
 });

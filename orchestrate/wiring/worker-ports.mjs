@@ -471,8 +471,15 @@ export function runnerSyncPorts({ config: c, rec, now = Date.now }, io = {}) {
     board: () => sync.board(),
     // The runner's sessions, then this product's Front Door tabs (M1 sessions.mjs, Track A step 6): each start's outbox
     // folder, named for the product, whose files must be the owner's (hostLockUid).
-    outboxSessions: () => [...sync.outboxSessions().filter((x) => x.product === c.product),
-      ...frontDoorSessions({ outboxRoot: c.outboxRoot, product: c.product, uid: c.hostLockUid, ...(io.frontDoorList ? { list: io.frontDoorList } : {}) })],
+    // A Front Door folder that can't be read loses only the Front Door's hand-ins this pass, never the runner's: it is
+    // written to the Dispatcher's log and the runner's sessions are still given (#657 audit m2).
+    outboxSessions: () => {
+      const runner = sync.outboxSessions().filter((x) => x.product === c.product);
+      let tabs = [];
+      try { tabs = frontDoorSessions({ outboxRoot: c.outboxRoot, product: c.product, uid: c.hostLockUid, ...(io.frontDoorList ? { list: io.frontDoorList } : {}) }); }
+      catch (e) { (io.log ?? ((t) => process.stderr.write(`${t}\n`)))(`the Front Door's tabs could not be read this pass, so their files wait for the next one: ${String(e?.message ?? e).slice(0, 300)}`); }
+      return [...runner, ...tabs];
+    },
     probe: (session) => {
       if (RUNNER_KINDS.includes(session?.kind)) return sync.probe(session);
       throw new Error(Object.hasOwn(REVIEW_KIND_OF, session?.role) || Object.values(REVIEW_KIND_OF).includes(session?.kind)

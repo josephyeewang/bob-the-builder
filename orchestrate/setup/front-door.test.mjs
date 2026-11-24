@@ -12,13 +12,13 @@ import { tempDir } from '../shared/test-tmp.mjs';
 import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.mjs';
 import { RUNNER_CONFIG } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { NO_FILE_SOURCES } from '../modules/M4-workshop/launcher/settings-names.mjs';
-import { SETTINGS_NAME, SKILL_FILE, USAGE, frontDoorEnv, main, startFrontDoor } from './front-door.mjs';
+import { SETTINGS_NAME, SETUP_FILE, SKILL_FILE, USAGE, frontDoorEnv, main, startFrontDoor } from './front-door.mjs';
 
 const P = 'orchestrate-test';
 const OWNER = 'joe';
 const FD = DESIGN_PROFILES.front_door;
-// The profile the lead may rule for (L1334): no Skill tool and no skills, the skill's text given as prompt.
-const AS_PROMPT = { ...FD, tools: FD.tools.filter((t) => t !== 'Skill'), skills: [] };
+// A profile as it was before L1334 option a: the Skill tool and the orchestrate skill.
+const WITH_SKILL = { ...FD, tools: [...FD.tools, 'Skill'], skills: ['orchestrate'] };
 
 function world({ rc = {}, check = { ok: true, version: '2.1.316' } } = {}) {
   const base = realpathSync(tempDir('m1-fd-start-'));
@@ -71,11 +71,26 @@ test('step 6: the start makes the session\'s outbox, writes the rendered setting
   for (const [f, v] of [['--settings', settingsFile], ['--setting-sources', NO_FILE_SOURCES], ['--tools', FD.tools.join(',')], ['--permission-mode', 'acceptEdits'], ['--model', 'sonnet'],
     ['--session-id', '00000000-0000-4000-8000-000000000001'], ['--name', `Front Door ${P}`], ['--mcp-config', '{"mcpServers":{}}']]) assert.equal(flagValue(run.args, f), v, f);
   assert.ok(run.args.includes('--restricted') && run.args.includes('--strict-mcp-config'));
-  assert.ok(!run.args.includes('--append-system-prompt-file'), 'the profile has the Skill tool: no prompt file');
+  assert.equal(flagValue(run.args, '--append-system-prompt-file'), join(w.installRoot, SKILL_FILE), 'L1334 option a: the skill is prompt text');
   assert.deepEqual(Object.keys(run.opts.env).sort(), ['HOME', 'PATH', 'TERM']);
 });
 
-test('step 6 (L1334): while check 6 refuses (the skill can\'t load), nothing starts and the outbox is gone', async () => {
+test('#657 audit m4: a check 6 that throws is a refusal: nothing starts and the outbox is gone', async () => {
+  const w = world();
+  w.io.check = async () => { throw new Error('spawn EACCES'); };
+  const r = await startFrontDoor({ product: P, setupFile: w.setupFile }, w.io);
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /launch check 6 refused the Front Door: it failed \(spawn EACCES\)/);
+  assert.equal(w.calls.run.length, 0);
+  assert.equal(existsSync(w.outbox), false, 'no folder left for intake to take');
+});
+
+test('the setup config is layout.mjs\'s one name for it', async () => {
+  const { ROOT_CONFIG_PATH } = await import('./layout.mjs');
+  assert.equal(SETUP_FILE, ROOT_CONFIG_PATH);
+});
+
+test('step 6: while check 6 refuses, nothing starts and the outbox is gone', async () => {
   const w = world({ check: { ok: false, reason: 'skills differ: ' } });
   const r = await startFrontDoor({ product: P, setupFile: w.setupFile }, w.io);
   assert.equal(r.ok, false);
@@ -84,9 +99,20 @@ test('step 6 (L1334): while check 6 refuses (the skill can\'t load), nothing sta
   assert.equal(existsSync(w.outbox), false, 'no folder left for intake to take');
 });
 
-test('step 6: a profile with no Skill tool gets the copy\'s SKILL.md as prompt text, in check 6 and in the tab alike', async () => {
+test('step 6 (L1334 option a): the Front Door has no Skill tool and no skill; a profile that names one starts nothing', async () => {
+  assert.equal(FD.tools.includes('Skill'), false);
+  assert.equal(FD.skills, undefined);
   const w = world();
-  const r = await startFrontDoor({ product: P, setupFile: w.setupFile, profile: AS_PROMPT }, w.io);
+  const r = await startFrontDoor({ product: P, setupFile: w.setupFile, profile: WITH_SKILL }, w.io);
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /names a skill or the Skill tool.*L1334/);
+  assert.equal(w.calls.check.length + w.calls.run.length, 0);
+  assert.equal(existsSync(w.outbox), false);
+});
+
+test('step 6 (L1334 option a): the copy\'s SKILL.md is given as prompt text, in check 6 and in the tab alike', async () => {
+  const w = world();
+  const r = await startFrontDoor({ product: P, setupFile: w.setupFile }, w.io);
   assert.equal(r.ok, true);
   const skill = join(w.installRoot, SKILL_FILE);
   assert.equal(flagValue(w.calls.check[0].args, '--append-system-prompt-file'), skill);

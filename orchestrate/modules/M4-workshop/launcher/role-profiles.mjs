@@ -64,9 +64,11 @@ export const DESIGN_PROFILES = Object.freeze({
     outbox: designKinds('scout'), compactWindow: 300000, setupFileRefusals: false, bobFolder: false, compactKind: 'report' }),
   writer: p({ tools: ['Read', 'Glob', 'Grep', 'Edit', 'Write'], mode: 'dontAsk', restricted: true,
     outbox: designKinds('writer'), compactWindow: 300000, setupFileRefusals: false, bobFolder: false, compactKind: 'report' }),
-  front_door: p({ tools: ['Read', 'Glob', 'Grep', 'Write', 'AskUserQuestion', 'PushNotification', 'Skill'], mode: 'acceptEdits',
+  // No Skill tool and no skills (L1334 option a): with no settings sources claude loads no skill, so the Front Door's
+  // start gives the skill's text as its prompt instead (setup/front-door.mjs, --append-system-prompt-file).
+  front_door: p({ tools: ['Read', 'Glob', 'Grep', 'Write', 'AskUserQuestion', 'PushNotification'], mode: 'acceptEdits',
     restricted: true, outbox: designKinds('front_door'), compactWindow: 250000, setupFileRefusals: true, bobFolder: false,
-    skills: ['orchestrate'], compactKind: 'state' }),
+    compactKind: 'state' }),
   thinking: p({ tools: ['Read', 'Glob', 'Grep', 'Write', 'AskUserQuestion', 'PushNotification'], mode: 'acceptEdits',
     restricted: true, outbox: designKinds('thinking'), compactWindow: 400000, setupFileRefusals: true, bobFolder: false, compactKind: 'report' }),
   learning: p({ tools: ['Read', 'Glob', 'Grep', 'Write'], mode: 'acceptEdits', restricted: true,

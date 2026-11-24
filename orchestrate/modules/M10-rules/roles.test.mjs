@@ -24,7 +24,7 @@ const TABLE = {
   incident: { model: 'main', effort: 'high', tools: ['Read', 'Glob', 'Grep'], permission_mode: 'dontAsk', restricted_mode: false, outbox_kinds: ['ask-request-'], auto_resume: false },
   scout: { model: 'haiku', effort: 'low', tools: ['Read', 'Glob', 'Grep'], permission_mode: 'dontAsk', restricted_mode: false, outbox_kinds: ['report-'], auto_resume: false },
   writer: { model: 'sonnet', effort: 'medium', tools: ['Read', 'Glob', 'Grep', 'Edit', 'Write'], permission_mode: 'dontAsk', restricted_mode: false, outbox_kinds: ['report-'], auto_resume: false },
-  front_door: { model: 'sonnet', effort: 'medium', tools: ['Read', 'Glob', 'Grep', 'Write', 'AskUserQuestion', 'PushNotification', 'Skill'], permission_mode: 'acceptEdits', restricted_mode: true, outbox_kinds: ['request-', 'state-', 'idea-', 'state-compact-', 'ask-request-'], auto_resume: false },
+  front_door: { model: 'sonnet', effort: 'medium', tools: ['Read', 'Glob', 'Grep', 'Write', 'AskUserQuestion', 'PushNotification'], permission_mode: 'acceptEdits', restricted_mode: true, outbox_kinds: ['request-', 'state-', 'idea-', 'state-compact-', 'ask-request-'], auto_resume: false },
   thinking: { model: 'main', effort: 'medium', tools: ['Read', 'Glob', 'Grep', 'Write', 'AskUserQuestion', 'PushNotification'], permission_mode: 'acceptEdits', restricted_mode: true, outbox_kinds: ['report-', 'idea-'], auto_resume: false },
   script: { model: 'main', effort: 'per_row', tools: ['Read', 'Glob', 'Grep', 'Write'], permission_mode: 'dontAsk', restricted_mode: false, outbox_kinds: ['report-', 'handin-'], auto_resume: false },
   plan_reviewer: { model: 'main', effort: 'high', effort_floor: 'high', effort_max: 'xhigh', tools: ['Read', 'Glob', 'Grep', 'Write'], permission_mode: 'dontAsk', restricted_mode: false, outbox_kinds: [], outbox_files: ['answer.txt'], auto_resume: false, context: 'context.plan_reviewer' },
@@ -65,6 +65,9 @@ test('never-list tools (Workflow among them, in script too: L787), unknown tools
   assert.match(withEdit('worker', (p) => ({ ...p, outbox_kinds: ['Report-'] })).reason, /bad outbox kind/);
   assert.match(withEdit('worker', (p) => ({ ...p, outbox_kinds: ['verdict-'] })).reason, /not listed for worker/);
   assert.match(withEdit('scout', (p) => ({ ...p, skills: ['orchestrate'] })).reason, /skill/);
+  // L1334 option a: not the front door either, by a skill or by the Skill tool.
+  assert.match(withEdit('front_door', (p) => ({ ...p, skills: ['orchestrate'] })).reason ?? '', /no role names a skill/);
+  assert.match(withEdit('front_door', (p) => ({ ...p, tools: [...p.tools, 'Skill'] })).reason ?? '', /no role has the Skill tool/);
   assert.match(withEdit('worker', (p) => ({ ...p, enforced: false })).reason, /explore/);
   assert.match(withEdit('worker', (p) => ({ ...p, role: 'lead' })).reason, /file says role/);
 });
