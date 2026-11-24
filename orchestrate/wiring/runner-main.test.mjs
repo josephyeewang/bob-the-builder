@@ -317,33 +317,39 @@ test('L1347: main gives the sessions the real paths of the tool places setup nam
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
-test('L1348: the runner stops for a restart once the install link names a newer version and nothing is on, and says why it waits', () => {
-  let at = '/i/v-1'; const logs = [];
-  const rp = (p) => { assert.equal(p, '/i/cur'); if (at === null) { const e = new Error('gone'); e.code = 'ENOENT'; throw e; } return at; };
-  const u = updateRestart({ installRoot: '/i/cur', realpath: rp, log: (t) => logs.push(t) });
-  const idle = { state: { sessions: [{ id: 'a', alive: false, ended: true }], saves: {}, installs: {} }, pending: new Map() };
+test('L1348: the runner stops for a restart once the install link names another version than its code and nothing only it holds is on', () => {
+  let at = '/i/v-1'; let q = 0; let t = 0; const logs = [];
+  const rp = (p) => { if (p === '/code') return '/i/v-1'; assert.equal(p, '/i/cur'); if (at === null) { const e = new Error('gone'); e.code = 'ENOENT'; throw e; } return at; };
+  const u = updateRestart({ installRoot: '/i/cur', from: '/code', realpath: rp, log: (x) => logs.push(x), waiting: () => q, now: () => t });
+  const idle = { state: { sessions: [], saves: {}, installs: {} }, pending: new Map() };
   assert.equal(u(idle), false, 'same version: no stop');
   assert.equal(u(undefined), false); assert.equal(u({}), false);
   at = '/i/v-2';
-  // Each kind of "on" holds it, told once per version.
+  // What only this process holds keeps it: a start or save still on, a kept save or install group, a request waiting.
   const on = [
-    { state: { sessions: [{ id: 'b' }] }, pending: new Map() },
-    { state: { sessions: [{ id: 'b', alive: true, ended: true }] }, pending: new Map() },
-    { state: { sessions: [{ id: 'b', alive: false, ended: true, outbox_open: true }] }, pending: new Map() },
+    { state: { sessions: [] }, pending: new Map([['x', {}]]) },
     { state: { sessions: [], saves: { s: { pgid: 1 } } }, pending: new Map() },
     { state: { sessions: [], installs: { s: { pgid: 1 } } }, pending: new Map() },
-    { state: { sessions: [] }, pending: new Map([['x', {}]]) },
   ];
   for (const x of on) assert.equal(u(x), false, JSON.stringify(x.state));
-  assert.equal(logs.filter((l) => /newer version is installed \(\/i\/v-2\); it restarts on it once no session is on/.test(l)).length, 1, logs.join('\n'));
+  q = 1; assert.equal(u(idle), false, 'a request waiting'); q = 0;
+  assert.equal(logs.filter((l) => /newer version is installed \(\/i\/v-2\); it restarts on it once no start, save or request is on/.test(l)).length, 1, logs.join('\n'));
+  // Told again every ten minutes while it waits.
+  t = 600_000; assert.equal(u(on[0]), false);
+  assert.equal(logs.filter((l) => /it restarts on it once/.test(l)).length, 2);
   // A link that can't be read now changes nothing.
   at = null; assert.equal(u(idle), false); at = '/i/v-2';
-  assert.equal(u(idle), true);
-  assert.match(logs.at(-1), /no session is on; it stops, and the Mac starts it again on the new version within a minute/);
-  // A link that couldn't be read at start never restarts, and says so.
-  at = null; const l2 = []; const u2 = updateRestart({ installRoot: '/i/cur', realpath: rp, log: (t) => l2.push(t) });
-  assert.match(l2[0], /can't be read now, so it won't restart itself/);
-  at = '/i/v-3'; assert.equal(u2(idle), false);
+  // Running sessions, and ended ones with an open outbox, carry over: they don't hold it (#378 path).
+  const sessions = { state: { sessions: [{ id: 'b' }, { id: 'c', alive: true }, { id: 'd', alive: false, ended: true, outbox_open: true }], saves: {}, installs: {} }, pending: new Map() };
+  assert.equal(u(sessions), true);
+  assert.match(logs.at(-1), /no start, save or request is on; it stops, and the Mac starts it again on the new version within a minute/);
+  // The version is the running code's: the link moved before the runner read it doesn't make it look current.
+  at = '/i/v-2'; const u3 = updateRestart({ installRoot: '/i/cur', from: '/code', realpath: rp });
+  assert.equal(u3(idle), true, 'code is v-1, the link is v-2');
+  // No code folder to read never restarts, and says so.
+  const l2 = []; const u2 = updateRestart({ installRoot: '/i/cur', realpath: rp, log: (x) => l2.push(x) });
+  assert.match(l2[0], /own code folder can't be read now, so it won't restart itself/);
+  assert.equal(u2(idle), false);
 });
 
 test('L1348: main hands the loop a stop that is the update restart as well as SIGTERM, and returns 0 when it stops', async () => {
@@ -358,7 +364,7 @@ test('L1348: main hands the loop a stop that is the update restart as well as SI
       rmSync(join(d, 'install')); symlinkSync(join(d, 'v-2'), join(d, 'install'));
       seen = ctx.stopWhen(idle);
     };
-    const code = await main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: () => config(d), log: (s) => logs.push(s), run, onStop: () => {} });
+    const code = await main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: () => config(d), log: (s) => logs.push(s), run, onStop: () => {}, codeRoot: () => join(d, 'v-1') });
     assert.equal(code, 0, logs.join('\n'));
     assert.equal(seen, true, logs.join('\n'));
   } finally { rmSync(d, { recursive: true, force: true }); }
