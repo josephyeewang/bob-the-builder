@@ -16,7 +16,7 @@ import { JOBS_DIR, JOB_ACK_WAIT_MS, LOCKED_JOBS, LOCKED_MS, LOCKED_SAVE_MS, RESU
 import { EventEmitter } from 'node:events';
 import { SAVE_DEADLINE_MS } from '../modules/M11-dispatcher/pass.mjs';
 import { LOCKED_PROMPT } from '../modules/M4-workshop/launcher/launch.mjs';
-import { POLICY_HOOKS } from '../modules/M4-workshop/launcher/render-settings.mjs';
+import { POLICY_HOOKS, renderRoleSettings } from '../modules/M4-workshop/launcher/render-settings.mjs';
 import { walledLaunchSettings } from './runner-launch.mjs';
 import { DESIGN_PROFILES, outboxKindsFor } from '../modules/M4-workshop/launcher/role-profiles.mjs';
 import { makeSnapshot } from '../modules/M4-workshop/hooks/snapshot.mjs';
@@ -842,6 +842,13 @@ test('#666 r2 M1: jobGuard: no hooks, the runner\'s own guard; hooks in two fold
     assert.throws(() => jobGuard(two), /hooks in more than one folder/);
     assert.throws(() => jobGuard({ hooks: { PreToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: 'merge-guard --role worker' }] }] } }), /not in the runner's form/);
     assert.throws(() => jobGuard({ hooks: [] }), /not an object/);
+    // L1352 r3 minor: shapes claude would not read as hooks are refused, not skipped.
+    const ok = hookSettings(join(at.abc, 'hooks')).hooks.PreToolUse;
+    assert.throws(() => jobGuard({ hooks: { PreToolUse: ok, PostToolUse: { matcher: '*' } } }), /PostToolUse hooks are not a list/);
+    assert.throws(() => jobGuard({ hooks: { PreToolUse: [...ok, { matcher: '*', hooks: { type: 'command' } }] } }), /PreToolUse hooks hold a group whose hooks are not a list/);
+    assert.throws(() => jobGuard({ hooks: { PreToolUse: [...ok, { matcher: '*' }] } }), /group whose hooks are not a list/);
+    assert.throws(() => jobGuard({ hooks: { PreToolUse: [...ok, null] } }), /group whose hooks are not a list/);
+    assert.equal(jobGuard({ hooks: {} }), GUARD, 'no events: the runner\'s own guard, as before');
     const bare = join(d, 'bare', 'hooks'); mkdirSync(bare, { recursive: true });
     assert.throws(() => jobGuard(hookSettings(bare)), /no lock-down guard beside its hooks folder/);
     // guardedRun refuses before claude starts, naming why.
@@ -906,6 +913,30 @@ test('L1354: lockedCommand\'s output gets through every Bash hook of a rendered 
     // The same hooks still refuse the guard run through a plain sh line (the hook's words are what claude passes back).
     const no = run(`sh -c 'npm ci'`);
     assert.ok(no.some((r) => r.status === 2 && /blocked/.test(r.stderr)), no.map((r) => r.stderr).join(''));
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+// L1352 r3 minor: the settings as render-settings really makes them for a worker (hooks present), not a hand-made shape.
+test('L1352 r3: jobGuard on real renderRoleSettings output (a worker, through the install\'s link) picks the guard beside those hooks', () => {
+  const d = realpathSync(tempDir('orch-render-guard-'));
+  try {
+    const at = versions(d, 'abc');
+    const link = join(d, 'orchestrate'); symlinkSync(at.abc, link);
+    const p = (...a) => join(d, ...a);
+    for (const x of ['snap', 'copy', 'outbox', 'notes']) mkdirSync(p(x));
+    const r = renderRoleSettings({ productionFiles: [], proposalOutboxes: [p('proposals')], role: 'worker', profile: DESIGN_PROFILES.worker, rulesHosts: [], product: { commands: { test: 'npm test' } },
+      paths: { copy: p('copy'), outbox: p('outbox'), hooksDir: join(link, 'hooks'), snapshot: p('snap', 'rules.json'), snapshotOwner: 0, node: process.execPath, notes: p('notes'),
+        deny: { proposals: [p('proposals')], secrets: [p('keys')], claudeHome: p('h', 'c'), ssh: p('h', 's'), gh: p('h', 'g'), robotKeys: p('k'), record: p('record'), otherCopies: [] } } });
+    assert.equal(r.ok, true, r.reason);
+    assert.ok(Object.keys(r.settings.hooks).length > 0 && r.settings.hooks.PreToolUse.length > 0, 'a worker\'s settings carry hooks');
+    assert.equal(jobGuard(r.settings), join(at.abc, 'modules', 'M4-workshop', 'jobs', 'guard.sh'), 'the guard beside the hooks the settings name, by its real path');
+    // The same render pointed at a folder with no guard beside it is refused, not given the runner's own.
+    const bare = p('bare', 'hooks'); mkdirSync(bare, { recursive: true });
+    const b = renderRoleSettings({ productionFiles: [], proposalOutboxes: [p('proposals')], role: 'worker', profile: DESIGN_PROFILES.worker, rulesHosts: [], product: { commands: { test: 'npm test' } },
+      paths: { copy: p('copy'), outbox: p('outbox'), hooksDir: bare, snapshot: p('snap', 'rules.json'), snapshotOwner: 0, node: process.execPath, notes: p('notes'),
+        deny: { proposals: [p('proposals')], secrets: [p('keys')], claudeHome: p('h', 'c'), ssh: p('h', 's'), gh: p('h', 'g'), robotKeys: p('k'), record: p('record'), otherCopies: [] } } });
+    assert.equal(b.ok, true, b.reason);
+    assert.throws(() => jobGuard(b.settings), /no lock-down guard beside its hooks folder/);
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
