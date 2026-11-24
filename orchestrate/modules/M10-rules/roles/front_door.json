@@ -9,8 +9,7 @@
     "Grep",
     "Write",
     "AskUserQuestion",
-    "PushNotification",
-    "Skill"
+    "PushNotification"
   ],
   "permission_mode": "acceptEdits",
   "restricted_mode": true,
@@ -22,8 +21,5 @@
     "ask-request-"
   ],
   "auto_resume": false,
-  "context": "context.front_door",
-  "skills": [
-    "orchestrate"
-  ]
+  "context": "context.front_door"
 }

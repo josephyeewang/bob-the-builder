@@ -310,16 +310,16 @@ test('check 0 (L1108 I7): both refusals begin with a NAMES_CHECK_REFUSALS prefix
   for (const r of ['launch check 6 (headless read-back): no start message', '', undefined, 'x setting names not confirmed']) assert.equal(isNamesCheckRefusal(r), false, String(r));
 });
 
-test('read-back: the Lead has exactly Read, Glob, Grep, Write and AskUserQuestion; the Front Door only the orchestrate skill (R-0b-34, 39)', () => {
+test('read-back: the Lead has exactly Read, Glob, Grep, Write and AskUserQuestion; the Front Door no skill at all (R-0b-34, 39; L1334 option a)', () => {
   const lead = DESIGN_PROFILES.lead;
   assert.deepEqual([...lead.tools].sort(), ['AskUserQuestion', 'Glob', 'Grep', 'Read', 'Write']);
   assert.equal(checkInit(goodInit('lead'), { role: 'lead', profile: lead }).ok, true);
   for (const t of ['Bash', 'Agent', 'Edit', 'WebFetch']) assert.equal(checkInit({ ...goodInit('lead'), tools: [...goodInit('lead').tools, t] }, { role: 'lead', profile: lead }).ok, false, t);
   const fd = DESIGN_PROFILES.front_door;
   assert.equal(checkInit(goodInit('front_door'), { role: 'front_door', profile: fd }).ok, true);
-  assert.equal(checkInit({ ...goodInit('front_door'), skills: ['orchestrate', 'bob'] }, { role: 'front_door', profile: fd }).ok, false);
-  assert.equal(checkInit({ ...goodInit('front_door'), skills: [] }, { role: 'front_door', profile: fd }).ok, false);
-  // thinking is the Front Door's list without Skill (review m7).
+  assert.equal(checkInit({ ...goodInit('front_door'), skills: ['orchestrate'] }, { role: 'front_door', profile: fd }).ok, false, 'its skill is prompt text, never a loaded skill');
+  assert.equal(checkInit({ ...goodInit('front_door'), tools: [...goodInit('front_door').tools, 'Skill'] }, { role: 'front_door', profile: fd }).ok, false);
+  // thinking is the Front Door's list (review m7; the Front Door's Skill tool went with L1334 option a).
   assert.deepEqual([...DESIGN_PROFILES.thinking.tools].sort(), fd.tools.filter((t) => t !== 'Skill').sort());
   assert.equal(checkInit({ ...goodInit('thinking'), tools: [...goodInit('thinking').tools, 'Skill'] }, { role: 'thinking', profile: DESIGN_PROFILES.thinking }).ok, false);
 });

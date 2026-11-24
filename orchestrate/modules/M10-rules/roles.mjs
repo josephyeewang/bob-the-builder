@@ -95,7 +95,9 @@ export function checkProfile(role, p) {
   }
   if (!byTier(p.auto_resume, (b) => typeof b === 'boolean')) no('bad auto_resume');
   if (p.context !== `context.${role}`) no('context must name this role\'s rules key');
-  if (p.skills !== undefined && !(Array.isArray(p.skills) && p.skills.every((s) => s === 'orchestrate') && role === 'front_door')) no('only the front_door may name a skill, and only orchestrate');
+  // L1334 option a: no role names a skill or the Skill tool; the Front Door's skill is its prompt text.
+  if (p.skills !== undefined) no('no role names a skill (L1334: the Front Door gets its skill as prompt text)');
+  if (Array.isArray(p.tools) && p.tools.includes('Skill')) no('no role has the Skill tool (L1334: the Front Door gets its skill as prompt text)');
   if (p.enforced !== undefined && !(p.enforced === false && role === 'explore')) no('enforced: false is only for explore');
   if (role === 'explore' && p.enforced !== false) no('explore must say enforced: false');
   return p;

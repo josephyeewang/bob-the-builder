@@ -49,7 +49,7 @@ test('every design profile passes its own ceiling, holds no never-list tool and 
   assert.equal(DESIGN_PROFILES.front_door.compactWindow, 250000);
   assert.equal(DESIGN_PROFILES.worker.compactWindow, 300000);
   for (const r of ['lead', 'front_door', 'thinking']) assert.equal(DESIGN_PROFILES[r].setupFileRefusals, true, r);
-  assert.deepEqual(DESIGN_PROFILES.front_door.skills, ['orchestrate']);
+  assert.equal(DESIGN_PROFILES.front_door.skills, undefined, 'L1334 option a: the skill is prompt text, never a loaded skill');
 });
 
 test('a published profile can never widen a role', () => {

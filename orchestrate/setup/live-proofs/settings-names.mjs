@@ -898,11 +898,10 @@ export async function roleReadback({ base, pin, start, roles = Object.keys(DESIG
     writeFileSync(file, `${JSON.stringify(r.settings)}\n`);
     const args = roleArgs({ profile, settingsFile: file, model: RUN_MODEL });
     const out = await start(args, paths.copy);
-    // L1334: a role's own skills are put in place by its start, and no start that installs one is built yet (the front
-    // door's orchestrate skill). With --setting-sources "" claude 2.1.316 loads no skill from the home, the work folder or
-    // an --add-dir folder (checked: claude-code 2.1.316, 2026-11-21), so the read-back proves the role file with no skills of its own. This proves
-    // nothing about the skill: no front door start exists yet, and when one is built, check 6 there must compare the
-    // full profile (readback.mjs readBack, as review-launch.mjs does) or the skill is unchecked.
+    // L1334: with --setting-sources "" claude 2.1.316 loads no skill from the home, the work folder or an --add-dir
+    // folder (checked: claude-code 2.1.316, 2026-11-21), so the read-back proves the role file with no skills of its own.
+    // Since L1334 option a no role names a skill (the Front Door's is prompt text, setup/front-door.mjs), so this is
+    // the full profile's list too.
     const fileOnly = { ...profile, skills: [] };
     const c = checkInit(findInit(out), { role, profile: fileOnly, pin, args });
     if (!c.ok) bad.push(`${role}: ${c.reason}`);
