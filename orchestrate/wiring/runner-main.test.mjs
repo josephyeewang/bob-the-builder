@@ -9,7 +9,7 @@ import { spawn } from 'node:child_process';
 import { makeLock } from '../modules/M9-record/lock.mjs';
 import { loginJobPlist } from '../modules/M11-dispatcher/login-job.mjs';
 import { statusOf, statusText } from '../setup/builder-wall.mjs';
-import { DENY_KEYS, personUserProblem, carriedOverProblem, checkRunnerConfig, realRenderPaths, updateRestart, hookStoreOf, launchInputs, lockedOf, lockedWiring, readRunnerConfig, startDeps, listenStop, main, readRootFile, realRunnerPorts, testProductHeld, testProductProblem, workerCheckInputs } from './runner-main.mjs';
+import { DENY_KEYS, personUserProblem, carriedOverProblem, checkRunnerConfig, realRenderPaths, updateRestart, hookStoreOf, launchInputs, lockedOf, lockedWiring, productCommands, readRunnerConfig, startDeps, listenStop, main, readRootFile, realRunnerPorts, testProductHeld, testProductProblem, workerCheckInputs } from './runner-main.mjs';
 import { SIGNIN_TOKEN_VAR, checkRoleEnv } from '../modules/M4-workshop/launcher/env-check.mjs';
 import { workerSnapshotProblem } from './runner-checks.mjs';
 import { rulesText } from '../setup/worker-rules.mjs';
@@ -727,6 +727,70 @@ test('L1125 gate REAL rules: M10\'s own parser and engine (as M11 budget() build
   // Anything but true or false: M10 refuses the rules when it reads them (L1100, #550), so they never load and nothing runs.
   for (const v of ["'yes'", "'True'", '1']) assert.match(gate(withFlag(v)), /refused when read: .*product\.test_product must be true or false/, v);
   assert.match(gate(fixture), /do not say product\.test_product: true/, 'left out: held');
+});
+
+// R-S1-2: the product's install and test commands, and the hosts its install may reach, come only from its rules file
+// (product_profile.commands, product_profile.registry_hosts), read at each start. The config can't carry them too.
+test('R-S1-2: the config refuses render.product and render.registryHosts; the commands come only from the rules', () => {
+  const d = '/T';
+  for (const [k, v] of [['product', { commands: { install: 'npm ci', test: 'npm test' } }], ['registryHosts', []]]) {
+    const c = config(d); c.products.p1.render[k] = v;
+    assert.throws(() => checkRunnerConfig(c), new RegExp(`product p1: render\\.${k} is not taken: the commands and registry hosts come only from the product's rules file \\(product_profile\\.commands and product_profile\\.registry_hosts\\), read at each start`), k);
+  }
+  // productCommands: what the rules say, only text kept; no rules, or rules that can't be read, give none and say why.
+  const rulesOf = (cmds, hosts) => ({ rules: { get: (k, o) => { assert.deepEqual(o, { product: 'p1' }); if (cmds instanceof Error) throw cmds; return k === 'product_profile.commands' ? cmds : hosts; } } });
+  assert.deepEqual(productCommands(rulesOf({ install: 'true', test: 'npm test', bad: 7 }, ['registry.npmjs.org', 3]), 'p1'), { commands: { install: 'true', test: 'npm test' }, registryHosts: ['registry.npmjs.org'] });
+  assert.deepEqual(productCommands(rulesOf(undefined, undefined), 'p1'), { commands: {}, registryHosts: [] }, 'left out: none, and the checks say which line to add');
+  assert.match(productCommands(rulesOf(new Error('snapshot is stale')), 'p1').why, /p1's rules can't be read \(snapshot is stale\)/);
+  for (const b of [null, {}, { rules: {} }]) assert.match(productCommands(b, 'p1').why, /rules are not loaded .*no budget/);
+  assert.deepEqual(startDeps(checkRunnerConfig(config(d))).productRules('p1').commands, {}, 'startDeps reads them through the same budget');
+});
+
+// R-S1-2 REAL loader: the Dispatcher's snapshot on the disk, M11 budget() over it (M10's own parser and engine), the
+// runner's startDeps reading it, and the worker's checks 4 and 11 wired from what it read, as startPort hands them on.
+test('R-S1-2 REAL loader: a rules snapshot naming the commands wires checks 4 and 11; one naming none refuses both with the line to add', async () => {
+  const { budget, writeRulesSnapshot } = await import('../modules/M11-dispatcher/budget.mjs');
+  const { PRODUCT, UID, product, setup } = await import('../modules/M9-record/fixtures.test-helper.mjs');
+  const { DESIGN_PROFILES } = await import('../modules/M4-workshop/launcher/role-profiles.mjs');
+  const fixture = readFileSync(new URL('../modules/M10-rules/fixtures/policy.yaml', import.meta.url), 'utf8');
+  const withCommands = `${fixture.trimEnd()}\n\nproduct_profile:\n  commands:\n    install: "true"\n    test: "test -s orchestrate/policy.yaml"\n  registry_hosts: []\n`;
+  const env = setup({ prefix: 'm11-rs12-rec-' }); product(env);
+  const dir = join(tempDir('m11-rs12-rules-'), 'rules'); mkdirSync(dir, { mode: 0o700 }); chmodSync(dir, 0o700);
+  const file = join(dir, 'dispatcher-rules.json'); const clock = { t: Date.parse('2026-11-11T12:00:00Z') };
+  const snap = (text, commit = 'c'.repeat(40)) => assert.deepEqual(writeRulesSnapshot(file, { product: PRODUCT, products: [PRODUCT], now: clock.t,
+    state: () => ({ status: 'ok', text, commit, blob: commit.replace(/./g, 'b'), fetchedAt: clock.t, policy: {}, rev: 'x', reason: 'fresh' }) }), { ok: true });
+  const b = budget({ recordRoot: env.root, recordUid: UID, dispatcherRules: file, workerStatusFile: join(dir, 'w.json'), workerUid: UID,
+    reviewStatusFile: join(dir, 'r.json'), reviewUid: UID, outboxRoot: env.outRoot }, { now: () => clock.t, io: { userName: () => null } });
+  const c = checkRunnerConfig(config('/T', { products: { [PRODUCT]: { repo: 'o/p1', mirror: '/T/mirror', render: { paths: { deny: DENY('/T') } } } } }));
+  const jobs = [];
+  const sd = startDeps(c, { budget: b, runLocked: async (j) => { jobs.push(j); return { ok: true }; } });
+  // As startPort does: one read, its commands and hosts handed to the checks.
+  const checks = () => {
+    const pr = sd.productRules(PRODUCT);
+    return sd.checksFor({ role: 'worker', profile: DESIGN_PROFILES.worker, kind: 'editing', product: PRODUCT, sessionId: 'S-1', copy: '/T/copies/C-1', settings: { file: '/T/s.json', settings: {} },
+      installCommand: pr.commands.install, testCommand: pr.commands.test, registryHosts: pr.registryHosts, ...(pr.why ? { rulesWhy: pr.why } : {}),
+      renderPhase: () => ({ ok: true, settings: {} }), writeSettings: () => ({ ok: true }), throwaway: async () => ({ ok: false, reason: 'stand-in throwaway' }),
+      spawn: () => { throw new Error('stand-in spawn'); } });
+  };
+  try {
+    snap(withCommands);
+    assert.deepEqual(sd.productRules(PRODUCT), { commands: { install: 'true', test: 'test -s orchestrate/policy.yaml' }, registryHosts: [] });
+    const k = checks();
+    assert.equal(typeof k[4], 'function'); assert.equal(typeof k[11], 'function');
+    assert.deepEqual(await k[4](), { ok: true }, 'check 4 runs the rules\' install');
+    assert.equal(jobs[0].command, 'true');
+    const eleven = await k[11]();
+    assert.doesNotMatch(eleven?.reason ?? '', /product_profile/, 'check 11 is the real check, not the missing-command refusal');
+    // The same snapshot without the commands: both refuse, naming the exact line the rules file must add.
+    clock.t += 60_000; snap(fixture, 'd'.repeat(40));
+    const n = checks();
+    assert.deepEqual(await n[4](), { ok: false, reason: `product ${PRODUCT}'s rules file (orchestrate/policy.yaml) names no product_profile.commands.install: add the exact install command there, or install: "true" if there is nothing to install` });
+    assert.deepEqual(await n[11](), { ok: false, reason: `product ${PRODUCT}'s rules file (orchestrate/policy.yaml) names no product_profile.commands.test: add the exact command that runs its tests there` });
+    assert.equal(jobs.length, 1, 'no install ran');
+    // No budget at all: both refuse with why.
+    const nb = startDeps(c, { runLocked: async () => ({ ok: true }) }).productRules(PRODUCT);
+    assert.match(nb.why, /rules are not loaded/);
+  } finally { rmSync(env.root, { recursive: true, force: true }); rmSync(dirname(dir), { recursive: true, force: true }); }
 });
 
 test('L1193: the config\'s wallStatus, when given, is a full path in its simplest form; left out, the config loads and every start is held', () => {

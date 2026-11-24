@@ -40,6 +40,10 @@ export const KEYS = Object.freeze({
   product_profile: { required: false, type: 'map' }, 'product_profile.required_checks': { required: false, type: 'list' },
   'product_profile.audit_workflow': { required: false, type: 'map' },
   'product_profile.checks_ignored': { required: false, type: 'list' }, 'product_profile.robot': { required: false, type: 'map' },   // M6
+  // The worker runner's (R-S1-2): commands { <key>: <exact command> }, read at each start; each value is one text here, and
+  // M4 render-settings.mjs renderAllowRules (BAD_COMMAND) decides whether it is one exact command. registry_hosts: the
+  // hosts the install may reach (check 4), a list of names, empty for none.
+  'product_profile.commands': { required: false, type: 'map' }, 'product_profile.registry_hosts': { required: false, type: 'list' },
   repairs: { required: false, type: 'map' }, 'repairs.max_statements': { required: false, type: 'text' },
   'repairs.allowed_functions': { required: false, type: 'list' },
   roles_enabled: { required: false, type: 'map' }, onboarding: { required: false, type: 'map' },
@@ -147,6 +151,10 @@ function check(raw) {
   // Exactly true or false (shared/rules.mjs exactFlag); missing reads as not the test product.
   const testProduct = raw.product?.test_product;
   if (testProduct !== undefined && exactFlag(testProduct) === undefined) bad('product.test_product must be true or false');
+  // Shapes only (R-S1-2); what a command may hold is M4's one rule, applied when a start renders its settings.
+  const commands = raw.product_profile?.commands;
+  if (isMap(commands)) for (const [k, v] of Object.entries(commands)) if (typeof v !== 'string' || !v) bad(`product_profile.commands.${k} must be one command, as text`);
+  if (raw.product_profile?.registry_hosts != null) strList(raw.product_profile.registry_hosts, 'product_profile.registry_hosts');
   const p = structuredClone(raw);
   p.product = { ...(raw.product ?? {}), cutover_stage: stage ?? 'first' };
 

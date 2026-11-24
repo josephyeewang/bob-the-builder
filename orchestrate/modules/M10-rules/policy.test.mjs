@@ -93,6 +93,21 @@ test('the cutover stage is first or second, and a missing one reads as first', (
   assert.equal(parsePolicy(fixture.replace('product:\n  cutover_stage: first\n', '')).policy.product.cutover_stage, 'first');
 });
 
+test('R-S1-2: product_profile.commands is a map of one command each, as text, and registry_hosts a list of names', () => {
+  const withProfile = (lines) => `${fixture.trimEnd()}\n\nproduct_profile:\n${lines}\n`;
+  const ok = parsePolicy(withProfile('  commands:\n    install: "true"\n    test: "test -s orchestrate/policy.yaml"\n  registry_hosts: []'));
+  assert.ok(ok.ok, ok.reason);
+  assert.deepEqual({ ...ok.policy.product_profile.commands }, { install: 'true', test: 'test -s orchestrate/policy.yaml' });
+  assert.deepEqual([...ok.policy.product_profile.registry_hosts], []);
+  assert.deepEqual([...parsePolicy(withProfile('  registry_hosts: [registry.npmjs.org]')).policy.product_profile.registry_hosts], ['registry.npmjs.org']);
+  assert.ok(parsePolicy(withProfile('  required_checks: [build]')).ok, 'both left out: the rules still load (the runner refuses the worker at check 4)');
+  assert.match(refused(withProfile('  commands: [npm ci]'), 'commands as a list'), /product_profile\.commands must be a map/);
+  assert.match(refused(withProfile('  commands:\n    install: [npm, ci]'), 'a command as a list'), /product_profile\.commands\.install must be one command, as text/);
+  assert.match(refused(withProfile('  commands:\n    test:\n      run: npm test'), 'a command as a map'), /product_profile\.commands\.test must be one command, as text/);
+  assert.match(refused(withProfile('  registry_hosts: registry.npmjs.org'), 'registry_hosts as one value'), /product_profile\.registry_hosts must be a list/);
+  assert.match(refused(withProfile("  registry_hosts: [registry.npmjs.org, '']"), 'an empty host'), /product_profile\.registry_hosts must be a list of text/);
+});
+
 test('product.test_product is true or false, and a missing one marks no test product (L1100)', () => {
   const withIt = (v) => fixture.replace('cutover_stage: first', `cutover_stage: first\n  test_product: ${v}`);
   assert.equal(parsePolicy(withIt('true')).policy.product.test_product, 'true');

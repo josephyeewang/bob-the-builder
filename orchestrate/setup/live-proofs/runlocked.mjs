@@ -11,13 +11,16 @@
 // No Dispatcher and no --check-locked flag: the runner's own builders are called directly (runner-main.mjs lockedOf and
 // lockedWiring, runner-ports.mjs startPort, as realRunnerPorts builds them), on throwaway cards of the test product.
 // Two inputs are this proof's own, since no Dispatcher runs: the card is read as claimed for its session (readCard),
-// and the session is given a short do-nothing prompt (promptFor, not wired on main yet). The variants a step needs (an
-// install command, a shorter lockedMs) are made on a copy of the config in memory: the config file is never written.
+// and the session is given a short do-nothing prompt (promptFor, not wired on main yet). The product's commands and
+// registry hosts are read once, as the runner reads them at each start (runner-main.mjs productCommands, R-S1-2: its rules
+// file, through the budget launchInputs loads), and every launch of the proof is given that read. The variants a step
+// needs (an install command, a shorter lockedMs) are made on copies of that read and of the config in memory: neither the
+// config file nor the rules are ever written.
 //
 // It refuses to run (every step NOT RUN, exit 1) unless: it runs as the user that owns the runner's own folder, and not
 // as root; the product is in the runner's config and its repository is the test repository (TEST_REPO); the config
-// names the pinned claude and `claude --version` is that pin; the product declares an install command and registry
-// hosts (none of them github.com, which step 2 must not reach); the worker runner is not running (its lock is taken for
+// names the pinned claude and `claude --version` is that pin; the product's rules name an install command and registry
+// hosts (none of them github.com, which step 2 must not reach: commandsProblem); the worker runner is not running (its lock is taken for
 // the proof's run, so the two never share a folder); and the runner's memory lists no session still live.
 //
 // A launch that stops before or after check 4 for a reason that is not runLocked's (launch check 0, the setting names
@@ -37,7 +40,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync, spawn as childSpawn, spawnSync } from 'node:child_process';
 import { makeLock } from '../../modules/M9-record/lock.mjs';
-import { checkRunnerConfig, launchInputs, lockedOf, lockedWiring, readRunnerConfig, realRenderPaths } from '../../wiring/runner-main.mjs';
+import { checkRunnerConfig, launchInputs, lockedOf, lockedWiring, productCommands, readRunnerConfig, realRenderPaths } from '../../wiring/runner-main.mjs';
 import { JOBS_DIR, lockedRunner, LOCKED_SAVE_MS, quoted } from '../../wiring/runner-locked.mjs';
 import { startPort, removeAll, chmodTree, saveSettingsName } from '../../wiring/runner-ports.mjs';
 import { loadMemory, processGroupPorts } from '../../wiring/runner-loop.mjs';
@@ -76,18 +79,25 @@ export function guardProblem({ c, product, uid, ownDirUid, claudeVersion }) {
   if (String(p.repo).split('/')[1] !== TEST_REPO) return `product ${product}'s repository is ${p.repo}, not the test repository (${TEST_REPO}). This proof runs on the test product only`;
   if (typeof c.claudeBin !== 'string' || !c.claudeBin.startsWith('/')) return 'the config names no pinned claude (claudeBin), so nothing can run inside the lock-down';
   const pin = pinProblem({ c, claudeVersion }); if (pin) return pin;
-  const install = p.render?.product?.commands?.install;
-  if (typeof install !== 'string' || !install.trim()) return `product ${product} declares no install command, so check 4 has nothing to run`;
-  if (!Array.isArray(p.render?.registryHosts) || !p.render.registryHosts.length) return `product ${product} declares no registry hosts, so step 1 would prove nothing`;
-  if (p.render.registryHosts.some((h) => /(^|\.)github\.com$/i.test(String(h)))) return `product ${product}'s registry hosts include github.com, which step 2 shows the install can't reach`;
   return null;
 }
 
-/** The config with one product's install command, and perhaps lockedMs, changed: in memory only. */
-export function variant(c, product, { install, lockedMs } = {}) {
-  const p = c.products[product];
-  const commands = { ...(p.render.product?.commands ?? {}), ...(install !== undefined ? { install } : {}) };
-  return { ...c, ...(lockedMs !== undefined ? { lockedMs } : {}), products: { ...c.products, [product]: { ...p, render: { ...p.render, product: { ...p.render.product, commands } } } } };
+/** Why the product's commands, as its rules give them (`rules`: runner-main.mjs productCommands), can't carry the proof,
+ * or null (R-S1-2). */
+export function commandsProblem({ product, rules }) {
+  if (rules?.why) return `product ${product}'s commands can't be read: ${rules.why}`;
+  const install = rules?.commands?.install;
+  if (typeof install !== 'string' || !install.trim()) return `product ${product}'s rules name no install command (product_profile.commands.install), so check 4 has nothing to run`;
+  const hosts = rules.registryHosts;
+  if (!Array.isArray(hosts) || !hosts.length) return `product ${product}'s rules name no registry hosts (product_profile.registry_hosts), so step 1 would prove nothing`;
+  if (hosts.some((h) => /(^|\.)github\.com$/i.test(String(h)))) return `product ${product}'s registry hosts include github.com, which step 2 shows the install can't reach`;
+  return null;
+}
+
+/** One launch's inputs ({ c, rules }) with the install command, and perhaps lockedMs, changed: copies in memory only. */
+export function variant({ c, rules }, { install, lockedMs } = {}) {
+  const commands = { ...(rules?.commands ?? {}), ...(install !== undefined ? { install } : {}) };
+  return { c: { ...c, ...(lockedMs !== undefined ? { lockedMs } : {}) }, rules: { ...rules, commands } };
 }
 
 const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
@@ -140,7 +150,8 @@ export const hooksSet = (text) => {
 
 /**
  * The proof's steps, with every port given (tests pass stand-ins). → results, one per step, in STEPS order.
- * io: { wiring(cfg, rec) → { start, saveWork }, stopGroup(s), groupListed(pid) → true/false/null, sleepers() → pids of
+ * `rules`: the product's commands and registry hosts as the runner reads them (productCommands), checked by commandsProblem.
+ * io: { wiring(cfg, rec, rules) → { start, saveWork }, stopGroup(s), groupListed(pid) → true/false/null, sleepers() → pids of
  * SLOW_INSTALL still running, verifyBundle(mirror, file) → null | why, exists(p), read(p), write(p, text, mode?), mkdir(p),
  * sleep(ms), now(), id(tag), reachable() → true/false (github.com from outside the sandbox, step 2's control),
  * warn(text), rm(p) (a link removed, not followed), cleanup({ copy, outbox, settingsFile, saveSettingsFile, settingsDir,
@@ -149,16 +160,16 @@ export const hooksSet = (text) => {
  * check 4), runs (each claude run: pid, out, job, settingsText it started with), groups (each group runLocked was told of,
  * as { name: 'install'|'save-work', group: { pgid, pid, pid_start, job?: { pgid, pid, pid_start } } }).
  */
-export async function proveRunLocked({ c, product, io }) {
+export async function proveRunLocked({ c, product, io, rules }) {
   const out = new Map();
   const p = c.products[product];
   const sessions = [];
   const role = RUNNER_ROLE_OF.editing;
   // One launch of a throwaway card. Its copy and outbox are named before the start, so a start that answers "still
   // running" (no paths) is cleaned up too.
-  const launchOne = async (cfg, tag) => {
+  const launchOne = async (v, tag) => {
     const rec = { answers: {}, settingsText: null, runs: [], groups: [] };
-    const { start, saveWork } = io.wiring(cfg, rec);
+    const { start, saveWork } = io.wiring(v.c, rec, v.rules);
     const card = io.id(`proof-rl-${tag}`); const sessionId = io.id(`proof-rl-${tag}`);
     const s = { card, sessionId, saveWork, rec, copy: runnerCopy({ copiesRoot: c.copiesRoot, product, card }), outbox: runnerOutbox({ outboxRoot: c.outboxRoot, product, role, sessionId }) };
     sessions.push(s);
@@ -172,18 +183,19 @@ export async function proveRunLocked({ c, product, io }) {
   const stop = async (r) => { try { return await io.stopGroup(groupOf(r)); } catch (e) { return { ok: false, reason: e?.message ?? String(e) }; } };
   try {
     // Steps 1, 3, 4, 6 and 7: one session of the product as declared.
-    const main = await launchOne(c, 'main');
+    const main = await launchOne({ c, rules }, 'main');
+    const hosts = rules.registryHosts;
     const a4 = four(main);
     const install = main.rec.runs.find((r) => r.job === 'install');
     if (!a4) out.set(1, noFour(1, main));
     else if (!a4.ok) out.set(1, fail(1, `check 4 refused the product's own install: ${a4.reason}`));
     else {
-      const during = p.render.registryHosts.filter((h) => !String(install?.settingsText ?? '').includes(h));
-      const kept = p.render.registryHosts.filter((h) => String(main.rec.settingsText ?? '').includes(h));
+      const during = hosts.filter((h) => !String(install?.settingsText ?? '').includes(h));
+      const kept = hosts.filter((h) => String(main.rec.settingsText ?? '').includes(h));
       out.set(1, !install?.settingsText ? fail(1, 'the install\'s settings were not seen, so the registry hosts can\'t be shown allowed for it')
         : during.length ? fail(1, `the install ran without ${during.join(', ')} allowed, so their removal afterwards shows nothing`)
           : main.rec.settingsText === null ? fail(1, 'the session\'s settings file could not be read back after check 4')
-            : kept.length ? fail(1, `the session's settings still name ${kept.join(', ')} after the install`) : pass(1, { hosts: p.render.registryHosts }));
+            : kept.length ? fail(1, `the session's settings still name ${kept.join(', ')} after the install`) : pass(1, { hosts }));
     }
     if (main.r?.ok !== true) {
       const at = blockedBy(main.r?.reason);
@@ -248,7 +260,7 @@ export async function proveRunLocked({ c, product, io }) {
     // The control (review m5): github.com reached from outside the sandbox, else a walled curl shows nothing.
     else if (io.reachable() !== true) out.set(2, notRun(2, 'github.com could not be reached from outside the sandbox either, so a refused curl inside it shows nothing. Check the Mini\'s network, then run this again'));
     else {
-      const s2 = await launchOne(variant(c, product, { install: walledInstall(c.home) }), 'walled');
+      const s2 = await launchOne(variant({ c, rules }, { install: walledInstall(c.home) }), 'walled');
       const b4 = four(s2);
       const code = Number(/the install exited (\d+)/.exec(b4?.reason ?? '')?.[1]);
       out.set(2, !b4 ? noFour(2, s2) : io.exists(x) ? fail(2, `the install wrote ${x}, outside the copy`)
@@ -264,7 +276,7 @@ export async function proveRunLocked({ c, product, io }) {
     const already = io.sleepers();
     if (already === null || already.length) out.set(5, notRun(5, already === null ? `whether ${SLOW_INSTALL} already runs can't be told` : `${SLOW_INSTALL} already runs (${already.join(', ')}), left by an earlier run; it ends by itself within 20 minutes. Run this again then`));
     else {
-      const s5 = await launchOne(variant(c, product, { install: SLOW_INSTALL, lockedMs: SHORT_LOCKED_MS }), 'slow');
+      const s5 = await launchOne(variant({ c, rules }, { install: SLOW_INSTALL, lockedMs: SHORT_LOCKED_MS }), 'slow');
       const c4 = four(s5); const run5 = s5.rec.runs.filter((r) => r.job === 'install').at(-1);
       const g5 = s5.rec.groups.filter((g) => g.name === 'install' && g.group?.job).at(-1)?.group;
       const jobPg = g5?.job?.pgid;
@@ -286,7 +298,7 @@ export async function proveRunLocked({ c, product, io }) {
 
     // Step 8: an install's leftover, looked at once the session has started (a known limit, never a fail). NOT SEEN counts
     // only when the install's own session was made (`started`); otherwise the step was not tried.
-    const s8 = await launchOne(variant(c, product, { install: LEFTOVER_INSTALL }), 'leftover');
+    const s8 = await launchOne(variant({ c, rules }, { install: LEFTOVER_INSTALL }), 'leftover');
     if (s8.r?.ok !== true) { const at = blockedBy(s8.r?.reason); out.set(8, notRun(8, at ? blockedWhy(at, s8.r.reason, 'the session did not start') : `the session did not start (${s8.r?.reason ?? 'no answer'})`)); }
     else {
       await io.sleep(LEFTOVER_WAIT_MS);
@@ -351,9 +363,11 @@ export const recordGroups = (base, rec) => (typeof base !== 'function' ? base : 
 
 /** The runner's own builders, as realRunnerPorts builds them, plus this proof's two inputs (see the top). `budget` and
  * `bobManifest` are launch checks 12 and 13's inputs, loaded by the runner's own launchInputs (L1092): a null one leaves
- * its check without a port, as in the runner, and the steps it stops read NOT RUN (blockedBy). */
+ * its check without a port, as in the runner, and the steps it stops read NOT RUN (blockedBy). `rules`, when given, is the
+ * launch's own read of the product's commands (proveRunLocked's, perhaps a variant); left out, the start reads them as
+ * the runner does (startDeps productRules). */
 export function realWiring(dir, log, { budget = null, bobManifest = null } = {}) {
-  return (cfg, rec) => {
+  return (cfg, rec, rules) => {
     const runLocked = recordGroups(lockedOf(cfg, { make: (o) => lockedRunner({ ...o, spawn: recordingSpawn(rec, dir) }) }), rec);
     const locked = lockedWiring(cfg, { runLocked, log, budget, bobManifest });
     const inner = locked.startDeps.checksFor;
@@ -367,7 +381,7 @@ export function realWiring(dir, log, { budget = null, bobManifest = null } = {})
       }]));
     };
     const readCard = (card) => ({ ok: true, doc: { state: 'claimed', claim: { session_id: rec.sessionId }, product: rec.product, tier: 2, id: card } });
-    const start = startPort(cfg, { ...locked.startDeps, checksFor, readCard, promptFor: () => PROOF_PROMPT });
+    const start = startPort(cfg, { ...locked.startDeps, ...(rules ? { productRules: () => rules } : {}), checksFor, readCard, promptFor: () => PROOF_PROMPT });
     return { start: (req) => { rec.sessionId = req.sessionId; rec.product = req.product; return start(req); }, saveWork: locked.saveWork, checksFor };
   };
 }
@@ -435,6 +449,10 @@ export async function main(argv, { print = (t) => process.stdout.write(t), uid =
   // they stop the runner; one that can't be loaded is said, and its check then refuses the launch (NOT RUN, blockedBy).
   const inputs = await proofInputs(c, inputsOf);
   if (inputs.problem) return fails(inputs.problem);
+  // The product's commands, read once as the runner reads them at each start (R-S1-2).
+  const rules = productCommands(inputs.budget, product);
+  const noCommands = commandsProblem({ product, rules });
+  if (noCommands) return fails(noCommands);
   // A session the runner started may outlive it; the proof's starts check no other product's walls against it (live: []).
   let m; try { m = loadMemory(c.memoryFile, { uid }); } catch (e) { return fails(`the worker runner's memory can't be read (${e?.message ?? e})`); }
   const live = (Array.isArray(m?.sessions) ? m.sessions : []).filter((s) => s?.alive === true || (s?.alive !== false && s?.ended !== true));
@@ -466,7 +484,7 @@ export async function main(argv, { print = (t) => process.stdout.write(t), uid =
       rm: (p) => rmSync(p, { force: true }),
       cleanup: (x) => cleanupProof(x, log),
     };
-    return proveRunLocked({ c, product, io });
+    return proveRunLocked({ c, product, io, rules });
   }, print });
   const r = report(results);
   print(r.text);

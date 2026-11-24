@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { tempDir } from '../../shared/test-tmp.mjs';
-import { CURL_UNREACHED, LEFTOVER_INSTALL, LEFTOVER_WAIT_MS, SLOW_INSTALL, STEPS, TEST_REPO, blockedBy, guardProblem, cleanupProof, hooksSet, main, proofInputs, underLock, proveRunLocked, readStream, realWiring, recordGroups, report, variant, walledInstall } from './runlocked.mjs';
+import { CURL_UNREACHED, LEFTOVER_INSTALL, LEFTOVER_WAIT_MS, SLOW_INSTALL, STEPS, TEST_REPO, blockedBy, commandsProblem, guardProblem, cleanupProof, hooksSet, main, proofInputs, underLock, proveRunLocked, readStream, realWiring, recordGroups, report, variant, walledInstall } from './runlocked.mjs';
 import { JOBS_DIR, LOCKED_SAVE_MS, quoted } from '../../wiring/runner-locked.mjs';
 import { CLONE_CONFIG_TEMPLATE } from '../../modules/M4-workshop/git/save-work.mjs';
 
@@ -13,7 +13,9 @@ const INSTALL = 'npm ci';
 const HOSTS = ['registry.npmjs.org'];
 const cfg = (over = {}) => ({ ownDir: '/w/state', settingsDir: '/w/state/settings', home: '/Users/workers', claudeBin: '/opt/claude', pin: '2.1.316',
   copiesRoot: '/w/copies', outboxRoot: '/w/outboxes',
-  products: { trial: { repo: `someone/${TEST_REPO}`, mirror: '/m/trial.git', render: { registryHosts: HOSTS, product: { commands: { install: INSTALL, test: 'npm test' } }, paths: {} } } }, ...over });
+  products: { trial: { repo: `someone/${TEST_REPO}`, mirror: '/m/trial.git', render: { paths: {} } } }, ...over });
+// The product's commands and registry hosts as the runner reads them from its rules (runner-main.mjs productCommands, R-S1-2).
+const RULES = Object.freeze({ commands: Object.freeze({ install: INSTALL, test: 'npm test' }), registryHosts: HOSTS });
 const okGuard = { c: cfg(), product: 'trial', uid: 501, ownDirUid: 501, claudeVersion: '2.1.316' };
 const HOOKS = { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: '/h/guard.mjs' }] }] };
 const SETTINGS = JSON.stringify({ hooks: HOOKS, sandbox: { network: { allowedDomains: ['api.anthropic.com'] } } });
@@ -26,7 +28,6 @@ const stream = (over = {}) => [
   JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', is_error: over.error === true }] } }),
   ...(over.result === false ? [] : [JSON.stringify({ type: 'result', permission_denials: over.denied ?? [] })]),
 ].join('\n');
-const withRender = (render) => cfg({ products: { trial: { ...cfg().products.trial, render: { ...cfg().products.trial.render, ...render } } } });
 
 test('guardProblem: the proof runs only as the runner\'s own user, on the test product, with the pinned claude', () => {
   assert.equal(guardProblem(okGuard), null, 'the control');
@@ -42,24 +43,32 @@ test('guardProblem: the proof runs only as the runner\'s own user, on the test p
     [{ c: cfg({ pin: undefined }) }, /no claude pin/],
     [{ claudeVersion: '2.1.317' }, /claude is 2\.1\.317.*pin is 2\.1\.316/],
     [{ claudeVersion: null }, /not readable/],
-    [{ c: withRender({ product: { commands: {} } }) }, /no install command/],
-    [{ c: withRender({ registryHosts: [] }) }, /no registry hosts/],
-    [{ c: withRender({ registryHosts: [...HOSTS, 'codeload.github.com'] }) }, /include github\.com/],
-    [{ c: withRender({ registryHosts: ['GitHub.com'] }) }, /include github\.com/],
   ];
   for (const [over, re] of bad) assert.match(guardProblem({ ...okGuard, ...over }) ?? 'null', re, JSON.stringify(over).slice(0, 80));
-  assert.equal(guardProblem({ ...okGuard, c: withRender({ registryHosts: ['notgithub.com'] }) }), null, 'only github.com and its own names');
 });
 
-test('variant: changes the one product\'s install and lockedMs in a copy, never the config itself', () => {
-  const c = cfg(); const before = JSON.stringify(c);
-  const v = variant(c, 'trial', { install: 'sleep 1213', lockedMs: 60_000 });
-  assert.equal(v.products.trial.render.product.commands.install, 'sleep 1213');
-  assert.equal(v.products.trial.render.product.commands.test, 'npm test', 'the other commands are kept');
-  assert.equal(v.lockedMs, 60_000);
-  assert.equal(JSON.stringify(c), before, 'the config is untouched');
-  assert.equal(variant(c, 'trial').products.trial.render.product.commands.install, INSTALL);
-  assert.ok(!('lockedMs' in variant(c, 'trial', { install: 'x' })));
+// R-S1-2: the install command and registry hosts come from the product's rules, as the runner reads them at each start.
+test('commandsProblem: the proof needs the rules to name an install command and registry hosts, none of them github.com', () => {
+  const at = (over) => commandsProblem({ product: 'trial', rules: { ...RULES, ...over } });
+  assert.equal(at({}), null, 'the control');
+  for (const [over, re] of [[{ commands: { test: 'npm test' } }, /rules name no install command \(product_profile\.commands\.install\)/], [{ commands: { install: ' ' } }, /no install command/],
+    [{ registryHosts: [] }, /rules name no registry hosts \(product_profile\.registry_hosts\)/], [{ registryHosts: [...HOSTS, 'codeload.github.com'] }, /include github\.com/],
+    [{ registryHosts: ['GitHub.com'] }, /include github\.com/], [{ why: 'the Dispatcher\'s rules are not loaded' }, /trial's commands can't be read: the Dispatcher's rules are not loaded/]]) {
+    assert.match(at(over) ?? 'null', re, JSON.stringify(over));
+  }
+  assert.equal(at({ registryHosts: ['notgithub.com'] }), null, 'only github.com and its own names');
+});
+
+test('variant: changes the install (in the rules read) and lockedMs (in the config) in copies, never either itself', () => {
+  const c = cfg(); const before = JSON.stringify([c, RULES]);
+  const v = variant({ c, rules: RULES }, { install: 'sleep 1213', lockedMs: 60_000 });
+  assert.equal(v.rules.commands.install, 'sleep 1213');
+  assert.equal(v.rules.commands.test, 'npm test', 'the other commands are kept');
+  assert.deepEqual(v.rules.registryHosts, HOSTS);
+  assert.equal(v.c.lockedMs, 60_000);
+  assert.equal(JSON.stringify([c, RULES]), before, 'the config and the rules read are untouched');
+  assert.equal(variant({ c, rules: RULES }).rules.commands.install, INSTALL);
+  assert.ok(!('lockedMs' in variant({ c, rules: RULES }, { install: 'x' }).c));
 });
 
 test('the plant installs: walled tries the network and the home folder; leftover proves its own session first; slow is one to look for', () => {
@@ -118,8 +127,8 @@ function world(over = {}) {
     mainSha: 'a'.repeat(64), saveSettings: SETTINGS, rewrite: true, jobGroup: 4250, jobListed: false, sleepersBefore: [], sleeperCalls: 0, reachable: true, warned: [], ...over };
   const c = cfg();
   const io = {
-    wiring: (cv, rec) => {
-      const install = cv.products.trial.render.product.commands.install;
+    wiring: (cv, rec, rules) => {
+      const install = rules.commands.install;
       const kind = install === INSTALL ? 'main' : install === SLOW_INSTALL ? 'slow' : install === LEFTOVER_INSTALL ? 'leftover' : 'walled';
       return {
         start: async (req) => {
@@ -183,7 +192,7 @@ function world(over = {}) {
   };
   return { w, c, io };
 }
-const run = async (over) => { const { w, c, io } = world(over); const r = await proveRunLocked({ c, product: 'trial', io }); return { w, r, by: Object.fromEntries(r.map((x) => [x.step, x])) }; };
+const run = async (over) => { const { w, c, io } = world(over); const r = await proveRunLocked({ c, product: 'trial', io, rules: RULES }); return { w, r, by: Object.fromEntries(r.map((x) => [x.step, x])) }; };
 
 test('proveRunLocked: a runLocked that works passes 1 to 7, sees the leftover, and cleans up every session', async () => {
   const { w, r, by } = await run();
@@ -315,10 +324,10 @@ test('proveRunLocked: a start still running, and a proof that throws part way, a
   assert.ok(!z.w.cleaned.some((x) => x.copy === `/w/copies/trial/${z.w.launched[3].req.card}`));
   assert.equal(z.w.warned.length, 1); assert.match(z.w.warned[0], /group 777 .* could not be stopped \(EPERM\); it may still run\. Left in place: \/w\/copies\/trial\//);
   const x = world({ verify: 'throw' });
-  await assert.rejects(proveRunLocked({ c: x.c, product: 'trial', io: x.io }), /boom/);
+  await assert.rejects(proveRunLocked({ c: x.c, product: 'trial', io: x.io, rules: RULES }), /boom/);
   assert.equal(x.w.cleaned.length, 1, 'the session started before the throw');
   const y = world({ sleepers: [4321] });
-  await proveRunLocked({ c: y.c, product: 'trial', io: y.io });
+  await proveRunLocked({ c: y.c, product: 'trial', io: y.io, rules: RULES });
   assert.deepEqual(y.w.cleaned[2].sleepers, [4321], 'a sleep left by step 5 is handed to the cleanup');
 });
 

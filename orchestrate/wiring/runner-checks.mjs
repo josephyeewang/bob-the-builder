@@ -20,11 +20,12 @@
 //                           runner-main.mjs startDeps `beforeStart`), since checks 4 and 11 run the branch's own code.
 //   3  outbox emptied       reviewChecks' 3 (emptyOutbox, with `busy` the "what holds this folder" port)
 //   4  dependencies         the install inside the lock-down (launch.mjs installStep), through the lock-down runner
-//                           (runner-locked.mjs `runLocked`, L969), with the product's declared install command
-//                           (render.product.commands.install) and its registry hosts (render.registryHosts). No runLocked
-//                           or no install command, no port: launch() refuses a worker here, so a product with nothing
-//                           to install launches no worker until it declares one (a cutover item; a no-op such as
-//                           `true` passes). A script session skips check 4. A process an install script moves into its
+//                           (runner-locked.mjs `runLocked`, L969), with the product's install command and registry
+//                           hosts from its rules file (product_profile.commands.install and product_profile.registry_hosts,
+//                           read once per start: runner-main.mjs productCommands, R-S1-2). A worker whose rules name no
+//                           install command is refused here with the line to add (commandMissing below): a product
+//                           with nothing to install declares install: "true", never a silent skip. No runLocked, no
+//                           port: launch() refuses ("no check is wired"). A script session skips check 4. A process an install script moves into its
 //                           own session (setsid) outlives the group kill, in the copy (runner-locked.mjs; Mini proof 9.8).
 //   5  role file            reviewChecks' 5: the settings file read back without following a link, byte for byte what
 //                           the start port wrote (the same text form as review-settings.mjs templateText), and
@@ -79,6 +80,7 @@ import { LOCKED_MS, claudeEnd, exitCodeCommand, groupFile, guardedRun, jobGroupP
 import { foldKey } from '../shared/plan-fingerprint.mjs';
 import { WORKER_RULES_COPY, readSnapshot, snapshotHash } from '../modules/M4-workshop/hooks/snapshot.mjs';
 import { hooksSnapshot, hooksSnapshotOwner } from '../modules/M4-workshop/launcher/render-settings.mjs';
+import { RULES_PATH } from '../modules/M10-rules/reader.mjs';
 
 /**
  * Why a worker session's rules snapshot can't be used, or null (L1226): root's worker-rules job writes it
@@ -191,6 +193,17 @@ export async function setupFilesProblem({ copy, mirror, mainAt }, { run = git } 
 export const baselineFile = ({ copy, sessionId }) => join(copy, `.orch-baseline-${sessionId}`);
 export const baselineCommand = (test, file) => exitCodeCommand(test, file, 'test command');
 
+/** What each command is for, in the refusal that names it (R-S1-2). */
+const COMMAND_FOR = Object.freeze({ install: 'add the exact install command there, or install: "true" if there is nothing to install', test: 'add the exact command that runs its tests there' });
+/**
+ * Why a worker can't pass check 4 (key install) or 11 (key test) for want of its command (R-S1-2), as the owner reads it:
+ * the rules could not be read (`x.rulesWhy`), or the product's rules file names no such command, with the line to add.
+ */
+export function commandMissing(x, key) {
+  if (x?.rulesWhy) return `${x.rulesWhy}; check ${key === 'install' ? 4 : 11} needs product_profile.commands.${key} from them`;
+  return `product ${x?.product}'s rules file (${RULES_PATH}) names no product_profile.commands.${key}: ${COMMAND_FOR[key]}`;
+}
+
 /**
  * The ports for one worker-runner session. x: the start port's { role, profile, kind, sessionId, card, cardDoc, product,
  * copy, outbox, env, head, mainAt, claudeBin, settings: { file, settings }, ownUid, throwaway() → { ok, copy, settingsFile,
@@ -221,7 +234,8 @@ export function workerChecks(x, { gateOf = check12, snapshotOwner = 0 } = {}) {
     };
   }
   if (has(x.machineWide)) ports[10] = r[10];
-  if (typeof x.spawn === 'function' && has(x.home) && (x.role !== 'worker' || (has(x.testCommand) && typeof x.throwaway === 'function'))) {
+  if (x.role === 'worker' && !has(x.testCommand)) ports[11] = async () => refuse(commandMissing(x, 'test'));
+  else if (typeof x.spawn === 'function' && has(x.home) && (x.role !== 'worker' || (has(x.testCommand) && typeof x.throwaway === 'function'))) {
     ports[11] = async () => {
       // The smoke first (#369 M2): the branch's tests run only once the lock-down is shown on.
       const smoke = await r[11]();
@@ -260,7 +274,8 @@ export function workerChecks(x, { gateOf = check12, snapshotOwner = 0 } = {}) {
   // Check 4 (L969): the product's install inside the lock-down, through installStep (the install-phase settings with the
   // registry's hosts, then the session's again, the registry shown gone). Only with the runner's runLocked, which
   // save-work has too (runner-main.mjs lockedWiring: one value, so a launch is never possible while a save is not, #456 r1 m3).
-  if (typeof x.runLocked === 'function' && has(x.installCommand) && typeof x.renderPhase === 'function' && typeof x.writeSettings === 'function') {
+  if (x.role === 'worker' && !has(x.installCommand)) ports[4] = async () => refuse(commandMissing(x, 'install'));
+  else if (typeof x.runLocked === 'function' && has(x.installCommand) && typeof x.renderPhase === 'function' && typeof x.writeSettings === 'function') {
     ports[4] = () => installStep({ render: x.renderPhase, write: x.writeSettings, registryHosts: Array.isArray(x.registryHosts) ? x.registryHosts : [],
       install: () => x.runLocked({ job: 'install', command: x.installCommand, sessionId: x.sessionId, role: x.role, settingsFile: x.settings?.file, cwd: x.copy,
         // The start's own environment (#463 r1 m6), which launch check 9 holds: the sign-in is not read a second time.
