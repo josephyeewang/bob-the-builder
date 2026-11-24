@@ -45,8 +45,8 @@ const PORTS_NOT_WIRED = Object.freeze(['frontDoorAlive', 'frontDoorHandoff', 'ga
   'leads', 'proposals', 'replyToLead', 'restartFrontDoor', 'resume',
   'sendFrontDoor', 'startMinibase', 'startReadonly', 'strayFrontDoor']);
 const CLEANUP_NOT_WIRED = Object.freeze(['saveWork']);
-// The cleanup ports wired for real (L739; worker-ports.test.mjs plants each).
-const CLEANUP_WIRED = Object.freeze(['copiesRoot', 'git', 'mirrorFor', 'sealRoot']);
+// The cleanup ports wired for real (L739; leftoverMoves, the runner's moved copies, L1357 audit M2; worker-ports.test.mjs plants each).
+const CLEANUP_WIRED = Object.freeze(['copiesRoot', 'git', 'leftoverMoves', 'mirrorFor', 'sealRoot']);
 // The ports wired for real (L270): approvals, whose GitHub writes and copies still refuse (pinned below). filesOf, hostLock
 // and reviewEnded (L739): worker-ports.test.mjs plants each. The worker runner's sync ports (L925: sessions, board,
 // outboxSessions, probe, stopSession) and the product value (L927): worker-ports.test.mjs plants those too. stopReview (L946): the review runner's stop file. The worker
@@ -374,7 +374,7 @@ test('the seam: the cleanup group follows the same rules, by its own list', () =
   // CLEANUP_PORTS is either wired (and answers) or refuses on read (#310 audit m-2).
   for (const k of NOT_WIRED_CLEANUP) assert.throws(() => group()[k], { message: notWiredText(`cleanup.${k}`) }, k);
   assert.deepEqual(CLEANUP_PORTS.filter((k) => !NOT_WIRED_CLEANUP.includes(k) && !CLEANUP_WIRED.includes(k)), [], 'every cleanup port wired or refusing');
-  assert.equal(typeof group().mirrorFor, 'function'); assert.equal(typeof group().git, 'function');
+  assert.equal(typeof group().mirrorFor, 'function'); assert.equal(typeof group().git, 'function'); assert.equal(typeof group().leftoverMoves, 'function');
   assert.equal(group().sealRoot, w.config.sealRoot, 'sealRoot is wired (L739): read as the checked folder');
   const cleanup = (changes) => {
     const c = Object.getOwnPropertyDescriptors(group());

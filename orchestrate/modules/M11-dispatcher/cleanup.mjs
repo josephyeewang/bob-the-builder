@@ -33,15 +33,22 @@ import { createAsk } from '../M2-approvals/binding.mjs';
 import { consumeAsk } from '../M2-approvals/ask-store.mjs';
 import { sensorsFact } from './sensor-facts.mjs';
 import { answerCounts } from '../../shared/approval.mjs';
-import { runnerCopy, runnerPlaces } from '../../shared/product-paths.mjs';
+import { LEFTOVER_FOLDER, LEFTOVER_WARN_COUNT, runnerCopy, runnerPlaces } from '../../shared/product-paths.mjs';
 import { holdAlert, HOLD_FACT } from './pass.mjs';
 import { listed, plain, tellThen } from './alerts.mjs';
+import { idHash } from './intake-facts.mjs';
 
 export const ASK_ID = (card) => `delete-copy-${card}`;
 export const CLEANUP_FACT = (card) => `cleanup-${card}`;
 const AUDITED = ['audited_ok', 'audit_flagged'];
 const IN_FLIGHT = ['requested', 'checking', 'merging', 'merged'];
 const ENDED = ['cancelled', 'closed', 'closed_no_answer'];
+// A card with a session in, or on its way into, its copy: a delete waits (L1357 audit M1).
+const LIVE_CARD = Object.freeze(['claimed', 'running']);
+/** A leftover copy the worker runner moved aside (L1357 audit M2): told once each. */
+export const LEFTOVER_MOVED_CAUSE = (to) => `leftover-moved-${idHash(to)}`;
+/** A product's leftover folder holding more than LEFTOVER_WARN_COUNT copies, or not countable: told daily. */
+export const LEFTOVER_MANY_CAUSE = (product) => `leftover-many-${product}`;
 const SHA = /^[0-9a-f]{40}$/;
 const CARD = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
 const iso = (ms) => new Date(ms).toISOString();
@@ -166,6 +173,10 @@ export async function cleanupCopy({ rec, rules, now, card, product, copiesRoot, 
     // A delete needs an answer M2 counted, as the undo tap does (audit MIN-5).
     const counted = answerCounts(rules, ask.doc, { approves: true });   // the one approval check (L81)
     if (!counted.ok) return done('refused', [`the delete answer was not counted: ${counted.reason}`]);
+    // Never under a live claim (L1357 audit M1): a card claimed or running may have a session in its copy. The ask stays
+    // answered, and the worker runner moves no copy of a card whose delete-copy ask is not consumed (runner-ports.mjs
+    // copyAskHeld), so the copy at this path is still the one Joe was asked about; it is deleted once the card is not.
+    if (LIVE_CARD.includes(cardDoc?.state)) return { result: 'kept', reasons: [`Joe said delete, but the card is ${cardDoc.state}; the copy is deleted once it is not`] };
     const own = ownCopy(copy, copiesRoot, card, named, product);
     consume(own.ok ? {} : { not_deleted: own.reason });
     if (!own.ok) return done('refused', [`Joe said delete, but ${own.reason}`]); // audit MIN-6
@@ -327,8 +338,9 @@ export const STRAY_FACT = HOLD_FACT(COPIES_NOT_PRODUCT_CAUSE);
 export const namesInMark = (doc) => {
   try { const v = JSON.parse(doc?.told_names ?? '[]'); return Array.isArray(v) ? v.filter((x) => typeof x === 'string') : []; } catch { return []; }
 };
-export async function cleanupPass({ rec, rules, now, copiesRoot, sealRoot, mirrorFor, git, saveWork, alert }) {
+export async function cleanupPass({ rec, rules, now, copiesRoot, sealRoot, mirrorFor, git, saveWork, alert, leftoverMoves }) {
   const out = [];
+  if (leftoverMoves && alert) await tellLeftoverMoves({ rec, leftoverMoves, alert, now, out });
   if (sealRoot) for (const n of sweepStaging(sealRoot, now)) out.push([n, { result: 'removed', reasons: ['a staging folder left by a killed run'] }]);
   let names = [];
   // A missing copies folder is nothing to do; any other error (EACCES and the rest) fails the step, so the tick tells it,
@@ -353,6 +365,10 @@ export async function cleanupPass({ rec, rules, now, copiesRoot, sealRoot, mirro
     if (!known) { kept(product, 'no product of that name in this Record', null); continue; }
     const s = st(dir);
     if (!s || s.isSymbolicLink() || !s.isDirectory()) { kept(product, 'not a real folder', stray); continue; }
+    const pile = leftoverPile({ product, dir, out });
+    if (pile && alert) {
+      try { await holdAlert({ rec, cause: LEFTOVER_MANY_CAUSE(product), text: pile, alert, now }); } catch (e) { alert(`the Dispatcher could not tell a leftover folder: ${e?.message ?? e}`); }
+    }
     let cards;
     try { cards = readdirSync(dir).filter((n) => !n.startsWith('.')); } catch (e) {
       if (e?.code === 'ENOENT') continue;
@@ -393,4 +409,41 @@ export async function cleanupPass({ rec, rules, now, copiesRoot, sealRoot, mirro
   }
   if (unread.length && alert) await tell(COPIES_UNREAD_CAUSE, `the worker copies of ${many(unread.length, 'product', 'products')} ${listed(unread)} were not looked at this pass: ${many(unread.length, 'its', 'their')} product record could not be read or is damaged. The copies are kept and may hold unpushed work: do not delete them; fix the record and the next pass looks again`);
   return out;
+}
+
+/**
+ * Each leftover copy the worker runner moved aside (L1357 audit M2), from its status (`leftoverMoves()`, owner-status.mjs:
+ * this product's), told to the owner once: where it went, from which session, and that nothing removes it. A status that
+ * can't be read is noted in the step's lines only: the runner's status has its own alerts, and a move not told yet stays
+ * listed for a week (RUNNER_KEEP_MOVED_MS), so the next pass that reads it tells it.
+ */
+export async function tellLeftoverMoves({ rec, leftoverMoves, alert, now, out = [] }) {
+  let moves;
+  try { moves = await leftoverMoves(); } catch (e) { out.push(['leftover-moves', { result: 'kept', reasons: [`the worker runner's moved copies could not be read: ${e?.message ?? e}`] }]); return 0; }
+  let n = 0;
+  for (const m of Array.isArray(moves) ? moves : []) {
+    if (typeof m?.to !== 'string' || !m.to) continue;
+    const fact = HOLD_FACT(LEFTOVER_MOVED_CAUSE(m.to));
+    if (rec.read('fact', fact)?.doc?.told_at) continue;
+    const text = `worker runner: card ${plain(m.card, 140)}'s copy was left by an earlier start${m.from_session ? ` (session ${plain(m.from_session, 140)})` : ''}, so at ${plain(m.at, 40)} it was moved aside to ${plain(m.to, 400)}, and the card started on a fresh copy. Nothing removes it: look at it, keep what you need, then remove that folder yourself.`;
+    try { await tellThen(alert, text, { fact, fields: { text, told_at: iso(now) }, kind: 'hold_alert' }); n += 1; }
+    catch (e) { alert(`the Dispatcher could not tell a moved leftover copy: ${e?.message ?? e}`); }
+  }
+  return n;
+}
+
+/**
+ * A product's leftover folder (L1357 audit M2): its count goes in the step's lines; the text to tell when it holds more
+ * than LEFTOVER_WARN_COUNT copies, or can't be counted, else null (none there, or few). cleanupPass tells it daily.
+ */
+export function leftoverPile({ product, dir, out = [] }) {
+  const aside = join(dir, LEFTOVER_FOLDER);
+  let names;
+  try { names = readdirSync(aside); } catch (e) {
+    if (e?.code === 'ENOENT') return null;
+    return `the leftover copies of product ${plain(product, 140)} (${plain(aside, 400)}) can't be counted (${e?.code ?? e?.message}), so whether they pile up is not known`;
+  }
+  out.push([`${product}/${LEFTOVER_FOLDER}`, { result: 'kept', reasons: [`${names.length} leftover ${names.length === 1 ? 'copy' : 'copies'}, kept for the owner`] }]);
+  if (names.length <= LEFTOVER_WARN_COUNT) return null;
+  return `product ${plain(product, 140)} has ${names.length} leftover copies in ${plain(aside, 400)}, more than ${LEFTOVER_WARN_COUNT}. Each is a card's copy an earlier start left, moved aside and kept; nothing removes them. Look at them, keep what you need, then remove them yourself.`;
 }

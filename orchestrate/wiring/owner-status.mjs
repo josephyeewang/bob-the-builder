@@ -19,7 +19,10 @@
 // workers share the owner's user (the runner wall, L751), and is a check to add once they do not.
 //
 // The status file (the runner writes it; this is the only reader):
-//   { written_at: ISO, sessions: [SESSION], requests: { <sessionId>: { state } }, answers?: { <ask>: ANSWER }, held?: [HELD] }
+//   { written_at: ISO, sessions: [SESSION], requests: { <sessionId>: { state } }, answers?: { <ask>: ANSWER }, held?: [HELD], moved?: [MOVED] }
+//   MOVED (L1357 audit M2): a card's copy left by an earlier start that a start moved aside, { card, product,
+//     from_session (the runner's last session of that card, or null), to (where it went), at: ISO }, as movedOk takes it,
+//     kept for RUNNER_KEEP_MOVED_MS; leftoverMoves() hands them on, and the Dispatcher tells each once (M11 cleanup.mjs).
 //   HELD (R-0b-175a): an interactive session past its start timeout, or the hook store unreadable (no session named), as
 //     send-safe/hook-store.mjs heldOk takes it. Absent when the runner has no hook store; interactiveHolds() hands them on.
 //   SESSION: { id, product, kind, card, lead, role, pgid, signin, config_dir, bundle_files, outbox, uid, outbox_open,
@@ -80,6 +83,15 @@ export { PRODUCT, productRoleClash, runnerPlaces, runnerCopy, runnerOutbox } fro
 export const UNDO_COMMIT = /^[0-9a-f]{40}$/;
 /** How long the runner keeps a used-up request entry: a day, more than any claim timeout plus the stale window. */
 export const RUNNER_KEEP_USED_UP_MS = 24 * 3_600_000;
+/** How long the runner lists a leftover copy it moved aside (L1357 audit M2), and how many at most: a week, 50. */
+export const RUNNER_KEEP_MOVED_MS = 7 * 24 * 3_600_000;
+export const RUNNER_KEEP_MOVED = 50;
+const MOVED_FIELDS = Object.freeze(['card', 'product', 'from_session', 'to', 'at']);
+/** One MOVED entry, as the runner writes it: nothing else. */
+export const movedOk = (x) => !!x && typeof x === 'object' && !Array.isArray(x) && Object.keys(x).every((k) => MOVED_FIELDS.includes(k))
+  && typeof x.card === 'string' && x.card !== '' && typeof x.product === 'string' && x.product !== ''
+  && (x.from_session === null || (typeof x.from_session === 'string' && REQUEST_ID.test(x.from_session)))
+  && typeof x.to === 'string' && isAbsolute(x.to) && typeof x.at === 'string' && Number.isFinite(Date.parse(x.at));
 /** The runner rewrites its status at least this often (L769): a forged inode lasts no longer than one rewrite. */
 export const RUNNER_STATUS_EVERY_MS = 15_000;
 /** The largest status file read: a bigger one is not the runner's. */
@@ -150,7 +162,7 @@ export function checkSession(x, { uid, outboxRoot, realpath }) {
 /**
  * The worker runner's status, checked whole, or a throw. `uid` is the owner's user (who runs the runner). `stat` and
  * `open` let a test stand in for the folder and the file.
- * → { sessions, requests, answers, held }
+ * → { sessions, requests, answers, held, moved }
  */
 export function readOwnerStatus({ file, now, uid, outboxRoot, realpath, stat = lstatSync, open = openRead }) {
   if (typeof file !== 'string' || !isAbsolute(file)) throw new Error('the worker runner\'s status file is not a full path');
@@ -188,7 +200,9 @@ export function readOwnerStatus({ file, now, uid, outboxRoot, realpath, stat = l
   }
   const held = Object.hasOwn(s, 'held') ? s.held : [];
   if (!Array.isArray(held) || !held.every(heldOk)) throw new Error('the worker runner\'s held list is not what the runner writes');
-  return { sessions: s.sessions, requests: s.requests, answers, held };
+  const moved = Object.hasOwn(s, 'moved') ? s.moved : [];
+  if (!Array.isArray(moved) || moved.length > RUNNER_KEEP_MOVED || !moved.every(movedOk)) throw new Error('the worker runner\'s list of moved copies is not what the runner writes');
+  return { sessions: s.sessions, requests: s.requests, answers, held, moved };
 }
 
 const pick = (x, fields) => Object.fromEntries(fields.map((f) => [f, x[f]]));
@@ -243,6 +257,8 @@ export function ownerSyncPorts({ statusFile, uid, outboxRoot, product, clock = D
     // R-0b-175a: the interactive sessions held (past their start timeout, or the hook store unreadable). A status that
     // can't be read throws, so the relay says so and never reads it as "nothing held".
     interactiveHolds: () => status().held,
+    // The leftover copies the runner moved aside (L1357 audit M2), every product's: the wiring picks its own product's.
+    leftoverMoves: () => status().moved.map((x) => ({ ...x })),
     drainHolds: () => status().sessions.filter((x) => x.drain_held).map((x) => ({ session: x.id, card: x.card, product: x.product, cause: x.drain_held.cause, since: x.drain_held.since })),
     stopSession: (sessionId) => {
       if (!REQUEST_ID.test(sessionId ?? '')) return false;

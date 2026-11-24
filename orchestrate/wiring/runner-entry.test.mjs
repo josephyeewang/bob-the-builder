@@ -22,7 +22,7 @@ import { RUNNER_NODE_FLAGS } from './runner-job.mjs';
 import { WORKER_RUNNER_MAIN } from '../setup/worker-runner-setup.mjs';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const IN_LOOP = /the worker runner has no memory file yet: a first run/;
+const IN_LOOP = /the worker runner has no memory file \(.*\): a first run, or the file was lost/;
 
 const PRELOAD = `import os from 'node:os';
 import { syncBuiltinESMExports } from 'node:module';

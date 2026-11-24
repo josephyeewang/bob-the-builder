@@ -950,12 +950,12 @@ test('R-0b-175a: with a hook store, each pass applies its new lines and every st
 test('L1357: the restart race, then a lapsed claim: the late start runs and ends, the claim lapses, and the next start of the card is told its copy is free', async () => {
   const w = world(); const seen = [];
   const real = w.ports.start; let go;
-  w.ports.start = (x) => { seen.push([x.sessionId, x.copyFree, x.copyHeld]); if (x.sessionId !== 'S-1') return real(x); return new Promise((resolve) => { go = () => resolve(real(x)); }); };
+  w.ports.start = (x) => { seen.push([x.sessionId, x.copyHeld()]); if (x.sessionId !== 'S-1') return real(x); return new Promise((resolve) => { go = () => resolve(real(x)); }); };
   // The request was written while no runner ran; the new runner, a minute on, with its memory and nothing held, reads it.
   w.now = T0 + 56_000;
   await w.pass([launchReq('S-1', { card: 'C-1' })]);
   assert.match(w.notes.join('\n'), /the start of S-1 is still on; it stays waiting, so its claim stays/);
-  assert.deepEqual(seen, [['S-1', true, null]], 'a card whose copy nothing holds');
+  assert.deepEqual(seen, [['S-1', null]], 'a card whose copy nothing holds');
   // A second claim of the card while that start is on, or while its session runs, never reaches the start.
   await w.pass([launchReq('S-2', { card: 'C-1' })]);
   go(); await new Promise((r) => setImmediate(r));
@@ -969,7 +969,7 @@ test('L1357: the restart race, then a lapsed claim: the late start runs and ends
   assert.equal(w.sync().stopSession('S-1'), true, 'the lapse goes through');
   // The card is claimed again: the start is told nothing of the runner's may still use the copy.
   w.now += 4 * MIN; await w.pass([launchReq('S-4', { card: 'C-1' }, w.now)]);
-  assert.deepEqual(seen.at(-1), ['S-4', true, null]);
+  assert.deepEqual(seen.at(-1), ['S-4', null]);
   assert.equal(w.read().answers['launch-S-4'].ok, true);
 });
 
@@ -977,7 +977,7 @@ test('L1357: an inherited start holds its card (claude may run in the copy); an 
   // A runner that stopped mid-start comes back with the start waiting and none held: the card's next launch is refused
   // before any start, so its copy is never touched.
   const w = world(); const seen = [];
-  const real = w.ports.start; w.ports.start = (x) => { seen.push([x.sessionId, x.copyFree, x.copyHeld]); return real(x); };
+  const real = w.ports.start; w.ports.start = (x) => { seen.push([x.sessionId, x.copyHeld()]); return real(x); };
   w.state = { requests: { 'S-1': { state: 'waiting', at: T0, card: 'C-1', product: 'p1' } } };
   await w.pass([launchReq('S-2', { card: 'C-1' })]);
   assert.deepEqual(seen, []);
@@ -986,32 +986,110 @@ test('L1357: an inherited start holds its card (claude may run in the copy); an 
   w.state.installs = { 'S-1': { pgid: 7101, pid: 7101, pid_start: '2026-11-10T12:00:00Z', at: T0 } };
   w.ports.stopGroup = async () => ({ ok: false, reason: 'the group leader\'s start time can\'t be read' });
   await w.pass([launchReq('S-3', { card: 'C-3' })]);
-  assert.deepEqual(seen.at(-1), ['S-3', true, null]);
+  assert.deepEqual(seen.at(-1), ['S-3', null]);
   // An install of a used-up start (its row no longer names a card) that can't be shown gone holds every card's copy.
   const u = world(); const useen = [];
-  const ureal = u.ports.start; u.ports.start = (x) => { useen.push([x.sessionId, x.copyFree, x.copyHeld]); return ureal(x); };
+  const ureal = u.ports.start; u.ports.start = (x) => { useen.push([x.sessionId, x.copyHeld()]); return ureal(x); };
   u.state = { requests: { 'S-8': { state: 'refused', at: T0 } }, installs: { 'S-8': { pgid: 7101, pid: 7101, pid_start: '2026-11-10T12:00:00Z', at: T0 } } };
   u.ports.stopGroup = async () => ({ ok: false, reason: 'the group leader\'s start time can\'t be read' });
   await u.pass([launchReq('S-1')]);
-  assert.deepEqual(useen, [['S-1', false, 'the install of S-8\'s start may still run']]);
+  assert.deepEqual(useen, [['S-1', 'the install of S-8\'s start may still run']]);
   // A save of the card's ended session still on holds its copy; once it has answered, nothing does.
   const v = world(); const vseen = [];
-  const vreal = v.ports.start; v.ports.start = (x) => { vseen.push([x.sessionId, x.copyFree, x.copyHeld]); return x.copyFree ? vreal(x) : { ok: false, reason: `the copy can't be made (copy folder already exists; ${x.copyHeld})` }; };
+  const vreal = v.ports.start; v.ports.start = (x) => { const h = x.copyHeld(); vseen.push([x.sessionId, h]); return h === null ? vreal(x) : { ok: false, reason: `the copy can't be made (copy folder already exists; ${h})` }; };
   await v.pass([launchReq('S-1')]);
   let end; v.ports.saveWork = () => new Promise((r) => { end = r; });
   await v.pass([{ name: `saveWork-S-1-${N1}.json`, body: { saveWork: { id: 'S-1' }, asked_at: new Date(v.now).toISOString() } }]);
   v.gone.add(4001); await v.pass([launchReq('S-2', { card: 'C-1' })]);
-  assert.deepEqual(vseen.at(-1), ['S-2', false, 'a save of session S-1 may still run in it']);
+  assert.deepEqual(vseen.at(-1), ['S-2', 'a save of session S-1 may still run in it']);
   assert.equal(v.read().answers['launch-S-2'].reason, 'the copy can\'t be made (copy folder already exists; a save of session S-1 may still run in it)', 'the refusal says what holds the copy');
   end({ ok: true }); await new Promise((r) => setImmediate(r));
   await v.pass([launchReq('S-3', { card: 'C-1' })]);
-  assert.deepEqual(vseen.at(-1), ['S-3', true, null]);
+  assert.deepEqual(vseen.at(-1), ['S-3', null]);
   // One kept from an earlier run that can't be stopped yet holds it too.
   const k = world(); const kseen = [];
-  const kreal = k.ports.start; k.ports.start = (x) => { kseen.push([x.sessionId, x.copyFree, x.copyHeld]); return kreal(x); };
+  const kreal = k.ports.start; k.ports.start = (x) => { kseen.push([x.sessionId, x.copyHeld()]); return kreal(x); };
   await k.pass([launchReq('S-1')]); k.gone.add(4001); await k.pass();
   k.state.saves = { 'S-1': { pgid: 7201, pid: 7201, pid_start: '2026-11-10T12:00:00Z', at: T0 } };
   k.ports.stopGroup = async () => ({ ok: false, reason: 'busy' });
   await k.pass([launchReq('S-2', { card: 'C-1' })]);
-  assert.deepEqual(kseen.at(-1), ['S-2', false, 'a save of session S-1 may still run in it']);
+  assert.deepEqual(kseen.at(-1), ['S-2', 'a save of session S-1 may still run in it']);
+});
+
+// L1357 audit m1: the start asks whether the copy is free at the moment of the move, of the newest pass's memory: what
+// a later pass holds (here an install group kept from a start since used up, which can't be shown gone) holds it.
+test('L1357 audit m1: copyHeld is asked of the newest pass, so what a later pass holds holds the copy', async () => {
+  const w = world();
+  await w.pass([launchReq('S-1')]); w.gone.add(4001); await w.pass();
+  const holder = {};
+  let ask; let go;
+  const real = w.ports.start;
+  w.ports.start = (x) => { ask = x.copyHeld; return new Promise((resolve) => { go = () => resolve(real(x)); }); };
+  await w.pass([launchReq('S-2', { card: 'C-1' })], { saveHolder: holder });
+  assert.equal(ask(), null, 'nothing holds it at the launch');
+  w.state.requests['S-8'] = { state: 'refused', at: w.now };
+  w.state.installs = { 'S-8': { pgid: 7101, pid: 7101, pid_start: '2026-11-10T12:00:00Z', at: w.now } };
+  w.ports.stopGroup = async () => ({ ok: false, reason: 'the group leader\'s start time can\'t be read' });
+  await w.pass([], { saveHolder: holder });
+  assert.equal(ask(), 'the install of S-8\'s start may still run', 'asked now, of the newest pass');
+  go(); await new Promise((r) => setImmediate(r));
+});
+
+// L1357 audit m2: an ended session is never saved from its card's copy once a later session of the card has it.
+test('L1357 audit m2: a save of an ended session is refused once a later session, or a start still on, of its card has the copy', async () => {
+  const w = world();
+  await w.pass([launchReq('S-1')]); w.gone.add(4001); await w.pass();
+  await w.pass([launchReq('S-2', { card: 'C-1' })]);
+  assert.equal(w.read().requests['S-2'].state, 'started');
+  await w.pass([{ name: `saveWork-S-1-${N1}.json`, body: { saveWork: { id: 'S-1' }, asked_at: new Date(w.now).toISOString() } }]);
+  assert.deepEqual(w.saves, [], 'never run');
+  assert.equal(w.read().answers[`saveWork-S-1-${N1}`].reason, 'card C-1\'s copy is session S-2\'s now, so session S-1 is not saved from it');
+  // The later session itself is saved as before.
+  await w.pass([{ name: `saveWork-S-2-${N2}.json`, body: { saveWork: { id: 'S-2' }, asked_at: new Date(w.now).toISOString() } }]);
+  assert.deepEqual(w.saves, ['S-2']);
+  // A start of the card still on holds the copy too.
+  const u = world();
+  await u.pass([launchReq('S-1')]); u.gone.add(4001); await u.pass();
+  u.ports.start = () => new Promise(() => {});
+  await u.pass([launchReq('S-3', { card: 'C-1' })]);
+  await u.pass([{ name: `saveWork-S-1-${N1}.json`, body: { saveWork: { id: 'S-1' }, asked_at: new Date(u.now).toISOString() } }]);
+  assert.equal(u.read().answers[`saveWork-S-1-${N1}`].reason, 'card C-1\'s copy is session S-3\'s now, so session S-1 is not saved from it');
+});
+
+// L1357 audit M2: each move is listed in the runner's status (card, product, the session whose copy it was, where it
+// went, when), read back by the Dispatcher's reader and its sync port; kept a week, then dropped.
+test('L1357 audit M2: a moved copy is listed in the status with its session, read back, and dropped after a week', async () => {
+  const w = world();
+  await w.pass([launchReq('S-1')]); w.gone.add(4001); await w.pass();
+  const real = w.ports.start;
+  w.ports.start = async (x) => { x.onMoved({ card: 'C-1', to: `${COPIES}/p1/.leftover/C-1.before-${x.sessionId}` }); return real(x); };
+  await w.pass([launchReq('S-2', { card: 'C-1' })]);
+  const e = { card: 'C-1', product: 'p1', from_session: 'S-1', to: `${COPIES}/p1/.leftover/C-1.before-S-2`, at: new Date(w.now).toISOString() };
+  assert.deepEqual(w.read().moved, [e]);
+  assert.deepEqual(w.sync().leftoverMoves(), [e]);
+  // A list not of the runner's shape makes the status not known.
+  const kept = w.status;
+  w.status = { ...kept, moved: [{ ...e, extra: 1 }] };
+  assert.throws(() => w.read(), /list of moved copies is not what the runner writes/);
+  w.status = { ...kept, moved: [{ ...e, to: 'relative/path' }] };
+  assert.throws(() => w.read(), /list of moved copies is not what the runner writes/);
+  w.status = kept;
+  // No move: no list in the status, and the reader gives none.
+  const z = world(); await z.pass();
+  assert.equal('moved' in z.status, false); assert.deepEqual(z.read().moved, []);
+  // A week on, the next move drops it.
+  w.gone.add(4002); await w.pass();
+  w.now += 8 * 24 * 3_600_000;
+  await w.pass([launchReq('S-3', { card: 'C-1' }, w.now)]);
+  assert.deepEqual(w.read().moved.map((x) => x.to), [`${COPIES}/p1/.leftover/C-1.before-S-3`]);
+});
+
+// L1357 audit m5: a runner that started with no memory file moves no leftover until its first full pass.
+test('L1357 audit m5: with movesHeld (no memory file at start) the copy is held, and said why', async () => {
+  const w = world(); let ask;
+  w.ports.start = async (x) => { ask = x.copyHeld; return { ok: false, reason: 'x' }; };
+  await w.pass([launchReq('S-1')], { movesHeld: true });
+  assert.equal(ask(), 'the runner started with no memory file, so no leftover copy is moved until its first full pass has checked the sessions');
+  await w.pass([launchReq('S-2')]);
+  assert.equal(ask(), null);
 });

@@ -23,6 +23,9 @@
 //                          orchestrate an access list of its own there (L747): list, search, read (file contents and
 //                          attributes, so a copy can be hashed) and delete, inherited by every file and folder made under
 //                          it; no add, no write; it deletes only after cleanupPass's checks (or on Joe's counted Yes).
+//                          A product's leftover folder (.leftover, L1357) inherits that entry: cleanupPass counts it.
+//   cleanup.leftoverMoves → the leftover copies the worker runner moved aside, from its status (owner-status.mjs MOVED),
+//                          this product's only: cleanupPass tells each once (L1357 audit M2).
 //   outboxRoot           → config outboxRoot, the TOP outboxes folder (<base>/outboxes): the pass checks a launch's
 //                          outbox in <outboxRoot>/<product>/<role>/<id> under it (#403 r1 M1, L887).
 //   product              → config product, this Dispatcher's (a value, L927): the stop step acts only on the sessions
@@ -81,7 +84,7 @@ const RUNNER_LAUNCHES = RUNNER_FOLDERS.launches;
 export const NOT_WIRED_WORKER = Object.freeze([]);
 // What the cleanup step reads (cleanupPass's own parameters, less what the tick gives every step: a test pins the two
 // together), and which of those aren't wired yet. To wire one: answer it in `cleanup` below and take it off NOT_WIRED_CLEANUP.
-export const CLEANUP_PORTS = Object.freeze(['mirrorFor', 'git', 'saveWork', 'copiesRoot', 'sealRoot']);
+export const CLEANUP_PORTS = Object.freeze(['mirrorFor', 'git', 'saveWork', 'copiesRoot', 'sealRoot', 'leftoverMoves']);
 export const NOT_WIRED_CLEANUP = Object.freeze(['saveWork']);
 
 /** Why the cleanup group can't start, or null. The same rules as the tick's ports, inside the one port the tick reads as a group. */
@@ -516,6 +519,10 @@ export function workerPorts(ctx, io = {}) {
   // A typo would make every request go nowhere: the folder must be there at start (its owner, mode and access list are checked on each write, L943 m4).
   realFolder(c.workerRequestsDir, "the worker runner's requests folder (workerRequestsDir)");
   const cleanup = cleanupPorts(ctx);
+  // This product's leftover copies the runner moved aside (L1357 audit M2), read fresh from its status on each call.
+  const moves = ownerSyncPorts({ statusFile: c.workerStatusFile, uid: c.workerUid, outboxRoot: c.outboxRoot, product: c.product, clock: ctx.now ?? Date.now,
+    stat: io.stat, open: io.open, realpath: io.realpath, holds: () => { throw new Error('not read here'); } });
+  cleanup.leftoverMoves = () => moves.leftoverMoves().filter((x) => x.product === c.product);
   for (const k of NOT_WIRED_CLEANUP) Object.defineProperty(cleanup, k, { enumerable: true, get: refusing(`cleanup.${k}`) });
   return {
     cleanup,
