@@ -55,6 +55,9 @@
 // A start leaves `pending` only once a memory holding its result has been kept (#358 r1 m3, #362 r1 M1): a keep that
 // fails leaves it there, so the next pass settles it again from the memory last kept.
 // A launch for a card that already has a live session, or a start still waiting, is refused (#358 r1 m4).
+// Every other start is told whether anything of this runner's may still use the card's copy (L1357, heldCopy: a save or an
+// install group still kept); with nothing, a copy left there by an earlier start is moved aside (runner-ports.mjs
+// moveLeftover), so a start whose claim lapsed, one refused once claude ran, or one whose undo failed never blocks its card.
 // The ports' contract (#358 r1 m5), which the real ports (runner-loop.mjs processGroupPorts) keep: a port is waited on
 // for at most RUNNER_PORT_MS only if it is async; a synchronous one blocks the pass for as long as it runs, so a
 // synchronous real port must bound itself well inside that wait (#362 r2 c-a: groupGone's ps, at most RUNNER_PS_MS); groupGone answers true only when the leader (pid and pid_start)
@@ -69,11 +72,11 @@
 import { CARD_ID } from '../modules/M9-record/outbox.mjs';
 import { PRODUCT } from '../shared/product-paths.mjs';
 import { REQUEST_ID } from '../modules/M4-workshop/launcher/review-runner.mjs';
-import { CLOCK_SKEW_MS, RUNNER_KEEP_USED_UP_MS, RUNNER_KINDS, RUNNER_ROLE_OF, RUNNER_STATUS_EVERY_MS, UNDO_COMMIT, USED_UP, checkSession, live } from './owner-status.mjs';
+import { CLOCK_SKEW_MS, RUNNER_KEEP_MOVED, RUNNER_KEEP_MOVED_MS, RUNNER_KEEP_USED_UP_MS, RUNNER_KINDS, RUNNER_ROLE_OF, RUNNER_STATUS_EVERY_MS, UNDO_COMMIT, USED_UP, checkSession, live, movedOk } from './owner-status.mjs';
 import { launchAnswerWrong } from './owner-asks.mjs';
 import { DRAIN_CAUSES, drainHeldOk } from '../modules/M11-dispatcher/drain-alerts.mjs';
 import { heldOk } from '../modules/M4-workshop/send-safe/hook-store.mjs';
-import { FUTURE_SKEW_MS } from '../shared/still-waiting.mjs';
+import { FUTURE_SKEW_MS, pastTime } from '../shared/still-waiting.mjs';
 
 /** How long the runner waits on one port before it answers for it, or (a start) leaves it to a later pass. Under the
  * status rewrite cadence, so a hung port never leaves the status unwritten for longer (L769). */
@@ -173,7 +176,8 @@ export async function workerRunnerPass(ctx) {
   const answer = (key, a) => { state.answers[key] = { ...a, at: now }; };
   const statusDoc = () => ({ written_at: new Date(Math.max(now, clock())).toISOString(), sessions: state.sessions.map(project),
     requests: Object.fromEntries(Object.entries(state.requests).map(([id, r]) => [id, { state: r.state }])),
-    answers: Object.fromEntries(Object.entries(state.answers).map(([k, { at, ...a }]) => [k, a])), ...(hooks ? { held: heldNow() } : {}) });
+    answers: Object.fromEntries(Object.entries(state.answers).map(([k, { at, ...a }]) => [k, a])), ...(hooks ? { held: heldNow() } : {}),
+    ...(Array.isArray(state.moved) && state.moved.length ? { moved: state.moved.filter(movedOk).map((x) => ({ ...x })) } : {}) });
   // The memory is kept first, then the status written: a status never runs ahead of what the runner will remember.
   // A settled start leaves `pending` only after a keep that holds it succeeded (#358 r1 m3, #362 r1 M1).
   const settled = new Set();
@@ -186,9 +190,23 @@ export async function workerRunnerPass(ctx) {
   // Every port wait is followed by a write (step-4 review M4), so no two writes are further apart than one port's wait.
   const wait = async (fn) => { const r = await within(portMs, fn); flush(); return r; };
   const holder = ctx.saveHolder && typeof ctx.saveHolder === 'object' ? ctx.saveHolder : null;
+  // The moves of leftover copies (L1357 audit M2), kept for RUNNER_KEEP_MOVED_MS and at most RUNNER_KEEP_MOVED of them (the
+  // oldest go first), so the status stays small; the Dispatcher tells each once, by its `to`.
+  const keepMoved = (e) => {
+    // A move is kept a week (I4: its time read by pastTime, so one stamped far ahead is dropped, not kept for ever).
+    const t0 = clock();
+    state.moved = [...(Array.isArray(state.moved) ? state.moved : []), e].filter((x) => {
+      if (!movedOk(x)) return false;
+      const at = pastTime(x.at, t0);
+      return at !== null && t0 - at <= RUNNER_KEEP_MOVED_MS;
+    }).slice(-RUNNER_KEEP_MOVED);
+    flush();
+  };
   if (holder) {
     holder.keep = (id, g) => { state.saves[id] = g; flush(); };
     holder.keepInstall = (id, g) => { state.installs[id] = g; flush(); };
+    holder.keepMoved = keepMoved;
+    holder.heldCopy = heldCopy;
   }
 
   // 0. A held save's (or start's install's, #463 r3 m1) process group told after its pass returned is kept now (#463 r1
@@ -345,12 +363,39 @@ export async function workerRunnerPass(ctx) {
       p.group = { pgid: g.pgid, pid: g.pid, pid_start: g.pid_start, ...(g.job ? { job: { pgid: g.job.pgid, pid: g.job.pid, pid_start: g.job.pid_start } } : {}), at: now };
       if (!over) { state.installs[id] = p.group; flush(); } else if (holder?.keepInstall) holder.keepInstall(id, p.group);
     };
-    p.on = Promise.resolve().then(() => ports.start({ card: l.card, kind: l.kind, product: l.product, sessionId: id, live, onGroup, ...(l.kind === 'undo' ? { undoCommit: l.undo_commit } : {}) }))
+    // Whether anything of this runner's may still use the card's copy (L1357), so a copy left there may be moved aside:
+    // asked by the start at the moment of the move (audit m1), of the newest pass's memory (the start may outlast this pass).
+    const copyHeld = () => (holder?.heldCopy ?? heldCopy)(l.card, id);
+    // A copy moved aside (audit M2): listed in the status, with the session whose copy it was, so the Dispatcher tells it.
+    const from = state.sessions.filter((s) => s.card === l.card).at(-1)?.id ?? null;
+    const onMoved = (m) => {
+      const e = { card: l.card, product: l.product, from_session: from, to: String(m?.to), at: new Date(clock()).toISOString() };
+      if (!over) keepMoved(e); else if (holder?.keepMoved) holder.keepMoved(e); else note(`card ${l.card}'s copy was moved to ${e.to}, but no pass is left to list it in the status`);
+    };
+    p.on = Promise.resolve().then(() => ports.start({ card: l.card, kind: l.kind, product: l.product, sessionId: id, live, onGroup, copyHeld, onMoved, ...(l.kind === 'undo' ? { undoCommit: l.undo_commit } : {}) }))
       .then((a) => { p.a = a; }, (e) => { p.a = { threw: e?.message ?? String(e) }; }).finally(() => { p.done = true; });
     pending.set(id, p);
     await Promise.race([p.on, late(portMs)]);
     if (!p.done) { state.requests[id].told = now; note(`the start of ${id} is still on; it stays waiting, so its claim stays`); return; }
     await settle(p); settled.add(id);
+  }
+  // What of this runner's may still use card's copy (L1357), or null. Asked once launch has refused a card with a live
+  // session or a start still on, so here: a save of one of the card's sessions, held by this run or kept from an earlier
+  // one (it runs in the copy's .git), and an install group of another start still kept (step 0 could not show it gone),
+  // unless that start is still waiting on another card (it installs in that card's copy): a used-up row no longer names
+  // its card, so any other one holds every card. An ended session itself holds nothing: its
+  // group is gone, and the Record no longer claims the card for it, since this start's claim names a new session.
+  // A runner that started with no memory file (ctx.movesHeld, runner-loop.mjs, audit m5) knows of no earlier session, so
+  // nothing is moved until its first full pass has checked the sessions.
+  function heldCopy(card, id) {
+    if (ctx.movesHeld === true) return 'the runner started with no memory file, so no leftover copy is moved until its first full pass has checked the sessions';
+    for (const s of state.sessions) {
+      if (s.card !== card) continue;
+      if (isLive(s)) return `session ${s.id} may still run in it`;
+      if (pending.has(saveKey(s.id)) || Object.hasOwn(state.saves, s.id)) return `a save of session ${s.id} may still run in it`;
+    }
+    const q = Object.keys(state.installs).find((x) => x !== id && !(state.requests[x]?.state === 'waiting' && typeof state.requests[x].card === 'string' && state.requests[x].card !== card));
+    return q === undefined ? null : `the install of ${q}'s start may still run`;
   }
   // A start's answer: listed only when the reader would take it (M2); one it would refuse is stopped, then refused.
   async function settle({ key, id, l, a }) {
@@ -405,6 +450,11 @@ export async function workerRunnerPass(ctx) {
     if (pending.has(held)) return answer(k.key, { ok: false, reason: `a save of ${s.id} is still running` });
     // One an earlier run left that step 0 could not stop yet may still run in the copy (#463 r1 self-review m1).
     if (state.saves[s.id]) return answer(k.key, { ok: false, reason: `an earlier save of ${s.id} may still be running` });
+    // The card's copy is another session's now (L1357 audit m2): a later session of the card, or a start of it still on,
+    // works in the copy at that path (a leftover moved aside, a fresh one made), so an ended session is never saved from it.
+    const later = state.sessions.slice(state.sessions.indexOf(s) + 1).find((x) => x.card === s.card)?.id
+      ?? Object.entries(state.requests).find(([q, r]) => q !== s.id && r?.state === 'waiting' && r.card === s.card)?.[0];
+    if (later !== undefined) return answer(k.key, { ok: false, reason: `card ${s.card}'s copy is session ${later}'s now, so session ${s.id} is not saved from it` });
     const p = { save: true, key: k.key, id: s.id, done: false, a: undefined };
     // The job's process group, kept in the memory as soon as it runs (#463 r1 m2), so a restart or a stop can end it.
     // Held on the save itself (the caller's pending map outlives this pass): a pass still running keeps it at once; one

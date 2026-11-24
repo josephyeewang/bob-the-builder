@@ -18,6 +18,7 @@
 //   readProductFile({ recordRoot, recordUid, product })        → the same, for docs/product/<id>.json
 //   listDocFiles({ recordRoot, recordUid, entity })            → { ok: true, docs: [{ id, doc, rev }], unread: [{ id, reason }] } | { ok: false, reason }
 //                                                                (cards, for check 12's gate; products, for the runner's requestGapMs)
+//                                                                (asks, for the worker runner's delete-copy check, L1357)
 //   readMeta({ recordRoot, recordUid, entity, id })            → { ok: true, meta: { createdBy, createdKind, stateSince, ts, seq } | null } | { ok: false, reason }
 //   recordView({ recordRoot, recordUid })                      → { read(entity, id), list(entity), meta(entity, id) }: M11 gate.mjs's `rec`, read only
 //
@@ -89,7 +90,7 @@ export function readDocFile({ recordRoot, recordUid, entity, id, missing = `no s
 export const readProductFile = ({ recordRoot, recordUid, product }) => readDocFile({ recordRoot, recordUid, entity: 'product', id: product, missing: 'no such product' });
 
 // The entities a list may name.
-export const LIST_ENTITIES = Object.freeze(['card', 'product', 'merge']);
+export const LIST_ENTITIES = Object.freeze(['card', 'product', 'merge', 'ask']);
 
 /**
  * Every card (or product, or merge), read only. A file that fails a check is listed in `unread` with its reason, never read as a

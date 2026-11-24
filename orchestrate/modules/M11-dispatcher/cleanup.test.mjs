@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { chmodSync, mkdirSync, writeFileSync, existsSync, statSync, readFileSync, symlinkSync, readdirSync, realpathSync, rmSync, utimesSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, resolve, sep } from 'node:path';
+import { LEFTOVER_FOLDER, LEFTOVER_WARN_COUNT } from '../../shared/product-paths.mjs';
 import { cleanupCopy, cleanupPass, ASK_ID, CLEANUP_FACT, COPIES_NOT_PRODUCT_CAUSE, COPIES_UNREAD_CAUSE, STRAY_FACT, namesInMark, hashCopy, mirrorTree, namedCopy, ownCopy, STALE_STAGING_MS, sweepStaging } from './cleanup.mjs';
 import { createSaveWork } from '../M4-workshop/git/save-work.mjs';
 import { git as safeGit, callLog } from '../M4-workshop/git/safe-git.mjs';
@@ -789,4 +790,73 @@ test('L836: cleanupCopy refuses a card or product that names no plain place, and
   assert.ok(existsSync(w.copy));
   const bad = await cleanupCopy({ rec, rules: R, now: T0, card: '../C-1', product: 'p1', copiesRoot: w.copiesRoot, sealRoot: w.sealRoot, mirror: w.mirror, git: guardedGit(w.copiesRoot), saveWork: locked, alert: () => {} });
   assert.deepEqual(bad.reasons, ['bad card id']);
+});
+
+// L1357 audit M1 (b): Joe's Yes is never acted on while the card is claimed or running: its copy may be a live session's.
+// The ask stays answered (so the runner moves no copy of the card meanwhile), and the copy is deleted once it is not.
+test('L1357 audit M1: a Yes to delete the copy waits while the card is claimed or running, and is acted on once it is not', async () => {
+  for (const state of ['claimed', 'running']) {
+    const w = world();
+    writeFileSync(join(w.copy, 'a.txt'), 'changed\n');
+    // The ask is made and answered while the card is live (a session started on it after the copy was asked about).
+    const rec = recFor(w, { card: { state } });
+    assert.equal((await clean(w, rec)).result, 'asked', state);
+    answerAsk(rec, YES);
+    const r = await clean(w, rec, { rules: COUNTED });
+    assert.equal(r.result, 'kept', state);
+    assert.deepEqual(r.reasons, [`Joe said delete, but the card is ${state}; the copy is deleted once it is not`]);
+    assert.ok(existsSync(join(w.copy, 'a.txt')), `${state}: never removed under a live claim`);
+    assert.equal(theAsk(rec).state, 'answered', `${state}: the ask stays unconsumed`);
+    change(rec, 'card', 'C-1', { state: 'cancelled' });
+    assert.equal((await clean(w, rec, { rules: COUNTED })).result, 'deleted', state);
+    assert.equal(existsSync(w.copy), false);
+    assert.equal(theAsk(rec).state, 'consumed');
+  }
+});
+
+// L1357 audit M2: each copy the worker runner moved aside is told to the owner once; a leftover folder holding more than
+// LEFTOVER_WARN_COUNT copies is told daily; nothing in it is touched.
+test('L1357 audit M2: each moved copy is told once, a leftover folder past the count is told, and nothing in it is removed', async () => {
+  const w = world();
+  const rec = recFor(w, { copy: null });
+  rmSync(w.copy, { recursive: true, force: true });
+  const aside = join(w.copiesRoot, 'p1', LEFTOVER_FOLDER);
+  mkdirSync(aside);
+  const move = (n) => ({ card: 'C-1', product: 'p1', from_session: `S-${n}`, to: join(aside, `C-1.before-S-${n + 1}`), at: iso(T0) });
+  const sent = [];
+  // Through the real outbox: a mark is written only once a copy is delivered (sendAlerts).
+  const pass = async (moves, now = T0) => {
+    const out = await cleanupPass({ rec, rules: R, now, copiesRoot: w.copiesRoot, sealRoot: w.sealRoot, mirrorFor: () => w.mirror,
+      git: guardedGit(w.copiesRoot), saveWork: locked, alert: outbox(rec, now), leftoverMoves: () => moves });
+    await sendAlerts(rec, async (t) => { sent.push(t); return true; }, now, { report: () => {} });
+    return out;
+  };
+  mkdirSync(move(1).to);
+  const out = await pass([move(1)]);
+  const told = (s) => s.filter((t) => t.includes('was left by an earlier start'));
+  assert.equal(told(sent).length, 1);
+  assert.equal(told(sent)[0], `worker runner: card C-1's copy was left by an earlier start (session S-1), so at ${iso(T0)} it was moved aside to ${move(1).to}, and the card started on a fresh copy. Nothing removes it: look at it, keep what you need, then remove that folder yourself.`);
+  assert.deepEqual(out.find(([n]) => n === `p1/${LEFTOVER_FOLDER}`)?.[1].reasons, ['1 leftover copy, kept for the owner']);
+  // Told once: the next pass, the same move, says nothing new; a second move is told.
+  await pass([move(1)], T0 + MIN);
+  assert.equal(told(sent).length, 1);
+  await pass([move(1), move(2)], T0 + 2 * MIN);
+  assert.equal(told(sent).length, 2);
+  // More than LEFTOVER_WARN_COUNT: told, and every one is still there.
+  for (let i = 2; i <= LEFTOVER_WARN_COUNT + 1; i += 1) mkdirSync(join(aside, `C-${i}.before-S-x`));
+  const many = (s) => s.filter((t) => t.includes('leftover copies in'));
+  await pass([], T0 + 3 * MIN);
+  assert.equal(many(sent).length, 1);
+  assert.match(many(sent)[0], new RegExp(`product p1 has ${LEFTOVER_WARN_COUNT + 1} leftover copies in .*, more than ${LEFTOVER_WARN_COUNT}\\.`));
+  assert.equal(readdirSync(aside).length, LEFTOVER_WARN_COUNT + 1, 'nothing removed');
+  // Told daily, not every pass.
+  await pass([], T0 + 4 * MIN);
+  assert.equal(many(sent).length, 1);
+  // A status that can't be read is said in the step's lines only, and tells nothing new.
+  const before = sent.length;
+  const o = await cleanupPass({ rec, rules: R, now: T0 + 5 * MIN, copiesRoot: w.copiesRoot, sealRoot: w.sealRoot, mirrorFor: () => w.mirror,
+    git: guardedGit(w.copiesRoot), saveWork: locked, alert: outbox(rec, T0 + 5 * MIN), leftoverMoves: () => { throw new Error('the status is 9 minutes old'); } });
+  await sendAlerts(rec, async (t) => { sent.push(t); return true; }, T0 + 5 * MIN, { report: () => {} });
+  assert.match(o.find(([n]) => n === 'leftover-moves')[1].reasons[0], /moved copies could not be read: the status is 9 minutes old/);
+  assert.equal(sent.length, before);
 });

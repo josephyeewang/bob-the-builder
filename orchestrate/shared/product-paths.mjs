@@ -34,3 +34,9 @@ export function runnerPlaces({ copiesRoot, outboxRoot, product }) {
 export const runnerCopy = ({ copiesRoot, product, card }) => join(runnerPlaces({ copiesRoot, outboxRoot: '/', product }).copies, plain('card', card));
 export const runnerOutbox = ({ outboxRoot, product, role, sessionId }) =>
   join(runnerPlaces({ copiesRoot: '/', outboxRoot, product }).outboxes, plain('role', role), plain('session id', sessionId));
+
+// Where the worker runner moves a card's copy an earlier start left (L1357, wiring/runner-ports.mjs moveLeftover):
+// <copies>/<product>/.leftover/<card>.before-<session>. A card id never starts with a dot, so no card's copy is named so.
+// The Dispatcher's cleanup counts what is in it and tells the owner past LEFTOVER_WARN_COUNT; nothing removes it.
+export const LEFTOVER_FOLDER = '.leftover';
+export const LEFTOVER_WARN_COUNT = 5;

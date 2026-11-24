@@ -3,7 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { workerPrompt } from '../modules/M5-review-audit/worker-prompt.mjs';
@@ -11,7 +11,7 @@ import { tempDir } from '../shared/test-tmp.mjs';
 import { SETTINGS as S } from '../modules/M4-workshop/launcher/settings-names.mjs';
 import { gitOk, initMirror } from '../modules/M4-workshop/git/safe-git.mjs';
 import { launch } from '../modules/M4-workshop/launcher/launch.mjs';
-import { INTAKE_DONE, chmodTree, removeAll, cardStartCommit, undoCommitProblem, drainedPort, groupThere, pauseLeadPort, liveWallProblem, productWallGap, projectFolderName, folderNameAsGiven, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath, workerAccount, workerPromptText, TRANSCRIPT_PLACE_CHECKED_AGAINST } from './runner-ports.mjs';
+import { INTAKE_DONE, LEFTOVER_FOLDER, copyAskHeld, chmodTree, removeAll, cardStartCommit, undoCommitProblem, drainedPort, groupThere, pauseLeadPort, liveWallProblem, productWallGap, projectFolderName, folderNameAsGiven, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath, workerAccount, workerPromptText, TRANSCRIPT_PLACE_CHECKED_AGAINST } from './runner-ports.mjs';
 import { roleEnv } from '../modules/M4-workshop/launcher/env-check.mjs';
 import { walledLaunchSettings } from './runner-launch.mjs';
 import { leaderStart } from './runner-loop.mjs';
@@ -328,6 +328,7 @@ function world(over = {}) {
     launchFn: async (x) => { w.calls.push(['launch', x]); return { ok: true, started: await x.start() }; },
     spawn: (bin, args, o) => { w.calls.push(['spawn', bin, args, o]); return { pid: 4242, once: (ev, fn) => { if (ev === 'spawn') fn(); }, unref: () => {} }; },
     pidStartOf: () => 'Tue Nov 10 12:00:00 2026',
+    askHeld: () => null,   // the Record holds no delete-copy ask (L1357 audit M1); copyAskHeld is tested on its own
     ...over,
   };
   w.start = (x = {}) => startPort(w.c, w.deps)({ card: 'C-1', kind: 'editing', product: 'p1', sessionId: SID, ...x });
@@ -353,7 +354,7 @@ test('step 5: a start makes the copy, the outbox and the walled settings, and an
     const wl = w.calls.find((c) => c[0] === 'walled')[1];
     assert.equal(wl.kind, 'editing'); assert.deepEqual(wl.workerRunner, w.c.workerRunner);
     assert.equal(wl.paths.copy, join(w.mine.copies, 'C-1')); assert.equal(wl.paths.outbox, join(w.mine.outboxes, 'worker', SID));
-    assert.deepEqual(wl.paths.deny, { secrets: ['/s'], otherCopies: [join(w.mine.copies, 'C-9'), join(w.mine.copies, `C-1..baseline-${SID}`)], proposals: ['/prop'] }, 'every other card\'s copy of this product is denied, and the baseline\'s throwaway place; the rules\' proposals folders too (L1345)');
+    assert.deepEqual(wl.paths.deny, { secrets: ['/s'], otherCopies: [join(w.mine.copies, '.leftover'), join(w.mine.copies, 'C-9'), join(w.mine.copies, `C-1..baseline-${SID}`)], proposals: ['/prop'] }, 'every other card\'s copy of this product is denied, the leftover folder (L1357) and the baseline\'s throwaway place; the rules\' proposals folders too (L1345)');
     const f = join(w.settingsDir, `${SID}.json`);
     assert.deepEqual(JSON.parse(readFileSync(f, 'utf8')), { s: 1 });
     assert.equal(statSync(f).mode & 0o777, 0o600);
@@ -374,6 +375,169 @@ test('step 5: a start makes the copy, the outbox and the walled settings, and an
     assert.equal(b.ok, false); assert.match(b.reason, /already exists/);
     assert.deepEqual(w.left(), { copy: true, outbox: true, settings: true });
     assert.equal(existsSync(join(w.mine.outboxes, 'worker', SID2)), false);
+  } finally { rmSync(w.d, { recursive: true, force: true }); }
+});
+
+// L1357: a copy left by an earlier start (a start that ran after the Dispatcher stopped waiting and whose claim then
+// lapsed, on the Mini on 24 Nov) refused every later start of its card for ever ("copy folder already exists").
+test('L1357: a leftover copy nothing holds is moved aside (kept, never removed) and the card starts on a fresh one; one the runner says is held is never touched', async () => {
+  const logs = [];
+  const w = world({ log: (s) => logs.push(s) });
+  const old = join(w.mine.copies, 'C-1'); const aside = join(w.mine.copies, LEFTOVER_FOLDER);
+  mkdirSync(old); writeFileSync(join(old, 'work.md'), 'the earlier worker\'s note');
+  try {
+    // Held (the runner names what may still use it): refused, untouched, nothing made, and the reason says what holds it.
+    const h = await w.start({ copyHeld: () => 'a save of session S-0 may still run in it' });
+    assert.equal(h.ok, false);
+    assert.equal(h.reason, 'the copy can\'t be made (copy folder already exists; a save of session S-0 may still run in it)');
+    assert.equal(readFileSync(join(old, 'work.md'), 'utf8'), 'the earlier worker\'s note');
+    assert.equal(w.calls.some((c) => c[0] === 'prepare'), false);
+    assert.equal(existsSync(join(aside, `C-1.before-${SID}`)), false);
+    // No word from the runner at all (an older caller) is held too.
+    const n = await w.start();
+    assert.equal(n.reason, 'the copy can\'t be made (copy folder already exists; the runner has not said whether anything of its own may still use it)');
+    assert.ok(existsSync(join(old, 'work.md')));
+    // Free: moved aside whole into the leftover folder (the runner's own, 0700), and a fresh copy made in its place.
+    const told = [];
+    const a = await w.start({ copyHeld: () => null, onMoved: (m) => told.push(m) });
+    assert.equal(a.ok, true, a.reason);
+    const moved = join(aside, `C-1.before-${SID}`);
+    assert.deepEqual(told, [{ card: 'C-1', to: moved }], 'each move is told, so the runner lists it (audit M2)');
+    assert.equal(readFileSync(join(moved, 'work.md'), 'utf8'), 'the earlier worker\'s note', 'kept, never removed');
+    assert.equal(statSync(aside).mode & 0o777, 0o700);
+    assert.equal(existsSync(join(old, 'work.md')), false, 'the card\'s copy is the fresh one');
+    assert.equal(w.calls.filter((c) => c[0] === 'prepare').length, 1);
+    assert.ok(logs.some((l) => l.includes(`card C-1's copy was left by an earlier start`) && l.includes(moved)), logs.join('\n'));
+    // The new session denies the leftover folder whole, so it never reads what was moved there.
+    const wl = w.calls.filter((c) => c[0] === 'walled').at(-1)[1];
+    assert.ok(wl.paths.deny.otherCopies.includes(aside));
+  } finally { rmSync(w.d, { recursive: true, force: true }); }
+});
+
+test('L1357: a leftover is not moved while a live session of the product could read it once moved; a leftover folder that is a link is never used', async () => {
+  const aside = (w) => join(w.mine.copies, LEFTOVER_FOLDER);
+  const denying = (dir) => ({ [S.sandbox]: { [S.filesystem]: { [S.denyRead]: [dir] } }, [S.permissions]: { [S.deny]: [`Read(/${dir}/**)`, `Edit(/${dir}/**)`] } });
+  const S2 = SID.replace('0f', '2f');
+  for (const [what, settings, re] of [
+    ['a session started before the leftover folder was made', () => ({}), new RegExp(`session ${S2} started before .*\\.leftover was on its deny list`)],
+    ['a session whose settings can\'t be read', () => { throw Object.assign(new Error('x'), { code: 'EACCES' }); }, new RegExp(`session ${S2}'s settings can't be read \\(EACCES\\)`)],
+  ]) {
+    const w = world({ readSettings: settings });
+    mkdirSync(join(w.mine.copies, 'C-1'));
+    try {
+      const a = await w.start({ copyHeld: () => null, live: [{ id: S2, product: 'p1' }] });
+      assert.equal(a.ok, false, what); assert.match(a.reason, re, what);
+      assert.match(a.reason, /^the copy can't be made \(copy folder already exists; /, what);
+      assert.ok(existsSync(join(w.mine.copies, 'C-1')), `${what}: left where it is`);
+      assert.equal(existsSync(join(aside(w), `C-1.before-${SID}`)), false, what);
+    } finally { rmSync(w.d, { recursive: true, force: true }); }
+  }
+  // One that denies the leftover folder (started since it was made), and an earlier run's start of another product that
+  // never wrote settings (liveWallProblem's to judge, and skipped there too): moved.
+  {
+    const w = world();
+    const S3 = SID.replace('0f', '3f');
+    w.deps.readSettings = (id) => { if (id === S2) return denying(aside(w)); throw Object.assign(new Error('x'), { code: 'ENOENT' }); };
+    mkdirSync(join(w.mine.copies, 'C-1'));
+    try {
+      const a = await w.start({ copyHeld: () => null, live: [{ id: S2, product: 'p1' }, { id: S3, product: 'p2', unstarted: true }] });
+      assert.equal(a.ok, true, a.reason);
+      assert.ok(existsSync(join(aside(w), `C-1.before-${SID}`)));
+    } finally { rmSync(w.d, { recursive: true, force: true }); }
+  }
+  // A leftover folder that is a link (or not a folder): nothing is moved through it.
+  {
+    const w = world();
+    const elsewhere = join(w.d, 'elsewhere'); mkdirSync(elsewhere);
+    symlinkSync(elsewhere, aside(w));
+    mkdirSync(join(w.mine.copies, 'C-1'));
+    try {
+      const a = await w.start({ copyHeld: () => null });
+      assert.equal(a.ok, false); assert.match(a.reason, /^the leftover folder .*\.leftover is not the runner's own folder$/);
+      assert.ok(existsSync(join(w.mine.copies, 'C-1')));
+      assert.deepEqual(readdirSync(elsewhere), []);
+    } finally { rmSync(w.d, { recursive: true, force: true }); }
+  }
+});
+
+// L1357 audit M1 (a): an unconsumed ask to delete the card's copy holds the leftover where it is, named; Joe's Yes is
+// acted on by path, so a fresh copy at that path would be the one deleted.
+test('L1357 audit M1: a leftover is not moved while the Record holds an unconsumed delete-copy ask for the card', async () => {
+  const w = world({ askHeld: (card) => (card === 'C-1' ? 'the Record\'s ask delete-copy-C-1 asks Joe whether to delete it (answered); it is moved once the Dispatcher\'s cleanup has settled that ask' : null) });
+  mkdirSync(join(w.mine.copies, 'C-1')); writeFileSync(join(w.mine.copies, 'C-1', 'work.md'), 'old');
+  try {
+    const a = await w.start({ copyHeld: () => null });
+    assert.equal(a.ok, false);
+    assert.equal(a.reason, 'the copy can\'t be made (copy folder already exists; the Record\'s ask delete-copy-C-1 asks Joe whether to delete it (answered); it is moved once the Dispatcher\'s cleanup has settled that ask)');
+    assert.equal(readFileSync(join(w.mine.copies, 'C-1', 'work.md'), 'utf8'), 'old');
+    assert.deepEqual(readdirSync(join(w.mine.copies, LEFTOVER_FOLDER)), []);
+    assert.equal(w.calls.some((c) => c[0] === 'prepare'), false);
+  } finally { rmSync(w.d, { recursive: true, force: true }); }
+});
+
+test('L1357 audit M1: copyAskHeld names an open, pushed or answered delete-copy ask of the card; consumed, expired, withdrawn and other cards\' asks hold nothing; an unread list holds', () => {
+  const doc = (id, card, state) => ({ id, doc: { purpose: 'delete_copy', card, state }, rev: 1 });
+  const held = (docs, unread = []) => copyAskHeld({ card: 'C-1', list: ({ entity }) => { assert.equal(entity, 'ask'); return { ok: true, docs, unread }; } });
+  for (const state of ['open', 'pushed', 'answered']) {
+    assert.equal(held([doc('delete-copy-C-1', 'C-1', 'consumed'), doc('delete-copy-C-1-2', 'C-1', state)]),
+      `the Record's ask delete-copy-C-1-2 asks Joe whether to delete it (${state}); it is moved once the Dispatcher's cleanup has settled that ask`);
+  }
+  for (const state of ['consumed', 'expired', 'withdrawn']) assert.equal(held([doc('delete-copy-C-1', 'C-1', state)]), null, state);
+  // Another card's asks (C-10, and C-1-2's own ask, which shares the name's start) and other asks hold nothing.
+  assert.equal(held([doc('delete-copy-C-10', 'C-10', 'open'), doc('delete-copy-C-1-2', 'C-1-2', 'open'), { id: 'go-C-1-abc', doc: { card: 'C-1', state: 'open' } }]), null);
+  // Not known is never "no ask".
+  assert.match(held([], [{ id: 'delete-copy-C-1', reason: 'it has more than one name' }]), /ask delete-copy-C-1 can't be read \(it has more than one name\)/);
+  assert.match(copyAskHeld({ card: 'C-1', list: () => ({ ok: false, reason: '/r is missing' }) }), /^the Record's asks can't be read \(\/r is missing\)/);
+  assert.match(copyAskHeld({ card: 'C-1', list: () => { throw new Error('boom'); } }), /^the Record's asks can't be read \(boom\)/);
+});
+
+// L1357 audit m1: whether the copy is free is asked at the moment of the move, after the start's awaits, never before.
+test('L1357 audit m1: the runner is asked whether the copy is free at the moment of the move, after the start\'s awaits', async () => {
+  const w = world();
+  let late = false;
+  w.deps.mainOf = async () => { await new Promise((r) => setImmediate(r)); late = true; return 'c'.repeat(40); };
+  mkdirSync(join(w.mine.copies, 'C-1'));
+  try {
+    const asked = [];
+    const a = await w.start({ copyHeld: () => { asked.push(late); return late ? 'a save of session S-0 may still run in it' : null; } });
+    assert.deepEqual(asked, [true], 'asked once, once the awaits are past');
+    assert.equal(a.ok, false); assert.match(a.reason, /a save of session S-0 may still run in it\)$/);
+    assert.ok(existsSync(join(w.mine.copies, 'C-1')));
+  } finally { rmSync(w.d, { recursive: true, force: true }); }
+});
+
+// L1357 audit m3: a leftover folder that can't be made or confirmed refuses the start, leftover or not: the session would
+// not deny a folder made after it started.
+test('L1357 audit m3: a leftover folder that can\'t be made, or isn\'t the runner\'s own, refuses every start, with no leftover too', async () => {
+  {
+    const w = world();
+    w.deps.fs = { mkdir: (p, o) => { if (p.endsWith(LEFTOVER_FOLDER)) throw Object.assign(new Error('x'), { code: 'EACCES' }); return mkdirSync(p, o); } };
+    try {
+      const a = await w.start({ copyHeld: () => null });
+      assert.equal(a.ok, false);
+      assert.equal(a.reason, `the leftover folder ${join(w.mine.copies, LEFTOVER_FOLDER)} can't be made (EACCES), so the session would not deny it`);
+      assert.equal(w.calls.some((c) => c[0] === 'prepare'), false);
+    } finally { rmSync(w.d, { recursive: true, force: true }); }
+  }
+  {
+    const w = world();
+    writeFileSync(join(w.mine.copies, LEFTOVER_FOLDER), 'a file');
+    try {
+      const a = await w.start({ copyHeld: () => null });
+      assert.equal(a.ok, false); assert.match(a.reason, /^the leftover folder .* is not the runner's own folder$/);
+    } finally { rmSync(w.d, { recursive: true, force: true }); }
+  }
+});
+
+// L1357 audit m4: a waiting row of an earlier run never ends, so its refusal names liveWallProblem's owner step.
+test('L1357 audit m4: a waiting row of an earlier run whose settings don\'t deny the leftover folder names the owner\'s step', async () => {
+  const S4 = SID.replace('0f', '4f');
+  const w = world({ readSettings: () => ({}) });
+  mkdirSync(join(w.mine.copies, 'C-1'));
+  try {
+    const a = await w.start({ copyHeld: () => null, live: [{ id: S4, product: 'p1', unstarted: true }] });
+    assert.equal(a.ok, false);
+    assert.match(a.reason, new RegExp(`session ${S4}, a start from an earlier run still waiting, left settings that don't deny .*; once no claude runs with them, the owner removes that settings file \\(${S4}\\.json in the runner's settings folder\\), and the copy is moved at the card's next start\\)$`));
   } finally { rmSync(w.d, { recursive: true, force: true }); }
 });
 

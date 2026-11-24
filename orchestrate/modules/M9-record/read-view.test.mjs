@@ -38,7 +38,7 @@ test('L998: a document, a product and the lists read what the Store Writer wrote
   assert.deepEqual(cards.docs.map((x) => x.id), ['C-1', 'C-2']);
   assert.deepEqual(cards.unread, []);
   assert.deepEqual(listDocFiles({ ...v, entity: 'product' }).docs.map((x) => x.id), [PRODUCT]);
-  assert.deepEqual(LIST_ENTITIES, ['card', 'product', 'merge']);
+  assert.deepEqual(LIST_ENTITIES, ['card', 'product', 'merge', 'ask']);
   // Merges, which an undo's exact reverse reads (M11 undo.mjs mergeOf): none made yet is an empty list, read as the store reads it.
   assert.deepEqual(recordView(v).list('merge'), env.record.list('merge'));
   assert.match(listDocFiles({ ...v, entity: 'fact' }).reason, /not an entity this view lists/);

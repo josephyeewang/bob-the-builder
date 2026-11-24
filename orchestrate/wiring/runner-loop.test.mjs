@@ -89,7 +89,13 @@ test('step 4: the memory is loaded once; a missing file is a first run, and a me
   v.ports.outboxDrained = async () => true;
   const state = await runRunner({ ...v.ctx(), stopWhen: () => n >= 2, sleep: async (ms) => { slept.push(ms); n += 1; },
     load: (f, o) => loadMemory(f, o) });
-  assert.match(v.notes.join('\n'), /no memory file yet: a first run/);
+  assert.match(v.notes.join('\n'), /no memory file \(.*\): a first run, or the file was lost\. It knows of no earlier session, so no card's leftover copy is moved aside until its first full pass has checked the sessions/);
+  // L1357 audit m5: the first tick after no memory file holds moves; once one has run whole, none does. A tick that
+  // throws keeps them held (the memory is read again).
+  const m = world(); const held = []; let q = 0;
+  await runRunner({ ...m.ctx(), stopWhen: () => q >= 3, sleep: async () => { q += 1; }, load: (f, o) => loadMemory(f, o),
+    tick: async (x) => { held.push(x.movesHeld); if (held.length === 1) throw new Error('first tick fails'); return x.state; } });
+  assert.deepEqual(held, [true, true, false]);
   assert.deepEqual(slept, [RUNNER_TICK_MS, RUNNER_TICK_MS]);
   assert.deepEqual(state.sessions, []);
   // L1348: stopWhen is told the memory and the starts still on, each time it is asked.

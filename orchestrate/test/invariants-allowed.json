@@ -735,6 +735,11 @@
    "file": "wiring/worker-runner.mjs",
    "line": "const asked = Date.parse(body?.asked_at ?? '');",
    "why": "a wait with its own check for a time ahead (L1157 d): CLOCK_SKEW_MS ahead is not read"
+  },
+  {
+   "file": "wiring/owner-status.mjs",
+   "line": "&& typeof x.to === 'string' && isAbsolute(x.to) && typeof x.at === 'string' && Number.isFinite(Date.parse(x.at));",
+   "why": "not a wait (L1357 audit M2): movedOk checks only that a moved copy's time is readable text; nothing waits on it or compares it, and the runner drops old ones by pastTime"
   }
  ],
  "I7": [

@@ -2694,6 +2694,8 @@ Object.defineProperties(__bob_e, {
   runnerPlaces: { get: () => runnerPlaces, enumerable: true },
   runnerCopy: { get: () => runnerCopy, enumerable: true },
   runnerOutbox: { get: () => runnerOutbox, enumerable: true },
+  LEFTOVER_FOLDER: { get: () => LEFTOVER_FOLDER, enumerable: true },
+  LEFTOVER_WARN_COUNT: { get: () => LEFTOVER_WARN_COUNT, enumerable: true },
 });
 // The one definition of the worker runner's per-product places (L836, L848), shared by the wiring (the start port, the
 // start answer check, the status reader), setup (the folders it makes) and M11 (copies, intake and push outboxes).
@@ -2729,6 +2731,12 @@ function runnerPlaces({ copiesRoot, outboxRoot, product }) {
 const runnerCopy = ({ copiesRoot, product, card }) => join(runnerPlaces({ copiesRoot, outboxRoot: '/', product }).copies, plain('card', card));
 const runnerOutbox = ({ outboxRoot, product, role, sessionId }) =>
   join(runnerPlaces({ copiesRoot: '/', outboxRoot, product }).outboxes, plain('role', role), plain('session id', sessionId));
+
+// Where the worker runner moves a card's copy an earlier start left (L1357, wiring/runner-ports.mjs moveLeftover):
+// <copies>/<product>/.leftover/<card>.before-<session>. A card id never starts with a dot, so no card's copy is named so.
+// The Dispatcher's cleanup counts what is in it and tells the owner past LEFTOVER_WARN_COUNT; nothing removes it.
+const LEFTOVER_FOLDER = '.leftover';
+const LEFTOVER_WARN_COUNT = 5;
 });
 
 // ---- orchestrate/shared/record-names.mjs ----

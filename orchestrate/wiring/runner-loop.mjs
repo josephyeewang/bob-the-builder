@@ -125,15 +125,18 @@ const leads = (g) => g !== null && typeof g === 'object' && !Array.isArray(g) &&
 const saveGroup = (g) => leads(g) && Number.isFinite(g.at) && (g.job === undefined || leads(g.job));
 
 /**
- * The runner's memory, read once at start. → {} on a first run (no file), the memory, or a throw (never a guess).
+ * The runner's memory, read once at start. → {} on a first run (no file; `missing()` is told), the memory, or a throw
+ * (never a guess).
  */
-export function loadMemory(file, { uid, note = () => {}, open = openSync, fstat = fstatSync, read = readFileSync, close = closeSync } = {}) {
+export function loadMemory(file, { uid, note = () => {}, missing = () => {}, open = openSync, fstat = fstatSync, read = readFileSync, close = closeSync } = {}) {
   // A relative path would be refused at the first keep (writeStatus): said here instead (#362 r1 c3).
   if (typeof file !== 'string' || !isAbsolute(file)) throw new Error('the worker runner\'s memory is not a full path');
   // Opened once, never through a link, and that open file checked and read (review m3: never check one file, read another).
   let fd;
   try { fd = open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) {
-    if (e?.code === 'ENOENT') { note('the worker runner has no memory file yet: a first run'); return {}; }
+    // Said plainly (L1357 audit m5): a lost file reads the same as a first run, so `missing()` holds moves of leftover
+    // copies until the first full pass (runRunner).
+    if (e?.code === 'ENOENT') { note(`the worker runner has no memory file (${file}): a first run, or the file was lost. It knows of no earlier session, so no card's leftover copy is moved aside until its first full pass has checked the sessions`); missing(); return {}; }
     throw new Error(e?.code === 'ELOOP' ? 'the worker runner\'s memory is a link' : `the worker runner's memory can't be opened (${e?.code ?? e?.message})`);
   }
   let m;
@@ -192,18 +195,21 @@ export async function runnerTick(ctx) {
  * the loop goes on (the next tick rewrites the status); the memory failing to load stops it before any tick.
  */
 export async function runRunner(ctx) {
-  const { memoryFile, uid, sleep = sleepFor, stopWhen = () => false, note = () => {}, everyMs = RUNNER_TICK_MS, load = loadMemory, drainMs = RUNNER_PORT_MS } = ctx;
+  const { memoryFile, uid, sleep = sleepFor, stopWhen = () => false, note = () => {}, everyMs = RUNNER_TICK_MS, load = loadMemory, drainMs = RUNNER_PORT_MS, tick = runnerTick } = ctx;
   // A cadence given in place of RUNNER_TICK_MS is held to the same bound (#362 r1 c2).
   if (!(everyMs > 0) || everyMs + RUNNER_PORT_MS >= RUNNER_STATUS_EVERY_MS) throw new Error('the worker runner\'s tick must leave a port wait under the status cadence');
-  let state = load(memoryFile, { uid, note });
+  // No memory file (L1357 audit m5): leftover copies stay where they are until a pass has run whole.
+  let movesHeld = false;
+  const missing = () => { movesHeld = true; };
+  let state = load(memoryFile, { uid, note, missing });
   const pending = new Map();
   // The newest pass's keeper of a save's group told after its pass returned (worker-runner.mjs, self-review M-2).
   const saveHolder = {};
   while (!stopWhen({ state, pending })) {
-    try { state = await runnerTick({ ...ctx, state, pending, saveHolder }); } catch (e) {
+    try { state = await tick({ ...ctx, state, pending, saveHolder, movesHeld }); movesHeld = false; } catch (e) {
       note(`a worker runner tick failed (${e?.message ?? e}); the next one runs in ${everyMs} ms`);
       // What that tick kept is the memory now (review M1); one that can't be read back stops the runner (a throw).
-      state = load(memoryFile, { uid, note });
+      state = load(memoryFile, { uid, note, missing });
     }
     if (stopWhen({ state, pending })) break;
     await sleep(everyMs);
