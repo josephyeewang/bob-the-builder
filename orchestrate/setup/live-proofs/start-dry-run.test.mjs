@@ -243,14 +243,36 @@ test('a gate the real start stops at marks every later PASS as on a stand-in', a
   } finally { w.done(); }
 });
 
-test('stopped part way (a signal): the abort hook removes what was made so far', async () => {
+test('stopped part way: no later check starts, nothing is spawned, the run ends normally and removes everything', async () => {
   const w = world();
-  let undo = null; let during = null; let after = null;
+  let stop = null;
   try {
-    await w.run({ onAbort: (f) => { undo = f; }, deps: { ...w.io.deps, promptFor: () => { during = w.leftovers(); undo(); after = w.leftovers(); return 'do the card'; } } });
-    assert.ok(during.length >= 2, `the copy and the outbox were there: ${during}`);
-    assert.deepEqual(after, [], 'the abort hook removed them');
+    const out = await w.run({ onAbort: (f) => { stop = f; }, deps: { ...w.io.deps, promptFor: () => { stop('SIGINT'); return 'do the card'; } } });
+    const s = w.byStage(out);
+    assert.deepEqual(w.ran, {}, 'no launch check ran after the stop');
+    assert.equal(s.check1.result, 'NOT TRIED'); assert.match(s.check1.why, /stopped \(SIGINT\)/);
+    assert.equal(s.start.result, 'NOT TRIED'); assert.equal(w.spawns, 0);
+    assert.equal(s.cleanup.result, 'PASS'); assert.deepEqual(w.leftovers(), []);
+    assert.equal(report(out.results).ok, false);
   } finally { w.done(); }
+});
+
+test('main: a signal during the run waits for it to end (no early exit), takes its handlers off, exits 1; ALL PASS exits 0', async () => {
+  for (const sigAt of ['promptFor', null]) {
+    const w = world();
+    const handlers = {}; let text = ''; let said = '';
+    const signals = { on: (k, f) => { handlers[k] = f; }, off: (k) => { delete handlers[k]; } };
+    const deps = { ...w.io.deps, promptFor: () => { if (sigAt) { handlers.SIGINT('SIGINT'); handlers.SIGINT('SIGINT'); } return 'do the card'; } };
+    const argv = ['--product', 'p1', '--card', 'C-1'];
+    try {
+      const code = await main(argv, { print: (t) => { text += t; }, uid: 603, readConfig: () => w.c, configOf: (x) => x, umask: () => {}, say: (t) => { said += t; }, signals,
+        io: { ...w.io, ownDirUid: 603, deps } });
+      assert.deepEqual(handlers, {});
+      if (sigAt) { assert.equal(code, 1); assert.match(said, /Stopping \(SIGINT\)/, text); assert.match(said, /Still stopping/); assert.match(text, /NOT READY/); }
+      else { assert.equal(code, 0, text); assert.match(text, /ALL PASS/); }
+      assert.deepEqual(w.leftovers(), []); assert.equal(w.spawns, 0);
+    } finally { w.done(); }
+  }
 });
 
 test('the recheck just before claude: a gate or check failing there is told, and claude still not spawned', async () => {

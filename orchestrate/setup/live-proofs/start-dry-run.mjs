@@ -27,8 +27,9 @@
 // What it changes: only what the real start makes, under names that hold this run's own session id (DRYRUN-…, never a
 // Dispatcher's: those are UUIDs): a copy beside the card's own (<card>..dryrun-<id>, so the card's real copy is never
 // taken), the session's outbox, its settings files in the runner's settings folder, and check 11's throwaway copy. Every
-// removal and write it makes is held to those names (any other is refused and told), and all of them are removed at the
-// end, on every path, a thrown error too; the last stage says whether anything was left. It never writes the Record, the
+// removal, and every write the start port makes itself, is held to those names (any other is refused and told); the
+// launch checks write their own files inside the dry copy, and check 11 a smoke marker in the workers' home under this
+// run's id. All of it is removed at the end, on every path, a thrown error and a stop part way too; the last stage says whether anything was left. It never writes the Record, the
 // requests folder or the status file, takes no runner lock, needs no sudo of its own, and reads the card as it is
 // (claimed or not: it is read as claimed for this run's session in memory only). Claude Code keeps its own transcript of
 // check 6's headless run in the workers' home, as it does for any start.
@@ -126,7 +127,11 @@ export async function dryRun({ c, configWhy, product, card, io = {} }) {
   const stopAt = (k, why) => { fail(k, why); if (!stopper) stopper = k; };
   const fsReal = { mkdir: mkdirSync, rm: rmSync, writeNew, list: readdirSync, lstat: lstatSync, chmodTree, rename: renameSync, ...(io.fs ?? {}) };
   let copyPath = null;
-  io.onAbort?.(() => cleanup());
+  // A stop asked part way (a signal): no later check is started, the running one is waited for (its install or tests
+  // run in their own process groups, which a Ctrl-C does not reach, and would write into the copy after it was removed),
+  // then the run ends as any other, removing what it made.
+  let abortWhy = null;
+  io.onAbort?.((sig) => { abortWhy = abortWhy ?? `the dry run was stopped (${sig})`; });
   try {
     if (!c) { stopAt('config', configWhy ?? 'no config'); return finish(); }
     pass('config');
@@ -205,9 +210,10 @@ export async function dryRun({ c, configWhy, product, card, io = {} }) {
     let outboxAt = null;
     try { outboxAt = runnerOutbox({ outboxRoot: c.outboxRoot, product, role: RUNNER_ROLE_OF[kind], sessionId: sid }); } catch { /* the start refuses it */ }
     let armed = false;
+    const stopping = () => armed || !!abortWhy;
     let heldAgain = null; let recheckWhy = null;
     const base = io.deps ?? {};
-    const wired = (io.wire ?? lockedWiring)(c, { stopped: () => armed, log, productHeld: () => null, budget, bobManifest, account: () => workerAccount(c) });
+    const wired = (io.wire ?? lockedWiring)(c, { stopped: stopping, log, productHeld: () => null, budget, bobManifest, account: () => workerAccount(c) });
     const sd = { ...wired.startDeps, ...base };
     const baseAccount = base.account ?? (() => workerAccount(c));
     const baseCommit = base.startCommit ?? cardStartCommit;
@@ -221,7 +227,7 @@ export async function dryRun({ c, configWhy, product, card, io = {} }) {
     const deps = {
       ...sd,
       fs,
-      stopped: () => armed,
+      stopped: stopping,
       log,
       readSettings,
       copyOf: (x) => { copyPath = dryCopyOf(x); return copyPath; },
@@ -253,7 +259,10 @@ export async function dryRun({ c, configWhy, product, card, io = {} }) {
       prepare: async (x) => {
         if (x.dest !== copyPath) return basePrepare(x);   // check 11's throwaway copy
         let r; try { r = await basePrepare(x); } catch (e) { r = refuse(said(e)); }
-        if (!r?.ok) stopAt('copy', `the copy can't be made (${r?.reason ?? 'no answer'})`);
+        if (!r?.ok) {
+          if (res.get('copy')?.result === 'FAIL') res.get('copy').why += `; and the dry run's own copy can't be made either (${r?.reason ?? 'no answer'})`;
+          stopAt('copy', `the copy can't be made (${r?.reason ?? 'no answer'})`);
+        }
         else made.add(x.dest);
         return r;
       },
@@ -291,6 +300,7 @@ export async function dryRun({ c, configWhy, product, card, io = {} }) {
           const port = a.checks?.[k.n];
           checks[k.n] = async (ctx) => {
             let r;
+            if (abortWhy) { set(`check${k.n}`, 'NOT TRIED', abortWhy); return refuse(abortWhy); }
             if (typeof port !== 'function') r = refuse('no check is wired');
             else { try { r = await port(ctx); } catch (e) { r = refuse(`the check failed: ${said(e)}`); } }
             if (r?.ok === true) pass(`check${k.n}`);
@@ -303,6 +313,7 @@ export async function dryRun({ c, configWhy, product, card, io = {} }) {
           };
         }
         const start = async (ctx) => {
+          if (abortWhy) return refuse(abortWhy);
           reach('recheck');
           armed = true;
           const r = await a.start(ctx);
@@ -335,12 +346,14 @@ export async function dryRun({ c, configWhy, product, card, io = {} }) {
     };
     const go = startPort(c, deps);
     let a;
+    if (abortWhy) return finish();
     try { a = await go({ card, kind, product, sessionId: sid, live: [] }); } catch (e) { a = refuse(`the start threw (${said(e)})`); }
     if (!res.has('start')) {
       // Where the start stopped: the first stage not told yet, unless a stage told its own stop.
       for (const k of INSIDE) {
         if (res.has(k)) continue;
-        if (stopper) set(k, 'NOT TRIED', `stopped at: ${LABEL[stopper]}`);
+        if (abortWhy) set(k, 'NOT TRIED', abortWhy);
+        else if (stopper) set(k, 'NOT TRIED', `stopped at: ${LABEL[stopper]}`);
         else { stopAt(k, a?.reason ?? 'no answer'); }
       }
     }
@@ -351,7 +364,7 @@ export async function dryRun({ c, configWhy, product, card, io = {} }) {
   }
 
   function finish() {
-    for (const k of ORDER) if (k !== 'cleanup' && !res.has(k)) set(k, 'NOT TRIED', stopper ? `stopped at: ${LABEL[stopper]}` : 'not reached');
+    for (const k of ORDER) if (k !== 'cleanup' && !res.has(k)) set(k, 'NOT TRIED', abortWhy ?? (stopper ? `stopped at: ${LABEL[stopper]}` : 'not reached'));
     const left = cleanup();
     if (!res.has('cleanup')) { if (left.length) fail('cleanup', `left behind: ${left.join(', ')}`); else pass('cleanup'); }
     return { results: ORDER.map((k) => res.get(k)), sessionId: sid, made: [...made], left, spawned };
@@ -360,6 +373,8 @@ export async function dryRun({ c, configWhy, product, card, io = {} }) {
   function cleanup() {
     const own = new Set(made);
     if (copyPath) own.add(copyPath);
+    // Check 11's smoke marker in the workers' home (review-launch.mjs smokeFiles); its own finally removes it.
+    if (c?.home) own.add(join(c.home, `.orch-smoke-outside-${sid}`));
     if (c?.settingsDir) { try { for (const n of fsReal.list(c.settingsDir)) if (n.startsWith(`${sid}.`)) own.add(join(c.settingsDir, n)); } catch { /* none made */ } }
     if (c?.copiesRoot && c?.products?.[product]) {
       try { const d = runnerPlaces({ copiesRoot: c.copiesRoot, outboxRoot: '/', product }).copies; for (const n of fsReal.list(d)) if (n.includes(sid)) own.add(join(d, n)); } catch { /* none made */ }
@@ -397,7 +412,7 @@ export function report(results, { sessionId } = {}) {
   } else lines.push('No stage failed.');
   if (notTried.length) lines.push(`${notTried.length} stage${notTried.length === 1 ? '' : 's'} could not be tried; they are not passes.`);
   const ok = results.every((r) => r.result === 'PASS' || r.result === 'SKIP');
-  lines.push(ok ? `ALL PASS: ${DRY_START_SAID}.` : 'NOT READY: the real start would be refused.');
+  lines.push(ok ? `ALL PASS: ${DRY_START_SAID}. (Whether the runner itself is up, and its own start-up checks, are not part of this: setup.mjs daemons check shows those.)` : 'NOT READY: the real start would be refused.');
   return { text: `${lines.join('\n')}\n`, ok };
 }
 
@@ -415,26 +430,33 @@ export function guardProblem({ c, product, card, uid, ownDirUid }) {
 }
 
 export async function main(argv, { print = (t) => process.stdout.write(t), uid = process.getuid?.(), readConfig = (f) => readRunnerConfig(f, selfPath()), io = {},
-  umask = (m) => process.umask(m), say = (t) => process.stderr.write(t), signals = process } = {}) {
+  umask = (m) => process.umask(m), say = (t) => process.stderr.write(t), signals = process, configOf = configFrom } = {}) {
   // The runner's job runs with this umask (runner-job.mjs); sudo's is 022, and check 1 refuses a copy others can read.
   umask(RUNNER_JOB_UMASK);
   const product = arg(argv, '--product'); const card = arg(argv, '--card');
   let c = null; let configWhy;
-  try { c = configFrom(readConfig(arg(argv, '--config'))); } catch (e) { configWhy = configUnreadable(e); }
+  try { c = configOf(readConfig(arg(argv, '--config'))); } catch (e) { configWhy = configUnreadable(e); }
   if (c) {
     let ownDirUid; try { const st = lstatSync(c.ownDir); ownDirUid = st.isDirectory() && !st.isSymbolicLink() ? st.uid : null; } catch { ownDirUid = null; }
     const bad = guardProblem({ c, product, card, uid, ownDirUid: io.ownDirUid ?? ownDirUid });
     if (bad) { print(`The dry run did not run: ${bad}.\n`); return 1; }
   }
   // Progress and the runner's own log lines as they come (the launch checks take minutes); the report follows.
-  // A stop part way removes what it made first.
-  let undo = null;
-  const onSignal = (sig) => { say(`\nStopped (${sig}): removing what the dry run made.\n`); try { undo?.(); } finally { process.exit(1); } };
+  // A stop part way (Ctrl-C, a closed window, a kill): no further check starts; the one running is waited for, then
+  // everything made is removed and the report says what was not tried. It never exits early: an early exit would
+  // leave a check's install or tests running in their own process groups, writing into a removed copy.
+  let stop = null; let asked = 0;
+  const onSignal = (sig) => {
+    asked += 1;
+    say(asked === 1 ? `\nStopping (${sig}): no further check starts; waiting for the running one to end, then removing what the dry run made.\n`
+      : `\nStill stopping: waiting for the running check to end (each has its own time limit). Ending it any harder would leave files.\n`);
+    stop?.(sig);
+  };
   const sigs = ['SIGINT', 'SIGTERM', 'SIGHUP'];
   for (const s of sigs) signals.on(s, onSignal);
   let out;
   try {
-    out = await dryRun({ c, configWhy, product, card, io: { progress: (t) => say(`  ${t}\n`), log: (t) => say(`  (log) ${t}\n`), ...io, onAbort: (f) => { undo = f; io.onAbort?.(f); } } });
+    out = await dryRun({ c, configWhy, product, card, io: { progress: (t) => say(`  ${t}\n`), log: (t) => say(`  (log) ${t}\n`), ...io, onAbort: (f) => { stop = f; io.onAbort?.(f); } } });
   } finally { for (const s of sigs) signals.off(s, onSignal); }
   const r = report(out.results, { sessionId: out.sessionId });
   print(r.text);

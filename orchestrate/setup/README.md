@@ -340,6 +340,10 @@ settings, copies and outbox folders, to remove by hand. While it runs, its setti
 restarting with an empty memory (the runner refuses settings files it has no session for), so run it while the runner
 is up. It runs as builder from a Terminal, not from launchd: it sets the runner job's umask itself, but the environment
 around it differs a little, so a check 6, 9 or 11 FAIL that names the environment is worth one real start to confirm.
+Ctrl-C does not end it at once: no further check starts, the one running (an install or the tests can take minutes)
+is waited for, then everything is removed and the report shows what was not tried. A real start of the same card while
+it runs removes the dry run's check-11 test copy (each start clears its card's old ones), which shows as a check 11 FAIL;
+run it again. ALL PASS covers the start only: whether the runner is up is `daemons check`'s.
 
 ## Part 4 — the watch-only week's rules copy and hourly job (R-0b-122)
 
