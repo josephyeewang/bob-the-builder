@@ -12,7 +12,7 @@ import { tempDir } from '../shared/test-tmp.mjs';
 import { pushWorld } from '../modules/M4-workshop/git/push-world.test-helper.mjs';
 import { createSaveWork } from '../modules/M4-workshop/git/save-work.mjs';
 import { bundleName } from '../modules/M4-workshop/git/push.mjs';
-import { JOBS_DIR, JOB_ACK_WAIT_MS, LOCKED_JOBS, LOCKED_MS, LOCKED_SAVE_MS, RESULT_MAX_BYTES, SAVE_DELAYS_MS, ackFile, groupFile, groupRecordCommand, guardedRun, jobFile, lockedRunner, readGroupRecord, runToEnd, settingsSha, claudeEnd, sayable, sayFile, SAID_MAX } from './runner-locked.mjs';
+import { JOBS_DIR, JOB_ACK_WAIT_MS, LOCKED_JOBS, LOCKED_MS, LOCKED_SAVE_MS, RESULT_MAX_BYTES, SAVE_DELAYS_MS, ackFile, groupFile, groupRecordCommand, guardedRun, jobFile, lockedRunner, readGroupRecord, runToEnd, settingsSha, claudeEnd, sayable, hearing, resultWords, SAID_MAX } from './runner-locked.mjs';
 import { EventEmitter } from 'node:events';
 import { SAVE_DEADLINE_MS } from '../modules/M11-dispatcher/pass.mjs';
 import { partialName } from '../modules/M4-workshop/git/save-work.mjs';
@@ -500,38 +500,42 @@ test('#463 r3 m4 A8: guardedRun refuses a limit past LOCKED_MS, a zero and a non
   }
 });
 
-test('L1351: a claude that fails says why: its last words reach the refusal, keys hidden; its file is removed', async () => {
+test('L1351: a claude that fails says why: its result and stderr reach the refusal through pipes, keys hidden', async () => {
   const dir = tempDir('orch-said-');
-  const r = await runToEnd(childSpawn, '/bin/sh', ['-c', 'echo start; echo "Error: sign-in refused sk-ant-api03-SECRETSECRET token AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" >&2; exit 1'], { cwd: dir }, 10_000, () => {}, () => false);
+  const json = JSON.stringify({ type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['Invalid API key fake' + '-key-SECRETSECRET'] });
+  const r = await runToEnd(childSpawn, '/bin/sh', ['-c', `echo '{"type":"assistant"}'; echo '${json}'; echo "fatal: sign-in refused token ${'A'.repeat(16)} https://joe:hunter2@host/x" >&2; exit 1`], { cwd: dir }, 10_000, () => {}, () => false);
   assert.equal(r.exitCode, 1);
-  assert.match(r.said, /start Error: sign-in refused \[hidden\] token \[hidden\]/);
-  assert.doesNotMatch(r.said, /SECRET|AAAAAAAA/);
-  assert.match(claudeEnd(r), /^claude exited 1, saying "start Error: sign-in refused/);
+  assert.match(r.said, /^result error_during_execution: Invalid API key \[hidden\]; stderr: fatal: sign-in refused token \[hidden\] https:\/\/\[hidden\]@host\/x$/);
+  assert.doesNotMatch(r.said, /SECRET|AAAA|hunter2/);
+  assert.match(claudeEnd(r), /^claude exited 1, saying "result error_during_execution: /);
   assert.equal(claudeEnd({ exitCode: 1 }), 'claude exited 1'); // nothing said: as before
-  assert.equal(claudeEnd({ exitCode: null, said: 'x' }), 'claude was ended by a signal, saying "x"');
-  // A run that says nothing leaves no `said`.
   const q = await runToEnd(childSpawn, '/bin/sh', ['-c', 'exit 0'], { cwd: dir }, 10_000, () => {}, () => false);
   assert.equal(q.said, undefined);
   rmSync(dir, { recursive: true, force: true });
 });
 
-test('L1351: sayable keeps one printable line, the last words only, quotes made plain', () => {
+test('L1351: a process that keeps claude\'s pipe open does not hold its close past the drain', async () => {
+  const dir = tempDir('orch-said-');
+  const t0 = Date.now();
+  // The background sleep inherits the pipes (as a job that kept them would); claude's exit closes them after the drain.
+  const r = await runToEnd(childSpawn, '/bin/sh', ['-c', 'sleep 30 & echo said >&2; exit 2'], { cwd: dir }, 20_000, (g) => { try { process.kill(-g, 'SIGKILL'); } catch {} }, () => true);
+  assert.equal(r.exitCode, 2);
+  assert.ok(Date.now() - t0 < 10_000, 'the close came after the drain, not the sleep');
+  assert.match(r.said, /stderr: said/);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('L1351: sayable hides key-shaped runs, URL sign-ins and keeps one short printable line', () => {
+  for (const k of [['made', 'up/with+slash', 'es/end9Q'].join(''), ['npm', 'shortABCDEF12'].join('_'), 'Bearer abc.def.' + 'q'.repeat(14) + 'Z9', ['ghp', 'x'.repeat(14) + 'W7'].join('_')]) assert.doesNotMatch(sayable(`x ${k} y`), new RegExp(k.slice(-6).replace(/[.+/]/g, '\\$&')), k);
   assert.equal(sayable('a\n\tb\u0007 "c"'), "a b 'c'");
+  assert.equal(sayable('https://u:p@h/'), 'https://[hidden]@h/');
   const long = sayable('x '.repeat(400) + 'END');
   assert.ok(long.length <= SAID_MAX + 1 && long.startsWith('…') && long.endsWith('END'));
 });
 
-test('L1351: the said file is private and removed once read; one that cannot be made says nothing and refuses nothing', () => {
-  const dir = tempDir('orch-saidf-');
-  const f = sayFile({ dir });
-  assert.equal(typeof f.fd, 'number');
-  const [sub] = readdirSync(dir);
-  writeFileSync(join(dir, sub, 'out'), 'hello');
-  assert.equal(f.take(), 'hello');
-  assert.deepEqual(readdirSync(dir), []);
-  assert.equal(f.take(), '');
-  const none = sayFile({ dir: join(dir, 'missing') });
-  assert.equal(none.fd, null);
-  assert.equal(none.take(), '');
-  rmSync(dir, { recursive: true, force: true });
+test('L1351: resultWords reads the last result event; a strange subtype is not shown; no event is null', () => {
+  assert.deepEqual(resultWords('{"type":"result","subtype":"error_max_turns","is_error":true}'), { sub: 'error_max_turns', why: '' });
+  assert.deepEqual(resultWords('{"type":"result","subtype":"X; rm","is_error":true,"result":"boom"}'), { sub: 'a subtype not shown', why: 'boom' });
+  assert.equal(resultWords('not json\n{"type":"assistant"}'), null);
+  const h = hearing(); assert.equal(h.said(), ''); // never listened: nothing said
 });

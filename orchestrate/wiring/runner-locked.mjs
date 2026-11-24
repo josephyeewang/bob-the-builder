@@ -49,8 +49,7 @@
 // The 10 minutes of LOCKED_MS (and check 11's BASELINE_MS, guardedRun, #463 r2 M3) is our own cap, a choice, not a tool
 // limit (#463 r3 m2): the Bash tool's longest wait is BASH_MAX_TIMEOUT_MS when it is set (2.1.317, 2.1.322, 2.1.316), and the runner
 // sets it to the job's limit. A product whose tests need longer splits its test command, or the cap is raised here.
-import { closeSync, constants, fstatSync, mkdtempSync, openSync, readFileSync, readSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { closeSync, constants, fstatSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -135,12 +134,14 @@ export function exitCodeCommand(command, file, what = 'command') {
 export function runToEnd(spawn, bin, args, opts, timeoutMs, kill = (g) => process.kill(-g, 'SIGKILL'), there = groupThere, onSpawn, job) {
   return new Promise((done0, fail0) => {
     let child;
-    // What claude says (L1351): its output goes to a private file of the runner's own, never a pipe (a job's process that
-    // kept a pipe open would hold claude's close), and its last words are kept for the refusal (`said`).
-    const out = sayFile();
-    const fin = (v) => { const said = out.take(); return said ? { ...v, said } : v; };
-    const resolve = (v) => done0(fin(v)); const reject = (e) => { out.take(); fail0(e); };
-    try { child = spawn(bin, args, { ...opts, detached: true, stdio: ['ignore', out.fd ?? 'ignore', out.fd ?? 'ignore'] }); } catch (e) { reject(e); return; }
+    // What claude says (L1351): its output is read through pipes of the runner's own (never a file a session could open),
+    // only the last of each kept, and summed up for the refusal (`said`). Claude's exit starts a short wait after which the
+    // pipes are closed, so a process that kept one open can't hold claude's close.
+    const heard = hearing();
+    const resolve = (v) => { const said = heard.said(); done0(said ? { ...v, said } : v); };
+    const reject = (e) => { heard.stop(); fail0(e); };
+    try { child = spawn(bin, args, { ...opts, detached: true, stdio: ['ignore', 'pipe', 'pipe'] }); } catch (e) { reject(e); return; }
+    heard.listen(child);
     const group = () => Number.isInteger(child.pid) && child.pid > 1;
     // The job's group once read (`jg`); `seen` also when the record named claude's own group (nothing more to kill).
     let jg = null; let seen = false;
@@ -261,30 +262,57 @@ const answerFile = (f) => writeFileSync(f, '', { flag: 'wx', mode: 0o600 });
 /** Claude's own end, said beside a job's answer (#463 r1 c3), with its last words when it left any (L1351). */
 export const claudeEnd = (r) => `${r?.exitCode === null ? 'claude was ended by a signal' : `claude exited ${r?.exitCode}`}${typeof r?.said === 'string' && r.said ? `, saying "${r.said}"` : ''}`;
 
-export const SAID_MAX = 300;
-/** Claude's last words, safe to show (L1351): printable text on one line, the last SAID_MAX characters, and anything
- *  shaped like a key or token (a long unbroken run of letters, digits, `-` and `_`, or sk-…) hidden. */
+export const SAID_MAX = 200;
+export const HEARD_OUT_MAX = 65536;
+export const HEARD_ERR_MAX = 8192;
+export const HEARD_DRAIN_MS = 2000;
+
+/** Text safe to show (L1351): printable, on one line, the last SAID_MAX characters, a URL's sign-in part and any run of
+ *  16 or more characters that could be part of a key or token (letters, digits and - _ + / = . :) hidden. */
 export function sayable(text) {
   const t = String(text ?? '').replace(/[^\x20-\x7e]+/g, ' ').replace(/\s+/g, ' ').trim()
-    .replace(/sk-[A-Za-z0-9_-]+/g, '[hidden]').replace(/[A-Za-z0-9_-]{32,}/g, '[hidden]').replace(/"/g, "'");
+    .replace(/:\/\/[^\s/@]*@/g, '://[hidden]@').replace(/[A-Za-z0-9_\-+/=.:]{16,}/g, '[hidden]').replace(/"/g, "'");
   return t.length > SAID_MAX ? `…${t.slice(-SAID_MAX)}` : t;
 }
 
-/** A private file for claude's output (0600, in a fresh 0700 folder of the runner's temp folder). → { fd, take() → its
- *  last words, sayable, then the file and folder removed }. One that can't be made gives fd null: claude's output is then
- *  thrown away, as before, and nothing is refused for it. */
-export function sayFile({ dir = tmpdir() } = {}) {
-  let d = null; let fd = null;
-  try { d = mkdtempSync(join(dir, 'orch-said-')); fd = openSync(join(d, 'out'), 'wx+', 0o600); } catch { if (d) try { rmSync(d, { recursive: true, force: true }); } catch { /* left */ } d = null; fd = null; }
-  let taken = false;
-  return { fd, take() {
-    if (taken || fd === null) return ''; taken = true;
-    let text = '';
-    try { const size = fstatSync(fd).size; const n = Math.min(size, 8192); const b = Buffer.alloc(n); if (n) readSync(fd, b, 0, n, size - n); text = b.toString('utf8'); } catch { text = ''; }
-    try { closeSync(fd); } catch { /* closed */ }
-    try { rmSync(d, { recursive: true, force: true }); } catch { /* left in the temp folder */ }
-    return sayable(text);
-  } };
+/** What claude's own result says (stream-json's last `result` event) → { sub, why } (sub: its subtype when it is a plain
+ *  name, else 'a subtype not shown'; why: its error words when it failed), or null with no result event. */
+export function resultWords(stdout) {
+  const lines = String(stdout ?? '').split('\n').map((l) => l.trim()).filter(Boolean).reverse();
+  for (const l of lines) {
+    let e; try { e = JSON.parse(l); } catch { continue; }
+    if (e?.type !== 'result') continue;
+    const sub = typeof e.subtype === 'string' && /^[a-z_]{1,40}$/.test(e.subtype) ? e.subtype : 'a subtype not shown';
+    const errs = Array.isArray(e.errors) ? e.errors.filter((x) => typeof x === 'string').join('; ') : '';
+    return { sub, why: errs || (e.is_error === true && typeof e.result === 'string' ? e.result : '') };
+  }
+  return null;
+}
+
+/** Claude's output, heard through its pipes: the last HEARD_OUT_MAX of stdout and HEARD_ERR_MAX of stderr. listen(child)
+ *  once spawned; said() → its result's words and its stderr's last words, sayable ('' when it said nothing); stop() at a
+ *  refusal. At claude's exit the pipes are closed after HEARD_DRAIN_MS (unref'd), so its close always comes. */
+export function hearing({ drainMs = HEARD_DRAIN_MS } = {}) {
+  let out = ''; let err = ''; let pipes = [];
+  const cut = (s, max) => (s.length > max ? s.slice(-max) : s);
+  const end = () => { for (const p of pipes) try { p.destroy(); } catch { /* closed */ } pipes = []; };
+  return {
+    listen(child) {
+      for (const [p, put] of [[child?.stdout, (d) => { out = cut(out + d, HEARD_OUT_MAX); }], [child?.stderr, (d) => { err = cut(err + d, HEARD_ERR_MAX); }]]) {
+        if (!p || typeof p.on !== 'function') continue;
+        p.setEncoding?.('utf8'); p.on('data', put); p.on('error', () => { /* a pipe that fails says nothing more */ });
+        pipes.push(p);
+      }
+      if (pipes.length && typeof child.on === 'function') child.on('exit', () => { const t = setTimeout(end, drainMs); t.unref?.(); });
+    },
+    said() {
+      end();
+      const r = resultWords(out);
+      const free = sayable([r?.why, err.trim() ? `stderr: ${err.trim()}` : ''].filter(Boolean).join('; '));
+      return [r ? `result ${r.sub}` : '', free].filter(Boolean).join(': ');
+    },
+    stop: end,
+  };
 }
 
 /** The job's result file: in the folder it runs in, named for the job and the session. */
