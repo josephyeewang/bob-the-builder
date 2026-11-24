@@ -6,7 +6,7 @@
 //     Dispatcher and the robot open it (dispatcher-wiring.mjs recordAndRules): the same products file, rules folder and
 //     read-only token, so the three jobs read one Record under one set of rules;
 //   - who is signed in and that account's usage: the owner's answer file (sensors-ports.mjs, L609/L614/L727), which only
-//     the owner's user may have written (answerUid); the marks a forged low reading is held to are the Record's (storedUsage);
+//     the owner's user may have written (answerUid); the marks a reading is held to (a moved reset time refused, a drop noted, L1358) are the Record's (storedUsage);
 //   - the network: a plain TCP connection to each of NETWORK_HOSTS (probes/network.mjs), up if any answers;
 //   - each pull request's reading: the product's repository (products.json's owner and repo) through the read-only client.
 //     No App client is named (checksGh), so the check runs at a PR's head read as not known, which the loop says each pass.

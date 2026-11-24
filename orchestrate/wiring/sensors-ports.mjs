@@ -8,7 +8,8 @@
 //                       (L781). Required: missing, it throws.
 //     whoIsSignedIn() → { account, signed_in, observed_at?, reason? }: signed_in false only when the answer says plainly
 //                       that the named account is signed out; null (couldn't tell) with the reason for everything else
-//     readUsage(account) → { source, h5, week, week_from, observed_at, h5_none?: true } | null
+//     readUsage(account) → { source, h5, week, week_from, observed_at, h5_none?: true, reset_note?: text } | null
+//                       reset_note: the drop(s) within one window taken as a reset (L1358), in plain words
 //
 // THE ANSWER'S OWN TIME (L728 M1). Both ports hand on the answer's observed_at, and state-facts.mjs stores the earlier of
 // it and its own read time. So M11's stale_after_min counts from when the owner's job asked Claude Code, never from
@@ -17,7 +18,8 @@
 // Each port reads the file afresh and answers null for anything not known: a file that is missing, too old, from the
 // future, not the owner's, writable by others, or not the shape below. The Sensors loop writes null as unknown, and M11
 // then starts nothing new (who is signed in) or keeps Tier-1 blocked (usage). `lastReason()` says why the last read
-// gave null, for the pass's problem line ("says so", L611).
+// gave null, for the pass's problem line ("says so", L611), or what a reading that passed noted (a gap; a drop taken as
+// a reset, L1358).
 //
 // A missing 5-hour row stays null, never 0% (L611). When the owner's answer says the report listed no 5-hour row at all
 // (`h5_none: true`, L1331: a clean report with a weekly row and no `session` row), readUsage hands that on, and M11
@@ -30,10 +32,24 @@
 // round, or lock it (`chflags uchg`) so the real round can't overwrite it (L728). A false file can name the other set-up
 // account (the Dispatcher starts sessions on it); say signed in when not (a session start fails and the Dispatcher's own
 // checks catch it); or claim low usage, which lets Tier-1 work and new starts run past a real amber or red band until
-// the plan's limit itself stops them. Three checks narrow the last one: a reset time further out than one window from the
-// reading is refused; within one usage window (the same reset time; the week is one window whatever row it names, since
-// M11 reads the week alone) a lower percent than one already seen is refused and said, and so is a reset time moved back or moved later
-// while the window seen is still open (L728 m1, L746 M-A and m-A); and a locked file goes stale within ANSWER_STALE_MS.
+// the plan's limit itself stops them. Checks narrow the last one: a reset time further out than one window from the
+// reading is refused; a reset time moved back or moved later while the window seen (the same reset time; the week is one
+// window whatever row it names, since M11 reads the week alone) is still open is refused and said (L728 m1, L746 m-A);
+// and a locked file goes stale within ANSWER_STALE_MS.
+//
+// A DROP WITHIN ONE WINDOW IS TAKEN AS A RESET (L1358). Until L1358 a lower percent than one already seen in the same
+// window was refused too (L728 m1, L746 M-A). That guarded against one thing: a false file, written by the owner's user or
+// a work session running as it, claiming lower usage than real so that new starts and Tier-1 work run past a real amber
+// or red band. But usage can really go down within a window: the account owner or Anthropic can reset it. The old rule
+// then refused every true reading until the week's window passed (days), handed on the stale high reading, and held all
+// work back (L1358: a reset to 0% read as "0% after 100%, refused"). So a drop is now accepted: the reading passes, the
+// marks start again from the new figure, and the drop is written down in plain words (`reset_note` on the reading, kept
+// in the usage fact, so the diary shows "usage for <row> went down from X% to Y% within one window; taken as a reset").
+// What that gives up: a false low file is no longer stopped by this check, only seen. That is acceptable because the
+// file is the owner's own job's output, read only when the owner's user owns it, nobody else can write it and it has no
+// access list (the checks below), and that same user could already rewrite or lock it every round, which no check here
+// stops (above). The plan's own limit still stops real overuse.
+//
 // What was seen is the usage fact in the Record (`stored`), so it holds across runs, each of which is a new process; this
 // process's own marks are kept too. A refusal hands on the stored reading again with its own time, and the usage writer
 // (M12 writeUsageFact, L757) never writes unknown over a stored window still open: no reading, an answer about another
@@ -56,7 +72,7 @@ import { pastTime } from '../shared/still-waiting.mjs';
 /**
  * The `stored` reader over a Record: the usage fact it holds for the account, or null when it holds none. A failed read
  * throws (L781, audit #283 r4 M-1): M9's read answers `{ corrupt: true }` rather than throw, and taking that as none would
- * drop the marks a forged low reading is held to.
+ * drop the marks a reading is held to (a moved reset time is refused against them; a drop is said against them, L1358).
  */
 export const storedUsage = (rec) => (account) => knownDoc(rec.read('fact', USAGE_FACT(account)), `the stored usage for ${account}`);
 const SOURCE = 'claude /usage';
@@ -172,7 +188,7 @@ export function sensorsPorts({ file, ownerUid, now = () => new Date(), staleMs =
   // row it came from (L746 r3 self-review): M11 reads the week alone, so a change of row must not start it afresh.
   const marksOf = (account, slot) => {
     const out = []; const m = seen.get(`${account}|${slot}`); if (m) out.push(m);
-    // Stored marks that can't be read are never taken as none (that would let a forged low reading through): the read
+    // Stored marks that can't be read are never taken as none (that would let a moved reset time through and hide a drop): the read
     // fails, and the usage writer hands the stored reading on, or refuses when it can't read it either.
     let d = null; try { d = stored(account); } catch (e) { throw new Error(`the stored usage marks could not be read (${String(e?.message ?? e).slice(0, 80)})`); }
     const sw = slot === 'session' ? d?.h5 : d?.week;
@@ -180,17 +196,20 @@ export function sensorsPorts({ file, ownerUid, now = () => new Date(), staleMs =
     if (sw && Number.isFinite(r) && Number.isFinite(sw.used_pct)) out.push({ resets: r, pct: sw.used_pct });
     return out;
   };
-  // A lower percent than one already seen in the same window, or a reset time moved back or later while the window seen
-  // is still open, is refused (L728 m1; L746 m-A: a new window starts only once the old one has passed). → a reason, or
-  // null. This process's marks are written only by commit(), once the reading passes; the stored one by the usage fact.
-  const dropped = (account, slot, row, w) => {
+  // Within one window (the same reset time) a lower percent than one already seen is TAKEN AS A RESET (L1358): the owner or
+  // Anthropic can reset plan usage, so a drop is real; the reading passes, its marks start again from the new figure, and
+  // the drop is noted (`down`). A reset time moved back or later while the window seen is still open is refused (L746 m-A:
+  // a new window starts only once the old one has passed). → { refuse: reason } | { down: { row, from, to } } | null.
+  // This process's marks are written only by commit(), once the reading passes; the stored one by the usage fact.
+  const checkWindow = (account, slot, row, w) => {
     const r = Date.parse(w?.resets_at ?? '');
     if (!w || !Number.isFinite(r)) return null;
+    let top = null;
     for (const m of marksOf(account, slot)) {
-      if (Math.abs(r - m.resets) <= SAME_WINDOW_MS) { if (w.used_pct < m.pct) return `usage: the ${row} row went down within one window (${w.used_pct}% after ${m.pct}%), so it is refused`; continue; }
-      if (m.resets > now().getTime()) return `usage: the ${row} row's reset time moved ${r < m.resets ? 'back' : 'later'} while the window seen (to ${new Date(m.resets).toISOString()}) is still open, so it is refused`;
+      if (Math.abs(r - m.resets) <= SAME_WINDOW_MS) { if (w.used_pct < m.pct && (top === null || m.pct > top)) top = m.pct; continue; }
+      if (m.resets > now().getTime()) return { refuse: `usage: the ${row} row's reset time moved ${r < m.resets ? 'back' : 'later'} while the window seen (to ${new Date(m.resets).toISOString()}) is still open, so it is refused` };
     }
-    return null;
+    return top === null ? null : { down: { row, from: top, to: w.used_pct } };
   };
   // A reading that passed is handed on with the window's first reset time, so the stored fact can't creep up to a minute
   // per run toward an early end (L746 r3 self-review). The earliest mark of the same window is the first one seen.
@@ -204,7 +223,8 @@ export function sensorsPorts({ file, ownerUid, now = () => new Date(), staleMs =
     const r = Date.parse(w?.resets_at ?? '');
     if (!w || !Number.isFinite(r)) return;
     const k = `${account}|${slot}`; const m = seen.get(k);
-    seen.set(k, m && Math.abs(r - m.resets) <= SAME_WINDOW_MS ? { resets: m.resets, pct: Math.max(m.pct, w.used_pct) } : { resets: r, pct: w.used_pct });
+    // The accepted figure is the mark, a drop included (L1358: a reset starts the marks again from the new value).
+    seen.set(k, m && Math.abs(r - m.resets) <= SAME_WINDOW_MS ? { resets: m.resets, pct: w.used_pct } : { resets: r, pct: w.used_pct });
   };
   // A refused reading must not wipe the marks (L746 r3 self-review): the pass writes a null reading as unknown usage, over
   // the stored fact. So the stored reading is handed on again, with its own older time: the writer keeps that time, M11
@@ -246,8 +266,12 @@ export function sensorsPorts({ file, ownerUid, now = () => new Date(), staleMs =
       const w = (x) => (x ? { used_pct: x.used_pct, resets_at: x.resets_at } : null);
       const from = a.usage.week_from ?? null;
       const h5in = w(a.usage.h5); const weekIn = w(a.usage.week);
-      const down = dropped(account, 'session', 'session', h5in) ?? (from ? dropped(account, 'week', from, weekIn) : null);
-      if (down) { why = down; return kept(account); }
+      const checks = [checkWindow(account, 'session', 'session', h5in), from ? checkWindow(account, 'week', from, weekIn) : null];
+      const refused = checks.find((c) => c?.refuse)?.refuse;
+      if (refused) { why = refused; return kept(account); }
+      // L1358: each drop within one window, said in plain words. It rides on the reading into the usage fact (the diary keeps
+      // it) and is this read's reason, so the pass logs it.
+      const resets = checks.filter((c) => c?.down).map(({ down: d }) => `usage for ${d.row} went down from ${d.from}% to ${d.to}% within one window; taken as a reset`);
       const h5 = anchored(account, 'session', h5in); const week = from ? anchored(account, 'week', weekIn) : weekIn;
       commit(account, 'session', h5);
       if (from) commit(account, 'week', week);
@@ -257,8 +281,10 @@ export function sensorsPorts({ file, ownerUid, now = () => new Date(), staleMs =
       const gaps = [!h5 && !none && 'no 5-hour row', h5 && !h5.resets_at && 'no 5-hour reset time', !week && 'no weekly row',
         week && !week.resets_at && 'no weekly reset time'].filter(Boolean);
       if (gaps.length) why = `usage: the report had ${gaps.join(', ')}, so it stays unknown`;
+      const note = resets.length ? resets.join('; ') : null;
+      if (note) why = why ? `${note}; ${why}` : note;
       return { source: from ? `${SOURCE} | week from ${from}` : SOURCE, h5, week, week_from: from, observed_at: a.observed_at,
-        ...(none ? { h5_none: true } : {}) };
+        ...(none ? { h5_none: true } : {}), ...(note ? { reset_note: note } : {}) };
     },
     lastReason: () => why,
   };

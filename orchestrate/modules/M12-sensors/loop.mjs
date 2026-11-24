@@ -65,13 +65,14 @@ export async function timed(fn, ms, what) {
 }
 
 /**
- * One pass. `rec` is the record; `ports` as above; `now()` → Date. → { wrote: {id: {ok, unknown, reason, kept?, not_known?}}, problems: [...] }.
+ * One pass. `rec` is the record; `ports` as above; `now()` → Date. → { wrote: {id: {ok, unknown, reason, kept?, not_known?, reset?}}, problems: [...], notes: [...] }.
+ * `notes` are things worth saying that are not problems: a usage drop within one window taken as a reset (L1358).
  * `kept` names usage windows handed on from the stored reading; `not_known` names PR fields read as not known.
  * A problem is a read that failed or a write the record refused; the rest of the pass still runs.
  */
 export async function sensorsPass({ rec, ports, now = () => new Date(), deadlineMs = PROBE_DEADLINE_MS, loop = LOOP }) {
   const writer = makeFactWriter(rec, { actor: 'sensors', now });
-  const wrote = {}; const problems = [];
+  const wrote = {}; const problems = []; const notes = [];
   // A port with a time limit: a failure is noted and answers `fallback` (unknown).
   const port = (fn, what, fallback = null) => async (...a) => {
     if (typeof fn !== 'function') return fallback;
@@ -104,6 +105,8 @@ export async function sensorsPass({ rec, ports, now = () => new Date(), deadline
       note(`usage-${who}`, r, u?.h5?.used_pct == null && !(u?.h5_none === true && u?.week?.used_pct != null && u?.week?.resets_at != null));
       // A window handed on from the stored reading (no new figure for it) is kept, not known (L771).
       if (r?.ok === true && r.handedOn?.length) wrote[`usage-${who}`].kept = [...r.handedOn];
+      // L1358: a drop within one window taken as a reset is said in the pass's notes (logged), as well as kept in the fact.
+      if (r?.ok === true && typeof u?.reset_note === 'string' && u.reset_note) { wrote[`usage-${who}`].reset = u.reset_note; notes.push(`usage-${who}: ${u.reset_note}`); }
     },
     'pr-': async () => {
       const g = ports.github;
@@ -146,7 +149,7 @@ export async function sensorsPass({ rec, ports, now = () => new Date(), deadline
   for (const f of polled) if (!feed[f]) problems.push(`${f}: the loop names it but has no feed for it`);
   if (polled.includes('signed-in-account')) await feed['signed-in-account']();
   await Promise.all(polled.filter((f) => f !== 'signed-in-account' && feed[f]).map((f) => feed[f]()));
-  return { wrote, problems };
+  return { wrote, problems, notes };
 }
 
 /** The job's config, through the checked reader (L253); `opts.self` is this script, checked as a code file of the copy. */
@@ -177,6 +180,7 @@ export async function main(argv, { now = () => new Date(), log = (s) => process.
     const r = await Promise.race([sensorsPass({ ...wired, now }), late]);
     if (r.late) { log(`sensors: the pass did not finish within ${runDeadlineMs} ms; exiting so the next start can run`); return 2; }
     for (const p of r.problems) log(`sensors: ${p}`);
+    for (const n of r.notes ?? []) log(`sensors: ${n}`);
     return 0;
   } finally { clearTimeout(timer); }
 }

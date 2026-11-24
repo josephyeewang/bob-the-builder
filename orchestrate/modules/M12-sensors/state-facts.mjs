@@ -9,7 +9,8 @@
 // The fact ids are M11's own (imported, not copied), and every fact passes the allow-list in fact-shapes.mjs.
 //
 // Ports (each may be async):
-//   readUsage(account)  → { h5: { used_pct, resets_at }, week: { used_pct, resets_at }, source, observed_at?, h5_none? } | null
+//   readUsage(account)  → { h5: { used_pct, resets_at }, week: { used_pct, resets_at }, source, observed_at?, h5_none?, reset_note? } | null
+//                         reset_note: a drop within one window taken as a reset (L1358, sensors-ports.mjs), stored as written.
 //                         h5_none: true = the plan's report listed no 5-hour row at all (L1331), so M11 judges the band
 //                         by the week alone. The fact always stores h5_none: true only when the reading says so, else false.
 //   whoIsSignedIn()     → the account name, or { account, signed_in?, reason?, observed_at? }, or null when it can't be read
@@ -54,8 +55,8 @@ const known = (w) => Number.isFinite(w?.used_pct) && timeOrNull(w?.resets_at) !=
  * The usage fact. Never unknown over known (L757, audit #283 r3 M-1): while a stored window is still open (its reset time
  * not passed), a reading that has nothing for that window (no reading at all, the loop's own unknown when the read failed
  * or ran late, no row, or no reset time) hands on the stored window instead, and the fact keeps the earlier of the two
- * times. So the marks the owner's-answer check compares against (sensors-ports.mjs) are never wiped by a gap, and a forged
- * low reading after one is still refused; the handed-on reading ages as before, and M11 then reads usage as not known.
+ * times. So the marks the owner's-answer check compares against (sensors-ports.mjs) are never wiped by a gap: a reset time moved
+ * while the window is open is still refused after one, and a drop is still said against the marks (L1358); the handed-on reading ages as before, and M11 then reads usage as not known.
  * Once the stored window's reset time passes, an unknown is written as unknown. A write that hands a window on says which
  * (`handedOn: ['h5' | 'week']`), so the pass summary shows it as kept, not as newly known (L771).
  */
@@ -100,6 +101,9 @@ export async function writeUsageFact(writer, readUsage, account, { now = () => n
   if (r.h5?.used_pct != null || (r.week?.used_pct != null && !known(r.week))) hold = Math.max(hold, at + H5_HOLD_MS);
   doc.h5_hold_until = hold > at ? new Date(hold).toISOString() : null;
   doc.h5_none = r.h5_none === true && r.h5?.used_pct == null && known(r.week) && !handedOn.length && !(hold > at);
+  // L1358: a drop within one window that the reader took as a reset, in plain words, on the write where it was seen, so
+  // the diary keeps it. Only on a fresh reading's own figures: never carried to the next write, never on a handed-on window.
+  if (typeof r.reset_note === 'string' && r.reset_note) doc.reset_note = r.reset_note.slice(0, 300);
   for (const k of handedOn) doc[k] = win(stored[k]);
   if (handedOn.length) {
     doc.observed_at = relayed(observed_at, stored.observed_at);
