@@ -16,10 +16,9 @@
 
 import { createHash } from 'node:crypto';
 import { readdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { join } from 'node:path';
 import { OUTBOX_NAME } from '../M4-workshop/launcher/outbox.mjs';
-import { readDocFile } from '../M9-record/read-view.mjs';
-import { docPathOf } from '../M9-record/store.mjs';
+import { readDocFile, recordFolderProblem } from '../M9-record/read-view.mjs';
 
 /** Intake's fact for one handed-in file (M11 outbox-intake.mjs appliedId, not exported there). */
 export const appliedFactId = (sessionId, name) => `intake-applied-${sessionId}-${name}`;
@@ -79,8 +78,15 @@ export function readFiled({ outbox, sessionId, recordRoot, recordUid, list = (d)
   let files;
   try { files = list(outbox); } catch (e) { return { text: `What Front Door tab ${sessionId} filed can't be read: its folder can't be listed (${e?.code ?? e?.message})`, rows: null }; }
   const fact = (id) => readDocFile({ recordRoot, recordUid, entity: 'fact', id });
-  // Listed once per read-back, only when a file has no applied fact; each hold is then read through readDocFile's checks.
+  // Listed once per read-back, only when a file has no applied fact, after read-view's checks of each folder on the way
+  // (as M4 review-runner-main.mjs recordPlanFile lists it; only M9 may import its store.mjs). Each hold is then read
+  // through readDocFile's checks. A folder that fails a check throws, and the file reads as not taken yet.
   let ids = null;
-  const factIds = () => (ids ??= readdirSync(dirname(docPathOf(recordRoot, 'fact', 'x'))).filter((n) => n.endsWith('.json')).map((n) => n.slice(0, -5)));
+  const factIds = () => {
+    if (ids) return ids;
+    const dir = join(recordRoot, 'docs', 'fact');
+    for (const d of [recordRoot, join(recordRoot, 'docs'), dir]) { const bad = recordFolderProblem(d, recordUid); if (bad) throw new Error(bad); }
+    return (ids = readdirSync(dir).filter((n) => n.endsWith('.json')).map((n) => n.slice(0, -5)));
+  };
   return filedReadback({ sessionId, files, fact, factIds });
 }
