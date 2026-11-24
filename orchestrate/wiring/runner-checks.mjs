@@ -205,8 +205,11 @@ export const baselineCommand = (test, file) => exitCodeCommand(test, file, 'test
 export const lockedRunOf = (x) => ({ inner, cwd, settingsFile, ms, label, job }, ports = {}) => guardedRun({ spawn: x.spawn, claudeBin: x.claudeBin,
   settingsFile, inner, profile: x.profile, cwd, env: x.env, ms, killGroup: x.killGroup, groupThere: x.groupThere, label,
   gfile: groupFile({ cwd, job, sessionId: x.sessionId, run: (x.nonce ?? (() => randomBytes(8).toString('hex')))() }), ...ports });
-/** The smoke's run (reviewChecks' lockedRun): claude ended by a signal, or the line's group never kept or still there at
- * claude's end, throws, so the smoke can't say. */
+/** The smoke's run (reviewChecks' `smokeRunOf`, called there with the session's own x; given by workerChecks below and
+ * by the review runner's wiring, M4 review-wiring.mjs, L1353): claude ended by a signal, or the line's group never kept
+ * or still there at claude's end, throws, so the smoke can't say. No group goes into a runner's memory (no onGroup):
+ * the smoke's line ends by itself within seconds (two touches and a 5-second curl), and its guard gives up after
+ * JOB_ACK_WAIT_MS with no go-ahead, so nothing of it outlives a runner that stopped mid-smoke for long. */
 export const smokeRunOf = (x) => async (o) => {
   const ran = await lockedRunOf(x)(o);
   if (ran?.exitCode === null) throw new Error(`claude did not end by itself (${claudeEnd(ran)})`);
@@ -234,7 +237,7 @@ export function commandMissing(x, key) {
  */
 export function workerChecks(x, { gateOf = check12, snapshotOwner = 0 } = {}) {
   const lockedRun = lockedRunOf(x);
-  const r = reviewChecks({ ...x, reviewHome: x.home, lockedRun: smokeRunOf(x) });
+  const r = reviewChecks({ ...x, reviewHome: x.home, smokeRunOf });
   // reviewChecks' check 1 says "the review copy"; a worker's is the card's copy (#369 r1 c1).
   const ports = { 1: async () => { const a = await r[1](); return a?.ok ? a : { ...a, reason: String(a?.reason).replaceAll('the review copy', 'the copy') }; }, 5: r[5], 9: async () => checkRoleEnv(x.env, { allowSigninToken: x.allowSigninToken === true }) };
   if (has(x.mirror)) ports[2] = async () => { const p = await setupFilesProblem(x); return p ? refuse(p) : { ok: true }; };

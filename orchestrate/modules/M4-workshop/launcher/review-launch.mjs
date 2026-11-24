@@ -21,10 +21,12 @@
 //                           its hash right, and its rules the config's
 //   9  no stray keys        checkRoleEnv (env-check.mjs) on the environment the session gets
 //   10 machine-wide block   checkMachineWide (env-check.mjs) on the machine-wide settings file the config names
-//   11 smoke                smokeTest through the runner's lockedRun (wiring/runner-locked.mjs guardedRun, L1352): one
-//                           shell command, run by the role's own start under its own settings with exactly that command
-//                           allowed, tries to write outside the copy and reach github.com; it must first mark that it
-//                           ran, or the smoke can't say and refuses. No lockedRun given: refused
+//   11 smoke                smokeTest through the lock-down run `smokeRunOf(x)` makes (wiring/runner-checks.mjs
+//                           smokeRunOf, its guardedRun, L1352): one shell command, run by the role's own start under its
+//                           own settings with exactly that command allowed, tries to write outside the copy and reach
+//                           github.com; it must first mark that it ran, or the smoke can't say and refuses. The maker is
+//                           given, never imported here (wiring/ imports this file); the review wiring and the worker
+//                           runner each pass the one smokeRunOf (L1353). None given: refused
 //   12 budget               M11's own check12 (gate.mjs, the function the Dispatcher's pass runs), given the budget
 //                           source the config's `budget` module hands back; no module, no port
 //   13 Bob method folder    checkBobFolder (launch.mjs) against the pinned file list the config's `bobManifest` names;
@@ -107,9 +109,11 @@ export async function spawnClaude(spawn, bin, args, { cwd, env }) {
  *   hooksDir, reviewHome, settings ({ file, settings } from settingsFor), rules (the config's), snapshot,
  *   writeSnapshot(path, rules), machineWide (path), busy(dir) → [holders], alert(text), spawn, ownUid(),
  *   cardDoc (the card from the Record), budget ({ rules, rec, bandsNow, runningNow } or null),
- *   bobFolder, bobManifest ({ path: sha256 } or null), probeMs; lockedRun ({ inner, cwd, settingsFile, ms, label, job }
- *   → runs `inner` as the lock-down's one command and answers once it is done, or throws: the wiring's guardedRun,
- *   L1352; check 11's only way to run claude); managedReaders (tests only: fakes for check 10's
+ *   bobFolder, bobManifest ({ path: sha256 } or null), probeMs; smokeRunOf (wiring/runner-checks.mjs smokeRunOf: given
+ *   this very `x`, it makes the run ({ inner, cwd, settingsFile, ms, label, job } → runs `inner` as the lock-down's one
+ *   command and answers once it is done, or throws: guardedRun, L1352) with x's own spawn, claudeBin, profile, env and
+ *   session id, so a copy of x with another spawn can't keep an old one (L1353); check 11's only way to run claude);
+ *   managedReaders (tests only: fakes for check 10's
  *   readers of the other managed sources, env-check.mjs MANAGED_READERS; left out, the real ones).
  * → { [n]: async () => { ok, reason } }, with no entry for a check this role has no port for.
  */
@@ -158,13 +162,14 @@ export function reviewChecks(x) {
       for (const p of Object.values(f)) rmSync(p, { force: true });
       let cmd; try { cmd = smokeCommand(f); } catch (e) { return refuse(e.message); }
       // L1352: given as it is, this line matched no exact allow rule, so dontAsk refused it and the smoke could never
-      // say. It runs as the install, the save and the baseline do: the runner's lockedRun gives claude one plain command
+      // say. It runs as the install, the save and the baseline do: the run smokeRunOf makes gives claude one plain command
       // (the guard, with this line as its job) under the session's own settings with exactly that command allowed.
-      if (typeof x.lockedRun !== 'function') return refuse('the smoke has no lock-down run to go through (the runner gives lockedRun)');
+      if (typeof x.smokeRunOf !== 'function') return refuse('the smoke has no lock-down run to go through (the runner gives smokeRunOf)');
+      const lockedRun = x.smokeRunOf(x);
       try {
         return await smokeTest({
           run: async () => {
-            await x.lockedRun({ inner: cmd, cwd: x.copy, settingsFile: x.settings.file, ms: probeMs, label: 'the smoke', job: 'smoke' });
+            await lockedRun({ inner: cmd, cwd: x.copy, settingsFile: x.settings.file, ms: probeMs, label: 'the smoke', job: 'smoke' });
             // Ran, and either reached the network or not. Not ran: it can't say, and the smoke refuses.
             return { networkReached: exists(f.net) ? true : exists(f.ran) ? false : undefined };
           },

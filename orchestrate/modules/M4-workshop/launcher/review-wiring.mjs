@@ -26,12 +26,24 @@
 // wrote>` and no other settings source, and returns claude's own process id (L66), since it spawns the pinned claude
 // itself. `ok: false` means claude was never spawned (L71 point 2); a launch refusal carries the checks' log
 // (`launch_log`).
+// Check 11, the smoke (L1353): the wiring gives launch the one smokeRunOf (wiring/runner-checks.mjs, the worker runner's
+// own), set after the runner's launchInputs so nothing there can take it out or swap it. reviewChecks calls it with the
+// session's own inputs, so the smoke's claude is this session's: the pinned claude, its spawn, its role, the environment
+// check 9 holds and its session id, under its settings file (the job's own copy beside it in the runner's settings
+// folder, with exactly the one command allowed), in its review copy, as the review user. The guard is the one beside
+// the hooks those settings name (jobGuard), so the installed copy's hooks of that version let the command through, and
+// hooks that are not their version's own are refused by name before claude starts. The smoke's process groups are not
+// kept in the runner's memory, as the worker runner keeps none for its smoke either: the review runner is one pass per
+// run and waits for the smoke to end; its claude's group is killed at the limit and at its end, and so is the line's own
+// group; a smoke claude left by a pass that died is a claude of review's the runner did not start, which the next pass
+// stops and tells Joe of (m-7); the line itself ends within seconds, and its guard gives up unanswered after 10 seconds.
 
 import { DESIGN_PROFILES } from './role-profiles.mjs';
 import { reviewPackage } from '../../M5-review-audit/review-package.mjs';
 import { reviewerPrompt } from '../../M5-review-audit/reviewer-prompt.mjs';
 import { launchReview, sessionArgs, spawnClaude } from './review-launch.mjs';
 import { startEnv } from './env-check.mjs';
+import { smokeRunOf } from '../../../wiring/runner-checks.mjs';
 
 const refuse = (reason) => ({ ok: false, reason });
 
@@ -61,11 +73,9 @@ export async function start(x) {
   const { env } = built;
   const li = x.launchInputs ?? {};
   let r;
-  // OPEN (#666 r2 M2; L1353, owner: lead): no lockedRun is passed here, so check 11's smoke refuses every reviewer and
-  // auditor start ("the smoke has no lock-down run to go through"). The review runner can't pass check 11 until it gets one.
   try {
     r = await launchReview({ ...li, role: x.role, profile, sessionId: x.sessionId, card: x.card, head: x.head, copy: x.copy, outbox: x.outbox,
-      env, claudeBin: x.claudeBin, spawn: x.spawn, settings: s },
+      env, claudeBin: x.claudeBin, spawn: x.spawn, settings: s, smokeRunOf },
     { spawnSession: () => spawnClaude(x.spawn, x.claudeBin, args, { cwd: x.copy, env }), names: { ...(li.names ?? {}), flags: args.filter((a) => a.startsWith('--')), version: li.pin } });
   } catch (e) { return no(`the launch checks failed: ${e?.message ?? e}`); }
   if (!r?.ok) return no(r?.reason ?? 'the launch checks refused', { launch_log: r?.log ?? [] });
