@@ -941,3 +941,77 @@ test('R-0b-175a: with a hook store, each pass applies its new lines and every st
   z.status = { ...z.status, held: [{ ...H, extra: 1 }] };
   assert.throws(() => z.read(), /held list is not what the runner writes/);
 });
+
+// L1357, the Mini on 24 Nov: the Dispatcher claimed R-S1-2 at 19:56:15, while the runner was down for its update (it
+// stopped at 19:56:11 and came back at 19:57:11). The new runner read the request, the start ran past its port wait
+// ("is still on; it stays waiting"), and claude started at 19:57:44, after the Dispatcher had stopped waiting. That
+// session ended on its own; the claim lapsed ("never launched") once stopSession saw it used up; and its copy then
+// refused every later start of the card. Each later start is now told the copy is free, so the start port moves it aside.
+test('L1357: the restart race, then a lapsed claim: the late start runs and ends, the claim lapses, and the next start of the card is told its copy is free', async () => {
+  const w = world(); const seen = [];
+  const real = w.ports.start; let go;
+  w.ports.start = (x) => { seen.push([x.sessionId, x.copyFree, x.copyHeld]); if (x.sessionId !== 'S-1') return real(x); return new Promise((resolve) => { go = () => resolve(real(x)); }); };
+  // The request was written while no runner ran; the new runner, a minute on, with its memory and nothing held, reads it.
+  w.now = T0 + 56_000;
+  await w.pass([launchReq('S-1', { card: 'C-1' })]);
+  assert.match(w.notes.join('\n'), /the start of S-1 is still on; it stays waiting, so its claim stays/);
+  assert.deepEqual(seen, [['S-1', true, null]], 'a card whose copy nothing holds');
+  // A second claim of the card while that start is on, or while its session runs, never reaches the start.
+  await w.pass([launchReq('S-2', { card: 'C-1' })]);
+  go(); await new Promise((r) => setImmediate(r));
+  w.now += 33_000; await w.pass();
+  assert.equal(w.read().requests['S-1'].state, 'started');
+  await w.pass([launchReq('S-3', { card: 'C-1' }, w.now)]);
+  assert.deepEqual(seen.map((s) => s[0]), ['S-1'], 'held while the start is on and while its session runs');
+  // claude ends on its own; the Dispatcher's lapse asks stopSession, which now answers true, and the claim lapses.
+  w.gone.add(4001); w.now += 30_000; await w.pass();
+  assert.equal(w.read().requests['S-1'].state, 'stopped');
+  assert.equal(w.sync().stopSession('S-1'), true, 'the lapse goes through');
+  // The card is claimed again: the start is told nothing of the runner's may still use the copy.
+  w.now += 4 * MIN; await w.pass([launchReq('S-4', { card: 'C-1' }, w.now)]);
+  assert.deepEqual(seen.at(-1), ['S-4', true, null]);
+  assert.equal(w.read().answers['launch-S-4'].ok, true);
+});
+
+test('L1357: an inherited start holds its card (claude may run in the copy); an install or a save still kept holds the copy, and the start is told what', async () => {
+  // A runner that stopped mid-start comes back with the start waiting and none held: the card's next launch is refused
+  // before any start, so its copy is never touched.
+  const w = world(); const seen = [];
+  const real = w.ports.start; w.ports.start = (x) => { seen.push([x.sessionId, x.copyFree, x.copyHeld]); return real(x); };
+  w.state = { requests: { 'S-1': { state: 'waiting', at: T0, card: 'C-1', product: 'p1' } } };
+  await w.pass([launchReq('S-2', { card: 'C-1' })]);
+  assert.deepEqual(seen, []);
+  assert.match(w.read().answers['launch-S-2'].reason, /card C-1 already has a session the runner started, or a start still on/);
+  // Its install group, kept and not yet shown gone, holds no other card's copy (it installs in C-1's).
+  w.state.installs = { 'S-1': { pgid: 7101, pid: 7101, pid_start: '2026-11-10T12:00:00Z', at: T0 } };
+  w.ports.stopGroup = async () => ({ ok: false, reason: 'the group leader\'s start time can\'t be read' });
+  await w.pass([launchReq('S-3', { card: 'C-3' })]);
+  assert.deepEqual(seen.at(-1), ['S-3', true, null]);
+  // An install of a used-up start (its row no longer names a card) that can't be shown gone holds every card's copy.
+  const u = world(); const useen = [];
+  const ureal = u.ports.start; u.ports.start = (x) => { useen.push([x.sessionId, x.copyFree, x.copyHeld]); return ureal(x); };
+  u.state = { requests: { 'S-8': { state: 'refused', at: T0 } }, installs: { 'S-8': { pgid: 7101, pid: 7101, pid_start: '2026-11-10T12:00:00Z', at: T0 } } };
+  u.ports.stopGroup = async () => ({ ok: false, reason: 'the group leader\'s start time can\'t be read' });
+  await u.pass([launchReq('S-1')]);
+  assert.deepEqual(useen, [['S-1', false, 'the install of S-8\'s start may still run']]);
+  // A save of the card's ended session still on holds its copy; once it has answered, nothing does.
+  const v = world(); const vseen = [];
+  const vreal = v.ports.start; v.ports.start = (x) => { vseen.push([x.sessionId, x.copyFree, x.copyHeld]); return x.copyFree ? vreal(x) : { ok: false, reason: `the copy can't be made (copy folder already exists; ${x.copyHeld})` }; };
+  await v.pass([launchReq('S-1')]);
+  let end; v.ports.saveWork = () => new Promise((r) => { end = r; });
+  await v.pass([{ name: `saveWork-S-1-${N1}.json`, body: { saveWork: { id: 'S-1' }, asked_at: new Date(v.now).toISOString() } }]);
+  v.gone.add(4001); await v.pass([launchReq('S-2', { card: 'C-1' })]);
+  assert.deepEqual(vseen.at(-1), ['S-2', false, 'a save of session S-1 may still run in it']);
+  assert.equal(v.read().answers['launch-S-2'].reason, 'the copy can\'t be made (copy folder already exists; a save of session S-1 may still run in it)', 'the refusal says what holds the copy');
+  end({ ok: true }); await new Promise((r) => setImmediate(r));
+  await v.pass([launchReq('S-3', { card: 'C-1' })]);
+  assert.deepEqual(vseen.at(-1), ['S-3', true, null]);
+  // One kept from an earlier run that can't be stopped yet holds it too.
+  const k = world(); const kseen = [];
+  const kreal = k.ports.start; k.ports.start = (x) => { kseen.push([x.sessionId, x.copyFree, x.copyHeld]); return kreal(x); };
+  await k.pass([launchReq('S-1')]); k.gone.add(4001); await k.pass();
+  k.state.saves = { 'S-1': { pgid: 7201, pid: 7201, pid_start: '2026-11-10T12:00:00Z', at: T0 } };
+  k.ports.stopGroup = async () => ({ ok: false, reason: 'busy' });
+  await k.pass([launchReq('S-2', { card: 'C-1' })]);
+  assert.deepEqual(kseen.at(-1), ['S-2', false, 'a save of session S-1 may still run in it']);
+});

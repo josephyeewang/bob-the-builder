@@ -3,7 +3,7 @@
 //
 // What each one does, and what is still another lane's (each such piece is a port that refuses until it is given, so no
 // session ever runs on a guess; the list is in the step-5 PR and on the lead's Mini list):
-//   start({ card, kind, product, sessionId, live, undoCommit? }) → { ok: true, pid, pgid, pidStart, head, base, outbox, signin, configDir, copy }
+//   start({ card, kind, product, sessionId, live, undoCommit?, copyFree?, copyHeld? }) → { ok: true, pid, pgid, pidStart, head, base, outbox, signin, configDir, copy }
 //     1. the card is read from the Record (read only) and must be claimed for this very session (claim.session_id): a
 //        launch request for a card claimed by another session starts nothing;
 //     2. the copy's start commit comes from `startCommit` (default cardStartCommit, L825: a Tier 1 card, or one with no
@@ -11,7 +11,7 @@
 //        launch's reversed commit (undoCommit, L976) must be in the mirror and an ancestor of that start commit
 //        (undoCommitProblem, safe-git; L985), or the start is refused with no copy made. promptFor is handed it (it is asked
 //        once the copy and outbox exist, L970), and so is launch check 12, which holds it to the commit the card's source names. Then M4's
-//        prepareWorkerCopy makes <copiesRoot>/<product>/<card> (never over a folder that is there). The answer's `base` names that
+//        prepareWorkerCopy makes <copiesRoot>/<product>/<card> (never over a folder that is there: one left there is moved aside first, or the start refused, L1357 below). The answer's `base` names that
 //        commit; it is kept in the runner's own session row and its answer (#364 r1 m2). The launch record has no field
 //        for it yet (writeLaunch, lane 2), and the status file's session fields don't carry it;
 //        The copy is <copiesRoot>/<product>/<card> and the outbox <outboxRoot>/<product>/<role>/<sessionId> (L836,
@@ -43,6 +43,10 @@
 //        group from a reused number only by that time (step-4 review M3).
 //     A refusal once the copy is made removes the copy, the outbox and the settings file this start made (claude never ran in
 //     them as a session), so the card's next start is not refused for a copy left over.
+//     A copy already there when a start comes (L1357: a start that ended after its claim lapsed, one refused once claude
+//     ran, an undo whose removal failed, a session that ended without its card's copy cleaned up) is moved aside, never
+//     removed, but only when the runner says nothing it knows of may still use it (`copyFree`, worker-runner.mjs) and every
+//     live session of the product denies the folder it goes to (LEFTOVER_FOLDER); else the start is refused, saying why.
 //   saveWork(session): M4 save-work (createSaveWork) on the session's copy, into its outbox. It runs only through the
 //     lock-down runner (runner-locked.mjs `runLocked`, L969), under the session's own settings file; without it save-work
 //     refuses, as it says it must. runner-main.mjs lockedWiring gives it the same runLocked as launch check 4.
@@ -99,6 +103,12 @@ import { SHA256 } from '../shared/plan-fingerprint.mjs';
 
 export const TRANSCRIPT_PLACE_CHECKED_AGAINST = null;   // read, not yet proved live (L1139): read in 2.1.316's code (see the note above); set to the version only after Joe's live run (L1134, L1137)
 const refuse = (reason) => ({ ok: false, reason });
+
+// Where a card's leftover copy is moved (L1357): <copies>/<product>/.leftover/<card>.before-<the new session id>. It is made
+// at every start, before the session's deny list is read, so every session started since denies it whole; a card id never
+// starts with a dot (CARD_ID), so no card's copy is named so, and the Dispatcher's cleanup passes dot folders by. Nothing
+// in it is removed by the runner: the owner looks and removes it.
+export const LEFTOVER_FOLDER = '.leftover';
 const notWired = (what) => refuse(`not wired: ${what}`);
 const SHA = /^[0-9a-f]{40}$/;
 
@@ -395,6 +405,42 @@ export function liveWallProblem(live, product, places, read) {
 }
 
 /**
+ * A card's copy left there by an earlier start, moved aside so the card can start again (L1357). → null (nothing there, or
+ * moved), or the plain reason the start is refused. The leftover folder is made first, on every start, so the session
+ * about to start denies it (its deny list is every name in the product's copies folder but its own card's).
+ * Moved only when (1) the runner vouches that no session, start, save or install of its own may still use the copy
+ * (`copyFree`; `copyHeld` says what may), and (2) every live session of this product denies the leftover folder: a
+ * session started before it was made denied the copy by its old name only, so moving it would let that one read it.
+ * One that can't be told (its settings unread) holds it too; an earlier run's start that never wrote settings is skipped,
+ * as liveWallProblem skips it. A rename within one folder: never a copy, never a removal, never through a link.
+ */
+export function moveLeftover({ fs, ownUid, log = () => {}, copies, copy, card, product, sessionId, live = [], readSettings, copyFree, copyHeld }) {
+  const aside = join(copies, LEFTOVER_FOLDER);
+  let made = null;
+  try { fs.mkdir(aside, { mode: 0o700 }); } catch (e) { if (e?.code !== 'EEXIST') made = e?.code ?? e?.message; }
+  let there; try { there = fs.lstat(copy); } catch (e) { if (e?.code === 'ENOENT') return null; return `the card's copy folder can't be read (${e?.code ?? e?.message})`; }
+  if (!there) return null;
+  const was = 'the copy can\'t be made (copy folder already exists';
+  if (copyFree !== true) return `${was}${typeof copyHeld === 'string' && copyHeld ? `; ${copyHeld}` : ''})`;
+  if (made) return `${was}; the leftover folder ${aside} can't be made (${made}), so it is not moved aside)`;
+  let a; try { a = fs.lstat(aside); } catch (e) { a = null; }
+  if (!a?.isDirectory?.() || a.isSymbolicLink() || a.uid !== ownUid()) return `${was}; ${aside} is not the runner's own folder, so it is not moved aside)`;
+  for (const s of Array.isArray(live) ? live : []) {
+    if (s?.product !== product) continue;
+    let set; let err;
+    try { set = readSettings(s?.id); } catch (e) { err = e; }
+    if (err && s?.unstarted === true && err?.code === 'ENOENT') continue;
+    if (err) return `${was}; session ${s?.id}'s settings can't be read (${err?.code ?? err?.message}), so whether it may read the copy once moved aside can't be told; it is moved once that session has ended)`;
+    const gap = productWallGap(set, { copies: aside });
+    if (gap) return `${was}; session ${s?.id} started before ${aside} was on its deny list (${gap}); it is moved once that session has ended)`;
+  }
+  const to = join(aside, `${card}.before-${sessionId}`);
+  try { fs.rename(copy, to); } catch (e) { return `${was}; moving it aside to ${to} failed (${e?.code ?? e?.message}))`; }
+  log(`card ${card}'s copy was left by an earlier start, and nothing the runner knows of may still use it; it was moved to ${to} (kept for the owner, never removed), and the card starts on a fresh copy`);
+  return null;
+}
+
+/**
  * The start port. c (the runner's config, checked by runner-main.mjs): { copiesRoot, outboxRoot, settingsDir, home, path,
  * claudeBin, recordRoot, recordUid, workerRunner: { requestsDir, statusFile },
  * products: { <name>: { repo, mirror, render: { paths, rulesHosts, productionFiles, proposalOutboxes } } } }.
@@ -453,7 +499,7 @@ export function startPort(c, deps = {}) {
   } = deps;
   const fs = { mkdir: mkdirSync, rm: rmSync, writeNew, list: readdirSync, lstat: lstatSync, chmodTree, rename: renameSync, ...(deps.fs ?? {}) };
   const log = deps.log ?? (() => {});
-  return async ({ card, kind, product, sessionId, live = [], undoCommit, onGroup } = {}) => {
+  return async ({ card, kind, product, sessionId, live = [], undoCommit, onGroup, copyFree = false, copyHeld = null } = {}) => {
     if (stopped()) return refuse('the worker runner is stopping');
     if (typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) return refuse('the session id is not one the Dispatcher makes');
     if (typeof card !== 'string' || !CARD_ID.test(card) || card.startsWith('.')) return refuse('not a card id');
@@ -498,6 +544,8 @@ export function startPort(c, deps = {}) {
     // compare with that commit, and main moving meanwhile is said as such, never read as the branch's tampering.
     let mainAt; try { mainAt = await mainOf(p.mirror); } catch (e) { return refuse(`the mirror's main can't be read (${e?.message ?? e})`); }
     const sameMain = async () => { try { return (await mainOf(p.mirror)) === mainAt; } catch { return false; } };
+    const leftover = moveLeftover({ fs, ownUid, log, copies: mine.copies, copy, card, product, sessionId, live, readSettings, copyFree, copyHeld });
+    if (leftover) return refuse(leftover);
     const making = { product: { repo: p.repo, mirror: p.mirror }, card: { id: card, repo: p.repo, commit, branch: cardBranch(card) } };
     const made = await prepare({ ...making, dest: copy });
     if (!made?.ok) return refuse(`the copy can't be made (${made?.reason ?? 'no answer'})`);

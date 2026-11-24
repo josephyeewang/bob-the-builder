@@ -55,6 +55,9 @@
 // A start leaves `pending` only once a memory holding its result has been kept (#358 r1 m3, #362 r1 M1): a keep that
 // fails leaves it there, so the next pass settles it again from the memory last kept.
 // A launch for a card that already has a live session, or a start still waiting, is refused (#358 r1 m4).
+// Every other start is told whether anything of this runner's may still use the card's copy (L1357, heldCopy: a save or an
+// install group still kept); with nothing, a copy left there by an earlier start is moved aside (runner-ports.mjs
+// moveLeftover), so a start whose claim lapsed, one refused once claude ran, or one whose undo failed never blocks its card.
 // The ports' contract (#358 r1 m5), which the real ports (runner-loop.mjs processGroupPorts) keep: a port is waited on
 // for at most RUNNER_PORT_MS only if it is async; a synchronous one blocks the pass for as long as it runs, so a
 // synchronous real port must bound itself well inside that wait (#362 r2 c-a: groupGone's ps, at most RUNNER_PS_MS); groupGone answers true only when the leader (pid and pid_start)
@@ -345,12 +348,29 @@ export async function workerRunnerPass(ctx) {
       p.group = { pgid: g.pgid, pid: g.pid, pid_start: g.pid_start, ...(g.job ? { job: { pgid: g.job.pgid, pid: g.job.pid, pid_start: g.job.pid_start } } : {}), at: now };
       if (!over) { state.installs[id] = p.group; flush(); } else if (holder?.keepInstall) holder.keepInstall(id, p.group);
     };
-    p.on = Promise.resolve().then(() => ports.start({ card: l.card, kind: l.kind, product: l.product, sessionId: id, live, onGroup, ...(l.kind === 'undo' ? { undoCommit: l.undo_commit } : {}) }))
+    // Whether anything of this runner's may still use the card's copy (L1357), so a copy left there may be moved aside.
+    const copyHeld = heldCopy(l.card, id);
+    p.on = Promise.resolve().then(() => ports.start({ card: l.card, kind: l.kind, product: l.product, sessionId: id, live, onGroup, copyFree: copyHeld === null, copyHeld, ...(l.kind === 'undo' ? { undoCommit: l.undo_commit } : {}) }))
       .then((a) => { p.a = a; }, (e) => { p.a = { threw: e?.message ?? String(e) }; }).finally(() => { p.done = true; });
     pending.set(id, p);
     await Promise.race([p.on, late(portMs)]);
     if (!p.done) { state.requests[id].told = now; note(`the start of ${id} is still on; it stays waiting, so its claim stays`); return; }
     await settle(p); settled.add(id);
+  }
+  // What of this runner's may still use card's copy (L1357), or null. Asked once launch has refused a card with a live
+  // session or a start still on, so here: a save of one of the card's sessions, held by this run or kept from an earlier
+  // one (it runs in the copy's .git), and an install group of another start still kept (step 0 could not show it gone),
+  // unless that start is still waiting on another card (it installs in that card's copy): a used-up row no longer names
+  // its card, so any other one holds every card. An ended session itself holds nothing: its
+  // group is gone, and the Record no longer claims the card for it, since this start's claim names a new session.
+  function heldCopy(card, id) {
+    for (const s of state.sessions) {
+      if (s.card !== card) continue;
+      if (isLive(s)) return `session ${s.id} may still run in it`;
+      if (pending.has(saveKey(s.id)) || Object.hasOwn(state.saves, s.id)) return `a save of session ${s.id} may still run in it`;
+    }
+    const q = Object.keys(state.installs).find((x) => x !== id && !(state.requests[x]?.state === 'waiting' && typeof state.requests[x].card === 'string' && state.requests[x].card !== card));
+    return q === undefined ? null : `the install of ${q}'s start may still run`;
   }
   // A start's answer: listed only when the reader would take it (M2); one it would refuse is stopped, then refused.
   async function settle({ key, id, l, a }) {
