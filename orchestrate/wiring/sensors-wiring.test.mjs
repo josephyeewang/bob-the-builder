@@ -93,7 +93,7 @@ test('L1049: wire() joins the loop to the real Record, the owner\'s answer and t
   // The job's own user stood in as another (ME + 2), so the answer file, this user's, is the owner's.
   const wired = await wire(w.config, { selfUid: ME + 2, log: (s) => logs.push(s), fetchFn: fakeGitHubFetch(w.fake), now: () => now,
     hosts: ['no-such-host.invalid'] });
-  assert.deepEqual(Object.keys(wired.ports).sort(), ['github', 'probes', 'readUsage', 'whoIsSignedIn']);
+  assert.deepEqual(Object.keys(wired.ports).sort(), ['github', 'probes', 'readUsage', 'usageReason', 'whoIsSignedIn']);
   assert.deepEqual(Object.keys(wired.ports.probes), ['network'], 'the Front Door and Mini Base are not wired: no stand-in answers');
   assert.equal(wired.ports.github.owner, ENTRY.owner);
   assert.equal(wired.ports.github.repo, ENTRY.repo);

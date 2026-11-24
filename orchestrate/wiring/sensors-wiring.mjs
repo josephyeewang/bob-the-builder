@@ -50,7 +50,7 @@ export function checkConfig(c, { selfUid = process.getuid() } = {}) {
 }
 
 /**
- * → { rec, ports: { whoIsSignedIn, readUsage, probes: { network }, github: { gh, owner, repo } } }, loop.mjs's shape.
+ * → { rec, ports: { whoIsSignedIn, readUsage, usageReason, probes: { network }, github: { gh, owner, repo } } }, loop.mjs's shape.
  * `fetchFn` and `now` (→ ms) are for tests; `answer` replaces sensorsPorts (tests only).
  */
 export async function wire(config, { fetchFn = globalThis.fetch, now = () => Date.now(), log = (s) => process.stderr.write(`${s}\n`), selfUid = process.getuid(), answer = sensorsPorts, hosts = NETWORK_HOSTS } = {}) {
@@ -62,6 +62,8 @@ export async function wire(config, { fetchFn = globalThis.fetch, now = () => Dat
     ports: {
       whoIsSignedIn: owner.whoIsSignedIn,
       readUsage: owner.readUsage,
+      // Why the last usage read was refused, handed on or partial: the loop logs it (L1358 m1).
+      usageReason: owner.lastReason,
       probes: { network: networkProbe({ hosts: [...hosts] }) },
       github: { gh, owner: entry.owner, repo: entry.repo },
     },

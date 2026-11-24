@@ -241,7 +241,7 @@ test('L728 M3: every refusal leaves a reason in lastReason()', async () => {
   try { const p = ports(w.file); await p.readUsage('b'); assert.ok(p.lastReason()); await p.readUsage('a'); assert.equal(p.lastReason(), null); } finally { w.done(); }
 });
 
-test('L728 m1, L1358: within one window a lower percent is taken as a reset and said; a moved reset time is refused', async () => {
+test('L728 m1, L1358: within one window a lower percent on the same row is taken as a reset and noted; a moved reset time or a row change is refused', async () => {
   const w = place();
   const put = (h5, week, from = 'weekly_all') => assert.equal(writeAnswer({ to: w.file, answer: answer({ usage: { h5, week, week_from: from } }) }).ok, true);
   const H = (pct, r = '2026-11-05T15:00:00.000Z') => ({ used_pct: pct, resets_at: r });
@@ -252,11 +252,11 @@ test('L728 m1, L1358: within one window a lower percent is taken as a reset and 
     put(H(40), W(50));
     let u = await p.readUsage('a');
     assert.equal(u?.week?.used_pct, 50, 'L1358: a drop within one window is a reset (by the owner or Anthropic), taken');
-    assert.equal(u.reset_note, 'usage for weekly_all went down from 60% to 50% within one window; taken as a reset');
-    assert.equal(p.lastReason(), u.reset_note, 'and said');
+    assert.equal(u.reset_note, 'usage for weekly_all went from 60% to 50% this week; taken as a reset');
+    assert.equal(p.lastReason(), null, 'a reset rides on the reading; it is no reason (nothing was wrong)');
     put(H(30, '2026-11-05T15:00:00.500Z'), W(50));                    // the server's times carry ms: still one window
     u = await p.readUsage('a');
-    assert.deepEqual([u?.h5?.used_pct, u?.reset_note], [30, 'usage for session went down from 40% to 30% within one window; taken as a reset']);
+    assert.deepEqual([u?.h5?.used_pct, u?.reset_note], [30, 'usage for session went from 40% to 30% in this 5-hour window; taken as a reset']);
     assert.equal(u.h5.resets_at, '2026-11-05T15:00:00.000Z', 'the window keeps its first reset time');
     put(H(30), W(50)); u = await p.readUsage('a');
     assert.deepEqual([u?.reset_note, p.lastReason()], [undefined, null], 'the marks start again from the new figure: the same reading is no drop');
@@ -266,15 +266,22 @@ test('L728 m1, L1358: within one window a lower percent is taken as a reset and 
     // starts low" at 12:00 with the 15:00 window still open, which let a reset moved 90 s later through.
     put(H(2, '2026-11-05T16:59:00.000Z'), W(61)); assert.equal(await p.readUsage('a'), null, 'a later reset while the window seen is open');
     assert.match(p.lastReason(), /session row's reset time moved later while the window seen \(to 2026-11-05T15:00:00\.000Z\) is still open/);
-    put(H(5, '2026-11-05T15:01:30.000Z'), W(5, '2026-11-07T23:01:30.000Z')); assert.equal(await p.readUsage('a'), null, 'moved 90 s later');
-    assert.match(p.lastReason(), /reset time moved later/);
+    put(H(5, '2026-11-05T15:01:30.000Z'), W(61)); assert.equal(await p.readUsage('a'), null, 'a 5-hour reset time moved 90 s later');
+    assert.match(p.lastReason(), /session row's reset time moved later/);
+    put(H(41), W(61, '2026-11-07T23:01:30.000Z')); assert.equal(await p.readUsage('a'), null, 'a weekly reset time moved later, the percent the same');
+    assert.match(p.lastReason(), /weekly_all row's reset time moved later/);
+    put(H(41), W(70, '2026-11-07T23:01:30.000Z')); assert.equal(await p.readUsage('a'), null, 'moved later, the percent up');
+    assert.match(p.lastReason(), /weekly_all row's reset time moved later/);
     put(H(5, '2026-11-05T14:00:00.000Z'), W(61));
     assert.equal(await p.readUsage('a'), null);
     assert.match(p.lastReason(), /reset time moved back/);
     assert.equal(await p.readUsage('a'), null, 'a refused reading leaves no mark: the same one is refused again');
     // L746 r3 self-review: M11 reads the week alone, so another row is held to the same week (this was "its own window").
-    u = await (put(H(41), W(10), 'weekly_scoped:Y'), p.readUsage('a'));
-    assert.equal(u?.reset_note, 'usage for weekly_scoped:Y went down from 61% to 10% within one window; taken as a reset', 'a change of row is held to the same week, so the drop is said');
+    // A drop that comes with a change of row is no reset (L1358, the #671 audit's M1): refused, as before.
+    put(H(41), W(10), 'weekly_scoped:Y'); assert.equal(await p.readUsage('a'), null, 'a change of row does not start the week afresh');
+    assert.match(p.lastReason(), /weekly_scoped:Y row went down within one window \(10% after 61%\)/);
+    put(H(41), W(70), 'weekly_scoped:Y'); assert.equal((await p.readUsage('a'))?.week?.used_pct, 70, 'another row going up in the same week is fine');
+    put(H(41), W(65), 'weekly_scoped:Y'); assert.equal((await p.readUsage('a'))?.reset_note, 'usage for weekly_scoped:Y went from 70% to 65% this week; taken as a reset', 'and a drop on that same row after is a reset');
     const fresh = ports(w.file);
     put(H(1), W(1)); assert.ok(await fresh.readUsage('a'), 'with no stored fact (stored gives null), a new process has only its own marks');
   } finally { w.done(); }
@@ -341,7 +348,7 @@ test('L1331: an answer that says no 5-hour row was listed reaches M11 as a week-
 // L746 M-A (probe R2-283-A): each Sensors run is a new process, so the marks are the stored usage fact: run 2 checks its
 // reading against run 1's stored fact. L1358: a lower percent in the same window is taken as a reset and said; a reset time
 // moved while the stored window is open is still refused; once the window seen has passed, a new one starts low.
-test('L746 M-A, L1358: the NEXT run holds a reading to the stored usage fact: a drop is noted, a moved reset refused', async () => {
+test('L746 M-A, L1358: the NEXT run holds a reading to the stored usage fact: a same-row drop is noted, a moved reset or a row change refused', async () => {
   const w = place();
   const put = (h5, week, at = T0, from = 'weekly_all') => assert.equal(writeAnswer({ to: w.file, answer: answer({ observed_at: new Date(at).toISOString(), usage: { h5, week, week_from: from } }) }).ok, true);
   const H = (pct, r = '2026-11-05T15:00:00.000Z') => ({ used_pct: pct, resets_at: r });
@@ -361,7 +368,8 @@ test('L746 M-A, L1358: the NEXT run holds a reading to the stored usage fact: a 
     const run2 = run(60_000);
     const u2 = await run2.readUsage('a');
     assert.deepEqual([u2?.h5?.used_pct, u2?.week?.used_pct], [5, 5], 'run 2 (a new process) takes 5% after the stored 90% as a reset');
-    assert.equal(run2.lastReason(), 'usage for session went down from 90% to 5% within one window; taken as a reset; usage for weekly_all went down from 95% to 5% within one window; taken as a reset');
+    assert.equal(u2.reset_note, 'usage for session went from 90% to 5% in this 5-hour window; taken as a reset; usage for weekly_all went from 95% to 5% this week; taken as a reset');
+    assert.equal(run2.lastReason(), null);
     const out = await pass(run(60_000), 60_000);
     assert.deepEqual([fact()?.h5?.used_pct, fact()?.week?.used_pct], [5, 5], 'the reset reading is stored, so the marks start again from it');
     assert.equal(fact()?.reset_note, u2.reset_note, 'the stored fact (so the diary) says the drop was taken as a reset');
@@ -380,7 +388,9 @@ test('L746 M-A, L1358: the NEXT run holds a reading to the stored usage fact: a 
     await pass(run(later), later);
     assert.equal(fact()?.reset_note, undefined, 'a note is never carried to a later write');
     put(H(5, '2026-11-05T20:00:00.000Z'), W(10), T0 + later, 'weekly_scoped:Y');
-    assert.match((await run(later).readUsage('a'))?.reset_note ?? '', /usage for weekly_scoped:Y went down from 96% to 10%/, "another row's week is held to the stored week too (switching rows does not hide a drop)");
+    const run5 = run(later);
+    assert.deepEqual(stale(await run5.readUsage('a')), storedNow(), "another row's week is held to the stored week too (switching rows is no way round, L746 r3; #671 M1)");
+    assert.match(run5.lastReason(), /weekly_scoped:Y row went down within one window \(10% after 96%\)/);
     // A failed read is never "no mark" (L781): the real Record answers a store error as `corrupt`, and that throws here.
     assert.throws(() => storedUsage(makeRecord({ read: () => { throw new Error('SQLITE_BUSY'); } }))('a'), /the stored usage for a could not be read \(record error: SQLITE_BUSY\)/);
     assert.throws(() => storedUsage({ read: () => ({ id: 'usage-a', corrupt: true, reason: 'x' }) })('a'), /could not be read/);
@@ -453,7 +463,9 @@ test('L754 todo: a usage reading held after a refusal is told once with its caus
     return { put, pass, fact, done: () => rmSync(dir, { recursive: true, force: true }) };
   };
   const real = { h5: H(90), week: W(95), week_from: 'weekly_all' };
-  const MH = '2026-11-05T15:01:30.000Z'; const MW = '2026-11-07T23:01:30.000Z';   // each reset time moved 91 s later
+  // The 5-hour reset time moved 91 s later; the weekly one moved back (a weekly one moved later with a lower percent on the
+  // same row is a restarted window, L1358 m3).
+  const MH = '2026-11-05T15:01:30.000Z'; const MW = '2026-11-07T22:58:00.000Z';
   const gaps = [
     ['no reading (usage null, with a reason)', (s, n) => s.put(null, n, { usage_reason: 'x' }), { h5: H(5, MH), week: W(5, MW), week_from: 'weekly_all' }],
     ['an answer about another account between the two reads', (s, n) => s.put(real, n, { account: 'b' }), { h5: H(5, MH), week: W(5, MW), week_from: 'weekly_all' }, { whoIsSignedIn: async () => 'a' }],
@@ -476,7 +488,7 @@ test('L754 todo: a usage reading held after a refusal is told once with its caus
         assert.deepEqual([f.h5.used_pct, f.week.used_pct], [90, 95], `the moved 5% is not stored: ${JSON.stringify(f)}`);
         // L1358: the same drop on the stored reset times is taken as a reset, and its note names the kept marks.
         s.put({ h5: H(5), week: W(5), week_from: 'weekly_all' }, 180e3); await s.pass(180e3);
-        assert.equal(s.fact().reset_note, 'usage for session went down from 90% to 5% within one window; taken as a reset; usage for weekly_all went down from 95% to 5% within one window; taken as a reset');
+        assert.equal(s.fact().reset_note, 'usage for session went from 90% to 5% in this 5-hour window; taken as a reset; usage for weekly_all went from 95% to 5% this week; taken as a reset');
       } finally { s.done(); }
     });
   }
@@ -515,8 +527,8 @@ test('L754 todo: a usage reading held after a refusal is told once with its caus
 }
 
 // L781 (audit #283 r4 M-1, probe283r4 R1x and R5): over the REAL Record wrapper (makeRecord), whose read answers a store error
-// as { corrupt: true } and never throws, brief read failures of the usage fact never let a forged low reading through and
-// never write unknown over the marks. The store fails the next N reads of the usage fact, then answers again.
+// as { corrupt: true } and never throws, brief read failures of the usage fact never let a low reading through unchecked
+// (L1358: one that passes the checks is a reset) and never write unknown over the marks. The store fails the next N reads of the usage fact, then answers again.
 function flakyWorld() {
   const dir = tempDir('orch-l781-'); chmodSync(dir, 0o755);
   const file = join(dir, ANSWER_FILE); const real = memoryRecord();
@@ -535,11 +547,12 @@ const R781_H = (p) => ({ used_pct: p, resets_at: '2026-11-05T15:00:00.000Z' });
 const R781_W = (p) => ({ used_pct: p, resets_at: '2026-11-07T22:59:59.000Z' });
 const R781_REAL = { h5: R781_H(90), week: R781_W(95), week_from: 'weekly_all' };
 const R781_FORGED = { h5: R781_H(5), week: R781_W(5), week_from: 'weekly_all' };
-// L1358: a drop in the same window is now taken as a reset; a reset time moved while the window is open is still refused.
-const R781_MOVED = { h5: { used_pct: 5, resets_at: '2026-11-05T15:01:30.000Z' }, week: { used_pct: 5, resets_at: '2026-11-07T23:01:30.000Z' }, week_from: 'weekly_all' };
+// L1358: a drop in the same window is now taken as a reset; a reset time moved while the window is open is still refused
+// (the 5-hour one later, the weekly one back: a weekly one moved later and lower on the same row is a restarted window).
+const R781_MOVED = { h5: { used_pct: 5, resets_at: '2026-11-05T15:01:30.000Z' }, week: { used_pct: 5, resets_at: '2026-11-07T22:58:00.000Z' }, week_from: 'weekly_all' };
 
 for (const k of [1, 2, 3, 4, 5, 6]) {
-  test(`L781 R1x: the first ${k} usage-fact read(s) of a run fail, and a forged 5/5 is not written over 90/95`, async () => {
+  test(`L781 R1x: the first ${k} usage-fact read(s) of a run fail, and a 5/5 that can't be checked against the marks is not written over 90/95`, async () => {
     const w = flakyWorld();
     try {
       w.put(R781_REAL, 0); await w.pass(0); assert.deepEqual(w.marks(), [90, 95]);

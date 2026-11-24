@@ -18,8 +18,9 @@
 // Each port reads the file afresh and answers null for anything not known: a file that is missing, too old, from the
 // future, not the owner's, writable by others, or not the shape below. The Sensors loop writes null as unknown, and M11
 // then starts nothing new (who is signed in) or keeps Tier-1 blocked (usage). `lastReason()` says why the last read
-// gave null, for the pass's problem line ("says so", L611), or what a reading that passed noted (a gap; a drop taken as
-// a reset, L1358).
+// gave null or handed on a stored or partial reading (a refusal, a gap): the Sensors pass logs it as a problem line
+// (sensors-wiring.mjs hands it on as `usageReason`; "says so", L611). A drop taken as a reset is not a reason: it rides
+// on the reading as `reset_note` (below).
 //
 // A missing 5-hour row stays null, never 0% (L611). When the owner's answer says the report listed no 5-hour row at all
 // (`h5_none: true`, L1331: a clean report with a weekly row and no `session` row), readUsage hands that on, and M11
@@ -33,9 +34,10 @@
 // account (the Dispatcher starts sessions on it); say signed in when not (a session start fails and the Dispatcher's own
 // checks catch it); or claim low usage, which lets Tier-1 work and new starts run past a real amber or red band until
 // the plan's limit itself stops them. Checks narrow the last one: a reset time further out than one window from the
-// reading is refused; a reset time moved back or moved later while the window seen (the same reset time; the week is one
-// window whatever row it names, since M11 reads the week alone) is still open is refused and said (L728 m1, L746 m-A);
-// and a locked file goes stale within ANSWER_STALE_MS.
+// reading is refused; a reset time moved back, or moved later without a drop on the same row, while the window seen (the
+// same reset time; the week is one window whatever row it names, since M11 reads the week alone) is still open is refused
+// and said (L728 m1, L746 m-A); a drop that comes with a change of row is refused; and a locked file goes stale within
+// ANSWER_STALE_MS.
 //
 // A DROP WITHIN ONE WINDOW IS TAKEN AS A RESET (L1358). Until L1358 a lower percent than one already seen in the same
 // window was refused too (L728 m1, L746 M-A). That guarded against one thing: a false file, written by the owner's user or
@@ -44,7 +46,10 @@
 // then refused every true reading until the week's window passed (days), handed on the stale high reading, and held all
 // work back (L1358: a reset to 0% read as "0% after 100%, refused"). So a drop is now accepted: the reading passes, the
 // marks start again from the new figure, and the drop is written down in plain words (`reset_note` on the reading, kept
-// in the usage fact, so the diary shows "usage for <row> went down from X% to Y% within one window; taken as a reset").
+// in the usage fact, so the diary shows "usage for <row> went from X% to Y% this week; taken as a reset"), and M11 tells
+// Joe once. Only a drop on the same row counts: a drop that comes with a change of weekly row is still refused (the
+// answer takes the highest weekly row, so a row coming and going is not a reset). A reset that also moved the weekly
+// reset time later, on the same row, is a restarted window and is taken too; see checkWindow below.
 // What that gives up: a false low file is no longer stopped by this check, only seen. That is acceptable because the
 // file is the owner's own job's output, read only when the owner's user owns it, nobody else can write it and it has no
 // access list (the checks below), and that same user could already rewrite or lock it every round, which no check here
@@ -89,6 +94,8 @@ const refuse = (reason) => ({ ok: false, reason });
 const isTime = (t) => typeof t === 'string' && Number.isFinite(Date.parse(t));
 const pct = (n) => typeof n === 'number' && Number.isFinite(n) && n >= 0 && n <= 100;
 const ROW = /^(weekly_all|weekly_scoped:[A-Za-z0-9._-]{1,40})$/;
+/** The plain words for a drop taken as a reset (L1358): in the usage fact, the Sensors' log and Joe's alert. */
+export const resetNote = ({ slot, row, from, to }) => `usage for ${row} went from ${from}% to ${to}% ${slot === 'session' ? 'in this 5-hour window' : 'this week'}; taken as a reset`;
 
 export function shapeProblem(a) {
   if (!a || typeof a !== 'object' || Array.isArray(a)) return 'the answer is not an object';
@@ -183,33 +190,56 @@ export function readOwnerAnswer({ file, ownerUid, now = () => new Date(), staleM
 export function sensorsPorts({ file, ownerUid, now = () => new Date(), staleMs = ANSWER_STALE_MS, acl = aclProblem, stored }) {
   if (typeof stored !== 'function') throw new TypeError('sensorsPorts needs stored: storedUsage(rec), the stored usage fact');
   let why = null;
-  const seen = new Map();   // `${account}|${slot}` → { resets: ms, pct }: the highest percent accepted in that window
+  // `${account}|${slot}` → { resets: ms, pct, row }: the latest percent accepted in that window (L1358: a reset lowers it),
+  // and the row it came from (the session slot's row is always `session`).
+  const seen = new Map();
+  // The row the stored week came from: the usage fact's source ends "week from <row>" (state-facts.mjs keeps the stored
+  // source whenever it hands the stored week on). null when it can't be told, which counts as another row.
+  const storedRow = (d) => { const m = / \| week from (\S+)$/.exec(typeof d?.source === 'string' ? d.source : ''); return m && ROW.test(m[1]) ? m[1] : null; };
   // The marks a reading is held to: this process's, and the stored usage fact's (L746 M-A). The week is one slot whatever
   // row it came from (L746 r3 self-review): M11 reads the week alone, so a change of row must not start it afresh.
   const marksOf = (account, slot) => {
     const out = []; const m = seen.get(`${account}|${slot}`); if (m) out.push(m);
-    // Stored marks that can't be read are never taken as none (that would let a moved reset time through and hide a drop): the read
-    // fails, and the usage writer hands the stored reading on, or refuses when it can't read it either.
+    // Stored marks that can't be read are never taken as none (that would let a moved reset time or a row's drop through):
+    // the read fails, and the usage writer hands the stored reading on, or refuses when it can't read it either.
     let d = null; try { d = stored(account); } catch (e) { throw new Error(`the stored usage marks could not be read (${String(e?.message ?? e).slice(0, 80)})`); }
     const sw = slot === 'session' ? d?.h5 : d?.week;
     const r = Date.parse(sw?.resets_at ?? '');
-    if (sw && Number.isFinite(r) && Number.isFinite(sw.used_pct)) out.push({ resets: r, pct: sw.used_pct });
+    if (sw && Number.isFinite(r) && Number.isFinite(sw.used_pct)) out.push({ resets: r, pct: sw.used_pct, row: slot === 'session' ? 'session' : storedRow(d) });
     return out;
   };
-  // Within one window (the same reset time) a lower percent than one already seen is TAKEN AS A RESET (L1358): the owner or
-  // Anthropic can reset plan usage, so a drop is real; the reading passes, its marks start again from the new figure, and
-  // the drop is noted (`down`). A reset time moved back or later while the window seen is still open is refused (L746 m-A:
-  // a new window starts only once the old one has passed). → { refuse: reason } | { down: { row, from, to } } | null.
+  // What a reading's window is, against every mark (L728 m1, L746 m-A, L1358). → { refuse: reason } | { down } | null.
+  //   - Same reset time (one window), percent up or the same: fine.
+  //   - Same reset time, percent DOWN, from the same row as the mark: TAKEN AS A RESET (L1358). The owner or Anthropic can
+  //     reset plan usage, so a drop is real: the reading passes, its marks start again from the new figure, and the drop
+  //     is said (`down`). From another row it is refused, as before (L746 r3, the #671 audit's M1): the owner's answer
+  //     takes the highest weekly row, so a scoped row coming and going would otherwise flip the band and name the wrong row.
+  //   - The weekly reset time moved LATER, the percent DOWN, the same row (L1358 m3): a restarted window (a reset that also
+  //     started the week again), taken with the same note. Its new reset time is still held to one window from the reading
+  //     (shapeProblem).
+  //   - Any other moved reset time while the window seen is still open is refused (L746 m-A: a new window starts only once
+  //     the old one has passed): moved back; moved later with the percent up or the same; moved later from another row;
+  //     and a moved 5-hour reset time, which a real 5-hour window ends within hours anyway.
+  // A window with no reset time (`resets_at` null) is not checked here: it is a gap, handed on as unknown (the usage writer
+  // keeps the stored window), so it can neither pass as a reset nor wipe the marks.
   // This process's marks are written only by commit(), once the reading passes; the stored one by the usage fact.
   const checkWindow = (account, slot, row, w) => {
     const r = Date.parse(w?.resets_at ?? '');
     if (!w || !Number.isFinite(r)) return null;
     let top = null;
     for (const m of marksOf(account, slot)) {
-      if (Math.abs(r - m.resets) <= SAME_WINDOW_MS) { if (w.used_pct < m.pct && (top === null || m.pct > top)) top = m.pct; continue; }
-      if (m.resets > now().getTime()) return { refuse: `usage: the ${row} row's reset time moved ${r < m.resets ? 'back' : 'later'} while the window seen (to ${new Date(m.resets).toISOString()}) is still open, so it is refused` };
+      const sameRow = m.row === row;
+      if (Math.abs(r - m.resets) <= SAME_WINDOW_MS) {
+        if (w.used_pct >= m.pct) continue;
+        if (!sameRow) return { refuse: `usage: the ${row} row went down within one window (${w.used_pct}% after ${m.pct}%), so it is refused` };
+        if (top === null || m.pct > top) top = m.pct;
+        continue;
+      }
+      if (m.resets <= now().getTime()) continue;
+      if (slot === 'week' && r > m.resets && sameRow && w.used_pct < m.pct) { if (top === null || m.pct > top) top = m.pct; continue; }
+      return { refuse: `usage: the ${row} row's reset time moved ${r < m.resets ? 'back' : 'later'} while the window seen (to ${new Date(m.resets).toISOString()}) is still open, so it is refused` };
     }
-    return top === null ? null : { down: { row, from: top, to: w.used_pct } };
+    return top === null ? null : { down: { slot, row, from: top, to: w.used_pct } };
   };
   // A reading that passed is handed on with the window's first reset time, so the stored fact can't creep up to a minute
   // per run toward an early end (L746 r3 self-review). The earliest mark of the same window is the first one seen.
@@ -219,12 +249,12 @@ export function sensorsPorts({ file, ownerUid, now = () => new Date(), staleMs =
     const same = marksOf(account, slot).filter((m) => Math.abs(r - m.resets) <= SAME_WINDOW_MS).map((m) => m.resets);
     return same.length ? { ...w, resets_at: new Date(Math.min(...same)).toISOString() } : w;
   };
-  const commit = (account, slot, w) => {
+  const commit = (account, slot, w, row) => {
     const r = Date.parse(w?.resets_at ?? '');
     if (!w || !Number.isFinite(r)) return;
     const k = `${account}|${slot}`; const m = seen.get(k);
     // The accepted figure is the mark, a drop included (L1358: a reset starts the marks again from the new value).
-    seen.set(k, m && Math.abs(r - m.resets) <= SAME_WINDOW_MS ? { resets: m.resets, pct: w.used_pct } : { resets: r, pct: w.used_pct });
+    seen.set(k, m && Math.abs(r - m.resets) <= SAME_WINDOW_MS ? { resets: m.resets, pct: w.used_pct, row } : { resets: r, pct: w.used_pct, row });
   };
   // A refused reading must not wipe the marks (L746 r3 self-review): the pass writes a null reading as unknown usage, over
   // the stored fact. So the stored reading is handed on again, with its own older time: the writer keeps that time, M11
@@ -269,12 +299,12 @@ export function sensorsPorts({ file, ownerUid, now = () => new Date(), staleMs =
       const checks = [checkWindow(account, 'session', 'session', h5in), from ? checkWindow(account, 'week', from, weekIn) : null];
       const refused = checks.find((c) => c?.refuse)?.refuse;
       if (refused) { why = refused; return kept(account); }
-      // L1358: each drop within one window, said in plain words. It rides on the reading into the usage fact (the diary keeps
-      // it) and is this read's reason, so the pass logs it.
-      const resets = checks.filter((c) => c?.down).map(({ down: d }) => `usage for ${d.row} went down from ${d.from}% to ${d.to}% within one window; taken as a reset`);
+      // L1358: each drop taken as a reset, said in plain words. It rides on the reading into the usage fact (the diary keeps
+      // it; M11 tells Joe once and ends a limit wait on it). It is not this read's reason: lastReason() stays what was wrong.
+      const resets = checks.filter((c) => c?.down).map(({ down: d }) => resetNote(d));
       const h5 = anchored(account, 'session', h5in); const week = from ? anchored(account, 'week', weekIn) : weekIn;
-      commit(account, 'session', h5);
-      if (from) commit(account, 'week', week);
+      commit(account, 'session', h5, 'session');
+      if (from) commit(account, 'week', week, from);
       // A reading with a part missing is still handed on (M11 refuses it as unknown), with the reason (L728 m4).
       // A report that lists no 5-hour row (L1331) is not a gap: the week alone decides.
       const none = a.usage.h5_none === true;
@@ -282,7 +312,6 @@ export function sensorsPorts({ file, ownerUid, now = () => new Date(), staleMs =
         week && !week.resets_at && 'no weekly reset time'].filter(Boolean);
       if (gaps.length) why = `usage: the report had ${gaps.join(', ')}, so it stays unknown`;
       const note = resets.length ? resets.join('; ') : null;
-      if (note) why = why ? `${note}; ${why}` : note;
       return { source: from ? `${SOURCE} | week from ${from}` : SOURCE, h5, week, week_from: from, observed_at: a.observed_at,
         ...(none ? { h5_none: true } : {}), ...(note ? { reset_note: note } : {}) };
     },

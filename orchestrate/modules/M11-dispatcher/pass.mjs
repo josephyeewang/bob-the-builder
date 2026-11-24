@@ -22,7 +22,7 @@
 // Every outside effect is a port, so tests run on fakes.
 
 import { KEYS, need, minutes, MissingKey, missingFor } from './keys.mjs';
-import { currentBands, recordBands } from './usage.mjs';
+import { currentBands, recordBands, USAGE_FACT } from './usage.mjs';
 import { startGate, riskOf } from './gate.mjs';
 import { atSafePoint } from './transcript.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
@@ -82,6 +82,9 @@ export const LIMIT_RESET_MAX_MS = 7 * 24 * 60 * 60 * 1000 + 60 * 60 * 1000;
 const waitedFrom = (doc, fallback, now) => pastTime(doc.wait?.since, now) ?? fallback;
 export const LIMIT_NO_HIT = 'limit_hit: no limit hit was recorded for the run in time';
 export const UNKNOWN_FACT = 'unknown-usage-alert';
+// L1358 m4: the told mark for a usage drop the Sensors took as a reset ({ at, told_at }): `at` is the reset's own time
+// (the usage fact's last_reset.at), so each reset is told once.
+export const RESET_FACT = 'reset-usage-alert';
 export const RULES_MISSING_FACT = 'rules-missing-alert';
 // Used only when timeouts.cancel_grace_min itself is missing (audit MAT-2): Cancel must still stop.
 export const CANCEL_GRACE_FLOOR_MS = 2 * 60_000;
@@ -671,7 +674,10 @@ export async function dispatcherPass({ rec, rules, now, clock = () => now, accou
           text: `card ${id}: account ${acct} hit its usage limit but ${why}, so it can't resume by itself; it waits on you` });
         continue;
       }
-      if (now < resets) {
+      // L1358 m5: usage the Sensors took as reset after the hit (the account's usage fact, last_reset.at) ends the wait as
+      // the reset time passing would. A reset time that can't be read or lies ahead is no reset (pastTime, I4).
+      const resetAt = pastTime(sensorsFact(rec, USAGE_FACT(acct))?.doc?.last_reset?.at, now);
+      if (now < resets && !(resetAt !== null && resetAt > seen)) {
         if (now - waitedFrom(doc, runStarted, now) > LIMIT_RESET_MAX_MS) {
           askJoe(id, { what: LIMIT_NO_RESET, now, kind: 'limit_no_reset', alert,
             text: `card ${id}: it has waited on account ${acct}'s usage limit since ${iso(waitedFrom(doc, runStarted, now))}, longer than any real limit window, and the reset it gives (${lf.resets_at}) is still ahead, so it can't resume by itself; it waits on you` });
@@ -695,6 +701,13 @@ export async function dispatcherPass({ rec, rules, now, clock = () => now, accou
   const sameStretch = uf?.since != null && String(uf.since) !== '' && String(uf.since) === String(unknownSince);
   if (unknownLong && (!sameStretch || dueToTell(uf, now, HOLD_REPEAT_MS))) {
     tellThen(alert, 'usage has been unreadable for over a day; parked work waits on you', { fact: UNKNOWN_FACT, fields: { since: unknownSince, told_at: iso(now) }, kind: 'usage_unknown_alert' });
+  }
+  // L1358 m4: a usage drop the Sensors took as a reset is told to Joe once, plainly, by the reset's own time. One still
+  // queued is not queued again.
+  const lastReset = account ? sensorsFact(rec, USAGE_FACT(account))?.doc?.last_reset : null;
+  if (lastReset && typeof lastReset.note === 'string' && lastReset.note && typeof lastReset.at === 'string'
+    && factDoc(rec, RESET_FACT)?.doc?.at !== lastReset.at && !isQueued(rec, RESET_FACT)) {
+    tellThen(alert, `account ${account}: ${lastReset.note}`, { fact: RESET_FACT, fields: { at: lastReset.at, told_at: iso(now) }, kind: 'usage_reset_alert' });
   }
 
   // 6. Starts. When starts are off (no account reading, a rules value missing), undo cards still go

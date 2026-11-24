@@ -1,8 +1,10 @@
 // L1358: the account owner reset the weekly usage. The owner's answer then said week 0% (no 5-hour row, h5_none) while the
 // stored usage fact said 100% in the same window; the drop was refused, the stale 100% was handed on, and the band stayed
-// unknown ("the 5-hour figure is not a percent"), so nothing was claimed. A drop within one window is now taken as a reset
-// and written down; a moved reset time, a stale file and a file not the owner's are still refused. End to end through the
-// real sensorsPorts, sensorsPass, Record, and M11's currentBands and mayStart.
+// unknown ("the 5-hour figure is not a percent"), so nothing was claimed. A drop on the same row is now taken as a reset
+// and written down (and, on the same row, a weekly reset time moved later with a lower percent: a restarted window); a
+// drop that comes with a change of row, any other moved reset time, a stale file and a file not the owner's are still
+// refused, and the pass logs why. End to end through the real sensorsPorts, sensorsPass, Record, and M11's currentBands
+// and mayStart.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, rmSync } from 'node:fs';
@@ -31,10 +33,12 @@ function world() {
   const file = join(dir, ANSWER_FILE); const rec = memoryRecord();
   const put = (usage, n) => assert.equal(writeAnswer({ to: file, answer: { v: 1, account: 'a', signed_in: true, observed_at: at(n), usage } }).ok, true);
   const ports = (n, o = {}) => sensorsPorts({ file, ownerUid: o.ownerUid ?? UID, now: () => new Date(T0 + n), acl: noAcl, stored: storedUsage(rec) });
-  const pass = (n, o) => { const q = ports(n, o); return sensorsPass({ rec, ports: { whoIsSignedIn: q.whoIsSignedIn, readUsage: q.readUsage, probes: {} }, now: () => new Date(T0 + n) }); };
+  // The ports as sensors-wiring.mjs gives them, usageReason included (L1358 m1).
+  const pass = (n, o) => { const q = ports(n, o); return sensorsPass({ rec, ports: { whoIsSignedIn: q.whoIsSignedIn, readUsage: q.readUsage, usageReason: q.lastReason, probes: {} }, now: () => new Date(T0 + n) }); };
+  const seed = (doc = LIVE_STORED) => assert.equal(makeFactWriter(rec, { actor: 'sensors', now: () => new Date(T0) }).put(USAGE_FACT('a'), doc).ok, true);
   const fact = () => rec.read('fact', USAGE_FACT('a'))?.doc;
   const band = (n) => currentBands({ rec, rules: rulesWith(), account: 'a', now: T0 + n });
-  return { rec, put, ports, pass, fact, band, done: () => rmSync(dir, { recursive: true, force: true }) };
+  return { rec, put, ports, pass, fact, band, seed, done: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
 test('L1358: the live reset (week 100% → 0%, no 5-hour row) is taken, written down, and gives a band that lets claims run', async () => {
@@ -47,13 +51,15 @@ test('L1358: the live reset (week 100% → 0%, no 5-hour row) is taken, written 
     const u = await q.readUsage('a');
     assert.deepEqual([u?.h5, u?.week?.used_pct, u?.h5_none], [null, 0, true], `the fresh reading is handed on: ${q.lastReason()}`);
     assert.equal(u.week.resets_at, LIVE_STORED.week.resets_at, 'the same window (reset times under a minute apart) keeps its first reset time');
-    assert.equal(q.lastReason(), 'usage for weekly_all went down from 100% to 0% within one window; taken as a reset');
+    assert.equal(u.reset_note, 'usage for weekly_all went from 100% to 0% this week; taken as a reset');
+    assert.equal(q.lastReason(), null, 'a reset is no reason: nothing was wrong');
     const out = await w.pass(300_000);
     assert.deepEqual(out.problems.filter((p) => /usage|signed-in/.test(p)), [], 'nothing went wrong with the account or usage');
-    assert.deepEqual(out.notes, ['usage-a: usage for weekly_all went down from 100% to 0% within one window; taken as a reset']);
+    assert.deepEqual(out.notes, ['usage-a: usage for weekly_all went from 100% to 0% this week; taken as a reset']);
     const d = w.fact();
     assert.deepEqual([d.week.used_pct, d.h5_none, d.h5.used_pct, d.reset_note],
-      [0, true, null, 'usage for weekly_all went down from 100% to 0% within one window; taken as a reset'], 'the stored fact keeps h5_none and the note');
+      [0, true, null, 'usage for weekly_all went from 100% to 0% this week; taken as a reset'], 'the stored fact keeps h5_none and the note');
+    assert.deepEqual(d.last_reset, { note: 'usage for weekly_all went from 100% to 0% this week; taken as a reset', at: at(300_000) }, 'and the last reset, for M11 to tell Joe once');
     const b = w.band(300_000);
     assert.deepEqual([b.band, b.own_building, b.prodBlocked], ['green', 'open', false], JSON.stringify(b));
     assert.doesNotMatch(b.reason, /5-hour figure is not a percent/);
@@ -61,31 +67,76 @@ test('L1358: the live reset (week 100% → 0%, no 5-hour row) is taken, written 
     // The next pass: the same reading is no drop, and the note is not carried on.
     w.put(RESET, 360_000); const next = await w.pass(360_000);
     assert.deepEqual([next.notes, w.fact().reset_note, w.fact().h5_none], [[], undefined, true]);
+    assert.deepEqual(w.fact().last_reset, d.last_reset, 'the last reset is carried on, so it is told once whichever pass reads it');
     assert.equal(w.band(360_000).band, 'green');
   } finally { w.done(); }
 });
 
-test('L1358: a reset time moved within the open window is still refused, and the stale 100% is handed on', async () => {
+// L1358 m3 (#671 audit): on the same row, a weekly reset time moved later with a lower percent is a restarted window
+// (a reset that also started the week again), taken with the same note, within one window of the reading. Moved back,
+// moved later with the percent the same or up, moved later from another row, and past one window are still refused.
+test('L1358 m3: a weekly reset time moved later with a lower percent, same row, is a restarted window; other moves are refused and logged', async () => {
+  const LATER = '2026-12-01T21:00:00.000Z';   // inside one week of the reading (T0 + 5 min)
+  const cases = [
+    ['moved later, lower, same row', LIVE_STORED, { used_pct: 0, resets_at: LATER }, 'weekly_all', null],
+    ['moved back', LIVE_STORED, { used_pct: 0, resets_at: '2026-11-26T23:00:00.000Z' }, 'weekly_all', /weekly_all row's reset time moved back while the window seen \(to 2026-11-27T00:00:01\.198Z\) is still open, so it is refused/],
+    ['moved later, the percent the same', LIVE_STORED, { used_pct: 100, resets_at: LATER }, 'weekly_all', /weekly_all row's reset time moved later while the window seen/],
+    ['moved later, the percent up', { ...LIVE_STORED, week: { ...LIVE_STORED.week, used_pct: 60 } }, { used_pct: 70, resets_at: LATER }, 'weekly_all', /weekly_all row's reset time moved later/],
+    ['moved later, lower, another row', LIVE_STORED, { used_pct: 0, resets_at: LATER }, 'weekly_scoped:Y', /weekly_scoped:Y row's reset time moved later/],
+    ['moved later, lower, past one window', LIVE_STORED, { used_pct: 0, resets_at: '2026-12-02T00:00:00.000Z' }, 'weekly_all', /week reset time is further out than one weekly window/],
+  ];
+  for (const [name, stored, week, from, refused] of cases) {
+    const w = world();
+    try {
+      w.seed(stored);
+      w.put({ ...RESET, week, week_from: from }, 300_000);
+      const out = await w.pass(300_000);
+      // A reset time past one window makes the whole answer refused, so no account is read either; the line says why.
+      const usageProblems = out.problems.filter((p) => /^usage(-a)?:/.test(p));
+      if (!refused) {
+        assert.deepEqual([w.fact().week.used_pct, w.fact().week.resets_at, w.fact().reset_note], [0, LATER, 'usage for weekly_all went from 100% to 0% this week; taken as a reset'], name);
+        assert.deepEqual(usageProblems, [], name);
+        assert.equal(w.band(300_000).band, 'green', name);
+        continue;
+      }
+      assert.deepEqual([w.fact().week.used_pct, w.fact().week.resets_at, w.fact().reset_note], [stored.week.used_pct, stored.week.resets_at, undefined], `${name}: the stored reading is handed on`);
+      assert.notEqual(w.fact().h5_none, true, `${name}: never with the no-5-hour marker (L1331 r3)`);
+      // L1358 m1: the pass's log says why, so a refusal is never only "band unknown".
+      assert.equal(usageProblems.length, 1, `${name}: ${JSON.stringify(out.problems)}`);
+      assert.match(usageProblems[0], refused, name);
+    } finally { w.done(); }
+  }
+});
+
+// L1358 M1 (#671 audit): the owner's answer takes the highest weekly row. A scoped row at 80% that drops out of the
+// report leaves weekly_all at 20% with the same reset time; taken as a reset, the band would flip to green, then back
+// when the scoped row came back. A drop that comes with a change of row is refused, so the band holds.
+test('L1358 M1: a scoped row dropping out (80% → weekly_all 20%, same reset time) is no reset: the band does not flip', async () => {
   const w = world();
   try {
-    assert.equal(makeFactWriter(w.rec, { actor: 'sensors', now: () => new Date(T0) }).put(USAGE_FACT('a'), LIVE_STORED).ok, true);
-    w.put({ ...RESET, week: { used_pct: 0, resets_at: '2026-11-27T00:05:00.000Z' } }, 300_000);
-    const q = w.ports(300_000);
-    const u = await q.readUsage('a');
-    assert.equal(u?.week?.used_pct, 100, 'the stored reading is handed on');
-    assert.equal(u.h5_none, undefined, 'never with the no-5-hour marker (L1331 r3)');
-    assert.match(q.lastReason(), /weekly_all row's reset time moved later while the window seen \(to 2026-11-27T00:00:01\.198Z\) is still open, so it is refused/);
-    await w.pass(300_000);
-    assert.equal(w.fact().week.used_pct, 100);
-    assert.equal(w.fact().reset_note, undefined, 'a refused reading is no reset');
-    assert.notEqual(w.band(300_000).band, 'green');
+    const WEEK = LIVE_STORED.week.resets_at;
+    w.seed({ ...LIVE_STORED, source: 'claude /usage | week from weekly_scoped:Y', week: { used_pct: 80, resets_at: WEEK } });
+    w.put({ ...RESET, week: { used_pct: 80, resets_at: WEEK }, week_from: 'weekly_scoped:Y' }, 0); await w.pass(0);   // the scoped row as stored, so the account is signed in
+    const before = w.band(0).band;
+    assert.notEqual(before, 'green', 'a week at 80% is not green');
+    const bands = [];
+    for (const [n, pct, from] of [[60_000, 20, 'weekly_all'], [120_000, 80, 'weekly_scoped:Y'], [180_000, 20, 'weekly_all']]) {
+      w.put({ ...RESET, week: { used_pct: pct, resets_at: WEEK }, week_from: from }, n);
+      const out = await w.pass(n);
+      if (from === 'weekly_all') assert.ok(out.problems.some((p) => /^usage-a: usage: the weekly_all row went down within one window \(20% after 80%\), so it is refused/.test(p)), JSON.stringify(out.problems));
+      assert.deepEqual([w.fact().week.used_pct, w.fact().reset_note, w.fact().last_reset], [80, undefined, { note: null, at: null }], `at ${n}`);
+      bands.push(w.band(n).band);
+    }
+    // Never green. A refused run hands the stored week on without the no-5-hour marker (L1331 r3), so it reads unknown,
+    // which holds claims as red does; only a reading that passed may say there is no 5-hour row.
+    assert.deepEqual(bands.map((b) => b === 'green'), [false, false, false], `no flip to green: ${bands.join(', ')}`);
   } finally { w.done(); }
 });
 
 test('L1358: a stale answer and one not the owner\'s are still refused, drop or not', async () => {
   const w = world();
   try {
-    assert.equal(makeFactWriter(w.rec, { actor: 'sensors', now: () => new Date(T0) }).put(USAGE_FACT('a'), LIVE_STORED).ok, true);
+    w.seed();
     w.put(RESET, 0);
     const stale = w.ports(ANSWER_STALE_MS + 60_000);
     assert.equal(await stale.readUsage('a'), null);
