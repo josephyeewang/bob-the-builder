@@ -627,19 +627,26 @@ const SETS_SAFE_VAR = [
 ];
 
 /**
- * The guard the lock-down command names (wiring/runner-locked.mjs GUARD): orchestrate's own jobs/guard.sh, found from
- * where these hooks run, so a guard.sh a session plants in its copy (at any path ending the same way) is not it. Run from
- * the repository, hooks/ sits beside jobs/; installed, the hooks are copied to <install>/hooks (setup/layout.mjs
- * COPY_HOOKS) while the jobs stay at <install>/modules/M4-workshop/jobs. The first of the two that is a plain file, its
- * path in letters, digits and . _ - / @ only, is the guard; neither, and no command gets the exception below.
+ * The lock-down guard that goes with a hooks folder (L1352; #666 r2 M1): orchestrate's own jobs/guard.sh of the same
+ * version as `hooksDir`, so a guard.sh a session plants in its copy (at any path ending the same way) is not it. The ONE
+ * place both sides find it: these hooks, from where they run (GUARD_PATH below), and the runner, from the hooks folder a
+ * job's settings name (wiring/runner-locked.mjs jobGuard). So a session that carried over an update (runner-main.mjs
+ * updateRestart: its settings still name the old version's hooks) gets the old version's guard, the one its hooks
+ * accept, and keeps it if the guard's form ever changes. `hooksDir` is read to its real path first (the install's link
+ * names the newest version; a session's settings name a version's real folder, realRenderPaths). Run from the
+ * repository, hooks/ sits beside jobs/; installed, the hooks are copied to <version>/hooks (setup/layout.mjs COPY_HOOKS)
+ * while the jobs stay at <version>/modules/M4-workshop/jobs. The first of the two that is a plain file, its path in
+ * letters, digits and . _ - / @ only, is the guard. → its path, or null (no guard: no command gets the exception below).
  */
-const HOOKS_HERE = dirname(fileURLToPath(import.meta.url));
-export const GUARD_PATH = (() => {
-  for (const p of [join(HOOKS_HERE, '..', 'jobs', 'guard.sh'), join(HOOKS_HERE, '..', 'modules', 'M4-workshop', 'jobs', 'guard.sh')]) {
+export function guardBesideHooks(hooksDir) {
+  let real; try { real = realpathSync.native(String(hooksDir)); } catch { return null; }
+  for (const p of [join(real, '..', 'jobs', 'guard.sh'), join(real, '..', 'modules', 'M4-workshop', 'jobs', 'guard.sh')]) {
     try { if (/^\/[A-Za-z0-9._\-/@]+$/.test(p) && lstatSync(p).isFile()) return p; } catch { /* not this layout */ }
   }
   return null;
-})();
+}
+const HOOKS_HERE = dirname(fileURLToPath(import.meta.url));
+export const GUARD_PATH = guardBesideHooks(HOOKS_HERE);
 /**
  * The lock-down job's one command (L1352; wiring/runner-locked.mjs lockedCommand builds it): orchestrate's own guard
  * script (GUARD_PATH, that exact path), run by /bin/sh with four plain words, the record, its go-ahead, a wait count, and

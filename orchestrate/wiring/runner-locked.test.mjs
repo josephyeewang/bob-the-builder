@@ -12,14 +12,15 @@ import { tempDir } from '../shared/test-tmp.mjs';
 import { pushWorld } from '../modules/M4-workshop/git/push-world.test-helper.mjs';
 import { createSaveWork } from '../modules/M4-workshop/git/save-work.mjs';
 import { bundleName } from '../modules/M4-workshop/git/push.mjs';
-import { JOBS_DIR, JOB_ACK_WAIT_MS, LOCKED_JOBS, LOCKED_MS, LOCKED_SAVE_MS, RESULT_MAX_BYTES, SAVE_DELAYS_MS, GUARD, ackFile, groupFile, guardedRun, jobSettings, jobSettingsFile, lockedCommand, lockedJobOf, lockedRule, jobFile, jobGroupProblem, lockedRunner, readGroupRecord, runToEnd, settingsSha, claudeEnd, sayable, hearing, resultWords, SAID_MAX } from './runner-locked.mjs';
+import { JOBS_DIR, JOB_ACK_WAIT_MS, LOCKED_JOBS, LOCKED_MS, LOCKED_SAVE_MS, RESULT_MAX_BYTES, SAVE_DELAYS_MS, GUARD, ackFile, groupFile, guardedRun, jobGuard, jobSettings, jobSettingsFile, lockedCommand, lockedJobOf, lockedRule, jobFile, jobGroupProblem, lockedRunner, readGroupRecord, runToEnd, settingsSha, claudeEnd, sayable, hearing, resultWords, SAID_MAX } from './runner-locked.mjs';
 import { EventEmitter } from 'node:events';
 import { SAVE_DEADLINE_MS } from '../modules/M11-dispatcher/pass.mjs';
 import { LOCKED_PROMPT } from '../modules/M4-workshop/launcher/launch.mjs';
 import { POLICY_HOOKS } from '../modules/M4-workshop/launcher/render-settings.mjs';
 import { DESIGN_PROFILES, outboxKindsFor } from '../modules/M4-workshop/launcher/role-profiles.mjs';
 import { makeSnapshot } from '../modules/M4-workshop/hooks/snapshot.mjs';
-import { LOCKED_JOB_COMMAND, unreadable } from '../modules/M4-workshop/hooks/lib.mjs';
+import { LOCKED_JOB_COMMAND, guardBesideHooks, unreadable } from '../modules/M4-workshop/hooks/lib.mjs';
+import { HOOKS_SOURCE, installHooks } from '../modules/M4-workshop/launcher/hooks-check.mjs';
 import { partialName } from '../modules/M4-workshop/git/save-work.mjs';
 import { RUNNER_STATUS_EVERY_MS } from './owner-status.mjs';
 import { RUNNER_PORT_MS } from './worker-runner.mjs';
@@ -462,7 +463,8 @@ test('#463 r2 self-review m2: each run\'s record has a name of its own, so a she
   const spy = (bin, args, opts) => { seen.push(wordsOf(args)[1]); return childSpawn('/bin/sh', ['-c', 'exit 0'], opts); };
   const run = runner({ spawn: spy });
   for (let i = 0; i < 2; i += 1) await assert.rejects(run({ job: 'install', command: 'true', sessionId: 'S-1', role: 'worker', settingsFile, cwd }), /result was not written/);
-  assert.equal(seen.length, 2); assert.notEqual(seen[0], seen[1]);
+  // #666 r2 m1: each run's guard never started (no record), so each was tried once more, under a record of its own too.
+  assert.equal(seen.length, 4); assert.equal(new Set(seen).size, 4);
   for (const f of seen) assert.match(f, /\.orch-job-install-S-1\.group\.[0-9a-f]{16}$/);
 });
 
@@ -715,6 +717,118 @@ test('L1352 audit: the hooks let through only orchestrate\'s own guard, found fr
     assert.equal(b.GUARD_PATH, null);
     assert.equal(b.LOCKED_JOB_COMMAND.test(lockedCommand({ gfile, inner: 'npm ci', guard: join(d, 'bare', 'jobs', 'guard.sh') })), false);
     assert.notEqual(b.unreadable(lockedCommand({ gfile, inner: 'npm ci', guard: join(d, 'bare', 'jobs', 'guard.sh') })), null);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+// #666 r2 M1, m2: the installed layout as the updater makes it. Each version is `orchestrate.v-<commit>/orchestrate`, its
+// hooks copied to `<version>/hooks` and its jobs at `<version>/modules/M4-workshop/jobs`; the install's link names the
+// newest. A session's settings name its hooks folder (a version's real folder, realRenderPaths, or through the link).
+const versions = (d, ...names) => {
+  const at = {};
+  for (const v of names) {
+    const root = join(d, `orchestrate.v-${v}`, 'orchestrate');
+    installHooks(join(root, 'hooks'), HOOKS_SOURCE);
+    mkdirSync(join(root, 'modules', 'M4-workshop', 'jobs'), { recursive: true });
+    writeFileSync(join(root, 'modules', 'M4-workshop', 'jobs', 'guard.sh'), readFileSync(GUARD));
+    at[v] = root;
+  }
+  return at;
+};
+const hookSettings = (hooksDir) => ({ hooks: { PreToolUse: Object.keys(POLICY_HOOKS).map((n) => ({ matcher: '*', hooks: [{ type: 'command', command: `${process.execPath} ${join(hooksDir, `${n}.mjs`)} --role worker` }] })) } });
+// The four Bash hooks, run as claude runs them (node <hooks folder>/<name>.mjs …), on one command: each one's exit.
+const hooksOn = (hooksDir, command, cwd, d) => {
+  const outbox = join(d, 'outbox'); mkdirSync(outbox, { recursive: true });
+  const snapshot = join(d, 'rules.json');
+  writeFileSync(snapshot, makeSnapshot({ production: { env_files: [join(d, 'prod', 'settings.production')], programs: ['fakedb'], hosts: ['db.prod.example.net'] }, secrets: { paths: [join(d, 'keys')] } }));
+  return ['merge-guard', 'no-verify-block', 'production-write-guard', 'secret-file-block'].map((name) => spawnSync(process.execPath,
+    [join(hooksDir, `${name}.mjs`), '--role', 'worker', '--outbox', outbox, '--snapshot', snapshot, '--kinds', outboxKindsFor('worker').join(','), '--copy', cwd],
+    { input: JSON.stringify({ tool_name: 'Bash', tool_input: { command }, cwd }), encoding: 'utf8', timeout: 10_000 }).status);
+};
+
+test('#666 r2 m2: the real installed layout: through the install\'s link, the runner\'s guard is the one the hooks let through', () => {
+  const d = realpathSync(tempDir('orch-layout-'));
+  try {
+    const at = versions(d, 'abc');
+    const link = join(d, 'orchestrate'); symlinkSync(at.abc, link);
+    const cwd = join(d, 'copy'); mkdirSync(cwd);
+    const guard = jobGuard(hookSettings(join(link, 'hooks')));
+    assert.equal(guard, join(at.abc, 'modules', 'M4-workshop', 'jobs', 'guard.sh'), 'the version\'s own guard, by its real path');
+    assert.equal(guardBesideHooks(join(link, 'hooks')), guard, 'the one function both sides use');
+    const command = lockedCommand({ gfile: groupFile({ cwd, job: 'install', sessionId: 'S-1', run: 'ab' }), inner: 'npm ci', guard });
+    assert.deepEqual(hooksOn(join(link, 'hooks'), command, cwd, d), [0, 0, 0, 0], 'the four Bash hooks, run through the link, let it through');
+    assert.notDeepEqual(hooksOn(join(link, 'hooks'), lockedCommand({ gfile: groupFile({ cwd, job: 'install', sessionId: 'S-1', run: 'ab' }), inner: 'npm ci' }), cwd, d), [0, 0, 0, 0],
+      'another orchestrate\'s guard (this checkout\'s) is refused');
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test('#666 r2 M1: a session carried over an update gets its own version\'s guard, which its own hooks let through', () => {
+  const d = realpathSync(tempDir('orch-skew-'));
+  try {
+    const at = versions(d, 'abc', 'def');
+    const link = join(d, 'orchestrate'); symlinkSync(at.def, link);   // updated: the link names v-def, the runner restarted there
+    const cwd = join(d, 'copy'); mkdirSync(cwd);
+    const old = join(at.abc, 'hooks');                                 // the carried-over session's settings: v-abc's hooks
+    const gfile = groupFile({ cwd, job: 'save-work', sessionId: 'S-1', run: 'ab' });
+    // Before: the runner named the guard beside its own code (v-def's), which v-abc's hooks refuse.
+    const runners = lockedCommand({ gfile, inner: 'true', guard: guardBesideHooks(join(link, 'hooks')) });
+    assert.notDeepEqual(hooksOn(old, runners, cwd, d), [0, 0, 0, 0], 'v-def\'s guard is refused by v-abc\'s hooks');
+    // After: the guard beside the hooks folder the job's settings name.
+    const guard = jobGuard(hookSettings(old));
+    assert.equal(guard, join(at.abc, 'modules', 'M4-workshop', 'jobs', 'guard.sh'));
+    assert.deepEqual(hooksOn(old, lockedCommand({ gfile, inner: 'true', guard }), cwd, d), [0, 0, 0, 0]);
+    // And a new session's, on v-def's hooks (through the link or its real folder), gets v-def's.
+    assert.equal(jobGuard(hookSettings(join(link, 'hooks'))), join(at.def, 'modules', 'M4-workshop', 'jobs', 'guard.sh'));
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test('#666 r2 M1: jobGuard: no hooks, the runner\'s own guard; hooks in two folders, a hook not in the runner\'s form, or no guard beside: refused', () => {
+  const d = realpathSync(tempDir('orch-jobguard-'));
+  try {
+    const at = versions(d, 'abc', 'def');
+    assert.equal(jobGuard({ permissions: {} }), GUARD);
+    const two = hookSettings(join(at.abc, 'hooks')); two.hooks.PreToolUse.push(hookSettings(join(at.def, 'hooks')).hooks.PreToolUse[0]);
+    assert.throws(() => jobGuard(two), /hooks in more than one folder/);
+    assert.throws(() => jobGuard({ hooks: { PreToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: 'merge-guard --role worker' }] }] } }), /not in the runner's form/);
+    assert.throws(() => jobGuard({ hooks: [] }), /not an object/);
+    const bare = join(d, 'bare', 'hooks'); mkdirSync(bare, { recursive: true });
+    assert.throws(() => jobGuard(hookSettings(bare)), /no lock-down guard beside its hooks folder/);
+    // guardedRun refuses before claude starts, naming why.
+    const settingsFile = join(d, 'S-1.json'); writeFileSync(settingsFile, `${JSON.stringify({ ...hookSettings(bare), permissions: {}, sandbox: sandbox() })}\n`);
+    return assert.rejects(guardedRun({ spawn: () => { throw new Error('started'); }, claudeBin: '/x/claude', settingsFile, inner: 'true', profile: DESIGN_PROFILES.worker, cwd: d, env: {}, ms: 1000, label: 'the job',
+      gfile: groupFile({ cwd: d, job: 'install', sessionId: 'S-1', run: 'ab' }) }), (e) => e.beforeRun === true && /no lock-down guard beside its hooks folder/.test(e.message));
+  } finally { setTimeout(() => rmSync(d, { recursive: true, force: true }), 2000); }
+});
+
+test('#666 r2 m1: a claude that ended its turn without running the command is tried once more, fresh; never twice, never after the guard started', async () => {
+  const { d, cwd, settingsFile } = world();
+  try {
+    // First claude ends at once (no tool call: no record); the second runs the command as the Bash tool does.
+    for (const [skips, recorded, spawns] of [[1, true, 2], [2, false, 2]]) {
+      const seen = []; let n = 0;
+      const real = detachedClaude();
+      const spawn = (bin, args, opts) => { seen.push({ g: wordsOf(args)[1], s: args[args.indexOf('--settings') + 1] }); n += 1;
+        return n <= skips ? childSpawn('/bin/sh', ['-c', 'exit 0'], opts) : real(bin, args, opts); };
+      const res = join(cwd, `res-${skips}`);
+      const r = await guardedRun({ spawn, claudeBin: '/x/claude', settingsFile, inner: `/bin/echo 0 > '${res}'`, profile: DESIGN_PROFILES.worker, cwd, env: { PATH: '/usr/bin:/bin' }, ms: 20_000,
+        gfile: groupFile({ cwd, job: 'install', sessionId: 'S-1', run: 'ab' }), label: 'the job' });
+      assert.equal(seen.length, spawns, 'once more at most');
+      assert.notEqual(seen[0].g, seen[1].g, 'a fresh record'); assert.notEqual(seen[0].s, seen[1].s, 'a fresh settings file');
+      assert.match(seen[1].g, /\.orch-job-install-S-1\.group\.[0-9a-f]{16}$/);
+      assert.equal(r.job?.recorded === true, recorded);
+      assert.equal(existsSync(res), recorded, 'the job ran on the retry, and only then');
+    }
+    // The guard started (its record written) but the job's exit was never written: no retry.
+    const seen = [];
+    const spawn = (bin, args, opts) => { seen.push(1); return detachedClaude()(bin, [...args.slice(0, -1), `${ASK}${recordOf(args)}`], opts); };
+    const r = await guardedRun({ spawn, claudeBin: '/x/claude', settingsFile, inner: 'true', profile: DESIGN_PROFILES.worker, cwd, env: { PATH: '/usr/bin:/bin' }, ms: 20_000,
+      gfile: groupFile({ cwd, job: 'install', sessionId: 'S-1', run: 'cd' }), label: 'the job' });
+    assert.equal(seen.length, 1); assert.equal(r.job.recorded, true);
+    // A claude past its time limit: no retry either.
+    let starts = 0;
+    const hang = (bin, args, opts) => { starts += 1; return childSpawn('/bin/sleep', ['5'], opts); };
+    await assert.rejects(guardedRun({ spawn: hang, claudeBin: '/x/claude', settingsFile, inner: 'true', profile: DESIGN_PROFILES.worker, cwd, env: { PATH: '/usr/bin:/bin' }, ms: 300,
+      gfile: groupFile({ cwd, job: 'install', sessionId: 'S-1', run: 'ef' }), label: 'the job' }), /did not finish in time/);
+    assert.equal(starts, 1);
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 

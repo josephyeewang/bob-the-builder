@@ -85,6 +85,9 @@ function world({ role = 'reviewer', smoke = 'sandboxed', init = initFor(role) } 
   const source = d('hooks-source'); cpSync(HOOKS_SOURCE, source, { recursive: true });
   for (const n of readdirSync(source)) if (n.endsWith('.test.mjs')) rmSync(join(source, n));
   const hooksDir = join(root, 'hooks'); installHooks(hooksDir, source);
+  // The lock-down guard beside the hooks, as installed (<version>/modules/M4-workshop/jobs; #666 r2 M1: jobGuard finds it there).
+  mkdirSync(join(root, 'modules', 'M4-workshop', 'jobs'), { recursive: true });
+  cpSync(join(HOOKS_SOURCE, '..', 'jobs', 'guard.sh'), join(root, 'modules', 'M4-workshop', 'jobs', 'guard.sh'));
   const snapshot = join(d('rr'), 'rules.json');
   const rules = { production: { env_files: [join(root, 'prod.cfg')], programs: ['fakehost'], hosts: ['db.prod.example.net'] }, secrets: { paths: [keys] } };
   writeSnapshot(snapshot, rules); // the runner's pass writes it before any start (readyProblem)

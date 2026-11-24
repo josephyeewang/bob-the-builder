@@ -49,7 +49,7 @@
 // The 10 minutes of LOCKED_MS (and check 11's BASELINE_MS, guardedRun, #463 r2 M3) is our own cap, a choice, not a tool
 // limit (#463 r3 m2): the Bash tool's longest wait is BASH_MAX_TIMEOUT_MS when it is set (2.1.317, 2.1.322, 2.1.316), and the runner
 // sets it to the job's limit. A product whose tests need longer splits its test command, or the cap is raised here.
-import { closeSync, constants, fstatSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -66,7 +66,8 @@ import { RUNNER_PORT_MS } from './worker-runner.mjs';
 import { RUNNER_TICK_MS, leaderStart, processGroupPorts } from './runner-loop.mjs';
 import { lstartIso } from '../modules/M9-record/lock.mjs';
 import { ASK_POLL_MS } from './owner-asks.mjs';
-import { SETTINGS as S } from '../modules/M4-workshop/launcher/settings-names.mjs';
+import { SETTINGS as S, HOOK_FIELDS as H } from '../modules/M4-workshop/launcher/settings-names.mjs';
+import { guardBesideHooks } from '../modules/M4-workshop/hooks/lib.mjs';
 
 export const LOCKED_JOBS = Object.freeze(['save-work', 'install']);
 /**
@@ -223,16 +224,32 @@ export async function runLockedCommand({ spawn, claudeBin, settingsFile, command
  * held to settingsProblem (`sha`, `noNetwork` as runLocked's) as read here, with that command's exact allow rule added
  * (jobSettings), written new beside it and removed after. The settings file itself is never changed, so a session's own
  * allow list never holds the rule. The record, its answer and the job's settings file are removed before and after.
+ * The guard the command names is the one beside the hooks folder those settings name (jobGuard, #666 r2 M1), so the
+ * session's own hooks, of that version, let it through.
+ * One retry (#666 r2 m1): the model, told to call the Bash tool once with the command, now and then ends its one turn
+ * without calling it (seen once in 9 live runs on the pin; checked: claude-code 2.1.316). When claude ended by itself and the guard's record
+ * was never written, the guard never started, so nothing of the job ran: it is run once more, with a fresh run name,
+ * record and settings file. Never on a time limit, a record that was written, or a group that can't be kept.
  */
 export async function guardedRun({ spawn, claudeBin, settingsFile, inner, profile, cwd, env, ms, killGroup, groupThere: there, gfile, onGroup, label, sha, noNetwork = false,
   read = readNoLink, info = processInfo, pidStartOf = leaderStart, jobGone = processGroupPorts().groupGone, pollMs = JOB_GROUP_POLL_MS,
-  answer = answerFile, rm = rmSync, write = newFile, nonce = () => randomBytes(8).toString('hex') }) {
+  answer = answerFile, rm = rmSync, write = newFile, nonce = () => randomBytes(8).toString('hex'), recordThere = (f) => { try { lstatSync(f); return true; } catch { return false; } } }) {
   if (!env || typeof env !== 'object') throw new Error(`no environment to run ${label} with`);
   if (!Number.isInteger(ms) || ms <= 0 || ms > LOCKED_MS) throw new Error(`${label}'s limit is not a time limit within the lock-down's cap (${LOCKED_MS} ms)`);
+  if (typeof settingsFile !== 'string' || !settingsFile.startsWith('/') || !settingsFile.endsWith('.json')) throw Object.assign(new Error(`${label} names no settings file`), { beforeRun: true });
+  const once = (g) => guardedOnce({ spawn, claudeBin, settingsFile, inner, profile, cwd, env, ms, killGroup, there, gfile: g, onGroup, label, sha, noNetwork,
+    read, info, pidStartOf, jobGone, pollMs, answer, rm, write, nonce, recordThere });
+  const first = await once(gfile);
+  if (!first.never) return first.ran;
+  if (typeof gfile !== 'string' || !/\.group\.[0-9a-z]{1,32}$/.test(gfile)) return first.ran;
+  return (await once(gfile.replace(/\.group\.[0-9a-z]{1,32}$/, `.group.${nonce()}`))).ran;
+}
+
+async function guardedOnce({ spawn, claudeBin, settingsFile, inner, profile, cwd, env, ms, killGroup, there, gfile, onGroup, label, sha, noNetwork,
+  read, info, pidStartOf, jobGone, pollMs, answer, rm, write, nonce, recordThere }) {
   const before = (m) => Object.assign(new Error(m), { beforeRun: true });
-  if (typeof settingsFile !== 'string' || !settingsFile.startsWith('/') || !settingsFile.endsWith('.json')) throw before(`${label} names no settings file`);
   let command; let text;
-  try { command = lockedCommand({ gfile, inner }); text = jobSettings(settingsFile, command, { sha, noNetwork, read }); } catch (e) { throw before(`${label} can't be run inside the lock-down (${e?.message ?? e})`); }
+  try { text = jobSettings(settingsFile, (v) => (command = lockedCommand({ gfile, inner, guard: jobGuard(v) })), { sha, noNetwork, read }); } catch (e) { throw before(`${label} can't be run inside the lock-down (${e?.message ?? e})`); }
   const own = jobSettingsFile(settingsFile, nonce());
   // The Bash tool's own wait is the limit (#463 r2 m1): it never moves the command to the background before it.
   const wait = { ...env, BASH_DEFAULT_TIMEOUT_MS: String(ms), BASH_MAX_TIMEOUT_MS: String(ms) };
@@ -252,9 +269,14 @@ export async function guardedRun({ spawn, claudeBin, settingsFile, inner, profil
     try { rm(f, { force: true }); } catch (e) { throw before(`${label}'s old ${what} can't be removed (${e?.code ?? e?.message})`); }
   }
   try { write(own, text); } catch (e) { throw before(`${label}'s own settings file can't be written (${e?.code ?? e?.message})`); }
+  let ran; let wrote = true;
   try {
-    return await runLockedCommand({ spawn, claudeBin, settingsFile: own, command, profile, cwd, env: wait, ms, killGroup, groupThere: there, onSpawn, job: watch });
+    ran = await runLockedCommand({ spawn, claudeBin, settingsFile: own, command, profile, cwd, env: wait, ms, killGroup, groupThere: there, onSpawn, job: watch });
+    wrote = recordThere(gfile) || recordThere(ackFile(gfile));
   } finally { for (const f of [gfile, ackFile(gfile), own]) try { rm(f, { force: true }); } catch { /* left; removed before the next run */ } }
+  // The guard never started: claude ended by itself, no record was ever read or left, no group was kept.
+  const never = ran.exitCode !== null && ran.job?.recorded !== true && !ran.job?.bad && !wrote;
+  return { ran, never };
 }
 
 /** What guardedRun's end says is wrong with the command's own group (#463 r2 M1, m6), or null. `recorded`: also refuse
@@ -366,7 +388,9 @@ export const GUARD = join(JOBS_DIR, 'guard.sh');
  * sandbox on and --max-turns 1, and that the model then sends it unchanged (LOCKED_PROMPT), was seen on 23 Nov 2026 with
  * the opt-in live tests (this folder's runner-locked.test.mjs, and check 11's smoke in runner-checks.test.mjs) on the pin
  * and on a newer claude (checked: claude-code 2.1.316 and 2.1.329). Void when the pin moves: run those live tests on the
- * new pin (ORCH_LIVE_CLAUDE=1 ORCH_LIVE_CLAUDE_BIN=<the pin's claude>).
+ * new pin (ORCH_LIVE_CLAUDE=1 ORCH_LIVE_CLAUDE_BIN=<the pin's claude>). The model now and then ends its one turn without
+ * calling the tool (once in 9 live runs on 2.1.316: nothing recorded, nothing ran); guardedRun's one retry, fresh,
+ * covers it (#666 r2 m1). Two such ends in a row are said as the job not having run.
  * A job's own settings file (`<settings>.job-<run>.json`, jobSettings) left by a runner that crashed mid-job sits in the
  * settings folder: a runner starting with no memory counts it as an earlier session's settings and does not start until
  * it is removed (runner-main.mjs carriedOverProblem).
@@ -399,8 +423,36 @@ export const jobSettingsFile = (settingsFile, run) => {
 };
 
 /**
+ * The guard a job's command names (#666 r2 M1): the one beside the hooks folder `settings` (a settings value) name, from
+ * the hooks' own guardBesideHooks, so it is the guard those hooks let through. Settings naming no hook get the runner's
+ * own (GUARD; no hook is there to accept or refuse it). Hooks in more than one folder, a hook command not in render-
+ * settings' form (`<node> <hooks folder>/<name>.mjs …`), or a hooks folder with no guard beside it: a throw.
+ */
+export function jobGuard(settings) {
+  const dirs = new Set();
+  const events = settings?.[S.hooks];
+  if (events !== undefined && (!events || typeof events !== 'object' || Array.isArray(events))) throw new Error('its settings\' hooks are not an object');
+  for (const groups of Object.values(events ?? {})) {
+    for (const g of Array.isArray(groups) ? groups : []) {
+      for (const h of Array.isArray(g?.[H.hooks]) ? g[H.hooks] : []) {
+        const word = String(h?.[H.command] ?? '').split(' ')[1] ?? '';
+        if (!word.startsWith('/') || !word.endsWith('.mjs')) throw new Error(`its settings name a hook not in the runner's form (${String(h?.[H.command]).slice(0, 80)})`);
+        dirs.add(dirname(word));
+      }
+    }
+  }
+  if (dirs.size === 0) return GUARD;
+  if (dirs.size > 1) throw new Error(`its settings name hooks in more than one folder (${[...dirs].join(', ')})`);
+  const [dir] = dirs;
+  const g = guardBesideHooks(dir);
+  if (!g) throw new Error(`there is no lock-down guard beside its hooks folder ${dir}`);
+  return g;
+}
+
+/**
  * The job's own settings (L1352): `settingsFile`'s bytes, read once and held to settingsProblem (sha, noNetwork) as read,
- * with lockedRule(command) added to its allow list and nothing else changed. → the file's text, or a throw.
+ * with lockedRule(command) added to its allow list and nothing else changed. `command` may be a function of the settings
+ * as read (guardedRun: the command naming jobGuard's guard), so they are read once. → the file's text, or a throw.
  */
 export function jobSettings(settingsFile, command, { sha, noNetwork = false, read = readNoLink } = {}) {
   let bytes; try { bytes = read(settingsFile); } catch (e) { throw new Error(`the settings file ${settingsFile} can't be read (${e?.code ?? e?.message})`); }
@@ -411,7 +463,7 @@ export function jobSettings(settingsFile, command, { sha, noNetwork = false, rea
   if (p !== undefined && (!p || typeof p !== 'object' || Array.isArray(p))) throw new Error(`the settings file ${settingsFile}'s permissions are not an object`);
   const allow = p?.[S.allow] ?? [];
   if (!Array.isArray(allow)) throw new Error(`the settings file ${settingsFile}'s allow list is not a list`);
-  v[S.permissions] = { ...(p ?? {}), [S.allow]: [...allow, lockedRule(command)] };
+  v[S.permissions] = { ...(p ?? {}), [S.allow]: [...allow, lockedRule(typeof command === 'function' ? command(v) : command)] };
   return `${JSON.stringify(v, null, 2)}\n`;
 }
 
