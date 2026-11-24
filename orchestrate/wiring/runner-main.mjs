@@ -412,6 +412,7 @@ export async function main(argv, { readConfig = (f) => readRunnerConfig(f, selfP
     let real; try { real = realpath(c[k]); } catch (e) { log(`the worker runner did not start: ${k} can't be read (${e?.code ?? e?.message})`); return 1; }
     if (real !== c[k]) { log(`the worker runner did not start: ${k} is reached through a link (it is ${real})`); return 1; }
   }
+  try { c = realRenderPaths(c, { realpath, log }); } catch (e) { log(`the worker runner did not start: ${e.message}`); return 1; }
   // Launch checks 12 and 13's inputs (L1001): one loader, shared with the runLocked proof (L1092). Its own defaults are
   // the real ones; main passes a loader only when a test sets one (undefined takes launchInputs' default).
   const inputs = await launchInputs(c, { pinnedProblem, loadBudget, readManifest, log });
@@ -450,6 +451,32 @@ export async function main(argv, { readConfig = (f) => readRunnerConfig(f, selfP
   } catch (e) { log(`the worker runner stopped: ${e?.message ?? e}`); return 1; } finally {
     try { l.release(held.nonce); } catch { /* gone */ }
   }
+}
+
+/** The tool places every session is given (hooks, node, notes, Bob: RENDER_PATHS), as their real paths (L1347). Setup
+ * names them through the install's link, which the updater points at each new version; the wall refuses a session folder
+ * reached through a link (render-settings.mjs), since the Mac's sandbox reads the real path. Read once, when the runner
+ * (or a proof that starts sessions as it does: live-proofs/runlocked.mjs) starts, so every session it starts gets the
+ * places the link named then, until a restart. A place not there yet is left as named, for the wall to decide (it refuses
+ * a folder reached through a link). The updater keeps the version before the current one, so a runner not restarted
+ * across two updates finds its places gone and every start is refused: restart the worker runner after an update.
+ * → a new config (the one given is not changed); a place that can't be read throws. */
+export function realRenderPaths(c, { realpath = (p) => realpathSync.native(p), log = () => {} } = {}) {
+  const products = {};
+  for (const [name, p] of Object.entries(c.products)) {
+    const paths = { ...p.render.paths };
+    for (const k of RENDER_PATHS) {
+      if (paths[k] === undefined) continue;
+      let real; try { real = realpath(paths[k]); } catch (e) {
+        if (e?.code === 'ENOENT') continue;
+        throw new Error(`product ${name}'s render.paths.${k} can't be read (${e?.code ?? e?.message})`);
+      }
+      if (real !== paths[k]) log(`worker runner: product ${name}'s ${k} is reached through a link; its sessions are given its real path ${real}`);
+      paths[k] = real;
+    }
+    products[name] = { ...p, render: { ...p.render, paths } };
+  }
+  return { ...c, products };
 }
 
 /** The worker runner's config at `file`, read as its job reads it (shared/job-config.mjs): no code key, `budget` an
