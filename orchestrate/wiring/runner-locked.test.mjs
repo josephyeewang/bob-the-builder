@@ -12,7 +12,7 @@ import { tempDir } from '../shared/test-tmp.mjs';
 import { pushWorld } from '../modules/M4-workshop/git/push-world.test-helper.mjs';
 import { createSaveWork } from '../modules/M4-workshop/git/save-work.mjs';
 import { bundleName } from '../modules/M4-workshop/git/push.mjs';
-import { JOBS_DIR, JOB_ACK_WAIT_MS, LOCKED_JOBS, LOCKED_MS, LOCKED_SAVE_MS, RESULT_MAX_BYTES, SAVE_DELAYS_MS, GUARD, ackFile, groupFile, guardedRun, jobGuard, jobSettings, jobSettingsFile, lockedCommand, lockedJobOf, lockedRule, jobFile, jobGroupProblem, lockedRunner, readGroupRecord, runToEnd, settingsSha, claudeEnd, sayable, hearing, resultWords, SAID_MAX } from './runner-locked.mjs';
+import { JOBS_DIR, JOB_ACK_WAIT_MS, LOCKED_JOBS, LOCKED_MS, LOCKED_SAVE_MS, RESULT_MAX_BYTES, SAVE_DELAYS_MS, GUARD, ackFile, groupFile, guardedRun, jobGuard, jobSettings, processInfo, jobSettingsFile, lockedCommand, lockedJobOf, lockedRule, jobFile, jobGroupProblem, lockedRunner, readGroupRecord, runToEnd, settingsSha, claudeEnd, sayable, hearing, resultWords, SAID_MAX } from './runner-locked.mjs';
 import { EventEmitter } from 'node:events';
 import { SAVE_DEADLINE_MS } from '../modules/M11-dispatcher/pass.mjs';
 import { LOCKED_PROMPT } from '../modules/M4-workshop/launcher/launch.mjs';
@@ -429,10 +429,27 @@ test('#463 r2 M1: no job runs without the runner\'s go-ahead, and a record that 
   await assert.rejects(runner({ spawn: (bin, args, opts) => childSpawn('/bin/sh', ['-c', `echo 0 > '${f}'`], opts) })({ job: 'install', command: 'true', sessionId: 'S-1', role: 'worker', settingsFile, cwd }),
     /the install job's process group was not recorded/);
   // The shell gives up waiting for a go-ahead that never comes, and the job does not run.
+  // The guard records its own shell: run in place of the shell started (`exec`), the record is that pid, on every
+  // system. (Without `exec`, whether `sh -c` runs its last command in place is the shell's choice: macOS's sh does,
+  // Ubuntu's dash forks a child; CI on #666, 24 Nov 2026. The runner never needs the record to be the group's leader:
+  // readGroupRecord keeps the recorded process's group. That is held just below, in the form claude's Bash tool runs it.)
   const g = join(cwd, 'g');
-  const r = spawnSync('/bin/sh', ['-c', lockedCommand({ gfile: g, inner: `touch '${ran}'` })], { encoding: 'utf8', timeout: JOB_ACK_WAIT_MS + 5_000 });
+  const r = spawnSync('/bin/sh', ['-c', `exec ${lockedCommand({ gfile: g, inner: `touch '${ran}'` })}`], { encoding: 'utf8', timeout: JOB_ACK_WAIT_MS + 5_000 });
   assert.notEqual(r.status, 0); assert.equal(existsSync(ran), false);
-  assert.equal(readFileSync(g, 'utf8').trim(), String(r.pid ?? readFileSync(g, 'utf8').trim()), 'its record is its own pid');
+  assert.ok(Number.isInteger(r.pid)); assert.equal(readFileSync(g, 'utf8').trim(), String(r.pid), 'its record is its own pid');
+  // Run as one command inside a shell (no `exec`), as claude's Bash tool runs it: the record names a process in the
+  // job's own group (the group of the shell started), whichever process the guard ended up in.
+  const g2 = join(cwd, 'g2');
+  const sh2 = childSpawn('/bin/sh', ['-c', `${lockedCommand({ gfile: g2, inner: `touch '${ran}'` })}; :`], { detached: true, stdio: 'ignore' });
+  try {
+    let text = '';
+    for (let n = 0; n < 200 && !text.endsWith('\n'); n += 1) { await new Promise((ok) => setTimeout(ok, 25)); try { text = readFileSync(g2, 'utf8'); } catch { /* not yet */ } }
+    const pid = Number(text.trim());
+    assert.ok(Number.isInteger(pid) && pid > 1, `a record was written (${JSON.stringify(text)})`);
+    assert.equal(processInfo(pid).pgid, sh2.pid, 'the recorded process is in the job\'s own group');
+    assert.equal(readGroupRecord(g2, { since: '2000-01-01T00:00:00Z' }).pgid, sh2.pid, 'and the runner reads that group from it');
+  } finally { try { process.kill(-sh2.pid, 'SIGKILL'); } catch { /* already gone */ } }
+  assert.equal(existsSync(ran), false, 'no go-ahead: never ran');
   // The record's form: none yet, half written, not a pid.
   const rec = join(cwd, 'rec');
   assert.equal(readGroupRecord(rec, { since: '2000-01-01T00:00:00Z' }), null);
