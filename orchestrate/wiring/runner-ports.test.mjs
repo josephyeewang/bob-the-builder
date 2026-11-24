@@ -315,7 +315,7 @@ function world(over = {}) {
   mkdirSync(join(w.mine.copies, 'C-9'));
   w.c = { copiesRoot: w.copiesRoot, outboxRoot: w.outboxRoot, settingsDir: w.settingsDir, home: join(d, 'home'), path: '/usr/bin:/bin', claudeBin: '/bin/sleep',
     workerRunner: { requestsDir: join(d, 'requests'), statusFile: join(d, 'runner', 'status.json') },
-    products: { p1: { repo: 'o/p1', mirror: join(d, 'mirror'), render: { paths: { hooksDir: '/h', deny: { secrets: ['/s'] } }, product: { hosts: [] }, rulesHosts: [], productionFiles: [], proposalOutboxes: ['/prop'] } } } };
+    products: { p1: { repo: 'o/p1', mirror: join(d, 'mirror'), render: { paths: { hooksDir: '/h', deny: { secrets: ['/s'] } }, rulesHosts: [], productionFiles: [], proposalOutboxes: ['/prop'] } } } };
   w.card = { state: 'claimed', claim: { session_id: SID }, product: 'p1' };
   w.deps = {
     readCard: () => ({ ok: true, doc: w.card }),
@@ -559,7 +559,7 @@ test('#364 self-review M4: with M4\'s own launch(), names that pass check 0 and 
   w.c.workerRunner = runner;
   w.c.products.p1.render = { paths: { hooksDir: '/w/hooks', snapshot: '/w/snapshots/rules.json', node: '/w/node', notes: '/w/notes', bobFolder: '/w/bob', mirror: '/w/mirror.git',
     deny: { proposals: ['/w/proposals'], secrets: ['/w/secrets'], claudeHome: '/h/.claude', ssh: '/h/.ssh', gh: '/h/.config/gh', robotKeys: '/w/keys', record: '/w/record' } },
-  product: { commands: { test: 'npm test' }, hosts: [] }, rulesHosts: [], productionFiles: [], proposalOutboxes: ['/w/proposals'] };
+  rulesHosts: [], productionFiles: [], proposalOutboxes: ['/w/proposals'] };
   try {
     const a = await w.start();
     assert.equal(a.ok, false); assert.match(a.reason, /^launch check 1 \(fresh copy\): no check is wired/);
@@ -581,7 +581,7 @@ test('L1345: the config setup writes names the proposals folders once (proposalO
   // As setup/worker-runner-setup.mjs writes it: deny has no proposals entry; every product's folder is in proposalOutboxes.
   w.c.products.p1.render = { paths: { hooksDir: '/w/hooks', snapshot: '/w/snapshots/rules.json', node: '/w/node', notes: '/w/notes', bobFolder: '/w/bob', mirror: '/w/mirror.git',
     deny: { secrets: ['/w/secrets'], claudeHome: '/h/.claude', ssh: '/h/.ssh', gh: '/h/.config/gh', robotKeys: '/w/keys', record: '/w/record' } },
-  product: { commands: { test: 'npm test' }, hosts: [] }, rulesHosts: [], productionFiles: [], proposalOutboxes: ['/w/proposals/p1', '/w/proposals/p2'] };
+  rulesHosts: [], productionFiles: [], proposalOutboxes: ['/w/proposals/p1', '/w/proposals/p2'] };
   try {
     const a = await w.start();
     assert.equal(made?.ok, true, made?.reason);
@@ -796,7 +796,7 @@ test('#364 r1 M1: with two products, a p1 session\'s settings deny p2\'s mirror 
   w.c.workerRunner = runner;
   const render = (n) => ({ paths: { hooksDir: `/w/${n}/hooks`, snapshot: `/w/${n}/snapshots/rules.json`, node: '/w/node', notes: `/w/${n}/notes`, bobFolder: '/w/bob', mirror: `/w/${n}/mirror.git`,
     deny: { proposals: [`/w/${n}/proposals`], secrets: ['/w/secrets'], claudeHome: '/h/.claude', ssh: '/h/.ssh', gh: '/h/.config/gh', robotKeys: '/w/keys', record: '/w/record' } },
-  product: { commands: { test: 'npm test' }, hosts: [] }, rulesHosts: [], productionFiles: [], proposalOutboxes: [`/w/${n}/proposals`] });
+  rulesHosts: [], productionFiles: [], proposalOutboxes: [`/w/${n}/proposals`] });
   w.c.products.p1.render = render('p1');
   w.c.products.p2 = { repo: 'o/p2', mirror: join(w.d, 'mirror-p2'), render: render('p2') };
   const theirs = { copies: join(w.copiesRoot, 'p2'), outboxes: join(w.outboxRoot, 'p2') };
@@ -884,7 +884,7 @@ test('#378 r1 M1: product B added while a product A session runs: B\'s start is 
   w.c.workerRunner = runner;
   const render = (n) => ({ paths: { hooksDir: `/w/${n}/hooks`, snapshot: `/w/${n}/snapshots/rules.json`, node: '/w/node', notes: `/w/${n}/notes`, bobFolder: '/w/bob', mirror: `/w/${n}/mirror.git`,
     deny: { proposals: [`/w/${n}/proposals`], secrets: ['/w/secrets'], claudeHome: '/h/.claude', ssh: '/h/.ssh', gh: '/h/.config/gh', robotKeys: '/w/keys', record: '/w/record' } },
-  product: { commands: { test: 'npm test' }, hosts: [] }, rulesHosts: [], productionFiles: [], proposalOutboxes: [`/w/${n}/proposals`] });
+  rulesHosts: [], productionFiles: [], proposalOutboxes: [`/w/${n}/proposals`] });
   w.c.products.p1.render = render('p1');
   try {
     // 1. Product A (p1) alone: its session starts, and its settings know nothing of a p2.
@@ -982,7 +982,7 @@ test('L889: the baseline\'s throwaway settings pass the real renderer: its folde
   w.c.workerRunner = runner;
   w.c.products.p1.render = { paths: { hooksDir: '/w/p1/hooks', snapshot: '/w/p1/snapshots/rules.json', node: '/w/node', notes: '/w/p1/notes', bobFolder: '/w/bob', mirror: '/w/p1/mirror.git',
     deny: { proposals: ['/w/p1/proposals'], secrets: ['/w/secrets'], claudeHome: '/h/.claude', ssh: '/h/.ssh', gh: '/h/.config/gh', robotKeys: '/w/keys', record: '/w/record' } },
-  product: { commands: { test: 'npm test' }, hosts: [] }, rulesHosts: [], productionFiles: [], proposalOutboxes: ['/w/p1/proposals'] };
+  rulesHosts: [], productionFiles: [], proposalOutboxes: ['/w/p1/proposals'] };
   try {
     const a = await w.start();
     assert.equal(a.ok, true, a.reason);
@@ -1003,7 +1003,8 @@ test('L889: the baseline\'s throwaway settings pass the real renderer: its folde
 test('#456 runLocked self-review M2: check 4\'s real settings steps write the install settings with the registry hosts, then put the session\'s back byte for byte', async () => {
   let x0; const seen = {};
   const walled = (x) => ({ ok: true, role: 'worker', settings: { phase: x.phase ?? 'session', hosts: x.registryHosts ?? null } });
-  const w = world({ walled, checksFor: (x) => { x0 = x; return {}; },
+  const productRules = () => ({ commands: { install: 'npm ci', test: 'npm test' }, registryHosts: ['registry.npmjs.org'] });
+  const w = world({ walled, productRules, checksFor: (x) => { x0 = x; return {}; },
     launchFn: async (x) => {
       const f = x0.settings.file; seen.first = readFileSync(f, 'utf8');
       const i = x0.renderPhase('install'); seen.install = i;
@@ -1012,7 +1013,6 @@ test('#456 runLocked self-review M2: check 4\'s real settings steps write the in
       seen.next = existsSync(`${f}.next`); seen.bad = x0.renderPhase('other');
       return { ok: true, started: await x.start() };
     } });
-  w.c.products.p1.render.registryHosts = ['registry.npmjs.org'];
   try {
     const a = await w.start();
     assert.equal(a.ok, true, a.reason);
@@ -1024,14 +1024,38 @@ test('#456 runLocked self-review M2: check 4\'s real settings steps write the in
   } finally { rmSync(w.d, { recursive: true, force: true }); }
   // A move that fails leaves no .next file, and says why; the session's settings file is untouched.
   let y0; let r;
-  const v = world({ walled, fs: { rename: () => { const e = new Error('no'); e.code = 'EXDEV'; throw e; } }, checksFor: (x) => { y0 = x; return {}; },
+  const v = world({ walled, productRules, fs: { rename: () => { const e = new Error('no'); e.code = 'EXDEV'; throw e; } }, checksFor: (x) => { y0 = x; return {}; },
     launchFn: async () => { const f = y0.settings.file; const before = readFileSync(f, 'utf8'); r = y0.writeSettings({ x: 1 }); r.same = readFileSync(f, 'utf8') === before; r.next = existsSync(`${f}.next`); return { ok: false, reason: 'stop here' }; } });
-  v.c.products.p1.render.registryHosts = ['registry.npmjs.org'];
   try {
     await v.start();
     assert.equal(r.ok, false); assert.match(r.reason, /not written \(EXDEV\)/);
     assert.deepEqual([r.same, r.next], [true, false]);
   } finally { rmSync(v.d, { recursive: true, force: true }); }
+});
+
+// R-S1-2: the start reads the product's commands and registry hosts once, from the rules (productRules), and that one read
+// feeds both the settings (exact allow rules) and checks 4 and 11. With no read, the reason reaches the checks.
+test('R-S1-2: one read of the product\'s rules feeds the settings\' commands and checks 4 and 11; none read, the reason reaches them', async () => {
+  let x0; const asked = [];
+  const productRules = (p) => { asked.push(p); return { commands: { install: 'true', test: 'test -s orchestrate/policy.yaml' }, registryHosts: [] }; };
+  const w = world({ productRules, checksFor: (x) => { x0 = x; return {}; } });
+  try {
+    assert.equal((await w.start()).ok, true);
+    assert.deepEqual(asked, ['p1'], 'read once, for this start\'s product');
+    const walled = w.calls.filter((c) => c[0] === 'walled').map((c) => c[1]);
+    assert.ok(walled.length >= 1);
+    for (const x of walled) assert.deepEqual(x.product, { commands: { install: 'true', test: 'test -s orchestrate/policy.yaml' } }, 'the settings render the rules\' commands');
+    assert.deepEqual([x0.installCommand, x0.testCommand, x0.registryHosts, 'rulesWhy' in x0], ['true', 'test -s orchestrate/policy.yaml', [], false]);
+  } finally { rmSync(w.d, { recursive: true, force: true }); }
+  for (const [deps, re] of [[{}, /reads no product rules/], [{ productRules: () => ({ commands: {}, registryHosts: [], why: 'the Dispatcher\'s rules are not loaded' }) }, /rules are not loaded/],
+    [{ productRules: () => { throw new Error('boom'); } }, /commands can't be read \(boom\)/]]) {
+    let y0; const v = world({ ...deps, checksFor: (x) => { y0 = x; return {}; } });
+    try {
+      assert.equal((await v.start()).ok, true);
+      assert.equal(y0.installCommand, undefined); assert.match(y0.rulesWhy, re);
+      for (const c of v.calls.filter((k) => k[0] === 'walled')) assert.deepEqual(c[1].product, { commands: {} }, 'no commands, so no allow rule for any');
+    } finally { rmSync(v.d, { recursive: true, force: true }); }
+  }
 });
 
 test('#463 r1 m5 (P11): a settings write that reads back other than written, or can\'t be read back, is refused', async () => {

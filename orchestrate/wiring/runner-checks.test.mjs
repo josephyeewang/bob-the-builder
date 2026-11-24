@@ -11,7 +11,7 @@ import { gitOk, initMirror } from '../modules/M4-workshop/git/safe-git.mjs';
 import { prepareWorkerCopy } from '../modules/M4-workshop/launcher/worker-copy.mjs';
 import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.mjs';
 import { CHECKS } from '../modules/M4-workshop/launcher/launch.mjs';
-import { BASELINE_MS, WALK_DEPTH, baselineCommand, baselineFile, setupFilesProblem, workerChecks } from './runner-checks.mjs';
+import { BASELINE_MS, WALK_DEPTH, baselineCommand, baselineFile, setupFilesProblem, workerChecks, commandMissing } from './runner-checks.mjs';
 import { LOCKED_MS, groupFile, groupRecordCommand } from './runner-locked.mjs';
 import { RECHECK, checkRunnerConfig, lockedOf, lockedWiring, realRunnerPorts, startDeps, workerCheckInputs } from './runner-main.mjs';
 import { rulesText } from '../setup/worker-rules.mjs';
@@ -115,9 +115,10 @@ function inputs(over = {}) {
 test('step 6: a port for each check whose inputs are there, none for one whose inputs are not (launch() refuses it)', async () => {
   const { d, x } = inputs();
   try {
-    assert.deepEqual(Object.keys(workerChecks(x)).map(Number), [1, 2, 3, 5, 6, 7, 8, 9, 10, 11], 'no install (4), budget (12) or Bob list (13) yet');
-    const none = workerChecks({ ...x, mirror: undefined, busy: undefined, pin: undefined, rules: undefined, machineWide: undefined, testCommand: undefined });
-    assert.deepEqual(Object.keys(none).map(Number), [1, 5, 9]);
+    assert.deepEqual(Object.keys(workerChecks({ ...x, installCommand: 'npm ci' })).map(Number), [1, 2, 3, 5, 6, 7, 8, 9, 10, 11], 'no runLocked (4), budget (12) or Bob list (13) yet');
+    const none = workerChecks({ ...x, mirror: undefined, busy: undefined, pin: undefined, rules: undefined, machineWide: undefined, testCommand: undefined, spawn: undefined });
+    // R-S1-2: a worker with no install or test command has checks 4 and 11, each refusing with the line to add.
+    assert.deepEqual(Object.keys(none).map(Number), [1, 4, 5, 9, 11]);
     // Check 12 is M11's own gate, with this session's kind.
     let seen; let given;
     const budget = { rules: {}, filesOf: () => [] };
@@ -149,8 +150,9 @@ test('L969, check 4: a port only with runLocked, an install command and both set
     const during = { permissions: { allow: [] }, sandbox: { network: { allowedDomains: ['api.example.com', 'registry.npmjs.org'] } } };
     const four = { runLocked: async (j) => { log.push(['run', j]); return { ok: true }; }, installCommand: 'npm ci', registryHosts: ['registry.npmjs.org'],
       renderPhase: (ph) => { log.push(['render', ph]); return { ok: true, settings: ph === 'install' ? during : session }; }, writeSettings: (st) => { log.push(['write', st]); return { ok: true }; } };
-    for (const k of ['runLocked', 'installCommand', 'renderPhase', 'writeSettings']) assert.equal(workerChecks({ ...x, ...four, [k]: undefined })[4], undefined, `no ${k}, no check 4`);
-    assert.equal(workerChecks({ ...x, ...four, installCommand: '' })[4], undefined, 'an empty install command, no check 4');
+    for (const k of ['runLocked', 'renderPhase', 'writeSettings']) assert.equal(workerChecks({ ...x, ...four, [k]: undefined })[4], undefined, `no ${k}, no check 4`);
+    // R-S1-2: no install command, or an empty one, is a refusal naming the line the rules file must add, never a missing port.
+    for (const installCommand of [undefined, '']) assert.match((await workerChecks({ ...x, ...four, installCommand })[4]()).reason, /names no product_profile\.commands\.install: .*install: "true" if there is nothing to install/, String(installCommand));
     const p = workerChecks({ ...x, ...four });
     assert.deepEqual(await p[4](), { ok: true });
     assert.deepEqual(log.map((l) => (l[0] === 'run' ? 'run' : l[0] === 'write' ? (l[1] === during ? 'write install' : 'write session') : `render ${l[1]}`)),
@@ -168,12 +170,28 @@ test('L969, check 4: a port only with runLocked, an install command and both set
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
+// R-S1-2: a worker with no install or test command is refused at check 4 or 11 with the exact line its rules file must add;
+// when the rules could not be read at all, with that reason instead. A script role needs neither.
+test('R-S1-2: checks 4 and 11 refuse a missing command naming the line to add, or why the rules were not read', async () => {
+  const { d, x } = inputs();
+  try {
+    const w = { ...x, installCommand: undefined, testCommand: undefined };
+    assert.deepEqual(await workerChecks(w)[4](), { ok: false, reason: 'product p1\'s rules file (orchestrate/policy.yaml) names no product_profile.commands.install: add the exact install command there, or install: "true" if there is nothing to install' });
+    assert.deepEqual(await workerChecks(w)[11](), { ok: false, reason: 'product p1\'s rules file (orchestrate/policy.yaml) names no product_profile.commands.test: add the exact command that runs its tests there' });
+    const why = 'the Dispatcher\'s rules are not loaded (the config names no budget, or it could not be loaded), so product p1\'s commands can\'t be read';
+    assert.equal(commandMissing({ ...w, rulesWhy: why }, 'install'), `${why}; check 4 needs product_profile.commands.install from them`);
+    assert.equal((await workerChecks({ ...w, rulesWhy: why })[11]()).reason, `${why}; check 11 needs product_profile.commands.test from them`);
+    const s = workerChecks({ ...w, role: 'script' });
+    assert.equal(s[4], undefined, 'a script role has no install check');
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
 // #456 r1 m3: save-work and launch check 4 come from ONE runLocked, so a launch is never possible while its work can't be saved.
 test('#456 r1 m3: save-work and check 4 are both on or both off: one runLocked feeds them', async () => {
   const c = checkRunnerConfig({ installRoot: '/i', requestsDir: '/r', statusFile: '/o/status.json', orchestrateUid: 501, outboxRoot: '/ob', copiesRoot: '/c', home: '/home',
     path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/rec', recordUid: 502, claimMs: 1,
-    products: { p1: { repo: 'o/p', mirror: '/m', render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] }, hooksDir: '/h', snapshot: '/snap/s.json', snapshotOwner: 0 }, product: { commands: { install: 'npm ci', test: 'npm test' } }, registryHosts: [] } } } });
-  const wx = { role: 'worker', profile: DESIGN_PROFILES.worker, kind: 'editing', product: 'p1', sessionId: SID, copy: '/c/C-1', settings: { file: '/f', settings: {} }, renderPhase: () => ({ ok: true, settings: {} }), writeSettings: () => ({ ok: true }) };
+    products: { p1: { repo: 'o/p', mirror: '/m', render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] }, hooksDir: '/h', snapshot: '/snap/s.json', snapshotOwner: 0 } } } } });
+  const wx = { role: 'worker', profile: DESIGN_PROFILES.worker, kind: 'editing', product: 'p1', sessionId: SID, copy: '/c/C-1', settings: { file: '/f', settings: {} }, renderPhase: () => ({ ok: true, settings: {} }), writeSettings: () => ({ ok: true }), installCommand: 'npm ci', testCommand: 'npm test', registryHosts: [] };
   const session = { id: SID, product: 'p1', kind: 'editing', card: 'C-1', copy: '/c/C-1', outbox: '/ob/p1/worker/x', save_settings_sha: 'a'.repeat(64) };
   // Off: no runLocked. Save-work refuses (it runs only in the lock-down) and no worker has check 4.
   const off = lockedWiring(c, { runLocked: null });
@@ -367,8 +385,8 @@ const RULES = { production: { env_files: ['.env'], programs: ['psql'], hosts: ['
 test('step 6: the runner\'s config feeds the checks (pin, machine-wide file, the product\'s rules, paths and test command)', async () => {
   const c = checkRunnerConfig({ installRoot: '/i', requestsDir: '/r', statusFile: '/o/status.json', orchestrateUid: 501, outboxRoot: '/ob', copiesRoot: '/c', home: '/home',
     path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/rec', recordUid: 502, claimMs: 1, pin: '2.1.300', machineWide: '/Library/Application Support/ClaudeCode/managed-settings.json',
-    products: { p1: { repo: 'o/p', mirror: '/m', rules: RULES, render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] }, hooksDir: '/h', snapshot: '/snap/s.json', snapshotOwner: 0, bobFolder: '/b' }, product: { commands: { test: 'npm test' } } } } } });
-  const i = workerCheckInputs(c, { product: 'p1', sessionId: SID });
+    products: { p1: { repo: 'o/p', mirror: '/m', rules: RULES, render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] }, hooksDir: '/h', snapshot: '/snap/s.json', snapshotOwner: 0, bobFolder: '/b' } } } } });
+  const i = workerCheckInputs(c, { product: 'p1', sessionId: SID, testCommand: 'npm test' });
   assert.deepEqual([i.mirror, i.pin, i.hooksDir, i.rules, i.snapshot, i.machineWide, i.home, i.testCommand, i.bobFolder, i.budget],
     ['/m', '2.1.300', '/h', RULES, '/snap/s.json', '/Library/Application Support/ClaudeCode/managed-settings.json', '/home', 'npm test', '/b', null]);
   for (const k of ['busy', 'spawn', 'alert']) assert.equal(typeof i[k], 'function', k);
@@ -379,12 +397,11 @@ test('step 6: the runner\'s config feeds the checks (pin, machine-wide file, the
   // Checks 1, 2, 3 and 8 once more just before claude starts (#369 M1, r1 m1): here no copy, so check 1 refuses first.
   assert.deepEqual(RECHECK, [1, 2, 3, 8]);
   assert.match(await sd.beforeStart({ product: 'p1', sessionId: SID, copy: '/c/C-1', ownUid: () => process.getuid() }), /^check 1: the card's copy is missing/);
-  const wx = { role: 'worker', profile: DESIGN_PROFILES.worker, kind: 'editing', product: 'p1', sessionId: SID, copy: '/c/C-1', settings: { file: '/f', settings: {} } };
+  const wx = { role: 'worker', profile: DESIGN_PROFILES.worker, kind: 'editing', product: 'p1', sessionId: SID, copy: '/c/C-1', settings: { file: '/f', settings: {} }, installCommand: 'npm ci', testCommand: 'npm test' };
   assert.deepEqual(Object.keys(sd.checksFor(wx)).map(Number), [1, 2, 3, 5, 6, 7, 8, 9, 10], 'no throwaway port, no check 11');
   assert.deepEqual(Object.keys(sd.checksFor({ ...wx, throwaway: async () => ({}) })).map(Number), [1, 2, 3, 5, 6, 7, 8, 9, 10, 11]);
-  // L969: the install command and the registry hosts come from the product's render; runLocked from the one wiring.
-  const withInstall = { ...c, products: { p1: { ...c.products.p1, render: { ...c.products.p1.render, product: { commands: { install: 'npm ci' } }, registryHosts: ['registry.npmjs.org'] } } } };
-  const j = workerCheckInputs(withInstall, { product: 'p1', sessionId: SID }, { runLocked: async () => ({ ok: true }) });
+  // L969, R-S1-2: the install command and the registry hosts are the start's own (its one read of the rules); runLocked from the one wiring.
+  const j = workerCheckInputs(c, { product: 'p1', sessionId: SID, installCommand: 'npm ci', registryHosts: ['registry.npmjs.org'] }, { runLocked: async () => ({ ok: true }) });
   assert.deepEqual([j.installCommand, j.registryHosts, typeof j.runLocked], ['npm ci', ['registry.npmjs.org'], 'function']);
   assert.equal(workerCheckInputs(c, { product: 'p1', sessionId: SID }).runLocked, null, 'none given: none');
   const base = { installRoot: '/i', requestsDir: '/r', statusFile: '/o/status.json', orchestrateUid: 501, outboxRoot: '/ob', copiesRoot: '/c', home: '/home',
@@ -511,7 +528,7 @@ test('L1001: the config\'s budget and Bob file list reach the checks, which then
   const budget = { rules: {}, rec: {}, bandsNow: () => ({}), runningNow: () => [] }; const bobManifest = { 'a.md': 'f'.repeat(64) };
   const i = workerCheckInputs(c, { product: 'p1', sessionId: SID }, { budget, bobManifest });
   assert.equal(i.budget, budget); assert.equal(i.bobManifest, bobManifest);
-  const wx = { role: 'worker', profile: DESIGN_PROFILES.worker, kind: 'editing', product: 'p1', sessionId: SID, copy: '/c/C-1', settings: { file: '/f', settings: {} } };
+  const wx = { role: 'worker', profile: DESIGN_PROFILES.worker, kind: 'editing', product: 'p1', sessionId: SID, copy: '/c/C-1', settings: { file: '/f', settings: {} }, installCommand: 'npm ci', testCommand: 'npm test' };
   const ports = (o) => Object.keys(startDeps(c, o).checksFor(wx)).map(Number);
   assert.deepEqual(ports({ budget, bobManifest }), [1, 2, 3, 5, 6, 7, 8, 9, 10, 12, 13]);
   assert.deepEqual(ports({}), [1, 2, 3, 5, 6, 7, 8, 9, 10], 'none loaded: no port, so launch refuses');
@@ -524,11 +541,11 @@ test('#463 r3 m5: check 4, save-work and checks 12 and 13 all stay wired through
   const c = checkRunnerConfig({ installRoot: '/i', requestsDir: '/r', statusFile: '/o/status.json', orchestrateUid: 501, outboxRoot: '/ob', copiesRoot: '/c', home: '/home',
     path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/rec', recordUid: 502, claimMs: 1, pin: '2.1.300', machineWide: '/Library/Application Support/ClaudeCode/managed-settings.json',
     budget: '/i/modules/M11-dispatcher/budget.mjs', bobManifest: '/i/bob-manifest.json', dispatcherRules: '/d/rules.json', reviewStatusFile: '/rv/status.json', reviewUid: 503,
-    products: { p1: { repo: 'o/p', mirror: '/m', rules: RULES, render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] }, hooksDir: '/h', snapshot: '/snap/s.json', snapshotOwner: 0, bobFolder: '/b' }, product: { commands: { install: 'npm ci', test: 'npm test' } }, registryHosts: [] } } } });
+    products: { p1: { repo: 'o/p', mirror: '/m', rules: RULES, render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] }, hooksDir: '/h', snapshot: '/snap/s.json', snapshotOwner: 0, bobFolder: '/b' } } } } });
   const budget = { rules: {}, rec: {}, bandsNow: () => ({}), runningNow: () => [] }; const bobManifest = { 'a.md': 'f'.repeat(64) };
   const seen = []; const jobs = [];
   const runLocked = async (j) => { seen.push(j.job); jobs.push(j); return j.job === 'install' ? { ok: true } : { ok: false, reason: 'stand-in' }; };
-  const wx = { role: 'worker', profile: DESIGN_PROFILES.worker, kind: 'editing', product: 'p1', sessionId: SID, copy: '/c/C-1', settings: { file: '/f', settings: {} }, renderPhase: () => ({ ok: true, settings: {} }), writeSettings: () => ({ ok: true }) };
+  const wx = { role: 'worker', profile: DESIGN_PROFILES.worker, kind: 'editing', product: 'p1', sessionId: SID, copy: '/c/C-1', settings: { file: '/f', settings: {} }, renderPhase: () => ({ ok: true, settings: {} }), writeSettings: () => ({ ok: true }), installCommand: 'npm ci', testCommand: 'npm test', registryHosts: [] };
   const w = lockedWiring(c, { runLocked, budget, bobManifest });
   const k = w.startDeps.checksFor(wx);
   assert.deepEqual(Object.keys(k).map(Number), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13], 'check 4 and checks 12 and 13 together');
@@ -554,7 +571,7 @@ test('#463 r3 m5: check 4, save-work and checks 12 and 13 all stay wired through
 });
 
 test('#528 r4 c2: a worker product\'s rules.secrets.paths, when there, must be a list of text; no rules at all is allowed', () => {
-  const prod = (rules) => ({ repo: 'o/p', mirror: '/m', render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] }, hooksDir: '/h', snapshot: '/snap/s.json', snapshotOwner: 0 }, product: { commands: { install: 'npm ci', test: 'npm test' } }, registryHosts: [] }, ...(rules === undefined ? {} : { rules }) });
+  const prod = (rules) => ({ repo: 'o/p', mirror: '/m', render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] }, hooksDir: '/h', snapshot: '/snap/s.json', snapshotOwner: 0 } }, ...(rules === undefined ? {} : { rules }) });
   const conf = (rules) => () => checkRunnerConfig({ installRoot: '/i', requestsDir: '/r', statusFile: '/o/status.json', orchestrateUid: 501, outboxRoot: '/ob', copiesRoot: '/c', home: '/home',
     path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/rec', recordUid: 502, claimMs: 1, products: { p1: prod(rules) } });
   const production = { env_files: [], programs: [], hosts: [] };

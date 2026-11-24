@@ -397,7 +397,7 @@ export function liveWallProblem(live, product, places, read) {
 /**
  * The start port. c (the runner's config, checked by runner-main.mjs): { copiesRoot, outboxRoot, settingsDir, home, path,
  * claudeBin, recordRoot, recordUid, workerRunner: { requestsDir, statusFile },
- * products: { <name>: { repo, mirror, render: { paths, product, rulesHosts, productionFiles, proposalOutboxes, registryHosts? } } } }.
+ * products: { <name>: { repo, mirror, render: { paths, rulesHosts, productionFiles, proposalOutboxes } } } }.
  * deps (ports; production passes only what is built): readCard, startCommit, prepare, checksFor(x) → { [n]: check },
  * promptFor(x) → text (asked once the copy and outbox exist, with { head, outbox }; may be async, and may answer
  * { ok: false, reason }, which undoes the start), names ({ version, confirmed? }, launch check 0; the flags are sessionArgs'), account, spawn, pidStartOf, kill, there, launchFn,
@@ -406,7 +406,10 @@ export function liveWallProblem(live, product, places, read) {
  * walled, fs ({ mkdir, rm, writeNew, list, lstat, chmodTree, rename }), ownUid, stopped (true once the runner is stopping: nothing more is spawned,
  * #364 self-review M1), log (what is told, such as a throwaway that can't be removed), productHeld(product) → null or why
  * the product starts no session (runner-main.mjs rootSnapshots, L1226, behind the wall and test-product gates; asked first, before anything is read),
- * readSettings(id) → a live session's settings (#378 r1 M1).
+ * readSettings(id) → a live session's settings (#378 r1 M1),
+ * productRules(product) → { commands, registryHosts, why? }: the product's commands and registry hosts from its rules
+ * (runner-main.mjs productCommands, R-S1-2), read once per start, after the holds; the settings' exact allow rules and
+ * install hosts and checks 4 and 11 all take this one read. None given: no commands, so a worker is refused at check 4.
  * The request: { card, kind, product, sessionId, live, undoCommit?, onGroup? } (live: the runner's other live sessions, liveWallProblem;
  * undoCommit: the reversed commit, 40 hex, an undo's only, L976; onGroup: told check 4's install process groups, #463 r3 m1).
  */
@@ -464,6 +467,11 @@ export function startPort(c, deps = {}) {
     // A product held (the wall, the test-product gate, or its rules snapshot not root's, fresh and its own: L1226) starts no session. Asked before anything is read.
     const held = deps.productHeld?.(product);
     if (held) return refuse(held);
+    // The product's commands and registry hosts (R-S1-2): one read for the whole start, from its rules.
+    let pr; try { pr = deps.productRules ? deps.productRules(product) : null; } catch (e) { pr = { why: `product ${product}'s commands can't be read (${e?.message ?? e})` }; }
+    const commands = pr?.commands && typeof pr.commands === 'object' && !Array.isArray(pr.commands) ? { ...pr.commands } : {};
+    const registryHosts = Array.isArray(pr?.registryHosts) ? [...pr.registryHosts] : [];
+    const rulesWhy = pr ? pr.why : 'the runner reads no product rules (no productRules port)';
     const cd = readCard(card);
     if (!cd?.ok) return refuse(`the card can't be read from the Record (${cd?.reason ?? 'no answer'})`);
     if (cd.doc?.state !== 'claimed' || cd.doc?.claim?.session_id !== sessionId) return refuse('the card is not claimed for this session');
@@ -530,7 +538,7 @@ export function startPort(c, deps = {}) {
     others.push(spare);
     others = [...new Set(others)];
     const r = p.render;
-    const settingsFor = (at, box, deny, phase = {}) => walled({ kind, workerRunner: c.workerRunner, profile, product: r.product, rulesHosts: r.rulesHosts, productionFiles: r.productionFiles, proposalOutboxes: r.proposalOutboxes, ...phase,
+    const settingsFor = (at, box, deny, phase = {}) => walled({ kind, workerRunner: c.workerRunner, profile, product: { commands }, rulesHosts: r.rulesHosts, productionFiles: r.productionFiles, proposalOutboxes: r.proposalOutboxes, ...phase,
       // The proposals wall (proposal-wall.mjs, L549): the rules' folders are the one list, passed as both the folders the
       // render must find denied and the deny entries themselves; setup's config names them once, as proposalOutboxes (L1345).
       paths: { ...r.paths, copy: at, outbox: box, deny: { ...(r.paths.deny ?? {}), otherCopies: [...(r.paths.deny?.otherCopies ?? []), ...deny],
@@ -569,7 +577,7 @@ export function startPort(c, deps = {}) {
     // Check 4 (L969, installStep): 'install' renders the same walled settings with the product's registry hosts; 'session'
     // is the very settings written above, so the file put back after the install is byte for byte what check 5 reads back.
     const renderPhase = (phase) => (phase === 'session' ? { ok: true, settings: w.settings }
-      : phase === 'install' ? settingsFor(copy, outbox, others, { phase: 'install', registryHosts: Array.isArray(r.registryHosts) ? r.registryHosts : [] }) : refuse('bad phase'));
+      : phase === 'install' ? settingsFor(copy, outbox, others, { phase: 'install', registryHosts }) : refuse('bad phase'));
     // c1: launch.mjs installStep checks the registry gone in the settings it rendered, not in the file; the two are one
     // only because this write reads the file back and compares it with them, byte for byte.
     // c4: a runner that dies during the install leaves the install-phase file (the registry's hosts allowed) as this
@@ -585,6 +593,8 @@ export function startPort(c, deps = {}) {
       return `${JSON.stringify(back, null, 2)}\n` === text ? { ok: true } : refuse('not read back as written');
     };
     const x = { role, profile, kind, sessionId, card, cardDoc: cd.doc, product, ...(kind === 'undo' ? { undoCommit } : {}), copy, outbox, env, head: made.head, mainAt, claudeBin: c.claudeBin, settings: { file: settingsFile, settings: w.settings }, ownUid, throwaway, renderPhase, writeSettings,
+      // The product's commands (R-S1-2), from the one read above: check 4 runs install, check 11 test.
+      installCommand: commands.install, testCommand: commands.test, registryHosts, ...(rulesWhy ? { rulesWhy } : {}),
       // Told the install's process groups (check 4, #463 r3 m1), kept by the runner as a save's are (worker-runner.mjs `installs`).
       ...(typeof onGroup === 'function' ? { onGroup } : {}) };
     let l;

@@ -10,7 +10,7 @@
 //   { "installRoot": "/abs", "requestsDir": "/abs", "statusFile": "/abs", "orchestrateUid": <uid>,
 //     "outboxRoot": "/abs", "copiesRoot": "/abs", "home": "/abs", "path": "/abs:/abs", "claudeBin": "/abs",
 //     "recordRoot": "/abs", "recordUid": <uid>, "claimMs": <ms>, "lockedMs": <ms>? (the install job's limit, at most runner-locked.mjs LOCKED_MS; save-work's is LOCKED_SAVE_MS),
-//     "products": { "<name>": { "repo": "owner/name", "mirror": "/abs", "render": { "paths": {...}, "product": {...},
+//     "products": { "<name>": { "repo": "owner/name", "mirror": "/abs", "render": { "paths": {...},
 //                   "rulesHosts": [], "productionFiles": [], "proposalOutboxes": [] }, "rules": {...}? } },
 //     "pin": "<claude version>"?, "machineWide": "/Library/Application Support/ClaudeCode/managed-settings.json"? (that file only, L913),
 //     "budget": "/abs.mjs"?, "bobManifest": "/abs"?,        inside installRoot and root's alone, each loaded once at start (L1001)
@@ -25,9 +25,12 @@
 // (launch check 12: the rules the Dispatcher's snapshot at dispatcherRules holds, the Record, and the running count from
 // this runner's status file and the review runner's), `bobManifest` the pinned Bob file list (check 13); each is root's
 // own file in the copy, and one that can't be loaded is logged and leaves its check without a port. Until both are
-// named no session starts; a worker is refused first at check 4 when its product declares no install command
-// (render.product.commands.install; its registry hosts in render.registryHosts). Check 4 and save-work run through one
-// lock-down runner (lockedWiring, L969, #456 r1 m3), so neither is ever on without the other.
+// named no session starts. The product's commands (product_profile.commands: install for check 4, test for check 11)
+// and its registry hosts (product_profile.registry_hosts) come only from its rules file, read at each start through the
+// budget, the same snapshot and read as check 12 and the test-product gate (productCommands, R-S1-2): never from this
+// config, which refuses render.product and render.registryHosts, so the commands have one source. A worker whose rules
+// name no install or no test command is refused at check 4 or 11 with the line its rules file must add. Check 4 and
+// save-work run through one lock-down runner (lockedWiring, L969, #456 r1 m3), so neither is ever on without the other.
 // Each product's render.paths.deny must name the Record, ~/.ssh, the gh config, ~/.claude and the robot keys (full paths,
 // not /), and list the secrets with the approvals and rules state (#364 r1 M2): a config missing any is refused.
 // The runner's own folder is the status file's folder: it holds the status, the memory (memory.json, 0o600), the
@@ -110,6 +113,8 @@ export function checkRunnerConfig(c) {
     if (typeof p?.repo !== 'string' || !/^[^/\s]+\/[^/\s]+$/.test(p.repo)) fail(`product ${name}: repo must be owner/name`);
     if (!fullPath(p.mirror)) fail(`product ${name}: mirror must be a full path in its simplest form`);
     if (!p.render?.paths || typeof p.render.paths !== 'object') fail(`product ${name}: render.paths must hold the session settings' fixed paths`);
+    // One source for the commands and the registry hosts (R-S1-2): the product's rules file, read at each start.
+    for (const k of ['product', 'registryHosts']) if (Object.hasOwn(p.render, k)) fail(`product ${name}: render.${k} is not taken: the commands and registry hosts come only from the product's rules file (product_profile.commands and product_profile.registry_hosts), read at each start`);
     if (p.rules !== undefined && (!p.rules || typeof p.rules !== 'object' || Array.isArray(p.rules))) fail(`product ${name}: rules must be the product's rules`);
     // The rules' production lists, as review-runner-main.mjs readConfig requires them (#369 m4): check 8 must not pass on
     // an empty snapshot.
@@ -208,13 +213,14 @@ export function hookStoreOf(c, { uid = process.getuid(), lstat = lstatSync, mkdi
 /**
  * What the launch checks read for one start (runner-checks.mjs workerChecks): the start port's x and the config's, the
  * lock-down runner check 4 runs the install through, and the budget and Bob file list main loaded once at start from the
- * config's `budget` and `bobManifest` (null: none, so checks 12 and 13 have no port).
+ * config's `budget` and `bobManifest` (null: none, so checks 12 and 13 have no port). The install and test commands and
+ * the registry hosts are the start's own (x: startPort read them once, through productCommands, for its settings too).
  */
 export function workerCheckInputs(c, x, { log = () => {}, runLocked = null, budget = null, bobManifest = null } = {}) {
   const p = c.products[x.product];
-  return { ...x, runLocked, installCommand: p.render.product?.commands?.install, registryHosts: p.render.registryHosts, mirror: p.mirror, pin: c.pin, hooksDir: p.render.paths.hooksDir, rules: p.rules, snapshot: p.render.paths.snapshot, sourceSha256: c.sourceSha256,
+  return { ...x, runLocked, mirror: p.mirror, pin: c.pin, hooksDir: p.render.paths.hooksDir, rules: p.rules, snapshot: p.render.paths.snapshot, sourceSha256: c.sourceSha256,
     machineWide: c.machineWide, busy: holdersOf, alert: (t) => log(`worker runner: ${x.sessionId}: ${t}`), spawn: childSpawn, home: c.home,
-    testCommand: p.render.product?.commands?.test, budget, bobFolder: p.render.paths.bobFolder, bobManifest,
+    budget, bobFolder: p.render.paths.bobFolder, bobManifest,
     // Check 9 lets the builder sign-in through only when the config names its file (L1261; runner-ports.mjs workerAccount).
     allowSigninToken: c.signinFile !== undefined };
 }
@@ -231,6 +237,24 @@ export function testProductProblem(budget, product) {
   let f; try { f = budget.rules.flag('product.test_product', { product }); } catch (e) { return `whether ${product} is a test product can't be read (${e?.message ?? e}); ${not}`; }
   return f === true ? null : `${product}'s rules do not say product.test_product: true; ${not}`;
 }
+/**
+ * A product's commands and registry hosts for one start (R-S1-2), from its rules file only (product_profile.commands
+ * { <key>: <exact command> } and product_profile.registry_hosts), read through the budget: the Dispatcher's snapshot, the
+ * same read as check 12 and the test-product gate, so a rules change is seen at the next start with no setup run. M10
+ * checked their shapes when it read the rules; whether each is one exact command is M4's rule, when the start renders
+ * its settings (render-settings.mjs renderAllowRules). → { commands, registryHosts, why? }: `why` says the rules could
+ * not be read (no budget, a snapshot refused), and the commands are then none, so a worker is refused at checks 4 and 11.
+ */
+export function productCommands(budget, product) {
+  const none = (why) => ({ commands: {}, registryHosts: [], why });
+  if (!budget?.rules || typeof budget.rules.get !== 'function') return none(`the Dispatcher's rules are not loaded (the config names no budget, or it could not be loaded), so product ${product}'s commands can't be read`);
+  let cmds; let hosts;
+  try { cmds = budget.rules.get('product_profile.commands', { product }); hosts = budget.rules.get('product_profile.registry_hosts', { product }); } catch (e) { return none(`product ${product}'s rules can't be read (${e?.message ?? e}), so its commands can't be read`); }
+  const commands = {};
+  if (cmds && typeof cmds === 'object' && !Array.isArray(cmds)) for (const [k, v] of Object.entries(cmds)) if (typeof v === 'string') commands[k] = v;
+  return { commands, registryHosts: Array.isArray(hosts) ? hosts.filter((h) => typeof h === 'string') : [] };
+}
+
 /** The start port's productHeld with the test-product gate first: `held` is the snapshots' own (rootSnapshots). */
 export const testProductHeld = (budget, held, problem = testProductProblem) => (product) => problem(budget, product) ?? held(product);
 
@@ -240,6 +264,8 @@ export const RECHECK = Object.freeze([1, 2, 3, 8]);
 /** The start port's ports from the config: the stop flag, check 0's pinned version, the worker launch checks, and the
  * RECHECK checks once more just before claude starts. */
 export const startDeps = (c, { stopped = () => false, log, productHeld, runLocked = null, budget = null, bobManifest = null, account, checksOf = (x) => workerChecks(workerCheckInputs(c, x, { log, runLocked, budget, bobManifest })) } = {}) => ({ stopped, log, productHeld, names: { version: c.pin },
+  // The product's commands and registry hosts, read once per start from its rules (R-S1-2).
+  productRules: (product) => productCommands(budget, product),
   ...(typeof account === 'function' ? { account } : {}),
   checksFor: checksOf,
   beforeStart: async (x) => {
