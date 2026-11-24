@@ -414,6 +414,8 @@ export function liveWallProblem(live, product, places, read) {
 /** The start's default prompt (L970): the worker prompt's text, or null (and the start is refused) when it gives none. */
 export const workerPromptText = (x) => { const p = workerPrompt(x); return p.ok ? p.text : { ok: false, reason: p.reason }; };
 
+// What the start answers when the runner is stopping as claude would start (the start dry run, L1346, stops there).
+export const STOPPING_AT_START = 'the worker runner is stopping, so claude was not started';
 /**
  * The account a worker session signs in with (L1079, L1261). With `signinFile` (setup's worker-config always names it, layout.mjs
  * builderSigninPath): the long-lived token in that file, read fresh at each call (builder-signin.mjs readSigninFile: one
@@ -607,7 +609,7 @@ export function startPort(c, deps = {}) {
             // The check's own reason is kept (#369 r2 m3): every check compares with mainAt, so main moving is only told beside it.
             if (p) return refuse(`a check failed again just before claude was to start, so it was not started: ${p}${(await sameMain()) ? '' : ' (main also moved during launch, or can\'t be read)'}`);
           }
-          return stopped() ? refuse('the worker runner is stopping, so claude was not started') : spawnLeader({ spawn, bin: c.claudeBin, args, cwd: copy, env, pidStartOf, ...(kill ? { kill } : {}), ...(there ? { there } : {}) });
+          return stopped() ? refuse(STOPPING_AT_START) : spawnLeader({ spawn, bin: c.claudeBin, args, cwd: copy, env, pidStartOf, ...(kill ? { kill } : {}), ...(there ? { there } : {}) });
         } });
     } catch (e) { return undo(`the launch failed (${e?.message ?? e})`); }
     // A claude that may still run keeps its copy, outbox and settings (#364 r1 m3); the runner keeps the request waiting.

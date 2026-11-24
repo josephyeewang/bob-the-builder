@@ -31,20 +31,22 @@
 // launch checks write their own files inside the dry copy, and check 11 a smoke marker in the workers' home under this
 // run's id. All of it is removed at the end, on every path, a thrown error and a stop part way too; the last stage says whether anything was left. It never writes the Record, the
 // requests folder or the status file, takes no runner lock, needs no sudo of its own, and reads the card as it is
-// (claimed or not: it is read as claimed for this run's session in memory only). Claude Code keeps its own transcript of
+// (claimed or not: it is read as claimed for this run's session in memory only). The claude CLI keeps its own transcript of
 // check 6's headless run in the workers' home, as it does for any start.
+// Stopped part way (Ctrl-C, Ctrl-\, a closed window, kill, or an error outside its own try): no further check starts,
+// the running one is waited for (and told NOT TRIED), then what it made is removed and it exits 1. Only a kill -9 or a
+// power cut can leave its files: names holding DRYRUN- in the runner's settings, copies and outbox
+// folders, which no start reads as its own; remove those by hand (the last line of a finished run says none were left).
+
 // Capability note (Principle 9): the start's order is startPort's as of this commit; a stage added to startPort is run by
 // this dry run (it drives the real port) but is told under the stage after it until STAGES names it.
-// Stopped part way (Ctrl-C, a closed window, kill): SIGINT, SIGTERM and SIGHUP remove what it made, then it exits 1.
-// Only a kill -9 or a power cut can leave its files: names holding DRYRUN- in the runner's settings, copies and outbox
-// folders, which no start reads as its own; remove those by hand (the last line of a finished run says none were left).
 
 import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, renameSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { configFrom, heldOf, launchInputs, lockedWiring, readRunnerConfig, rootSnapshots, rootsProblem, testProductProblem, wallGateOf } from '../../wiring/runner-main.mjs';
-import { cardStartCommit, chmodTree, liveWallProblem, mirrorMain, removeAll, sessionSettingsOf, startPort, workerAccount, workerPromptText, writeNew } from '../../wiring/runner-ports.mjs';
+import { STOPPING_AT_START, cardStartCommit, chmodTree, liveWallProblem, mirrorMain, removeAll, sessionSettingsOf, startPort, workerAccount, workerPromptText, writeNew } from '../../wiring/runner-ports.mjs';
 import { walledLaunchSettings } from '../../wiring/runner-launch.mjs';
 import { loadMemory } from '../../wiring/runner-loop.mjs';
 import { RUNNER_ROLE_OF, live as isLive, runnerCopy, runnerOutbox, runnerPlaces } from '../../wiring/owner-status.mjs';
@@ -55,13 +57,12 @@ import { CHECKS, launch } from '../../modules/M4-workshop/launcher/launch.mjs';
 import { CONFIRMED, NAMES_CHECK_REFUSALS as NCR, unconfirmedNames } from '../../modules/M4-workshop/launcher/settings-names.mjs';
 import { accountDir, accountEnv } from '../../modules/M4-workshop/launcher/accounts.mjs';
 import { CARD_ID } from '../../modules/M9-record/outbox.mjs';
-import { holdsSecret } from '../../shared/secret-guard.mjs';
 import { kindOf } from '../../modules/M11-dispatcher/pass.mjs';
-import { configUnreadable, notOwnUser } from './before-run.mjs';
+import { configUnreadable, maskSignin, notInConfig, notOwnUser } from './before-run.mjs';
+import { cardTaken } from '../../wiring/worker-runner.mjs';
 
 export const DRY_START_SAID = 'dry run: would start claude now';
 // startPort's own words when stopped() answers true inside start(), just before claude would be spawned.
-const STOPPING_AT_START = 'the worker runner is stopping, so claude was not started';
 
 /** Every stage, in the start's order: [key, what it shows]. */
 export const STAGES = Object.freeze([
@@ -106,6 +107,8 @@ export const drySessionId = (now = Date.now(), rand = () => randomBytes(4).toStr
 export const dryCopyOf = ({ copiesRoot, product, card, sessionId }) => join(runnerPlaces({ copiesRoot, outboxRoot: '/', product }).copies, `${card}..dryrun-${sessionId}`);
 
 const refuse = (reason) => ({ ok: false, reason });
+// Nothing that holds the sign-in is printed: the report and the runner's own log lines both go through this.
+const mask = maskSignin;
 const said = (e) => e?.message ?? String(e);
 
 /**
@@ -136,6 +139,7 @@ export async function dryRun({ c, configWhy, product, card, io = {} }) {
   // then the run ends as any other, removing what it made.
   let abortWhy = null;
   io.onAbort?.((sig) => { abortWhy = abortWhy ?? `the dry run was stopped (${sig})`; });
+  io.onCrash?.(() => cleanup());   // an error outside the run's own try: remove what it made before node ends
   try {
     if (!c) { stopAt('config', configWhy ?? 'no config'); return finish(); }
     pass('config');
@@ -162,13 +166,16 @@ export async function dryRun({ c, configWhy, product, card, io = {} }) {
     // The other live sessions, as the runner's loop gives them to a start (worker-runner.mjs `live`): its listed live
     // sessions, and its waiting starts marked unstarted.
     let live = null; let busy = null;
+    const readMemory = () => (io.memory ?? ((x) => loadMemory(x.memoryFile, { uid: process.getuid() })))(c);
+    // One session per card's copy (worker-runner.mjs, #358 r1 m4): a live listed one, or a start that may be on.
+    const busyIn = (m) => ((Array.isArray(m?.sessions) ? m.sessions : []).some((s) => s && typeof s === 'object' && s.card === card && isLive(s))
+      || Object.values(m?.requests && typeof m.requests === 'object' ? m.requests : {}).some((r) => r?.state === 'waiting' && r.card === card)
+      ? cardTaken(card) : null);
     try {
-      const m = (io.memory ?? ((x) => loadMemory(x.memoryFile, { uid: process.getuid() })))(c);
+      const m = readMemory();
       live = [...(Array.isArray(m?.sessions) ? m.sessions : []).filter((s) => s && typeof s === 'object' && isLive(s)).map((s) => ({ id: s.id, product: s.product })),
         ...Object.entries(m?.requests && typeof m.requests === 'object' ? m.requests : {}).filter(([, r]) => r?.state === 'waiting').map(([q, r]) => ({ id: q, product: r.product, unstarted: true }))];
-      // One session per card's copy (worker-runner.mjs, #358 r1 m4): a live listed one, or a start that may be on.
-      if ((Array.isArray(m?.sessions) ? m.sessions : []).some((s) => s && typeof s === 'object' && s.card === card && isLive(s))
-        || Object.values(m?.requests && typeof m.requests === 'object' ? m.requests : {}).some((r) => r?.state === 'waiting' && r.card === card)) busy = `card ${card} already has a session the runner started, or a start still on`;
+      busy = busyIn(m);
       pass('memory');
     } catch (e) { failOn('memory', `it can't be read (${said(e)})`, 'no other live sessions'); set('liveWalls', 'NOT TRIED', 'the runner\'s memory could not be read'); }
     const readSettings = io.readSettings ?? sessionSettingsOf(c.settingsDir);
@@ -184,11 +191,14 @@ export async function dryRun({ c, configWhy, product, card, io = {} }) {
     if (rc.doc?.product !== product) { stopAt('card', rc.doc?.product === undefined ? 'the card names no product' : `the card is product ${rc.doc.product}'s`); return finish(); }
     const kind = kindOf(rc.doc);
     if (kind === 'undo') { stopAt('card', 'it is an undo card; the dry run does not try an undo\'s start (its reversed commit is the pass\'s to name)'); return finish(); }
-    set('card', 'PASS', `its state is ${rc.doc.state ?? 'not named'}; read as claimed for this run`);
+    // The Dispatcher claims only a ready card, so only a ready card (or one claimed now) reaches a real start.
+    if (rc.doc.state === 'ready' || rc.doc.state === 'claimed') set('card', 'PASS', `its state is ${rc.doc.state}; read as claimed for this run`);
+    else failOn('card', `its state is ${rc.doc.state ?? 'not named'}: the Dispatcher starts only a ready card`, 'the card read as claimed');
     // What the real start meets that a dry run, beside the card, would not: the runner's one session per card, and
     // the card's own copy still there (prepareWorkerCopy refuses a copy folder that exists).
     if (busy) failOn('request', busy, 'the card taken as free');
-    let ownCopy = null; try { ownCopy = runnerCopy({ copiesRoot: c.copiesRoot, product, card }); (io.fs?.lstat ?? lstatSync)(ownCopy); } catch { ownCopy = null; }
+    const ownCopyThere = () => { let f = null; try { f = runnerCopy({ copiesRoot: c.copiesRoot, product, card }); (io.fs?.lstat ?? lstatSync)(f); } catch { f = null; } return f; };
+    const ownCopy = ownCopyThere();
     if (ownCopy) failOn('copy', `the card's own copy is still there, so the real start refuses: copy folder already exists (${ownCopy})`, 'a copy beside the card\'s own');
     const claimed = { ...rc.doc, state: 'claimed', claim: { ...(rc.doc.claim ?? {}), session_id: sid } };
 
@@ -261,7 +271,7 @@ export async function dryRun({ c, configWhy, product, card, io = {} }) {
         return baseMain(m);
       },
       prepare: async (x) => {
-        if (x.dest !== copyPath) return basePrepare(x);   // check 11's throwaway copy
+        if (x.dest !== copyPath) return abortWhy ? refuse(abortWhy) : basePrepare(x);   // check 11's throwaway copy: none after a stop
         let r; try { r = await basePrepare(x); } catch (e) { r = refuse(said(e)); }
         if (!r?.ok) {
           if (res.get('copy')?.result === 'FAIL') res.get('copy').why += `; and the dry run's own copy can't be made either (${r?.reason ?? 'no answer'})`;
@@ -309,10 +319,17 @@ export async function dryRun({ c, configWhy, product, card, io = {} }) {
               // The real start runs no install, claude or tests past any stage it refuses at, and nor does the dry
               // run: those stages are why the branch's code may run here at all (the sandbox alone is not trusted).
               const gates = [...res.values()].filter((x) => x.result === 'FAIL' || x.result === 'NOT TRIED').map((x) => x.label);
+              // Asked again now (minutes may have passed): a real start of this card since would refuse this one.
+              let again = null; try { again = busyIn(readMemory()); } catch (e) { again = `the runner's memory can't be read (${said(e)})`; }
+              if (again) gates.push(again);
+              const own = ownCopyThere(); if (own) gates.push(`the card's own copy is there now (${own})`);
               if (gates.length) { set(`check${k.n}`, 'NOT TRIED', `it would run the branch's code (an install, claude or the tests) past a stage the real start refuses at: ${gates.join('; ')}`); return { ok: true }; }
             }
             if (typeof port !== 'function') r = refuse('no check is wired');
             else { try { r = await port(ctx); } catch (e) { r = refuse(`the check failed: ${said(e)}`); } }
+            // A stop while it ran may have killed its children (Ctrl-C reaches the ones in the Terminal's group): what it
+            // answered then proves nothing either way.
+            if (abortWhy) { set(`check${k.n}`, 'NOT TRIED', `${abortWhy} while it ran`); return refuse(abortWhy); }
             if (r?.ok === true) pass(`check${k.n}`);
             else {
               fail(`check${k.n}`, `${r?.reason ?? 'no answer'}${lastFailed ? ` (ran after check ${lastFailed} failed)` : ''}`);
@@ -403,7 +420,6 @@ export async function dryRun({ c, configWhy, product, card, io = {} }) {
 
 /** The printed report: one line per stage, then every failure. → { text, ok }. Nothing that holds the sign-in is printed. */
 export function report(results, { sessionId } = {}) {
-  const mask = (t) => (holdsSecret(String(t)) ? '(withheld: it held the sign-in)' : String(t).replace(/sk-ant-[A-Za-z0-9_-]+/g, '(withheld)'));
   const lines = [`Start dry run${sessionId ? ` (session ${sessionId})` : ''}: every stage of the worker runner's start, in order.`];
   for (let i = 0; i < results.length; i += 1) {
     const r = results[i];
@@ -434,21 +450,21 @@ export function guardProblem({ c, product, card, uid, ownDirUid }) {
   if (!Number.isInteger(uid) || uid === 0) return 'it runs as root. Run it as the worker runner\'s own user (sudo -H -u builder)';
   const own = notOwnUser({ c, uid, ownDirUid }); if (own) return own;
   if (typeof product !== 'string' || !product) return 'no --product was named';
-  if (!Object.hasOwn(c?.products ?? {}, product)) return `product ${product} is not in the worker runner's config`;
+  if (!Object.hasOwn(c?.products ?? {}, product)) return notInConfig(product);
   if (typeof card !== 'string' || !CARD_ID.test(card) || card.startsWith('.')) return 'no --card was named, or it is not a card id';
   return null;
 }
 
 export async function main(argv, { print = (t) => process.stdout.write(t), uid = process.getuid?.(), readConfig = (f) => readRunnerConfig(f, selfPath()), io = {},
-  umask = (m) => process.umask(m), say = (t) => process.stderr.write(t), signals = process, configOf = configFrom } = {}) {
+  umask = (m) => process.umask(m), errOut = (t) => process.stderr.write(t), signals = process, configOf = configFrom } = {}) {
   // The runner's job runs with this umask (runner-job.mjs); sudo's is 022, and check 1 refuses a copy others can read.
   umask(RUNNER_JOB_UMASK);
   // A closed window makes every later write fail; a failed write must never end the run before it removes what it
   // made, so both writers swallow their errors, and after a hang-up nothing more is written.
   let hungUp = false;
   if (signals === process) for (const st of [process.stdout, process.stderr]) st.on?.('error', () => {});
-  const sayRaw = say; const printRaw = print;
-  say = (t) => { if (hungUp) return; try { sayRaw(t); } catch { /* the window is gone */ } };
+  const printRaw = print;
+  const toErr = (t) => { if (hungUp) return; try { errOut(t); } catch { /* the window is gone */ } };
   print = (t) => { if (hungUp) return; try { printRaw(t); } catch { /* the window is gone */ } };
   const product = arg(argv, '--product'); const card = arg(argv, '--card');
   let c = null; let configWhy;
@@ -462,11 +478,14 @@ export async function main(argv, { print = (t) => process.stdout.write(t), uid =
   // A stop part way (Ctrl-C, a closed window, a kill): no further check starts; the one running is waited for, then
   // everything made is removed and the report says what was not tried. It never exits early: an early exit would
   // leave a check's install or tests running in their own process groups, writing into a removed copy.
-  let stop = null; let asked = 0;
+  let stop = null; let asked = 0; let crashClean = null;
+  const onCrash = (e) => { try { crashClean?.(); } finally { toErr(`\nThe dry run failed (${mask(e?.message ?? e)}); what it made is removed.\n`); process.exit(1); } };
+  const crashes = signals === process ? ['uncaughtException', 'unhandledRejection'] : [];
+  for (const s of crashes) process.on(s, onCrash);
   const onSignal = (sig) => {
     asked += 1;
     if (sig === 'SIGHUP') { stop?.(sig); hungUp = true; return; }
-    say(asked === 1 ? `\nStopping (${sig}): no further check starts; waiting for the running one to end, then removing what the dry run made.\n`
+    toErr(asked === 1 ? `\nStopping (${sig}): no further check starts; waiting for the running one to end, then removing what the dry run made.\n`
       : `\nStill stopping: waiting for the running check to end (each has its own time limit). Ending it any harder would leave files.\n`);
     stop?.(sig);
   };
@@ -474,8 +493,8 @@ export async function main(argv, { print = (t) => process.stdout.write(t), uid =
   for (const s of sigs) signals.on(s, onSignal);
   let out;
   try {
-    out = await dryRun({ c, configWhy, product, card, io: { progress: (t) => say(`  ${t}\n`), log: (t) => say(`  (log) ${t}\n`), ...io, onAbort: (f) => { stop = f; io.onAbort?.(f); } } });
-  } finally { for (const s of sigs) signals.off(s, onSignal); }
+    out = await dryRun({ c, configWhy, product, card, io: { progress: (t) => toErr(`  ${t}\n`), log: (t) => toErr(`  (log) ${mask(t)}\n`), ...io, onAbort: (f) => { stop = f; io.onAbort?.(f); }, onCrash: (f) => { crashClean = f; io.onCrash?.(f); } } });
+  } finally { for (const s of sigs) signals.off(s, onSignal); for (const s of crashes) process.off(s, onCrash); }
   const r = report(out.results, { sessionId: out.sessionId });
   print(r.text);
   return r.ok ? 0 : 1;

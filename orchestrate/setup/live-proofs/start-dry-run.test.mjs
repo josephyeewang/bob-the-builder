@@ -264,7 +264,7 @@ test('stopped part way: no later check starts, nothing is spawned, the run ends 
   } finally { w.done(); }
 });
 
-test('stopped while a check runs: that check is waited for and told, no later check starts', async () => {
+test('stopped while a check runs: that check is waited for, told NOT TRIED whatever it answered, and no later check starts', async () => {
   const w = world();
   let stop = null; let ended = false;
   const wire = (c, o) => { const r = w.io.wire(c, o); const ports = r.startDeps.checksFor(); return { startDeps: { ...r.startDeps, checksFor: () => ({ ...ports,
@@ -273,10 +273,46 @@ test('stopped while a check runs: that check is waited for and told, no later ch
     const out = await w.run({ onAbort: (f) => { stop = f; }, wire });
     const s = w.byStage(out);
     assert.equal(ended, true, 'the running check was waited for');
-    assert.equal(s.check4.result, 'PASS');
+    assert.equal(s.check4.result, 'NOT TRIED', 'what a check answered while a stop landed proves nothing'); assert.match(s.check4.why, /stopped \(SIGINT\) while it ran/);
     for (const n of [5, 6, 7, 8, 9, 10, 11, 12, 13]) assert.equal(w.ran[n], undefined, `check ${n} not started after the stop`);
     assert.match(s.check5.why, /stopped \(SIGINT\)/);
     assert.equal(s.start.result, 'NOT TRIED'); assert.deepEqual(w.leftovers(), []); assert.equal(w.spawns, 0);
+  } finally { w.done(); }
+});
+
+test('a card that is not ready (or claimed): the card stage FAILs, as the Dispatcher starts only a ready card, and no install, claude or tests run', async () => {
+  for (const state of ['done', 'in_review', undefined]) {
+    const w = world();
+    try {
+      const out = await w.run({ readCard: (id) => ({ ok: true, doc: { id, state, product: 'p1' } }) });
+      const s = w.byStage(out);
+      assert.equal(s.card.result, 'FAIL', String(state)); assert.match(s.card.why, /the Dispatcher starts only a ready card/);
+      for (const n of [4, 6, 11]) { assert.equal(w.ran[n], undefined, `check ${n} not run (${state})`); assert.equal(s[`check${n}`].result, 'NOT TRIED'); }
+      assert.ok(out.results.some((r) => r.result !== 'PASS' && r.result !== 'SKIP')); assert.deepEqual(w.leftovers(), []); assert.equal(w.spawns, 0);
+    } finally { w.done(); }
+  }
+  for (const state of ['ready', 'claimed']) {
+    const w = world();
+    try {
+      const s = w.byStage(await w.run({ readCard: (id) => ({ ok: true, doc: { id, state, product: 'p1' } }) }));
+      assert.equal(s.card.result, 'PASS', state);
+    } finally { w.done(); }
+  }
+});
+
+test('stopped while check 11 runs: its baseline throwaway copy is refused (no tests run on it), check 11 is NOT TRIED, nothing is left', async () => {
+  const w = world();
+  let stop = null; let spare = null;
+  const wire = (c, o) => { const r = w.io.wire(c, o); const ports = r.startDeps.checksFor(); return { startDeps: { ...r.startDeps, checksFor: (x) => ({ ...ports,
+    11: async () => { w.ran[11] = 1; stop('SIGINT'); spare = await x.throwaway(); return spare.ok ? { ok: true } : spare; } }) } }; };
+  try {
+    const out = await w.run({ onAbort: (f) => { stop = f; }, wire });
+    const s = w.byStage(out);
+    assert.equal(w.ran[11], 1);
+    assert.equal(spare.ok, false, 'no throwaway copy after a stop'); assert.match(spare.reason, /stopped \(SIGINT\)/);
+    assert.equal(w.calls.filter((x) => Array.isArray(x) && x[0] === 'prepare').length, 1, 'only the dry run\'s own copy was prepared');
+    assert.equal(s.check11.result, 'NOT TRIED'); assert.match(s.check11.why, /while it ran/);
+    assert.ok(out.results.some((r) => r.result !== 'PASS' && r.result !== 'SKIP')); assert.deepEqual(w.leftovers(), []); assert.equal(w.spawns, 0);
   } finally { w.done(); }
 });
 
@@ -288,7 +324,7 @@ test('main: a signal during the run waits for it to end (no early exit), takes i
     const deps = { ...w.io.deps, promptFor: () => { if (sigAt) { handlers.SIGINT('SIGINT'); handlers.SIGINT('SIGINT'); } return 'do the card'; } };
     const argv = ['--product', 'p1', '--card', 'C-1'];
     try {
-      const code = await main(argv, { print: (t) => { text += t; }, uid: 603, readConfig: () => w.c, configOf: (x) => x, umask: () => {}, say: (t) => { said += t; }, signals,
+      const code = await main(argv, { print: (t) => { text += t; }, uid: 603, readConfig: () => w.c, configOf: (x) => x, umask: () => {}, errOut: (t) => { said += t; }, signals,
         io: { ...w.io, ownDirUid: 603, deps } });
       assert.deepEqual(handlers, {});
       if (sigAt) { assert.equal(code, 1); assert.match(said, /Stopping \(SIGINT\)/, text); assert.match(said, /Still stopping/); assert.match(text, /NOT READY/); }
@@ -306,7 +342,7 @@ test('main: a closed window (SIGHUP, then every write failing) still ends the ru
   const deps = { ...w.io.deps, promptFor: () => { handlers.SIGHUP('SIGHUP'); return 'do the card'; } };
   const argv = ['--product', 'p1', '--card', 'C-1'];
   try {
-    const code = await main(argv, { print: gone, say: gone, uid: 603, readConfig: () => w.c, configOf: (x) => x, umask: () => {}, signals,
+    const code = await main(argv, { print: gone, errOut: gone, uid: 603, readConfig: () => w.c, configOf: (x) => x, umask: () => {}, signals,
       io: { ...w.io, ownDirUid: 603, deps } });
     assert.equal(code, 1);
     assert.ok(writes >= 1, 'it did try to write before the hang-up');
@@ -338,7 +374,7 @@ test('a session id the Dispatcher never makes; the guard refuses root, another u
 
 test('main: a config that can\'t be read is a FAIL line and exit 1, with every other stage NOT TRIED', async () => {
   let text = ''; const masks = []; const sigs = [];
-  const code = await main(['--config', '/nope', '--product', 'p1', '--card', 'C-1'], { print: (t) => { text += t; }, uid: 603, readConfig: () => { throw new Error('ENOENT'); }, umask: (m) => { masks.push(m); }, say: () => {}, signals: { on: (k) => sigs.push(k), off: (k) => sigs.splice(sigs.indexOf(k), 1) } });
+  const code = await main(['--config', '/nope', '--product', 'p1', '--card', 'C-1'], { print: (t) => { text += t; }, uid: 603, readConfig: () => { throw new Error('ENOENT'); }, umask: (m) => { masks.push(m); }, errOut: () => {}, signals: { on: (k) => sigs.push(k), off: (k) => sigs.splice(sigs.indexOf(k), 1) } });
   assert.deepEqual(masks, [0o077], 'the runner job\'s umask, so check 1 sees a 0700 copy'); assert.deepEqual(sigs, [], 'its signal handlers are taken off');
   assert.equal(code, 1);
   assert.match(text, /^FAIL\s+the worker runner's config is read/m);

@@ -21,8 +21,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { checkRunnerConfig, readRunnerConfig } from '../../wiring/runner-main.mjs';
 import { sessionEnv, workerAccount } from '../../wiring/runner-ports.mjs';
-import { holdsSecret } from '../../shared/secret-guard.mjs';
-import { configUnreadable, notOwnUser, pinProblem } from './before-run.mjs';
+import { configUnreadable, maskSignin, notOwnUser, pinProblem } from './before-run.mjs';
 
 export const PROMPT = 'Reply with the word OK.';
 /** The one claude start, by flag: no tools, one turn, no settings sources, nothing kept, one JSON answer. */
@@ -31,7 +30,7 @@ export const proofArgs = () => ['-p', PROMPT, '--tools', '', '--max-turns', '1',
 /** What claude's run shows: { result: 'PASS' | 'FAIL', why }. Nothing of the token reaches `why`. */
 export function judge(r) {
   // Masked before it is cut short (a cut token would no longer match): the registered value, and anything shaped like a key.
-  const mask = (t) => (holdsSecret(t) ? '(withheld: it held the sign-in)' : t.replace(/sk-ant-[A-Za-z0-9_-]+/g, '(withheld)'));
+  const mask = maskSignin;
   const said = (t) => mask(String(t ?? '').trim()).split('\n').slice(-2).join(' ').slice(0, 200) || 'nothing';
   if (r?.error) return { result: 'FAIL', why: `claude could not be run (${r.error.code ?? r.error.message})` };
   let j = null; try { j = JSON.parse(String(r?.stdout ?? '')); } catch { /* not its JSON answer */ }

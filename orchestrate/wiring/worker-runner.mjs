@@ -77,6 +77,8 @@ import { FUTURE_SKEW_MS } from '../shared/still-waiting.mjs';
 
 /** How long the runner waits on one port before it answers for it, or (a start) leaves it to a later pass. Under the
  * status rewrite cadence, so a hung port never leaves the status unwritten for longer (L769). */
+// One session per card's copy (#358 r1 m4): the refusal, here and in the start dry run (L1346).
+export const cardTaken = (card) => `card ${card} already has a session the runner started, or a start still on`;
 export const RUNNER_PORT_MS = 10_000;
 if (RUNNER_PORT_MS >= RUNNER_STATUS_EVERY_MS) throw new Error('RUNNER_PORT_MS must be under RUNNER_STATUS_EVERY_MS');
 /** The `pending` key of a save still on (a start's is its session id, which this can't be). */
@@ -331,7 +333,7 @@ export async function workerRunnerPass(ctx) {
     if (l.kind === 'undo' && !(typeof l.undo_commit === 'string' && UNDO_COMMIT.test(l.undo_commit))) return refuse('the undo launch names no reversed commit');
     if (l.kind !== 'undo' && l.undo_commit !== undefined) return refuse('only an undo launch names a reversed commit');
     // One session per card's copy (#358 r1 m4): a live listed one, or a start that may be on, holds it.
-    if (state.sessions.some((s) => s.card === l.card && isLive(s)) || Object.values(state.requests).some((r) => r.state === 'waiting' && r.card === l.card)) return refuse(`card ${l.card} already has a session the runner started, or a start still on`);
+    if (state.sessions.some((s) => s.card === l.card && isLive(s)) || Object.values(state.requests).some((r) => r.state === 'waiting' && r.card === l.card)) return refuse(cardTaken(l.card));
     state.requests[id] = { state: 'waiting', at: now, card: l.card, product: l.product }; flush();
     // The other live sessions (#378 r1 M1): the listed ones, and the waiting starts of an earlier run (this run's own
     // starts are made from this config, so they deny every product in it). One not known to have reached claude is
