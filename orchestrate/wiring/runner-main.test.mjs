@@ -9,7 +9,7 @@ import { spawn } from 'node:child_process';
 import { makeLock } from '../modules/M9-record/lock.mjs';
 import { loginJobPlist } from '../modules/M11-dispatcher/login-job.mjs';
 import { statusOf, statusText } from '../setup/builder-wall.mjs';
-import { DENY_KEYS, personUserProblem, carriedOverProblem, checkRunnerConfig, hookStoreOf, launchInputs, lockedOf, lockedWiring, readRunnerConfig, startDeps, listenStop, main, readRootFile, realRunnerPorts, testProductHeld, testProductProblem, workerCheckInputs } from './runner-main.mjs';
+import { DENY_KEYS, personUserProblem, carriedOverProblem, checkRunnerConfig, realRenderPaths, hookStoreOf, launchInputs, lockedOf, lockedWiring, readRunnerConfig, startDeps, listenStop, main, readRootFile, realRunnerPorts, testProductHeld, testProductProblem, workerCheckInputs } from './runner-main.mjs';
 import { SIGNIN_TOKEN_VAR, checkRoleEnv } from '../modules/M4-workshop/launcher/env-check.mjs';
 import { workerSnapshotProblem } from './runner-checks.mjs';
 import { rulesText } from '../setup/worker-rules.mjs';
@@ -281,6 +281,39 @@ test('#378 r1 m4: main does not start when the copies or outbox root is reached 
     assert.equal(ran, false);
     assert.equal(await main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: () => config(d), log: (s) => logs.push(s), run, onStop: () => {} }), 0, logs.join('\n'));
     assert.equal(ran, true);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test('L1347: main gives the sessions the real paths of the tool places setup names through the install link, and stops on one it can\'t read', async () => {
+  const d = roots(tempDir('orch-rmain-'));
+  try {
+    mkdirSync(join(d, 'runner'));
+    mkdirSync(join(d, 'install.v-1', 'hooks'), { recursive: true }); mkdirSync(join(d, 'install.v-1', 'bin'));
+    writeFileSync(join(d, 'install.v-1', 'bin', 'node'), '');
+    symlinkSync(join(d, 'install.v-1'), join(d, 'current'));
+    const paths = { deny: DENY(d), hooksDir: join(d, 'current', 'hooks'), node: join(d, 'current', 'bin', 'node'), notes: join(d, 'current', 'notes-not-yet') };
+    const cfg = () => config(d, { products: { p1: { repo: 'o/p1', mirror: join(d, 'mirror'), render: { paths } } } });
+    const logs = []; let got = null;
+    const code = await main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: cfg, log: (s) => logs.push(s), onStop: () => {},
+      portsOf: (cc, ports, o) => { got = cc; return realRunnerPorts(cc, ports, o); }, run: async () => {} });
+    assert.equal(code, 0, logs.join('\n'));
+    const q = got.products.p1.render.paths;
+    assert.equal(q.hooksDir, join(d, 'install.v-1', 'hooks'));
+    assert.equal(q.node, join(d, 'install.v-1', 'bin', 'node'));
+    assert.equal(q.notes, join(d, 'current', 'notes-not-yet'), 'a place not there yet is left for the wall');
+    assert.deepEqual(q.deny, paths.deny);
+    assert.ok(logs.some((l) => /p1's hooksDir is reached through a link; its sessions are given its real path/.test(l)), logs.join('\n'));
+    // A read that fails other than "not there" stops the runner before anything runs.
+    let ran = false;
+    const code2 = await main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: cfg, log: (s) => logs.push(s), onStop: () => {}, run: async () => { ran = true; },
+      realpath: (x) => { if (x === paths.hooksDir) { const e = new Error('denied'); e.code = 'EACCES'; throw e; } return realpathSync.native(x); } });
+    assert.equal(code2, 1); assert.equal(ran, false);
+    assert.match(logs.at(-1), /did not start: product p1's render\.paths\.hooksDir can't be read \(EACCES\)/);
+    // The one function main uses, which the runLocked proof also calls: the config given is left as it was.
+    const c0 = checkRunnerConfig(cfg());
+    const r = realRenderPaths(c0);
+    assert.equal(r.products.p1.render.paths.node, join(d, 'install.v-1', 'bin', 'node'));
+    assert.equal(c0.products.p1.render.paths.node, paths.node);
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 

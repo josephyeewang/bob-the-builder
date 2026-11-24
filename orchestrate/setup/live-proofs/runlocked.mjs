@@ -37,7 +37,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync, spawn as childSpawn, spawnSync } from 'node:child_process';
 import { makeLock } from '../../modules/M9-record/lock.mjs';
-import { checkRunnerConfig, launchInputs, lockedOf, lockedWiring, readRunnerConfig } from '../../wiring/runner-main.mjs';
+import { checkRunnerConfig, launchInputs, lockedOf, lockedWiring, readRunnerConfig, realRenderPaths } from '../../wiring/runner-main.mjs';
 import { JOBS_DIR, lockedRunner, LOCKED_SAVE_MS, quoted } from '../../wiring/runner-locked.mjs';
 import { startPort, removeAll, chmodTree, saveSettingsName } from '../../wiring/runner-ports.mjs';
 import { loadMemory, processGroupPorts } from '../../wiring/runner-loop.mjs';
@@ -424,7 +424,8 @@ export async function main(argv, { print = (t) => process.stdout.write(t), uid =
   const fails = (why) => { print(report(STEPS.map(([n]) => notRun(n, why))).text); return 1; };
   // macOS only (L1005): ps -g, pgrep and perl's setsid are read as the Mini's; anywhere else, a named skip, never a run.
   if (platform !== 'darwin') return fails(`SKIP: this proof runs on macOS only (the Mini), not on ${platform}`);
-  let c; try { c = checkRunnerConfig(readRunnerConfig(arg(argv, '--config'), selfPath())); } catch (e) { return fails(configUnreadable(e)); }
+  // The tool places as the runner gives them to its sessions (L1347): their real paths, never the install link's spelling.
+  let c; try { c = realRenderPaths(checkRunnerConfig(readRunnerConfig(arg(argv, '--config'), selfPath()))); } catch (e) { return fails(configUnreadable(e)); }
   const product = arg(argv, '--product');
   let ownDirUid; try { const st = lstatSync(c.ownDir); ownDirUid = st.isDirectory() && !st.isSymbolicLink() ? st.uid : null; } catch { ownDirUid = null; }
   let claudeVersion = null; try { claudeVersion = /^(\d+\.\d+\.\d+)/.exec(execFileSync(c.claudeBin, ['--version'], { encoding: 'utf8', timeout: 30_000 }).trim())?.[1] ?? null; } catch { /* not readable */ }
