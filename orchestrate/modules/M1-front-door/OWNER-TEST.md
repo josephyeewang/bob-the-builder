@@ -14,7 +14,7 @@ Claude records each result as the second ledger line for its row (README). Use t
 - **Where:** the Claude app on your phone → Code → the session named for the Front Door.
 - **Type:** `hello, what can you do?`
 - **You should see:** exactly "I can file a new idea, sort a piece of work on a product into a Bob mode and read it back,
-  file a research ask, and flag a merged change to undo. Pause, away, back, wrap up and rotate aren't wired yet."
+  and file a research ask. Undo, pause, away, back, wrap up and rotate aren't wired yet."
   (lead calls L151, L167)
 - Claude records which way Remote Control was on: in the role's settings at start, or typed in after start.
 
