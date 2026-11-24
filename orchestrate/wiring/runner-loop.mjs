@@ -187,7 +187,8 @@ export async function runnerTick(ctx) {
 }
 
 /**
- * The loop: load the memory, then tick every RUNNER_TICK_MS until `stopWhen()` says so. A tick that throws is noted and
+ * The loop: load the memory, then tick every RUNNER_TICK_MS until `stopWhen({ state, pending })` says so (the memory
+ * and the starts and saves still on, so a stop can wait until nothing is on: L1348). A tick that throws is noted and
  * the loop goes on (the next tick rewrites the status); the memory failing to load stops it before any tick.
  */
 export async function runRunner(ctx) {
@@ -198,13 +199,13 @@ export async function runRunner(ctx) {
   const pending = new Map();
   // The newest pass's keeper of a save's group told after its pass returned (worker-runner.mjs, self-review M-2).
   const saveHolder = {};
-  while (!stopWhen()) {
+  while (!stopWhen({ state, pending })) {
     try { state = await runnerTick({ ...ctx, state, pending, saveHolder }); } catch (e) {
       note(`a worker runner tick failed (${e?.message ?? e}); the next one runs in ${everyMs} ms`);
       // What that tick kept is the memory now (review M1); one that can't be read back stops the runner (a throw).
       state = load(memoryFile, { uid, note });
     }
-    if (stopWhen()) break;
+    if (stopWhen({ state, pending })) break;
     await sleep(everyMs);
   }
   // A start still on when the stop came (#364 self-review M1): the start port refuses to spawn once the runner is

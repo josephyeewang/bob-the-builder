@@ -431,6 +431,7 @@ export async function main(argv, { readConfig = (f) => readRunnerConfig(f, selfP
   if (held.broke) log('the last worker runner\'s lock was left by a runner that is gone; it was broken');
   let stopping = false;
   onStop(() => { stopping = true; });
+  const updated = updateRestart({ installRoot: c.installRoot, realpath, log });
   // Each product's rules snapshot, root's (L1226): checked at each start, a product whose snapshot fails held, failing closed.
   const snaps = rootSnapshots(c, { log, problem: (s) => snapshotProblem(s) });
   let P;
@@ -446,7 +447,7 @@ export async function main(argv, { readConfig = (f) => readRunnerConfig(f, selfP
       if (hooks.broken) log(`worker runner: ${hooks.broken}; no Lead, Front Door or Mini Base session is typed into until it is fixed by hand`);
     }
     await run({ ...(hooks ? { hooks } : {}), requestsDir: c.requestsDir, statusFile: c.statusFile, memoryFile: c.memoryFile, orchestrateUid: c.orchestrateUid, uid: process.getuid(),
-      outboxRoot: c.outboxRoot, copiesRoot: c.copiesRoot, claimMs: c.claimMs, ports: P, note: log, stopWhen: () => stopping });
+      outboxRoot: c.outboxRoot, copiesRoot: c.copiesRoot, claimMs: c.claimMs, ports: P, note: log, stopWhen: (x) => stopping || updated(x) });
     return 0;
   } catch (e) { log(`the worker runner stopped: ${e?.message ?? e}`); return 1; } finally {
     try { l.release(held.nonce); } catch { /* gone */ }
@@ -477,6 +478,34 @@ export function realRenderPaths(c, { realpath = (p) => realpathSync.native(p), l
     products[name] = { ...p, render: { ...p.render, paths } };
   }
   return { ...c, products };
+}
+
+/** The runner's restart onto a newer version (L1348). The updater repoints the install link and keeps only the version
+ * before the current one, and nothing restarts the runner, so one left running would, two updates later, find its own
+ * code and its sessions' tool places (realRenderPaths) gone. So: once the install link names another version than the
+ * one this runner started from, and nothing is on (no live session, none with its outbox still open, no save or install
+ * kept, no start or save still on), the loop stops and main returns 0; launchd's StartInterval starts the job again
+ * within a minute, on the new version. While something is on it is told once and waits. A link that can't be read now
+ * changes nothing; one that couldn't be read at start never restarts (the owner restarts by hand, as before).
+ * → stopWhen's part: ({ state, pending }) → true to stop. */
+export function updateRestart({ installRoot, realpath = (p) => realpathSync.native(p), log = () => {} }) {
+  let from; try { from = realpath(installRoot); } catch { from = null; }
+  if (from === null) log(`worker runner: its install folder ${installRoot} can't be read now, so it won't restart itself onto a newer version; restart it by hand after an update`);
+  let told = null;
+  return (x) => {
+    if (from === null || !x?.state) return false;
+    let now; try { now = realpath(installRoot); } catch { return false; }
+    if (now === from) return false;
+    const s = x.state;
+    const on = (x.pending?.size ?? 0) > 0 || (s.sessions ?? []).some((q) => q && (isLiveSession(q) || q.outbox_open === true))
+      || Object.keys(s.saves ?? {}).length > 0 || Object.keys(s.installs ?? {}).length > 0;
+    if (on) {
+      if (told !== now) log(`worker runner: a newer version is installed (${now}); it restarts on it once no session is on`);
+      told = now; return false;
+    }
+    log(`worker runner: a newer version is installed (${now}) and no session is on; it stops, and the Mac starts it again on the new version within a minute`);
+    return true;
+  };
 }
 
 /** The worker runner's config at `file`, read as its job reads it (shared/job-config.mjs): no code key, `budget` an

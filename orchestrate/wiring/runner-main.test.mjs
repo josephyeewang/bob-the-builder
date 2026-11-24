@@ -9,7 +9,7 @@ import { spawn } from 'node:child_process';
 import { makeLock } from '../modules/M9-record/lock.mjs';
 import { loginJobPlist } from '../modules/M11-dispatcher/login-job.mjs';
 import { statusOf, statusText } from '../setup/builder-wall.mjs';
-import { DENY_KEYS, personUserProblem, carriedOverProblem, checkRunnerConfig, realRenderPaths, hookStoreOf, launchInputs, lockedOf, lockedWiring, readRunnerConfig, startDeps, listenStop, main, readRootFile, realRunnerPorts, testProductHeld, testProductProblem, workerCheckInputs } from './runner-main.mjs';
+import { DENY_KEYS, personUserProblem, carriedOverProblem, checkRunnerConfig, realRenderPaths, updateRestart, hookStoreOf, launchInputs, lockedOf, lockedWiring, readRunnerConfig, startDeps, listenStop, main, readRootFile, realRunnerPorts, testProductHeld, testProductProblem, workerCheckInputs } from './runner-main.mjs';
 import { SIGNIN_TOKEN_VAR, checkRoleEnv } from '../modules/M4-workshop/launcher/env-check.mjs';
 import { workerSnapshotProblem } from './runner-checks.mjs';
 import { rulesText } from '../setup/worker-rules.mjs';
@@ -314,6 +314,53 @@ test('L1347: main gives the sessions the real paths of the tool places setup nam
     const r = realRenderPaths(c0);
     assert.equal(r.products.p1.render.paths.node, join(d, 'install.v-1', 'bin', 'node'));
     assert.equal(c0.products.p1.render.paths.node, paths.node);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test('L1348: the runner stops for a restart once the install link names a newer version and nothing is on, and says why it waits', () => {
+  let at = '/i/v-1'; const logs = [];
+  const rp = (p) => { assert.equal(p, '/i/cur'); if (at === null) { const e = new Error('gone'); e.code = 'ENOENT'; throw e; } return at; };
+  const u = updateRestart({ installRoot: '/i/cur', realpath: rp, log: (t) => logs.push(t) });
+  const idle = { state: { sessions: [{ id: 'a', alive: false, ended: true }], saves: {}, installs: {} }, pending: new Map() };
+  assert.equal(u(idle), false, 'same version: no stop');
+  assert.equal(u(undefined), false); assert.equal(u({}), false);
+  at = '/i/v-2';
+  // Each kind of "on" holds it, told once per version.
+  const on = [
+    { state: { sessions: [{ id: 'b' }] }, pending: new Map() },
+    { state: { sessions: [{ id: 'b', alive: true, ended: true }] }, pending: new Map() },
+    { state: { sessions: [{ id: 'b', alive: false, ended: true, outbox_open: true }] }, pending: new Map() },
+    { state: { sessions: [], saves: { s: { pgid: 1 } } }, pending: new Map() },
+    { state: { sessions: [], installs: { s: { pgid: 1 } } }, pending: new Map() },
+    { state: { sessions: [] }, pending: new Map([['x', {}]]) },
+  ];
+  for (const x of on) assert.equal(u(x), false, JSON.stringify(x.state));
+  assert.equal(logs.filter((l) => /newer version is installed \(\/i\/v-2\); it restarts on it once no session is on/.test(l)).length, 1, logs.join('\n'));
+  // A link that can't be read now changes nothing.
+  at = null; assert.equal(u(idle), false); at = '/i/v-2';
+  assert.equal(u(idle), true);
+  assert.match(logs.at(-1), /no session is on; it stops, and the Mac starts it again on the new version within a minute/);
+  // A link that couldn't be read at start never restarts, and says so.
+  at = null; const l2 = []; const u2 = updateRestart({ installRoot: '/i/cur', realpath: rp, log: (t) => l2.push(t) });
+  assert.match(l2[0], /can't be read now, so it won't restart itself/);
+  at = '/i/v-3'; assert.equal(u2(idle), false);
+});
+
+test('L1348: main hands the loop a stop that is the update restart as well as SIGTERM, and returns 0 when it stops', async () => {
+  const d = roots(tempDir('orch-rmain-'));
+  try {
+    mkdirSync(join(d, 'runner'));
+    mkdirSync(join(d, 'v-1')); mkdirSync(join(d, 'v-2')); symlinkSync(join(d, 'v-1'), join(d, 'install'));
+    const logs = []; let seen = null;
+    const run = async (ctx) => {
+      const idle = { state: { sessions: [], saves: {}, installs: {} }, pending: new Map() };
+      assert.equal(ctx.stopWhen(idle), false, 'not moved yet');
+      rmSync(join(d, 'install')); symlinkSync(join(d, 'v-2'), join(d, 'install'));
+      seen = ctx.stopWhen(idle);
+    };
+    const code = await main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: () => config(d), log: (s) => logs.push(s), run, onStop: () => {} });
+    assert.equal(code, 0, logs.join('\n'));
+    assert.equal(seen, true, logs.join('\n'));
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
