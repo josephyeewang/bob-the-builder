@@ -362,6 +362,10 @@ test('L1348: main hands the loop a stop that is the update restart as well as SI
       const idle = { state: { sessions: [], saves: {}, installs: {} }, pending: new Map() };
       assert.equal(ctx.stopWhen(idle), false, 'not moved yet');
       rmSync(join(d, 'install')); symlinkSync(join(d, 'v-2'), join(d, 'install'));
+      // A request waiting in the runner's own requests folder holds the stop; read from the config's folder.
+      mkdirSync(join(d, 'requests'), { recursive: true }); writeFileSync(join(d, 'requests', 'r-1.json'), '{}');
+      assert.equal(ctx.stopWhen(idle), false, 'a request is waiting');
+      rmSync(join(d, 'requests', 'r-1.json'));
       seen = ctx.stopWhen(idle);
     };
     const code = await main(['/cfg.json'], { asUser: AS_BUILDER, readConfig: () => config(d), log: (s) => logs.push(s), run, onStop: () => {}, codeRoot: () => join(d, 'v-1') });

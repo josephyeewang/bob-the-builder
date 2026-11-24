@@ -563,4 +563,6 @@ const invoked = (() => { try { return process.argv[1] ? realpathSync.native(proc
 // import, and its imports reach back here (setup/worker-runner-setup.mjs imports checkRunnerConfig), so an awaited
 // main() waited on this file while this file waited on main(), and node exited 13 with nothing said, once a minute.
 // A throw from main exits 1 at once, as an uncaught one did.
-if (invoked && invoked === selfPath()) main(process.argv.slice(2)).then((code) => { process.exitCode = code; }, (e) => { process.stderr.write(`${e?.stack ?? e}\n`); process.exit(1); });
+// A runner that stopped itself for an update (L1348) must really exit, or launchd counts the job as running and never
+// starts it again: an unref'd timer ends the process 5 s after main returns, should some handle still hold it.
+if (invoked && invoked === selfPath()) main(process.argv.slice(2)).then((code) => { process.exitCode = code; setTimeout(() => process.exit(code), 5_000).unref(); }, (e) => { process.stderr.write(`${e?.stack ?? e}\n`); process.exit(1); });
