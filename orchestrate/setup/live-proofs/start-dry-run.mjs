@@ -119,7 +119,7 @@ const said = (e) => e?.message ?? String(e);
 
 /**
  * The dry run. c: the config as configFrom gives it (or null with `configWhy`); product, card; io: ports, each the
- * real one when left out (tests stand in for them): { roots, inputs, wallGate, snapshots, testProduct, memory, readCard,
+ * real one when left out (tests stand in for them): { roots, realPaths, inputs, wallGate, snapshots, testProduct, memory, readCard,
  * readSettings, wire, deps (startPort's own deps, put under the dry run's wrappers), fs, sessionId, log }.
  * → { results: [{ stage, label, result: 'PASS'|'FAIL'|'NOT TRIED'|'SKIP', why?, on? }], sessionId, made, left, spawned }.
  */
@@ -151,7 +151,8 @@ export async function dryRun({ c, configWhy, product, card, runCode = false, io 
   try {
     if (!c) { stopAt('config', configWhy ?? 'no config'); return finish(); }
     pass('config');
-    // Main's order: the roots, then launch checks 12 and 13's inputs. Main stops on either; the dry run tells and goes on.
+    // Main's order: the roots, the tool places' real paths, then launch checks 12 and 13's inputs. Main stops on any of
+    // them; the dry run tells and goes on.
     let why; try { why = (io.roots ?? ((x) => rootsProblem(x)))(c); } catch (e) { why = said(e); }
     if (why) failOn('roots', why, 'the copies and outbox roots'); else pass('roots');
     // Main's next step (L1347): every session is given the tool places' real paths, read once here, so the dry run's
@@ -287,7 +288,13 @@ export async function dryRun({ c, configWhy, product, card, runCode = false, io 
         heldCalls += 1;
         if (heldCalls === 1) { reach('signin'); return null; }   // the gates were told above, each on its own
         try { heldAgain = realHeld(q); } catch (e) { heldAgain = said(e); }
-        if (heldAgain && toldHolds.has(heldAgain)) heldAgain = null;
+        // The runner's gate answers its first hold only (the wall first): one told already may stand in front of a new
+        // one, so each of the three is asked on its own then, and only a hold not told already is told here.
+        if (heldAgain && toldHolds.has(heldAgain)) {
+          heldAgain = [() => wallGate(), () => testProduct(budget, q), () => snaps.held(q)]
+            .map((f) => { try { return f(); } catch (e) { return `it can't be checked (${said(e)})`; } })
+            .filter((w) => w && !toldHolds.has(w)).join('; ') || null;
+        }
         return null;
       },
       account: () => {

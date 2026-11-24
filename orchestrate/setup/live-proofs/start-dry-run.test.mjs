@@ -39,7 +39,7 @@ function world({ plant = {} } = {}) {
     inputs: async () => ({ budget: plant.noBudget ? null : { rec: plant.rec ?? {
       read: (e, id) => { if (plant.readThrows) throw new Error(plant.readThrows); return e === 'fact' && id === 'outage' && plant.outage ? { doc: { state: 'open' } } : null; } } }, bobManifest: null }),
     wallGate: async () => () => { w.wallAsks = (w.wallAsks ?? 0) + 1; return plant.wall ?? (plant.wallLater && w.wallAsks > 1 ? plant.wallLater : null); },
-    snapshots: () => ({ held: () => plant.snapshot ?? null }),
+    snapshots: () => ({ held: () => { w.snapAsks = (w.snapAsks ?? 0) + 1; return plant.snapshot ?? (plant.snapshotLater && w.snapAsks > 1 ? plant.snapshotLater : null); } }),
     testProduct: () => plant.testProduct ?? null,
     memory: () => { w.memoryReads = (w.memoryReads ?? 0) + 1; if (plant.memory) throw new Error(plant.memory); if (plant.memoryLater && w.memoryReads > 1) return plant.memoryLater; return { sessions: [], requests: {} }; },
     readCard: (id) => (plant.card ? { ok: false, reason: plant.card } : { ok: true, doc: { id, state: 'ready', product: 'p1' } }),
@@ -576,4 +576,36 @@ test('the tool places are given as their real paths, as the runner gives them (L
     assert.equal(report(out.results).ok, false);
     assert.equal(w2.spawns, 0); assert.deepEqual(w2.leftovers(), []);
   } finally { w2.done(); }
+});
+
+test('the recheck looks behind a hold told already: the wall told at its stage, a snapshot held since is still told', async () => {
+  const w = world({ plant: { wall: 'the builder wall is down', snapshotLater: 'the rules snapshot is from an older config' } });
+  try {
+    const out = await w.run();
+    const s = w.byStage(out);
+    assert.equal(s.wall.result, 'FAIL'); assert.equal(s.snapshot.result, 'PASS');
+    assert.equal(s.recheck.result, 'FAIL'); assert.match(s.recheck.why, /rules snapshot is from an older config/);
+    assert.doesNotMatch(s.recheck.why, /builder wall is down/, 'the wall, told already, is not told again');
+    assert.equal(w.spawns, 0); assert.deepEqual(w.leftovers(), []);
+  } finally { w.done(); }
+});
+
+test('a stop that lands while check 12 is asked (before checks 4, 6 and 11) runs no code after it', async () => {
+  const w = world();
+  try {
+    let stop = null;
+    const wire = w.io.wire;
+    const out = await w.run({
+      onAbort: (f) => { stop = f; },
+      wire: (cc) => {
+        const x = wire(cc); const checksFor = x.startDeps.checksFor;
+        x.startDeps.checksFor = (...a) => { const p = checksFor(...a); const k12 = p[12]; return { ...p, 12: async (ctx) => { stop?.('SIGINT'); return k12(ctx); } }; };
+        return x;
+      },
+    });
+    const s = w.byStage(out);
+    assert.ok(stop, 'the run gave its stop');
+    for (const n of [4, 6, 11]) { assert.equal(w.ran[n], undefined, `check ${n}'s port never called`); assert.equal(s[`check${n}`].result, 'NOT TRIED', `check ${n}`); }
+    assert.equal(w.spawns, 0); assert.deepEqual(w.leftovers(), []);
+  } finally { w.done(); }
 });
