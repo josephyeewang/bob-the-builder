@@ -268,10 +268,11 @@ export const HEARD_ERR_MAX = 8192;
 export const HEARD_DRAIN_MS = 2000;
 
 /** Text safe to show (L1351): printable, on one line, the last SAID_MAX characters, a URL's sign-in part and any run of
- *  16 or more characters that could be part of a key or token (letters, digits and - _ + / = . :) hidden. */
+ *  16 or more characters that could be part of a key or token (letters, digits and - _ + / = . : %) hidden; a URL's
+ *  sign-in is hidden up to its last @. */
 export function sayable(text) {
   const t = String(text ?? '').replace(/[^\x20-\x7e]+/g, ' ').replace(/\s+/g, ' ').trim()
-    .replace(/:\/\/[^\s/@]*@/g, '://[hidden]@').replace(/[A-Za-z0-9_\-+/=.:]{16,}/g, '[hidden]').replace(/"/g, "'");
+    .replace(/:\/\/[^\s]*@/g, '://[hidden]@').replace(/[A-Za-z0-9_\-+/=.:%]{16,}/g, '[hidden]').replace(/"/g, "'");
   return t.length > SAID_MAX ? `…${t.slice(-SAID_MAX)}` : t;
 }
 

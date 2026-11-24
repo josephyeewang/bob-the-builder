@@ -529,6 +529,8 @@ test('L1351: sayable hides key-shaped runs, URL sign-ins and keeps one short pri
   for (const k of [['made', 'up/with+slash', 'es/end9Q'].join(''), ['npm', 'shortABCDEF12'].join('_'), 'Bearer abc.def.' + 'q'.repeat(14) + 'Z9', ['ghp', 'x'.repeat(14) + 'W7'].join('_')]) assert.doesNotMatch(sayable(`x ${k} y`), new RegExp(k.slice(-6).replace(/[.+/]/g, '\\$&')), k);
   assert.equal(sayable('a\n\tb\u0007 "c"'), "a b 'c'");
   assert.equal(sayable('https://u:p@h/'), 'https://[hidden]@h/');
+  assert.equal(sayable('https://u:p@ss@h/ and https://u:pa/ss@h/'), 'https://[hidden]@h/ and https://[hidden]@h/');
+  assert.equal(sayable('k %2Fabc%3Dxyz1234567%2B'), 'k [hidden]');
   const long = sayable('x '.repeat(400) + 'END');
   assert.ok(long.length <= SAID_MAX + 1 && long.startsWith('…') && long.endsWith('END'));
 });
