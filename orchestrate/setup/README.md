@@ -326,7 +326,13 @@ When the worker runner keeps refusing a card's start, the runner's log shows one
 costs a pass. The dry run runs the runner's own start on that card once, through every launch check, and stops where
 claude would be started. Run it on the Mini, as builder, from the installed copy:
 
-`sudo -H -u builder <installRoot>/bin/node <installRoot>/setup/live-proofs/start-dry-run.mjs --config <installRoot>/worker-runner.json --product <product> --card <card>`
+`sudo -H -u builder <installRoot>/bin/node <installRoot>/setup/live-proofs/start-dry-run.mjs --config <installRoot>/worker-runner.json --product <product> --card <card> --run-code`
+
+Leave out `--run-code` for a first look: every check that only reads runs, and checks 4, 6 and 11 (the install, a
+headless claude, the smoke and baseline tests: the branch's code) are not run. Add it only for a card the Dispatcher
+would start: its go given, its dependencies merged, its round within the cap. The dry run reads what it can of that
+(the card ready with no claim, a kind the Dispatcher starts, no outage open, and launch check 12, asked before the
+checks that run code) but not the rest, which needs the Dispatcher's own Record and rules.
 
 It prints one PASS, FAIL or NOT TRIED line per stage, then every failure. A failed stage is replaced by a stand-in where a
 later stage can still be tried; those later lines name the stand-ins they ran on, and nothing on a stand-in counts as a
@@ -334,11 +340,11 @@ pass. It exits 0 only when every stage passed (or does not apply to this card). 
 read-back, the smoke and baseline tests: a few minutes). It makes only what the real start makes, under its own
 `DRYRUN-` session id and a copy beside the card's own, and removes all of it at the end; it never writes the Record, the
 requests folder or the status file, and takes no runner lock. The card must be ready: the Dispatcher starts no other (a claimed card is another session's, whose start may be on now), so any other state is a FAIL, and the
-install, claude and tests are then not run. Nor are they when the Dispatcher would not claim the card (it is not on the
-Record's ready list, its kind is one the Dispatcher never starts, or an outage is open), or when launch check 12 (the
-budget, the caps, the files no other card holds) refuses it: the dry run asks check 12 before the checks that run code.
-The Dispatcher's other holds before it claims are not asked: M10's start_session (the product's own start rules), the
-host lock's copy and the amber Tier-1 queue. Nor is whether the runner is up on its current config: run setup.mjs
+install, claude and tests are then not run. Nor are they when the card holds a claim, is a kind the Dispatcher never
+starts, an outage is open, launch check 12 (the budget, the caps, the files no other card holds) refuses it, or the
+card moved (claimed, or no longer ready) while the run went on. The Dispatcher's other holds before it claims are not
+asked: the card's round, dependencies and go, M10's start_session (the product's own start rules, and whether the
+script profile is on), the host lock's copy and the amber Tier-1 queue. Nor is whether the runner is up on its current config: run setup.mjs
 daemons check first, and restart the runner after a config or install change, or a real start is refused there even
 after ALL PASS.
 Each stage's line also shows as it is decided, while it runs. Stopped part way (Ctrl-C, a closed window), it removes

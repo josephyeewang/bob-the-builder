@@ -6,7 +6,9 @@ import { join } from 'node:path';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { walledLaunchSettings } from '../../wiring/runner-launch.mjs';
 import { FLAGS, namesIn } from '../../modules/M4-workshop/launcher/settings-names.mjs';
-import { DRY_START_SAID, STAGES, dryCopyOf, dryRun, drySessionId, guardProblem, main, report } from './start-dry-run.mjs';
+import { recordView } from '../../modules/M9-record/read-view.mjs';
+import { UID, must, setup as recordSetup } from '../../modules/M9-record/fixtures.test-helper.mjs';
+import { DRY_START_SAID, NOT_ASKED, STAGES, dryCopyOf, dryRun, drySessionId, guardProblem, main, report } from './start-dry-run.mjs';
 
 const HEAD = 'b'.repeat(40);
 const SID = 'DRYRUN-test-0001';
@@ -34,9 +36,8 @@ function world({ plant = {} } = {}) {
   w.io = {
     sessionId: SID,
     roots: () => plant.roots ?? null,
-    inputs: async () => ({ budget: plant.noBudget ? null : { rec: {
-      ready: () => { if (plant.readyThrows) throw new Error(plant.readyThrows); return plant.notReady ? [{ id: 'C-2', doc: {} }] : [{ id: 'C-1', doc: {} }]; },
-      read: (e, id) => (e === 'fact' && id === 'outage' && plant.outage ? { doc: { state: 'open' } } : null) } }, bobManifest: null }),
+    inputs: async () => ({ budget: plant.noBudget ? null : { rec: plant.rec ?? {
+      read: (e, id) => { if (plant.readThrows) throw new Error(plant.readThrows); return e === 'fact' && id === 'outage' && plant.outage ? { doc: { state: 'open' } } : null; } } }, bobManifest: null }),
     wallGate: async () => () => plant.wall ?? null,
     snapshots: () => ({ held: () => plant.snapshot ?? null }),
     testProduct: () => plant.testProduct ?? null,
@@ -61,7 +62,7 @@ function world({ plant = {} } = {}) {
       spawn: () => { w.spawns += 1; throw new Error('spawned'); },
     },
   };
-  w.run = (over = {}) => dryRun({ c, product: 'p1', card: 'C-1', io: { ...w.io, ...over } });
+  w.run = (over = {}, { runCode = true } = {}) => dryRun({ c, product: 'p1', card: 'C-1', runCode, io: { ...w.io, ...over } });
   w.byStage = (out) => Object.fromEntries(out.results.map((r) => [r.stage, r]));
   w.leftovers = () => [
     ...readdirSync(mine.copies).filter((n) => n.includes(SID)),
@@ -312,28 +313,22 @@ test('stopped while check 11 runs: its baseline throwaway copy is refused (no te
   } finally { w.done(); }
 });
 
-test('a card the Dispatcher would not claim, or check 12 refusing, stops the install, claude and tests', async () => {
+test('a card the Dispatcher could not claim, or check 12 refusing, stops the install, claude and tests', async () => {
   const cases = [
-    [{ notReady: true }, /not on the Record's ready list/],
-    [{ outage: true }, /an outage is open/],
-    [{ readyThrows: 'the store is locked' }, /can't be checked \(the store is locked\)/],
+    [{ outage: true }, {}, /an outage is open/],
+    [{ readThrows: 'the store is locked' }, {}, /can't be checked \(the store is locked\)/],
+    [{}, { claim: { session_id: 'S-9' } }, /holds a claim already/],
+    [{}, { kind: 'lead_daily_card' }, /never started by the Dispatcher/],
+    [{}, { kind: 'research_copy' }, /never started by the Dispatcher/],
   ];
-  for (const [plant, why] of cases) {
+  for (const [plant, doc, why] of cases) {
     const w = world({ plant });
     try {
-      const s = w.byStage(await w.run());
-      assert.equal(s.claimable.result, 'FAIL', JSON.stringify(plant)); assert.match(s.claimable.why, why);
-      for (const n of [4, 6, 11]) assert.equal(w.ran[n], undefined, `check ${n} not run (${JSON.stringify(plant)})`);
+      const s = w.byStage(await w.run({ readCard: (id) => ({ ok: true, doc: { id, state: 'ready', product: 'p1', ...doc } }) }));
+      assert.equal(s.claimable.result, 'FAIL', why.source); assert.match(s.claimable.why, why);
+      for (const n of [4, 6, 11]) assert.equal(w.ran[n], undefined, `check ${n} not run (${why.source})`);
       assert.equal(s.check12.result, 'PASS', 'the checks that only read still run');
       assert.deepEqual(w.leftovers(), []); assert.equal(w.spawns, 0);
-    } finally { w.done(); }
-  }
-  for (const kind of ['lead_daily_card', 'research_copy']) {
-    const w = world();
-    try {
-      const s = w.byStage(await w.run({ readCard: (id) => ({ ok: true, doc: { id, state: 'ready', product: 'p1', kind } }) }));
-      assert.equal(s.claimable.result, 'FAIL', kind); assert.match(s.claimable.why, /never started by the Dispatcher/);
-      for (const n of [4, 6, 11]) assert.equal(w.ran[n], undefined, `check ${n} not run (${kind})`);
     } finally { w.done(); }
   }
   {
@@ -350,10 +345,67 @@ test('a card the Dispatcher would not claim, or check 12 refusing, stops the ins
     const w = world({ plant: { noBudget: true } });
     try {
       const s = w.byStage(await w.run());
-      assert.equal(s.claimable.result, 'NOT TRIED'); assert.match(s.claimable.why, /Record is not loaded/);
+      assert.equal(s.claimable.result, 'NOT TRIED'); assert.match(s.claimable.why, /no Record view/);
       for (const n of [4, 6, 11]) assert.equal(w.ran[n], undefined, `check ${n} not run without the Record`);
     } finally { w.done(); }
   }
+});
+
+test('the outage is read through the real Record view the budget gives (its shape, not a stand-in): no facts at all fails closed, none open passes, one open fails', async () => {
+  const env = recordSetup({ prefix: 'orch-dryrun-rec-' });
+  try {
+    const rec = recordView({ recordRoot: env.root, recordUid: UID });
+    {
+      // A Record that never held a fact can't say whether an outage is open: told, and fails closed (no code runs).
+      const w = world({ plant: { rec } });
+      try { const k = w.byStage(await w.run()); assert.equal(k.claimable.result, 'FAIL'); assert.match(k.claimable.why, /can't be checked/); assert.equal(w.ran[4], undefined); } finally { w.done(); }
+    }
+    must(env.record.write({ actor: 'dispatcher', entity: 'fact', id: 'band-usage', expectRev: 0, doc: { band: 'green' } }), 'a fact');
+    {
+      const w = world({ plant: { rec } });
+      try { const k = w.byStage(await w.run()).claimable; assert.equal(k.result, 'PASS', k.why); } finally { w.done(); }
+    }
+    must(env.record.write({ actor: 'dispatcher', entity: 'fact', id: 'outage', expectRev: 0, doc: { state: 'open' } }), 'outage');
+    {
+      const w = world({ plant: { rec } });
+      try {
+        const s = w.byStage(await w.run());
+        assert.equal(s.claimable.result, 'FAIL'); assert.match(s.claimable.why, /an outage is open/);
+        for (const n of [4, 6, 11]) assert.equal(w.ran[n], undefined);
+      } finally { w.done(); }
+    }
+  } finally { rmSync(env.base, { recursive: true, force: true }); }
+});
+
+test('without --run-code: every check that only reads runs, checks 4, 6 and 11 are not asked, and the run says so (never ALL PASS)', async () => {
+  const w = world();
+  try {
+    const out = await w.run({}, { runCode: false });
+    const s = w.byStage(out);
+    for (const n of [4, 6, 11]) { assert.equal(w.ran[n], undefined, `check ${n} not run`); assert.equal(s[`check${n}`].result, 'NOT TRIED'); assert.equal(s[`check${n}`].why, NOT_ASKED); }
+    for (const n of [1, 2, 3, 5, 7, 8, 9, 10, 12, 13]) assert.equal(w.ran[n] >= 1, true, `check ${n} still run`);
+    assert.equal(w.ran[12], 1, 'check 12 is not asked early when no code will run');
+    assert.equal(s.start.result, 'NOT TRIED');
+    const r = report(out.results, { sessionId: out.sessionId });
+    assert.equal(r.ok, false); assert.match(r.text, /EVERY CHECK THAT ONLY READS PASSED/); assert.doesNotMatch(r.text, /ALL PASS/);
+    assert.deepEqual(w.leftovers(), []); assert.equal(w.spawns, 0);
+  } finally { w.done(); }
+  const w2 = world({ plant: { snapshot: 'stale' } });
+  try {
+    const r = report((await w2.run({}, { runCode: false })).results, {});
+    assert.doesNotMatch(r.text, /EVERY CHECK THAT ONLY READS PASSED/); assert.match(r.text, /NOT READY/);
+  } finally { w2.done(); }
+});
+
+test('the card moving while the run goes on (claimed by a real start) stops checks 4, 6 and 11', async () => {
+  const w = world();
+  let reads = 0;
+  try {
+    const s = w.byStage(await w.run({ readCard: (id) => { reads += 1; return { ok: true, doc: { id, state: reads > 1 ? 'claimed' : 'ready', product: 'p1', ...(reads > 1 ? { claim: { session_id: 'S-9' } } : {}) } }; } }));
+    assert.equal(s.card.result, 'PASS');
+    for (const n of [4, 6, 11]) { assert.equal(w.ran[n], undefined, `check ${n} not run`); assert.match(s[`check${n}`].why, /the card is claimed now/); }
+    assert.deepEqual(w.leftovers(), []); assert.equal(w.spawns, 0);
+  } finally { w.done(); }
 });
 
 test('a stop before the copy is made: nothing more is made (no copy, no outbox, no settings), and nothing is left', async () => {
@@ -403,7 +455,7 @@ test('main: an error outside the run\'s own try removes what it made, says so, a
     return 'do the card';
   } };
   try {
-    await main(['--product', 'p1', '--card', 'C-1'], { print: () => {}, errOut: (t) => { said += t; }, uid: 603, readConfig: () => w.c, configOf: (x) => x, umask: () => {}, signals, crashes,
+    await main(['--product', 'p1', '--card', 'C-1', '--run-code'], { print: () => {}, errOut: (t) => { said += t; }, uid: 603, readConfig: () => w.c, configOf: (x) => x, umask: () => {}, signals, crashes,
       exit: (n) => { exited = n; }, io: { ...w.io, ownDirUid: 603, deps } });
     assert.equal(madeBefore, 1, 'the copy was there when it crashed'); assert.deepEqual(leftAtCrash, [], 'removed at the crash');
     assert.equal(exited, 1); assert.match(said, /The dry run failed \(a timer blew up\); what it made is removed/);
@@ -417,7 +469,7 @@ test('main: a signal during the run waits for it to end (no early exit), takes i
     const handlers = {}; let text = ''; let said = '';
     const signals = { on: (k, f) => { handlers[k] = f; }, off: (k) => { delete handlers[k]; } };
     const deps = { ...w.io.deps, promptFor: () => { if (sigAt) { handlers.SIGINT('SIGINT'); handlers.SIGINT('SIGINT'); } return 'do the card'; } };
-    const argv = ['--product', 'p1', '--card', 'C-1'];
+    const argv = ['--product', 'p1', '--card', 'C-1', '--run-code'];
     try {
       const code = await main(argv, { print: (t) => { text += t; }, uid: 603, readConfig: () => w.c, configOf: (x) => x, umask: () => {}, errOut: (t) => { said += t; }, signals,
         io: { ...w.io, ownDirUid: 603, deps } });
@@ -435,7 +487,7 @@ test('main: a closed window (SIGHUP, then every write failing) still ends the ru
   const signals = { on: (k, f) => { handlers[k] = f; }, off: (k) => { delete handlers[k]; } };
   const gone = () => { writes += 1; throw Object.assign(new Error('write EIO'), { code: 'EIO' }); };
   const deps = { ...w.io.deps, promptFor: () => { handlers.SIGHUP('SIGHUP'); return 'do the card'; } };
-  const argv = ['--product', 'p1', '--card', 'C-1'];
+  const argv = ['--product', 'p1', '--card', 'C-1', '--run-code'];
   try {
     const code = await main(argv, { print: gone, errOut: gone, uid: 603, readConfig: () => w.c, configOf: (x) => x, umask: () => {}, signals,
       io: { ...w.io, ownDirUid: 603, deps } });

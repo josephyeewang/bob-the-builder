@@ -77,7 +77,7 @@ export const STAGES = Object.freeze([
   ['memory', 'the runner\'s memory is read (its other live sessions)'],
   ['liveWalls', 'every other live session is walled off from this product'],
   ['card', 'the card is read from the Record, is this product\'s, and is ready'],
-  ['claimable', 'the Dispatcher would claim it: on the Record\'s ready list (its round, dependencies, product and go), a kind it starts, and no outage'],
+  ['claimable', 'the Dispatcher could claim it: ready with no claim, a kind it starts, and no outage open'],
   ['request', 'the start request is one the runner takes'],
   ['signin', 'the sign-in is read'],
   ['commit', 'the copy\'s start commit is read'],
@@ -101,6 +101,8 @@ const ORDER = STAGES.map(([k]) => k);
 const INSIDE = ORDER.slice(ORDER.indexOf('request'), ORDER.indexOf('cleanup'));
 // The launch checks that run the branch's code: 4 the install, 6 a headless claude, 11 the smoke and the tests.
 export const RUNS_CODE = new Set([4, 6, 11]);
+// Without --run-code they are not run: whether the Dispatcher would claim the card is the operator's to vouch for.
+export const NOT_ASKED = 'not asked: it runs the branch\'s code (an install, a headless claude or the tests). Run again with --run-code once the card is one the Dispatcher would start (its go given, its dependencies merged)';
 // Each is run only when every stage before it passed: the real start refuses at the first failed stage, so it never
 // runs that code past one, and nor does the dry run. Keep-going goes on through the checks that only read.
 
@@ -120,7 +122,7 @@ const said = (e) => e?.message ?? String(e);
  * readSettings, wire, deps (startPort's own deps, put under the dry run's wrappers), fs, sessionId, log }.
  * → { results: [{ stage, label, result: 'PASS'|'FAIL'|'NOT TRIED'|'SKIP', why?, on? }], sessionId, made, left, spawned }.
  */
-export async function dryRun({ c, configWhy, product, card, io = {} }) {
+export async function dryRun({ c, configWhy, product, card, runCode = false, io = {} }) {
   const log = io.log ?? (() => {});
   const sid = io.sessionId ?? drySessionId();
   const res = new Map();
@@ -201,21 +203,28 @@ export async function dryRun({ c, configWhy, product, card, io = {} }) {
     if (rc.doc.state === 'ready') set('card', 'PASS', 'its state is ready; read as claimed for this run');
     else if (rc.doc.state === 'claimed') failOn('card', 'it is claimed already: the Dispatcher has handed it to a session, whose start may be on now; try it when it is ready', 'the card read as claimed for this run');
     else failOn('card', `its state is ${rc.doc.state ?? 'not named'}: the Dispatcher starts only a ready card`, 'the card read as claimed');
-    // The Dispatcher claims only what its pass takes (pass.mjs): a card on the Record's own ready list (ready, no claim,
-    // and its readiness check: round, dependencies, the product's state, the owner's go), of a kind it starts, with no
-    // outage open. Read through the budget's Record, the one launch check 12 reads. Its other holds before it claims
-    // (M10's start_session, the host lock's copy, the amber Tier-1 queue) are not asked here; check 12 is (the caps).
-    const brec = budget?.rec;
-    if (!brec || typeof brec.ready !== 'function') set('claimable', 'NOT TRIED', 'the Dispatcher\'s Record is not loaded (the config names no budget, or it did not load)');
-    else {
+    // What of the Dispatcher's claim the dry run can read (pass.mjs): the card ready with no claim, of a kind it starts,
+    // and no outage open (the fact, read through the budget's Record view, the one launch check 12 reads). The rest of
+    // its decision (the card's round, dependencies, the owner's go, M10's start_session, the host lock's copy, the amber
+    // queue) needs the Dispatcher's own Record and rules engine, which a dry run does not open: the operator vouches for
+    // it by asking for the checks that run code (--run-code), and without that they are not run.
+    {
       let why = null;
       try {
-        if (NEVER_STARTED.includes(rc.doc.kind)) why = `a ${rc.doc.kind} card is never started by the Dispatcher`;
-        else if (brec.read('fact', OUTAGE_FACT)?.doc?.state === 'open') why = 'an outage is open: the Dispatcher starts nothing';
-        else if (!brec.ready().some((x) => x.id === card)) why = 'it is not on the Record\'s ready list (not ready, claimed, or its round, dependencies, product state or go hold it)';
+        if (rc.doc.claim) why = 'it holds a claim already';
+        else if (NEVER_STARTED.includes(rc.doc.kind)) why = `a ${rc.doc.kind} card is never started by the Dispatcher`;
+        else if (!budget?.rec || typeof budget.rec.read !== 'function') why = null;
+        else if (budget.rec.read('fact', OUTAGE_FACT)?.doc?.state === 'open') why = 'an outage is open: the Dispatcher starts nothing';
       } catch (e) { why = `it can't be checked (${said(e)})`; }
-      if (why) failOn('claimable', why, 'the card taken as one the Dispatcher would claim'); else pass('claimable');
+      if (why) failOn('claimable', why, 'the card taken as one the Dispatcher could claim');
+      else if (!budget?.rec || typeof budget.rec.read !== 'function') set('claimable', 'NOT TRIED', 'whether an outage is open can\'t be read: no budget is loaded, so no Record view');
+      else pass('claimable');
     }
+    const cardStillFree = () => {
+      let r2; try { r2 = (io.readCard ?? ((id) => readCardFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, card: id })))(card); } catch (e) { return `the card can't be read again (${said(e)})`; }
+      if (!r2?.ok) return `the card can't be read again (${r2?.reason ?? 'no answer'})`;
+      return r2.doc?.state === 'ready' && !r2.doc?.claim ? null : `the card is ${r2.doc?.claim ? 'claimed' : r2.doc?.state ?? 'in no state'} now`;
+    };
     // What the real start meets that a dry run, beside the card, would not: the runner's one session per card, and
     // the card's own copy still there (prepareWorkerCopy refuses a copy folder that exists).
     if (busy) failOn('request', busy, 'the card taken as free');
@@ -343,6 +352,7 @@ export async function dryRun({ c, configWhy, product, card, io = {} }) {
             let r;
             if (abortWhy) { set(`check${k.n}`, 'NOT TRIED', abortWhy); return refuse(abortWhy); }
             if (RUNS_CODE.has(k.n)) {
+              if (!runCode) { set(`check${k.n}`, 'NOT TRIED', NOT_ASKED); return { ok: true }; }
               // The real start runs no install, claude or tests past any stage it refuses at, and nor does the dry
               // run: those stages are why the branch's code may run here at all (the sandbox alone is not trusted).
               const gates = [...res.values()].filter((x) => x.result === 'FAIL' || x.result === 'NOT TRIED').map((x) => x.label);
@@ -350,6 +360,7 @@ export async function dryRun({ c, configWhy, product, card, io = {} }) {
               let again = null; try { again = busyIn(readMemory()); } catch (e) { again = `the runner's memory can't be read (${said(e)})`; }
               if (again) gates.push(again);
               const own = ownCopyThere(); if (own) gates.push(`the card's own copy is there now (${own})`);
+              const moved = cardStillFree(); if (moved) gates.push(moved);
               // Check 12 is the Dispatcher's own start gate (the budget, the caps, the files no other card holds), asked
               // before it claims; the launch asks it after 4, 6 and 11. It only reads, so it is asked here first.
               const k12 = CHECKS.find((q) => q.n === 12);
@@ -472,6 +483,9 @@ export function report(results, { sessionId } = {}) {
   } else lines.push('No stage failed.');
   if (notTried.length) lines.push(`${notTried.length} stage${notTried.length === 1 ? '' : 's'} could not be tried; they are not passes.`);
   const ok = results.every((r) => r.result === 'PASS' || r.result === 'SKIP');
+  const onlyAsked = !ok && results.every((r) => r.result === 'PASS' || r.result === 'SKIP' || (r.result === 'NOT TRIED' && (r.why === NOT_ASKED || r.stage === 'start')))
+    && results.some((r) => r.why === NOT_ASKED);
+  if (onlyAsked) { lines.push('EVERY CHECK THAT ONLY READS PASSED. Checks 4, 6 and 11 were not asked: run again with --run-code to run them; until then the start is not proven.'); return { text: `${lines.join('\n')}\n`, ok: false }; }
   lines.push(ok ? `ALL PASS: ${DRY_START_SAID}. (Whether the runner itself is up, and its own start-up checks, are not part of this: setup.mjs daemons check shows those.)` : 'NOT READY: the real start would be refused.');
   return { text: `${lines.join('\n')}\n`, ok };
 }
@@ -528,7 +542,7 @@ export async function main(argv, { print = (t) => process.stdout.write(t), uid =
   for (const s of sigs) signals.on(s, onSignal);
   let out;
   try {
-    out = await dryRun({ c, configWhy, product, card, io: { progress: (t) => toErr(`  ${t}\n`), log: (t) => toErr(`  (log) ${mask(t)}\n`), ...io, onAbort: (f) => { stop = f; io.onAbort?.(f); }, onCrash: (f) => { crashClean = f; io.onCrash?.(f); } } });
+    out = await dryRun({ c, configWhy, product, card, runCode: argv.includes('--run-code'), io: { progress: (t) => toErr(`  ${t}\n`), log: (t) => toErr(`  (log) ${mask(t)}\n`), ...io, onAbort: (f) => { stop = f; io.onAbort?.(f); }, onCrash: (f) => { crashClean = f; io.onCrash?.(f); } } });
   } finally { for (const s of sigs) signals.off(s, onSignal); for (const s of crashKinds) crashes.off(s, onCrash); }
   const r = report(out.results, { sessionId: out.sessionId });
   print(r.text);
