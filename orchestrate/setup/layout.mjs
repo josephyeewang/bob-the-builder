@@ -17,6 +17,7 @@ import { AI_ROLES } from '../shared/record.mjs';
 import { PRODUCT, productRoleClash, runnerPlaces, PRODUCT_OUTBOX_ROLES } from '../shared/product-paths.mjs';
 import { RUNNER_ROLES } from '../shared/review-roles.mjs';
 import { RULES_VERSION } from '../modules/M4-workshop/git/gitleaks.mjs';
+import { HOOKS_ITEM } from '../modules/M4-workshop/launcher/install-check.mjs';
 
 // The plain-script Mac users (L44, R-0b-05). `review` is also REVIEW_USER in the launcher; the setup test pins them equal.
 // `builder` (L1078, L1079) is the workers' user: the worker runner and every session it starts (worker, undo, script) run
@@ -240,7 +241,7 @@ export const dispatcherRulesPath = (cfg, prod) => join(dispatcherRulesDir(cfg, p
 // M4's pinnedBinary spells claude-code once more, as a launcher may not depend on setup; review-config.test.mjs pins the two
 // as equal.
 export const COPY_CLAUDE_CODE = 'claude-code';
-export const COPY_HOOKS = 'hooks';
+export const COPY_HOOKS = HOOKS_ITEM;   // install-check.mjs, which the updater reads too: it makes this folder on every update (L1354)
 
 /** Where a user's home folder is (also what its Mac record names). */
 export const homeOf = (cfg, user) => join(cfg.base, 'home', user);

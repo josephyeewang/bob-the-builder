@@ -17,8 +17,11 @@
 //      versioned folder beside the copy (`<installRoot>.v-<commit>/orchestrate`), and the few files outside it that the
 //      code imports (install-check.mjs OUTSIDE_FILES) at their repository paths in the same folder (L92 item 4), straight
 //      from git's objects: no checkout, no work tree; copies in the copy's own items that are not in the repository
-//      (`keep`: its node, its configs, the claude program; never the wiring, L132 M-1) from the copy in place, then writes the commit
-//      stamp last, at the top of the versioned folder;
+//      (`keep`: its node, its configs, the claude program; never the wiring, L132 M-1) from the copy in place, except the
+//      hooks folder (HOOKS_ITEM), which it makes from the new folder's own module hooks (copyHookScripts, L1354), so a hook
+//      change reaches the Mac with the update that brings it (a worker-runner session, which names its hooks by real
+//      path, keeps the old copy's; a Front Door tab, which names them through the link, gets the new ones); then writes
+//      the commit stamp last, at the top of the versioned folder;
 //   5. checks the new folder is root's alone (`installProblem`) and holds what the runner's config names in the copy
 //      (its wiring, the claude program, the hooks), then flips the copy's link to its `orchestrate/` with one rename. The folder it
 //      replaced is kept through one more update (`PREVIOUS`, L75 (a)): a review session started on it names its node
@@ -49,7 +52,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { git, checkMirror, useGitHome, MIRROR_CONFIG_TEMPLATE, ROOT_PATH } from '../git/safe-git.mjs';
-import { SOURCE, OUTSIDE_FILES, STAMP, NODE, UPDATER_CONFIG, RUNNER_CONFIG, RUNNER_MODULES, MODULE_HOMES, copyModuleProblem, installStamp, installProblem, chainProblem, aclProblem, currentCopy, readInstallStamp,
+import { SOURCE, OUTSIDE_FILES, STAMP, NODE, UPDATER_CONFIG, RUNNER_CONFIG, RUNNER_MODULES, MODULE_HOMES, HOOKS_ITEM, HOOK_MODULE, copyHookScripts, copyModuleProblem, installStamp, installProblem, chainProblem, aclProblem, currentCopy, readInstallStamp,
   versionName, versionCommit, mainSeenFile, readMainSeen, nextMainSeen } from './install-check.mjs';
 
 export const MAIN = 'refs/heads/main';
@@ -62,7 +65,8 @@ const HTTPS = /^https:\/\/[A-Za-z0-9.-]+(:\d+)?\/[^\s]+$/;
 const FILE_MODES = { 100644: 0o644, 100755: 0o755 };
 export const GIT_MS = 300_000;
 // The runner's config keys that name something in the copy (L75 m-4), each checked in the new copy before the flip.
-// The claude program and the hooks may be copy items, which `keep` must carry over or the first update would drop them;
+// The claude program and the hooks may be copy items, which `keep` names or the first update would drop them (it carries
+// the claude program over and makes the hooks again from the new copy's modules, L1354);
 // the wiring and the budget module must be the copy's own code files from main (L132 M-1, install-check RUNNER_MODULES).
 // The bob step's Bob file list (bobManifest) is a copy item too, which the bob step adds to keep (L1035 m1).
 export const RUNNER_NAMES = Object.freeze(['wiring', 'budget', 'claudeBin', 'hooksDir', 'bobManifest']);
@@ -474,6 +478,8 @@ async function swapIn(c, { commit, cur, from, first, owner, write, step, g, rena
     }
     step('outside files');
     for (const n of c.keep) {
+      // The hooks are this version's, made from its own modules just written (L1354): never the old copy's.
+      if (n === HOOKS_ITEM) { copyHookScripts(join(copy, HOOK_MODULE), join(copy, n)); step(`made ${n}`); continue; }
       if (!there(join(from, n))) throw new Error(`the copy's own item ${n} is missing from ${from}`);
       copyItem(join(from, n), join(copy, n));
       step(`kept ${n}`);

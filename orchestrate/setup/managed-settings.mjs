@@ -226,7 +226,7 @@ export function checkManagedSettings(io, cfg, { readers = managedReaders(io), re
     return !!st && (kind === 'dir' ? st.isDirectory() : st.isFile()) && st.uid === io.rootUid && (st.mode & 0o777) === mode; };
   rows.push({ what: `the guard's folder ${dir} is root's 0755`, ok: plain(dir, 'dir', 0o755), why: 'run managed-settings again' });
   for (const n of GUARD_FILES) rows.push({ what: `${join(dir, n)} is root's 0644`, ok: plain(join(dir, n), 'file', 0o644), why: 'run managed-settings again' });
-  // #487 r2 m3: each guard file against the one installed (add-to-install brings new guard code; the live guard stays old
+  // #487 r2 m3: each guard file against the one installed (add-to-install, and each update since L1354, brings new guard code; the live guard stays old
   // until this command runs again).
   const hooksDir = join(io.at(installPaths(cfg).installRoot), COPY_HOOKS);
   for (const n of GUARD_FILES) {

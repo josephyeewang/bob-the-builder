@@ -23,10 +23,13 @@
 //   aclProblem(paths)                   → null, or the first path that has an access list (ACL)
 //   readInstallStamp(installRoot)       → the 40-hex commit stamp, or null
 //   readMainSeen(file), nextMainSeen(prev, now), behindSince(state, main, installed) → root's record of when main moved ahead
+//   copyHookScripts(source, dest)       → the copy's hooks folder made from a version's module hooks (L1354)
+//   hooksProblem(hooksDir, source)      → null, or why a hooks folder is not, byte for byte, the module hooks, by name
 
-import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readdirSync, readlinkSync } from 'node:fs';
+import { chmodSync, closeSync, constants, copyFileSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 
 // The repository folder the copy is made of, and the folder inside the versioned folder that the link names.
 export const SOURCE = 'orchestrate';
@@ -39,6 +42,55 @@ export const SOURCE = 'orchestrate';
 export const OUTSIDE_FILES = Object.freeze(['scripts/blueprint/yaml-lite.mjs']);
 
 export const NODE = 'bin/node';
+// The copy's hooks folder (L1354): one of the copy's own items, at the top of the copy, holding the hook scripts every
+// session's settings name (setup/layout.mjs COPY_HOOKS is this name). It is made from the same version's module hooks
+// (HOOK_MODULE): by add-to-install, and by the updater on every update (review-updater.mjs swapIn), never carried over
+// from the copy it replaces, so a hook change on main reaches the Mac with the update that brings it. A worker-runner
+// session names the folder by its real path (wiring realRenderPaths), so one started on the old copy keeps that copy's
+// folder while it runs (hooks/lib.mjs guardBesideHooks). A Front Door tab names it through the link (setup/front-door.mjs),
+// so it reads the new version's hooks from the flip on.
+export const HOOKS_ITEM = 'hooks';
+export const HOOK_MODULE = 'modules/M4-workshop/hooks';
+/** A hook script: a .mjs file that is not a test. Only these are copied, and compared with the copy's folder. */
+export const isHookScript = (n) => n.endsWith('.mjs') && !n.endsWith('.test.mjs');
+
+/**
+ * The hooks folder made from `source` (a version's HOOK_MODULE): `dest` 0755, each hook script copied in as a plain
+ * file, 0755. A script that is not a plain file (a link) is refused. The one copy step, for add-to-install (hooks-check.mjs
+ * installHooks, which owns the result to root after) and the updater (root's already, as root writes it).
+ */
+export function copyHookScripts(source, dest) {
+  mkdirSync(dest, { recursive: true, mode: 0o755 });
+  chmodSync(dest, 0o755);
+  for (const n of readdirSync(source).filter(isHookScript).sort()) {
+    if (!lstatSync(join(source, n)).isFile()) throw new Error(`the hook ${join(source, n)} is not a plain file`);
+    copyFileSync(join(source, n), join(dest, n));
+    chmodSync(join(dest, n), 0o755);
+  }
+}
+
+const fileSha = (p) => createHash('sha256').update(readFileSync(p)).digest('hex');
+
+/**
+ * Null, or why `hooksDir` is not `source`'s hook scripts byte for byte (launch check 7, the runner's lock-down jobs and
+ * check-install alike, L1354), naming the scripts: missing, extra (any .mjs there), or differing.
+ */
+export function hooksProblem(hooksDir, source) {
+  let want; let have;
+  try { want = readdirSync(source).filter(isHookScript).sort(); have = readdirSync(hooksDir).filter((n) => n.endsWith('.mjs')).sort(); } catch { return 'the hook folder is missing'; }
+  const missing = want.filter((n) => !have.includes(n)); const extra = have.filter((n) => !want.includes(n));
+  if (missing.length || extra.length) {
+    return `the hook folder holds different files from the module copy (${[missing.length ? `missing: ${missing.join(', ')}` : '', extra.length ? `extra: ${extra.join(', ')}` : ''].filter(Boolean).join('; ')})`;
+  }
+  const differ = [];
+  for (const n of want) {
+    let a; let b;
+    try { a = fileSha(join(source, n)); b = fileSha(join(hooksDir, n)); } catch { return `hook ${n} is unreadable`; }
+    if (a !== b) differ.push(n);
+  }
+  if (!differ.length) return null;
+  return `hook ${differ[0]} differs from the module copy${differ.length > 1 ? ` (and ${differ.slice(1).join(', ')})` : ''}`;
+}
 // The updater's own config and the review runner's config: two of the copy's own items (review-updater.mjs `keep`),
 // at fixed names so the updater can refuse a `keep` that would drop either (L73 point 4).
 export const UPDATER_CONFIG = 'updater.json';
