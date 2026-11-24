@@ -19,6 +19,8 @@ import { ACCOUNT_NAMES, accountEnv } from './accounts.mjs';
 import { startGate } from '../../M11-dispatcher/gate.mjs';
 import { rulesWith, recWith } from '../../M11-dispatcher/fixtures.test-helper.mjs';
 import { reviewChecks, launchReview, sessionArgs, spawnClaude, smokeFiles, smokeCommand, GATE_KIND, FIRST_ROUND_EFFORT, SEND_BACK_EFFORT } from './review-launch.mjs';
+import { LOCKED_PROMPT } from './launch.mjs';
+import { smokeRunOf } from '../../../wiring/runner-checks.mjs';
 import { sourcesProblem } from './readback.mjs';
 
 const PIN = '2.1.300';
@@ -32,25 +34,31 @@ const initFor = (role, over = {}) => {
     setting_sources: ['managed', 'flag'], permissionMode: p.mode, claude_code_version: PIN, ...over };
 };
 
-// A fake claude. Asked to run the smoke command, it does what FAKE_SMOKE says: 'sandboxed' marks only that it ran
-// (the walls held), 'open' writes all three files, 'net' marks it ran and reached the network, 'none' does nothing.
+// A fake claude. Asked to run the smoke (L1352: the guard's one command, the smoke's line its base64 job), it runs the
+// guard as the Bash tool does (detached, so its record and the runner's go-ahead are real), with a job standing in for
+// what the sandbox lets through, per FAKE_SMOKE: 'sandboxed' marks only that it ran (the walls held), 'open' writes all
+// three files, 'net' marks it ran and reached the network, 'none' runs but writes nothing; 'skip' never runs the command.
 // Otherwise it prints its start message (FAKE_INIT) and waits to be stopped.
 function fakeClaude(dir) {
   const f = join(dir, 'fake-claude.mjs');
   writeFileSync(f, `
-import { writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 const prompt = process.argv.at(-1);
-if (prompt.startsWith('Run exactly this shell command once')) {
-  const [ran, outside, net] = [...prompt.matchAll(/'([^']+)'/g)].map((m) => m[1]);
+if (prompt.startsWith(${JSON.stringify(LOCKED_PROMPT)})) {
+  const words = [...prompt.matchAll(/'([^']+)'/g)].map((m) => m[1]);
+  const [ran, outside, net] = [...Buffer.from(words.at(-1), 'base64').toString('utf8').matchAll(/'([^']+)'/g)].map((m) => m[1]);
   const mode = process.env.FAKE_SMOKE;
-  if (mode !== 'none') writeFileSync(ran, '');
-  if (mode === 'open') writeFileSync(outside, '');
-  if (mode === 'open' || mode === 'net') writeFileSync(net, '');
-  process.exit(0);
-}
+  if (mode === 'skip') process.exit(0);
+  const put = (p) => ": > '" + p + "'";
+  const job = { sandboxed: [put(ran)], open: [put(ran), put(outside), put(net)], net: [put(ran), put(net)], none: ['true'] }[mode].join('; ');
+  const cmd = prompt.slice(${JSON.stringify(LOCKED_PROMPT)}.length).replace(words.at(-1), Buffer.from(job, 'utf8').toString('base64'));
+  const c = spawn('/bin/sh', ['-c', cmd], { detached: true, stdio: 'ignore' });
+  c.on('exit', () => process.exit(0));
+} else {
 console.log('not json at all');
 console.log(process.env.FAKE_INIT);
 setTimeout(() => {}, 60000);
+}
 `);
   return f;
 }
@@ -77,6 +85,9 @@ function world({ role = 'reviewer', smoke = 'sandboxed', init = initFor(role) } 
   const source = d('hooks-source'); cpSync(HOOKS_SOURCE, source, { recursive: true });
   for (const n of readdirSync(source)) if (n.endsWith('.test.mjs')) rmSync(join(source, n));
   const hooksDir = join(root, 'hooks'); installHooks(hooksDir, source);
+  // The lock-down guard beside the hooks, as installed (<version>/modules/M4-workshop/jobs; #666 r2 M1: jobGuard finds it there).
+  mkdirSync(join(root, 'modules', 'M4-workshop', 'jobs'), { recursive: true });
+  cpSync(join(HOOKS_SOURCE, '..', 'jobs', 'guard.sh'), join(root, 'modules', 'M4-workshop', 'jobs', 'guard.sh'));
   const snapshot = join(d('rr'), 'rules.json');
   const rules = { production: { env_files: [join(root, 'prod.cfg')], programs: ['fakehost'], hosts: ['db.prod.example.net'] }, secrets: { paths: [keys] } };
   writeSnapshot(snapshot, rules); // the runner's pass writes it before any start (readyProblem)
@@ -105,6 +116,8 @@ function world({ role = 'reviewer', smoke = 'sandboxed', init = initFor(role) } 
     // under reviewHome itself (L906 m2), so every check-10 run here goes through that.
     managedReaders: { plist: () => null, user: () => 'role', claudeFile: machineWide },
   };
+  // Check 11's one way to run claude, as the runner gives it (L1352).
+  x.lockedRun = smokeRunOf(x);
   const flags = sessionArgs({ profile, settingsFile, sessionId: 'S-1', prompt: 'p' }).filter((a) => a.startsWith('--'));
   const names = { flags, version: PIN, confirmed: Object.fromEntries([...namesIn(r.settings), ...flags].map((n) => [n, { by: 'readback:stand-in', version: PIN }])) };
   return { root, x, names, spawned, alerts };
@@ -289,8 +302,9 @@ test('L900 pin: no claude the launcher starts gets --managed-settings or CLAUDE_
     }
     const seen = [];
     const spy = (bin, args, opts) => { seen.push({ args, env: opts?.env ?? {} }); return w.x.spawn(bin, args, opts); };
-    await port({ ...w.x, spawn: spy }, 6);
-    await port({ ...w.x, spawn: spy }, 11);
+    const sx = { ...w.x, spawn: spy }; sx.lockedRun = smokeRunOf(sx);
+    await port(sx, 6);
+    assert.deepEqual(await port(sx, 11), { ok: true }, `${role}: the smoke ran`);
     assert.ok(seen.length >= 2, `${role}: the probe and the smoke both started a claude`);
     for (const s of seen) { noFlag(s.args, `${role} probe or smoke`); assert.equal(Object.hasOwn(s.env, PARENT_VAR), false, `${role}: ${PARENT_VAR} reached a claude`); }
   }
@@ -304,12 +318,21 @@ test('M-3 planted check 11: the smoke runs through the role\'s own start; a writ
   const ok = world({ smoke: 'sandboxed' });
   assert.deepEqual(await port(ok.x, 11), { ok: true });
   const args = ok.spawned.at(-1);
-  assert.equal(args[args.indexOf(F.settings) + 1], ok.x.settings.file, 'the smoke uses the session\'s own settings');
+  // L1352: the session's own settings with the one command's exact rule added, in a file of its own beside them, removed after.
+  const own = args[args.indexOf(F.settings) + 1];
+  assert.match(own, new RegExp(`^${ok.x.settings.file.slice(0, -'.json'.length)}\\.job-[0-9a-f]{16}\\.json$`), 'the smoke uses the session\'s own settings');
+  assert.equal(existsSync(own), false, 'the job\'s own settings file is removed after');
   assert.equal(args[args.indexOf(F.tools) + 1], 'Bash');
   for (const p of Object.values(smokeFiles(ok.x))) assert.equal(existsSync(p), false, 'the smoke files are cleaned up');
   assert.match((await port(world({ smoke: 'open' }).x, 11)).reason, /wrote outside the copy/);
   assert.match((await port(world({ smoke: 'net' }).x, 11)).reason, /reached the network/);
   assert.match((await port(world({ smoke: 'none' }).x, 11)).reason, /could not say/);
+  // L1352: a claude that never ran the one command (refused, say) is no smoke: its line's group was never recorded.
+  assert.match((await port(world({ smoke: 'skip' }).x, 11)).reason, /the smoke run did not finish: the smoke's process group was not recorded/);
+  // No lockedRun (nothing gave check 11 its one way to run claude): refused, nothing started.
+  const bare = world();
+  assert.match((await port({ ...bare.x, lockedRun: undefined }, 11)).reason, /no lock-down run to go through/);
+  assert.equal(bare.spawned.length, 0);
   // A file left from an earlier run doesn't count: the port removes them first.
   const stale = world({ smoke: 'none' });
   writeFileSync(smokeFiles(stale.x).ran, '');

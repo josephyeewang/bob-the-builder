@@ -21,9 +21,10 @@
 //                           its hash right, and its rules the config's
 //   9  no stray keys        checkRoleEnv (env-check.mjs) on the environment the session gets
 //   10 machine-wide block   checkMachineWide (env-check.mjs) on the machine-wide settings file the config names
-//   11 smoke                smokeTest through lockedRunCommand (launch.mjs): one shell command, run by the role's own
-//                           start with its own settings, tries to write outside the copy and reach github.com; it
-//                           must first mark that it ran, or the smoke can't say and refuses
+//   11 smoke                smokeTest through the runner's lockedRun (wiring/runner-locked.mjs guardedRun, L1352): one
+//                           shell command, run by the role's own start under its own settings with exactly that command
+//                           allowed, tries to write outside the copy and reach github.com; it must first mark that it
+//                           ran, or the smoke can't say and refuses. No lockedRun given: refused
 //   12 budget               M11's own check12 (gate.mjs, the function the Dispatcher's pass runs), given the budget
 //                           source the config's `budget` module hands back; no module, no port
 //   13 Bob method folder    checkBobFolder (launch.mjs) against the pinned file list the config's `bobManifest` names;
@@ -33,7 +34,7 @@
 import { lstatSync, openSync, fstatSync, readFileSync, closeSync, rmSync, constants } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import { launch, smokeTest, lockedRunCommand, checkBobFolder } from './launch.mjs';
+import { launch, smokeTest, checkBobFolder } from './launch.mjs';
 import { roleArgs, readBack } from './readback.mjs';
 import { checkVersion, checkHooks, checkSnapshot, productionProbe } from './hooks-check.mjs';
 import { checkRoleEnv, checkMachineWide } from './env-check.mjs';
@@ -71,18 +72,6 @@ function readNoLink(p) {
   try { if (!fstatSync(fd).isFile()) throw new Error(`${p} is not a plain file`); return readFileSync(fd, 'utf8'); } finally { closeSync(fd); }
 }
 
-// Runs a probe claude to its end (or the time limit) and hands back what it printed.
-function runProbe(spawn, bin, args, opts, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    let child; let out = '';
-    try { child = spawn(bin, args, { ...opts, stdio: ['ignore', 'pipe', 'pipe'] }); } catch (e) { reject(e); return; }
-    const t = setTimeout(() => { try { child.kill('SIGKILL'); } catch {} reject(new Error('the probe did not finish in time')); }, timeoutMs);
-    child.stdout?.on('data', (d) => { out += d; });
-    child.on('error', (e) => { clearTimeout(t); reject(e); });
-    child.on('close', (code) => { clearTimeout(t); resolve({ exitCode: code, out }); });
-  });
-}
-
 /** The session's own start: `--settings` the runner's file and no other source, the runner's session id, the role. */
 export function sessionArgs({ profile, settingsFile, sessionId, prompt, earlier }) {
   // No settings file but managed and --settings (L1093, L1109): the same limit the read-back checks, so it proves this start.
@@ -118,7 +107,9 @@ export async function spawnClaude(spawn, bin, args, { cwd, env }) {
  *   hooksDir, reviewHome, settings ({ file, settings } from settingsFor), rules (the config's), snapshot,
  *   writeSnapshot(path, rules), machineWide (path), busy(dir) → [holders], alert(text), spawn, ownUid(),
  *   cardDoc (the card from the Record), budget ({ rules, rec, bandsNow, runningNow } or null),
- *   bobFolder, bobManifest ({ path: sha256 } or null), probeMs; managedReaders (tests only: fakes for check 10's
+ *   bobFolder, bobManifest ({ path: sha256 } or null), probeMs; lockedRun ({ inner, cwd, settingsFile, ms, label, job }
+ *   → runs `inner` as the lock-down's one command and answers once it is done, or throws: the wiring's guardedRun,
+ *   L1352; check 11's only way to run claude); managedReaders (tests only: fakes for check 10's
  *   readers of the other managed sources, env-check.mjs MANAGED_READERS; left out, the real ones).
  * → { [n]: async () => { ok, reason } }, with no entry for a check this role has no port for.
  */
@@ -166,12 +157,14 @@ export function reviewChecks(x) {
       const f = smokeFiles(x);
       for (const p of Object.values(f)) rmSync(p, { force: true });
       let cmd; try { cmd = smokeCommand(f); } catch (e) { return refuse(e.message); }
-      const lr = lockedRunCommand({ claudeBin: x.claudeBin, settingsFile: x.settings.file, command: cmd, roleArgs, profile: x.profile });
-      if (!lr.ok) return lr;
+      // L1352: given as it is, this line matched no exact allow rule, so dontAsk refused it and the smoke could never
+      // say. It runs as the install, the save and the baseline do: the runner's lockedRun gives claude one plain command
+      // (the guard, with this line as its job) under the session's own settings with exactly that command allowed.
+      if (typeof x.lockedRun !== 'function') return refuse('the smoke has no lock-down run to go through (the runner gives lockedRun)');
       try {
         return await smokeTest({
           run: async () => {
-            await runProbe(x.spawn, lr.bin, lr.args, { cwd: x.copy, env: x.env }, probeMs);
+            await x.lockedRun({ inner: cmd, cwd: x.copy, settingsFile: x.settings.file, ms: probeMs, label: 'the smoke', job: 'smoke' });
             // Ran, and either reached the network or not. Not ran: it can't say, and the smoke refuses.
             return { networkReached: exists(f.net) ? true : exists(f.ran) ? false : undefined };
           },

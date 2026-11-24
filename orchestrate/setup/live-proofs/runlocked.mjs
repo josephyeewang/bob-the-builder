@@ -41,7 +41,7 @@ import { fileURLToPath } from 'node:url';
 import { execFileSync, spawn as childSpawn, spawnSync } from 'node:child_process';
 import { makeLock } from '../../modules/M9-record/lock.mjs';
 import { checkRunnerConfig, launchInputs, lockedOf, lockedWiring, productCommands, readRunnerConfig, realRenderPaths } from '../../wiring/runner-main.mjs';
-import { JOBS_DIR, lockedRunner, LOCKED_SAVE_MS, quoted } from '../../wiring/runner-locked.mjs';
+import { JOBS_DIR, lockedJobOf, lockedRunner, LOCKED_SAVE_MS, quoted } from '../../wiring/runner-locked.mjs';
 import { startPort, removeAll, chmodTree, saveSettingsName } from '../../wiring/runner-ports.mjs';
 import { loadMemory, processGroupPorts } from '../../wiring/runner-loop.mjs';
 import { runnerCopy, runnerOutbox, RUNNER_ROLE_OF } from '../../wiring/owner-status.mjs';
@@ -219,7 +219,8 @@ export async function proveRunLocked({ c, product, io, rules }) {
           : took > LOCKED_SAVE_MS ? fail(7, `the save took ${took} ms, past save-work's limit of ${LOCKED_SAVE_MS} ms: a time limit to set again`) : pass(7, { ms: took }));
         let st = null; try { st = run ? readStream(io.read(run.out)) : null; } catch { st = null; }
         const script = quoted(join(JOBS_DIR, 'save-work.mjs'));
-        const job = st?.commands.find((cmd) => cmd.includes(script));
+        // The job runs inside the guard's one command (L1352), as base64: read it decoded.
+        const job = st?.commands.find((cmd) => (lockedJobOf(cmd) ?? cmd).includes(script));
         out.set(6, !a?.ok ? fail(6, 'save-work did not answer ok, so claude can\'t be shown to have run it') : !run ? fail(6, 'no claude run was seen for the save')
           : !st ? fail(6, 'claude\'s run said nothing that can be read, so it can\'t be told it ran the job')
             : st.mode !== 'dontAsk' ? fail(6, `claude ran in mode ${st.mode}, not dontAsk`) : !job ? fail(6, `claude did not run ${script}`)

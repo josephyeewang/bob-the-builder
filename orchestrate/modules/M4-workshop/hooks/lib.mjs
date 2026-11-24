@@ -626,8 +626,47 @@ const SETS_SAFE_VAR = [
   new RegExp(`(^|[ \\t\\n;&|(])(export|typeset|declare|local|readonly|integer|float|private|unset|read|vared|getopts|for|select|foreach|print|printf|zparseopts|let|strftime|zformat)([ \\t\\n][^;&|\\n]*?)?[ \\t\\n=,:(+-](${SAFE_NAMES})\\b`),
 ];
 
+/**
+ * The lock-down guard that goes with a hooks folder (L1352; #666 r2 M1): orchestrate's own jobs/guard.sh of the same
+ * version as `hooksDir`, so a guard.sh a session plants in its copy (at any path ending the same way) is not it. The ONE
+ * place both sides find it: these hooks, from where they run (GUARD_PATH below), and the runner, from the hooks folder a
+ * job's settings name (wiring/runner-locked.mjs jobGuard). So a session that carried over an update (runner-main.mjs
+ * updateRestart: its settings still name the old version's hooks) gets the old version's guard, the one its hooks
+ * accept, and keeps it if the guard's form ever changes. `hooksDir` is read to its real path first (the install's link
+ * names the newest version; a session's settings name a version's real folder, realRenderPaths). Run from the
+ * repository, hooks/ sits beside jobs/; installed, the hooks are copied to <version>/hooks (setup/layout.mjs COPY_HOOKS)
+ * while the jobs stay at <version>/modules/M4-workshop/jobs. The first of the two that is a plain file, its path in
+ * letters, digits and . _ - / @ only, is the guard. → its path, or null (no guard: no command gets the exception below).
+ */
+export function guardBesideHooks(hooksDir) {
+  let real; try { real = realpathSync.native(String(hooksDir)); } catch { return null; }
+  for (const p of [join(real, '..', 'jobs', 'guard.sh'), join(real, '..', 'modules', 'M4-workshop', 'jobs', 'guard.sh')]) {
+    try { if (/^\/[A-Za-z0-9._\-/@]+$/.test(p) && lstatSync(p).isFile()) return p; } catch { /* not this layout */ }
+  }
+  return null;
+}
+const HOOKS_HERE = dirname(fileURLToPath(import.meta.url));
+export const GUARD_PATH = guardBesideHooks(HOOKS_HERE);
+/**
+ * The lock-down job's one command (L1352; wiring/runner-locked.mjs lockedCommand builds it): orchestrate's own guard
+ * script (GUARD_PATH, that exact path), run by /bin/sh with four plain words, the record, its go-ahead, a wait count, and
+ * the job as base64 letters. The shape is read whole, so it is not refused as "sh runs commands the guard can't see": the
+ * job inside was written by the runner, never by the session, and claude runs it only under a settings file allowing
+ * exactly that one command (a session's own settings allow no such command). The other checks still read its words.
+ * The record's path is held to letters, digits and . _ - / @ (narrower than PLAIN_PATH: no bracket, parenthesis, plus,
+ * quote or space), and to the runner's spelling (runner-locked.mjs groupFile, ackFile).
+ * Capability note (Principle 9, L1352): letting this shape through rests on dontAsk holding claude to the settings'
+ * allow list with the sandbox on, so a session can't run it unless its settings allow exactly it; seen with the opt-in
+ * live tests (wiring/runner-locked.test.mjs, runner-checks.test.mjs) on 23 Nov 2026 (checked: claude-code 2.1.316 and
+ * 2.1.329). Void when the pin moves: run those live tests on the new pin.
+ */
+export const LOCKED_JOB_COMMAND = GUARD_PATH
+  ? new RegExp(`^/bin/sh '${GUARD_PATH.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}' '(/[A-Za-z0-9._\\-/@]+/\\.orch-job-[a-z-]+-[A-Za-z0-9._-]+\\.group\\.[0-9a-z]{1,32})' '\\1\\.ok' [0-9]{1,4} '[A-Za-z0-9+/]+={0,2}'$`)
+  : /(?!)/;
+
 /** Why a guard can't read this command (refuse it), or null when it is plain words. */
 export function unreadable(cmd) {
+  if (LOCKED_JOB_COMMAND.test(String(cmd ?? ''))) return null;
   const h = heredocs(cmd);
   if (h.why) return h.why;
   const c = joinLines(h.text);

@@ -61,6 +61,8 @@ export async function start(x) {
   const { env } = built;
   const li = x.launchInputs ?? {};
   let r;
+  // OPEN (#666 r2 M2; L1353, owner: lead): no lockedRun is passed here, so check 11's smoke refuses every reviewer and
+  // auditor start ("the smoke has no lock-down run to go through"). The review runner can't pass check 11 until it gets one.
   try {
     r = await launchReview({ ...li, role: x.role, profile, sessionId: x.sessionId, card: x.card, head: x.head, copy: x.copy, outbox: x.outbox,
       env, claudeBin: x.claudeBin, spawn: x.spawn, settings: s },

@@ -38,7 +38,8 @@
 //                           through when the config names its file (x.allowSigninToken, L1261): that one name only
 //   10 machine-wide block   reviewChecks' 10 (checkMachineWide)
 //   11 smoke and baseline   reviewChecks' smoke first, with the owner's home as the place outside the copy it must not
-//                           write, so the lock-down is shown on before any of the branch's code runs (#369 M2); then a
+//                           write, so the lock-down is shown on before any of the branch's code runs (#369 M2), run as the
+//                           baseline is (lockedRun below: guardedRun's one plain command, exactly allowed, L1352); then a
 //                           worker's baseline (the product's test command, run once through runner-locked.mjs guardedRun,
 //                           must exit 0: its own process group recorded and killed with claude's, the Bash tool's wait its
 //                           limit, BASELINE_MS 10 min, our cap, #463 r2 M3, r3 m2; the Bash tool's wait read in 2.1.316's code, checked: claude-code 2.1.316). The baseline never runs in the session's copy (#369 r1 M1): the start port makes a
@@ -193,6 +194,26 @@ export async function setupFilesProblem({ copy, mirror, mainAt }, { run = git } 
 export const baselineFile = ({ copy, sessionId }) => join(copy, `.orch-baseline-${sessionId}`);
 export const baselineCommand = (test, file) => exitCodeCommand(test, file, 'test command');
 
+/**
+ * L1352: check 11's two lock-down runs, the smoke and the baseline, go through guardedRun alike: claude is given one plain
+ * command (the guard, the line as its job) under the given settings with exactly that command allowed, and the line's own
+ * process group is recorded and kept before it runs, and killed with claude's. Before, the smoke's compound line went to
+ * claude as it was, matched no allow rule, and was refused under dontAsk, so the smoke could never say.
+ * x: workerChecks' (spawn, claudeBin, profile, env, killGroup?, groupThere?, sessionId, nonce?). `ports`: guardedRun's
+ * reading ports, from jobPorts, given for the baseline only (tests fake the baseline's group, not the smoke's).
+ */
+export const lockedRunOf = (x) => ({ inner, cwd, settingsFile, ms, label, job }, ports = {}) => guardedRun({ spawn: x.spawn, claudeBin: x.claudeBin,
+  settingsFile, inner, profile: x.profile, cwd, env: x.env, ms, killGroup: x.killGroup, groupThere: x.groupThere, label,
+  gfile: groupFile({ cwd, job, sessionId: x.sessionId, run: (x.nonce ?? (() => randomBytes(8).toString('hex')))() }), ...ports });
+/** The smoke's run (reviewChecks' lockedRun): claude ended by a signal, or the line's group never kept or still there at
+ * claude's end, throws, so the smoke can't say. */
+export const smokeRunOf = (x) => async (o) => {
+  const ran = await lockedRunOf(x)(o);
+  if (ran?.exitCode === null) throw new Error(`claude did not end by itself (${claudeEnd(ran)})`);
+  const left = jobGroupProblem(ran, o.label, { killedOk: true });
+  if (left) throw new Error(left);
+  return ran;
+};
 /** What each command is for, in the refusal that names it (R-S1-2). */
 const COMMAND_FOR = Object.freeze({ install: 'add the exact install command there, or install: "true" if there is nothing to install', test: 'add the exact command that runs its tests there' });
 /**
@@ -209,10 +230,11 @@ export function commandMissing(x, key) {
  * copy, outbox, env, head, mainAt, claudeBin, settings: { file, settings }, ownUid, throwaway() → { ok, copy, settingsFile,
  * done() } (the baseline's own copy, #369 r1 M1) } plus the config's { mirror, pin, hooksDir,
  * rules, snapshot, sourceSha256, machineWide, busy, alert, spawn, home, testCommand, budget, bobFolder, bobManifest,
- * probeMs?, baselineMs?, nonce?, jobPorts? (guardedRun's read, info, pidStartOf, jobGone, pollMs, answer, rm: for tests) }. gateOf is M11's check12 (a port for tests). → { [n]: async () => { ok, reason } }, with no entry for a check whose inputs are not there.
+ * probeMs?, baselineMs?, nonce?, jobPorts? (guardedRun's read, info, pidStartOf, jobGone, pollMs, answer, rm: for tests, the baseline's run only) }. gateOf is M11's check12 (a port for tests). → { [n]: async () => { ok, reason } }, with no entry for a check whose inputs are not there.
  */
 export function workerChecks(x, { gateOf = check12, snapshotOwner = 0 } = {}) {
-  const r = reviewChecks({ ...x, reviewHome: x.home });
+  const lockedRun = lockedRunOf(x);
+  const r = reviewChecks({ ...x, reviewHome: x.home, lockedRun: smokeRunOf(x) });
   // reviewChecks' check 1 says "the review copy"; a worker's is the card's copy (#369 r1 c1).
   const ports = { 1: async () => { const a = await r[1](); return a?.ok ? a : { ...a, reason: String(a?.reason).replaceAll('the review copy', 'the copy') }; }, 5: r[5], 9: async () => checkRoleEnv(x.env, { allowSigninToken: x.allowSigninToken === true }) };
   if (has(x.mirror)) ports[2] = async () => { const p = await setupFilesProblem(x); return p ? refuse(p) : { ok: true }; };
@@ -252,10 +274,7 @@ export function workerChecks(x, { gateOf = check12, snapshotOwner = 0 } = {}) {
           // #463 r2 M3 (L1010): as runLocked's jobs (guardedRun), the tests run in a process group of their own that is
           // recorded and kept before they start, killed with claude's at the limit and at claude's end, and the Bash
           // tool waits the whole limit. The baseline is a start check, so no group is kept in the runner's memory.
-          const ran = await guardedRun({ spawn: x.spawn, claudeBin: x.claudeBin, settingsFile: t.settingsFile, inner: cmd, profile: x.profile, cwd: t.copy,
-            env: x.env, ms: x.baselineMs ?? BASELINE_MS, killGroup: x.killGroup, groupThere: x.groupThere, label: 'the baseline',
-            gfile: groupFile({ cwd: t.copy, job: 'baseline', sessionId: x.sessionId, run: (x.nonce ?? (() => randomBytes(8).toString('hex')))() }),
-            ...jobPortsOf(x.jobPorts) });
+          const ran = await lockedRun({ inner: cmd, cwd: t.copy, settingsFile: t.settingsFile, ms: x.baselineMs ?? BASELINE_MS, label: 'the baseline', job: 'baseline' }, jobPortsOf(x.jobPorts));
           // Claude's own end (#463 r1 c3, as runLocked): one ended by a signal is no baseline, whatever it wrote.
           if (ran?.exitCode === null) return { exitCode: claudeEnd(ran) };
           // Its own group still there at claude's end, or never recorded (so the tests never ran as kept): no baseline.
