@@ -8,7 +8,7 @@
 // the one a Dispatcher pass gives the card (pass.mjs kindOf); an undo card is not tried (its reversed commit is the pass's).
 //
 // What it runs is the runner's own code, never a copy of it: main's config reading (runner-main.mjs configFrom), its roots
-// check (rootsProblem), launch checks 12 and 13's inputs (launchInputs), the builder wall (wallGateOf), the test-product
+// check (rootsProblem), the tool places' real paths (realRenderPaths), launch checks 12 and 13's inputs (launchInputs), the builder wall (wallGateOf), the test-product
 // gate (testProductProblem) and the rules snapshot (rootSnapshots), the other live sessions' walls (runner-ports.mjs
 // liveWallProblem, on the runner's memory read as the runner reads it), then the start port itself (startPort, with the
 // ports lockedWiring builds for it, as realRunnerPorts does), through every launch check (launch.mjs) to the point where
@@ -47,7 +47,7 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, renameSync
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { configFrom, heldOf, launchInputs, lockedWiring, readRunnerConfig, rootSnapshots, rootsProblem, testProductProblem, wallGateOf } from '../../wiring/runner-main.mjs';
+import { configFrom, heldOf, launchInputs, lockedWiring, readRunnerConfig, realRenderPaths, rootSnapshots, rootsProblem, testProductProblem, wallGateOf } from '../../wiring/runner-main.mjs';
 import { STOPPING_AT_START, cardStartCommit, chmodTree, liveWallProblem, mirrorMain, removeAll, sessionSettingsOf, startPort, workerAccount, workerPromptText, writeNew } from '../../wiring/runner-ports.mjs';
 import { walledLaunchSettings } from '../../wiring/runner-launch.mjs';
 import { loadMemory } from '../../wiring/runner-loop.mjs';
@@ -70,6 +70,7 @@ export const DRY_START_SAID = 'dry run: would start claude now';
 export const STAGES = Object.freeze([
   ['config', 'the worker runner\'s config is read and passes its check'],
   ['roots', 'the copies and outbox folders are their own real paths'],
+  ['toolPaths', 'the sessions\' tool places (hooks, node, notes, Bob) read as their real paths'],
   ['inputs', 'launch checks 12 and 13\'s inputs load (the budget and the Bob file list)'],
   ['wall', 'the builder wall lets sessions start'],
   ['testProduct', 'the product is a test product'],
@@ -153,6 +154,9 @@ export async function dryRun({ c, configWhy, product, card, runCode = false, io 
     // Main's order: the roots, then launch checks 12 and 13's inputs. Main stops on either; the dry run tells and goes on.
     let why; try { why = (io.roots ?? ((x) => rootsProblem(x)))(c); } catch (e) { why = said(e); }
     if (why) failOn('roots', why, 'the copies and outbox roots'); else pass('roots');
+    // Main's next step (L1347): every session is given the tool places' real paths, read once here, so the dry run's
+    // starts see what the runner's do. Main stops on a place that can't be read; the dry run tells and goes on as named.
+    try { c = (io.realPaths ?? ((x) => realRenderPaths(x, { log })))(c); pass('toolPaths'); } catch (e) { failOn('toolPaths', said(e), 'the tool places as setup names them'); }
     const inputs = await (io.inputs ?? ((x) => launchInputs(x, { log })))(c);
     let budget = null; let bobManifest = null;
     if (inputs?.problem) failOn('inputs', inputs.problem, 'launch checks 12 and 13 with no inputs');

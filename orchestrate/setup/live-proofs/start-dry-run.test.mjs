@@ -1,7 +1,7 @@
 // The start dry run (L1346): every failure told in one run, a clean world PASS, nothing spawned, nothing left, keep-going real.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { walledLaunchSettings } from '../../wiring/runner-launch.mjs';
@@ -43,8 +43,9 @@ function world({ plant = {} } = {}) {
     testProduct: () => plant.testProduct ?? null,
     memory: () => { w.memoryReads = (w.memoryReads ?? 0) + 1; if (plant.memory) throw new Error(plant.memory); if (plant.memoryLater && w.memoryReads > 1) return plant.memoryLater; return { sessions: [], requests: {} }; },
     readCard: (id) => (plant.card ? { ok: false, reason: plant.card } : { ok: true, doc: { id, state: 'ready', product: 'p1' } }),
-    wire: () => ({ startDeps: { names: { version: VERSION, confirmed }, checksFor: () => ports,
-      beforeStart: async () => { w.calls.push('beforeStart'); return plant.recheck ?? null; } } }),
+    ...(plant.realPaths ? { realPaths: plant.realPaths } : {}),
+    wire: (cc) => { w.wiredConfig = cc; return ({ startDeps: { names: { version: VERSION, confirmed }, checksFor: () => ports,
+      beforeStart: async () => { w.calls.push('beforeStart'); return plant.recheck ?? null; } } }); },
     deps: {
       startCommit: async () => { w.calls.push('startCommit'); return HEAD; },
       mainOf: async () => 'c'.repeat(40),
@@ -553,4 +554,26 @@ test('a check that runs code with no port wired FAILs as unwired, with or withou
       assert.deepEqual(w.leftovers(), []);
     } finally { w.done(); }
   }
+});
+
+test('the tool places are given as their real paths, as the runner gives them (L1347); one that can\'t be read is told and the run goes on', async () => {
+  const w = world();
+  try {
+    const real = join(w.d, 'hooks-v2'); mkdirSync(real); symlinkSync(real, join(w.d, 'hooks-link'));
+    w.c.products.p1.render.paths.hooksDir = join(w.d, 'hooks-link');
+    const out = await w.run();
+    const s = w.byStage(out);
+    assert.equal(s.toolPaths.result, 'PASS');
+    assert.equal(w.wiredConfig.products.p1.render.paths.hooksDir, realpathSync.native(real), 'the start is wired with the real path');
+    assert.equal(w.c.products.p1.render.paths.hooksDir, join(w.d, 'hooks-link'), 'the config given is not changed');
+  } finally { w.done(); }
+  const w2 = world({ plant: { realPaths: () => { throw new Error('product p1\'s render.paths.node can\'t be read (EACCES)'); } } });
+  try {
+    const out = await w2.run();
+    const s = w2.byStage(out);
+    assert.equal(s.toolPaths.result, 'FAIL'); assert.match(s.toolPaths.why, /render.paths.node can't be read/);
+    assert.equal(s.check1.result, 'PASS'); assert.ok(s.check1.on.includes('the tool places as setup names them'), 'the rest goes on, on a stand-in');
+    assert.equal(report(out.results).ok, false);
+    assert.equal(w2.spawns, 0); assert.deepEqual(w2.leftovers(), []);
+  } finally { w2.done(); }
 });
