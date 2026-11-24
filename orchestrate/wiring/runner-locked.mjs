@@ -351,7 +351,8 @@ export const GUARD = join(JOBS_DIR, 'guard.sh');
  * to JOB_ACK_WAIT_MS for the runner's answer (ackFile). The runner, outside the sandbox, reads that pid's process group
  * and its leader's start time while the guard waits, keeps them, and only then answers; so the group is known before the
  * job (or any of an install's scripts) runs, and nothing the job does can change what was kept. The guard then runs
- * `inner` in that same process (exec). No ps runs inside the sandbox: /bin/ps is setuid, which a sandboxed process can't
+ * `inner` in that same process (exec), under `/bin/sh -c`: not claude's own shell, so no zsh syntax, and none of the
+ * owner's aliases, functions or options from a shell setup, reach the job (the product's declared command must be sh). No ps runs inside the sandbox: /bin/ps is setuid, which a sandboxed process can't
  * run (seen under sandbox-exec on this Mac). A record that can't be made, or no answer, stops the job before it runs, so
  * its result is never written.
  * `inner` goes as base64, decoded by the guard, rather than in a file the runner writes for it: the allow rule then names
@@ -362,9 +363,13 @@ export const GUARD = join(JOBS_DIR, 'guard.sh');
  * The hooks read this shape whole (M4 hooks/lib.mjs LOCKED_JOB_COMMAND), so they do not refuse its `/bin/sh`; the old line
  * was refused by them too (its `$$`, and save-work's node run by its path).
  * Capability note (Principle 9, L1352): that dontAsk runs this command under an exact `Bash(<command>)` rule, with the
- * sandbox on and --max-turns 1, and that the model then sends it unchanged (LOCKED_PROMPT), was seen on 23 Nov 2026 in
- * 2 of 2 trials and the opt-in live test in runner-locked.test.mjs, not on the pin, which was not installed to check
- * (checked: claude-code 2.1.329, open until 2027-01-20 (L1352)). Void when the pin moves: run that live test on the pin.
+ * sandbox on and --max-turns 1, and that the model then sends it unchanged (LOCKED_PROMPT), was seen on 23 Nov 2026 with
+ * the opt-in live tests (this folder's runner-locked.test.mjs, and check 11's smoke in runner-checks.test.mjs) on the pin
+ * and on a newer claude (checked: claude-code 2.1.316 and 2.1.329). Void when the pin moves: run those live tests on the
+ * new pin (ORCH_LIVE_CLAUDE=1 ORCH_LIVE_CLAUDE_BIN=<the pin's claude>).
+ * A job's own settings file (`<settings>.job-<run>.json`, jobSettings) left by a runner that crashed mid-job sits in the
+ * settings folder: a runner starting with no memory counts it as an earlier session's settings and does not start until
+ * it is removed (runner-main.mjs carriedOverProblem).
  */
 export function lockedCommand({ gfile, inner, guard = GUARD }) {
   if (typeof inner !== 'string' || !inner.trim() || /[\0\n]/.test(inner)) throw new Error('the job is not one line');

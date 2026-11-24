@@ -161,8 +161,8 @@ export function checkBobFolder({ folder, manifest, settings }) {
 /**
  * What claude is told for a locked run (L1352): call the Bash tool once with the command exactly as given. Asked to
  * "report its exit code", claude added `; echo "EXIT=$?"` to the command, so an exact allow rule no longer matched it
- * and dontAsk refused it; with this wording it sent the command unchanged (checked: claude-code 2.1.329, open until
- * 2027-01-20 (L1352)). The command is the prompt's end, after this text.
+ * and dontAsk refused it; with this wording it sent the command unchanged (checked: claude-code 2.1.316 and
+ * 2.1.329, the opt-in live tests in wiring/). The command is the prompt's end, after this text.
  */
 export const LOCKED_PROMPT = 'Call the Bash tool once with this exact command string, character for character, adding nothing before or after it (no echo, no exit-code check): ';
 

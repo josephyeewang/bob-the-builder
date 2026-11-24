@@ -13,5 +13,6 @@
 n=0
 while [ ! -e "$2" ] && [ "$n" -lt "$3" ]; do /bin/sleep 0.05; n=$((n+1)); done
 [ -e "$2" ] || exit 66
-job=$(/bin/echo "$4" | /usr/bin/base64 -d) && [ -n "$job" ] || exit 67
+# --decode: older macOS base64 takes -D or --decode, newer -D, -d or --decode, GNU's (the Linux CI) -d or --decode.
+job=$(/bin/echo "$4" | /usr/bin/base64 --decode) && [ -n "$job" ] || exit 67
 exec /bin/sh -c "$job"

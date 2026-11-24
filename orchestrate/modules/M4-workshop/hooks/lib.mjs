@@ -626,17 +626,38 @@ const SETS_SAFE_VAR = [
   new RegExp(`(^|[ \\t\\n;&|(])(export|typeset|declare|local|readonly|integer|float|private|unset|read|vared|getopts|for|select|foreach|print|printf|zparseopts|let|strftime|zformat)([ \\t\\n][^;&|\\n]*?)?[ \\t\\n=,:(+-](${SAFE_NAMES})\\b`),
 ];
 
-/** Why a guard can't read this command (refuse it), or null when it is plain words. */
+/**
+ * The guard the lock-down command names (wiring/runner-locked.mjs GUARD): orchestrate's own jobs/guard.sh, found from
+ * where these hooks run, so a guard.sh a session plants in its copy (at any path ending the same way) is not it. Run from
+ * the repository, hooks/ sits beside jobs/; installed, the hooks are copied to <install>/hooks (setup/layout.mjs
+ * COPY_HOOKS) while the jobs stay at <install>/modules/M4-workshop/jobs. The first of the two that is a plain file, its
+ * path in letters, digits and . _ - / @ only, is the guard; neither, and no command gets the exception below.
+ */
+const HOOKS_HERE = dirname(fileURLToPath(import.meta.url));
+export const GUARD_PATH = (() => {
+  for (const p of [join(HOOKS_HERE, '..', 'jobs', 'guard.sh'), join(HOOKS_HERE, '..', 'modules', 'M4-workshop', 'jobs', 'guard.sh')]) {
+    try { if (/^\/[A-Za-z0-9._\-/@]+$/.test(p) && lstatSync(p).isFile()) return p; } catch { /* not this layout */ }
+  }
+  return null;
+})();
 /**
  * The lock-down job's one command (L1352; wiring/runner-locked.mjs lockedCommand builds it): orchestrate's own guard
- * script, run by /bin/sh with four plain words, the record, its go-ahead, a wait count, and the job as base64 letters.
- * The shape is read whole, so it is not refused as "sh runs commands the guard can't see": the job inside was written by
- * the runner, never by the session, and claude runs it only under a settings file allowing exactly that one command
- * (a session's own settings allow no such command). The other checks still read its words. Paths are held to the plain
- * names (PLAIN_PATH, no quote), the record to the runner's spelling (runner-locked.mjs groupFile, ackFile).
+ * script (GUARD_PATH, that exact path), run by /bin/sh with four plain words, the record, its go-ahead, a wait count, and
+ * the job as base64 letters. The shape is read whole, so it is not refused as "sh runs commands the guard can't see": the
+ * job inside was written by the runner, never by the session, and claude runs it only under a settings file allowing
+ * exactly that one command (a session's own settings allow no such command). The other checks still read its words.
+ * The record's path is held to letters, digits and . _ - / @ (narrower than PLAIN_PATH: no bracket, parenthesis, plus,
+ * quote or space), and to the runner's spelling (runner-locked.mjs groupFile, ackFile).
+ * Capability note (Principle 9, L1352): letting this shape through rests on dontAsk holding claude to the settings'
+ * allow list with the sandbox on, so a session can't run it unless its settings allow exactly it; seen with the opt-in
+ * live tests (wiring/runner-locked.test.mjs, runner-checks.test.mjs) on 23 Nov 2026 (checked: claude-code 2.1.316 and
+ * 2.1.329). Void when the pin moves: run those live tests on the new pin.
  */
-export const LOCKED_JOB_COMMAND = /^\/bin\/sh '\/[A-Za-z0-9._\-/@]+\/modules\/M4-workshop\/jobs\/guard\.sh' '(\/[A-Za-z0-9._\-/@]+\/\.orch-job-[a-z-]+-[A-Za-z0-9._-]+\.group\.[0-9a-z]{1,32})' '\1\.ok' [0-9]{1,4} '[A-Za-z0-9+/]+={0,2}'$/;
+export const LOCKED_JOB_COMMAND = GUARD_PATH
+  ? new RegExp(`^/bin/sh '${GUARD_PATH.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}' '(/[A-Za-z0-9._\\-/@]+/\\.orch-job-[a-z-]+-[A-Za-z0-9._-]+\\.group\\.[0-9a-z]{1,32})' '\\1\\.ok' [0-9]{1,4} '[A-Za-z0-9+/]+={0,2}'$`)
+  : /(?!)/;
 
+/** Why a guard can't read this command (refuse it), or null when it is plain words. */
 export function unreadable(cmd) {
   if (LOCKED_JOB_COMMAND.test(String(cmd ?? ''))) return null;
   const h = heredocs(cmd);

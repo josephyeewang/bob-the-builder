@@ -680,7 +680,7 @@ test('L1352: the worker\'s Bash hooks let every job\'s command through (install,
   assert.deepEqual(bashHooks.sort(), ['merge-guard', 'no-verify-block', 'production-write-guard', 'secret-file-block']);
   // Near misses are still refused: the shape is read whole, or not let through.
   const [, one] = jobs[0];
-  for (const near of [`${one}; touch x`, `${one} && touch x`, one.replace("/bin/sh '", "sh '"), one.replace('/jobs/guard.sh', '/jobs/other.sh'), one.replace(".ok'", ".no'"), `${one.slice(0, -1)}$(x)'`]) {
+  for (const near of [`${one}; touch x`, `${one} && touch x`, one.replace("/bin/sh '", "sh '"), one.replace('/jobs/guard.sh', '/jobs/other.sh'), one.replace(GUARD, join(copy, 'modules', 'M4-workshop', 'jobs', 'guard.sh')), one.replace(".ok'", ".no'"), `${one.slice(0, -1)}$(x)'`]) {
     assert.equal(LOCKED_JOB_COMMAND.test(near), false, near);
     assert.notEqual(unreadable(near), null, near);
   }
@@ -692,6 +692,30 @@ test('L1352: the worker\'s Bash hooks let every job\'s command through (install,
       assert.equal(r.status, 0, `${name} on ${command}: ${r.stderr}`);
     }
   }
+});
+
+test('L1352 audit: the hooks let through only orchestrate\'s own guard, found from where they run', async () => {
+  const d = realpathSync(tempDir('orch-guardpath-'));
+  try {
+    const lib = join(JOBS_DIR, '..', 'hooks', 'lib.mjs');
+    // Installed: the hooks copied to <install>/hooks, the jobs at <install>/modules/M4-workshop/jobs (setup/layout.mjs).
+    const inst = join(d, 'install');
+    mkdirSync(join(inst, 'hooks'), { recursive: true }); mkdirSync(join(inst, 'modules', 'M4-workshop', 'jobs'), { recursive: true });
+    writeFileSync(join(inst, 'hooks', 'lib.mjs'), readFileSync(lib));
+    writeFileSync(join(inst, 'modules', 'M4-workshop', 'jobs', 'guard.sh'), readFileSync(GUARD));
+    const m = await import(join(inst, 'hooks', 'lib.mjs'));
+    const guard = join(inst, 'modules', 'M4-workshop', 'jobs', 'guard.sh');
+    assert.equal(m.GUARD_PATH, guard);
+    const gfile = groupFile({ cwd: join(d, 'copy'), job: 'install', sessionId: 'S-1', run: 'ab' });
+    assert.equal(m.LOCKED_JOB_COMMAND.test(lockedCommand({ gfile, inner: 'npm ci', guard })), true);
+    assert.equal(m.LOCKED_JOB_COMMAND.test(lockedCommand({ gfile, inner: 'npm ci' })), false, 'another orchestrate\'s guard is not this one\'s');
+    // No guard where the hooks run: nothing is let through, so the hooks refuse it as they refuse any `sh` line.
+    const bare = join(d, 'bare', 'hooks'); mkdirSync(bare, { recursive: true }); writeFileSync(join(bare, 'lib.mjs'), readFileSync(lib));
+    const b = await import(join(bare, 'lib.mjs'));
+    assert.equal(b.GUARD_PATH, null);
+    assert.equal(b.LOCKED_JOB_COMMAND.test(lockedCommand({ gfile, inner: 'npm ci', guard: join(d, 'bare', 'jobs', 'guard.sh') })), false);
+    assert.notEqual(b.unreadable(lockedCommand({ gfile, inner: 'npm ci', guard: join(d, 'bare', 'jobs', 'guard.sh') })), null);
+  } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
 // A real claude (L1352), as the Mini runs it but with no hooks: dontAsk, the sandbox on, only the product's command

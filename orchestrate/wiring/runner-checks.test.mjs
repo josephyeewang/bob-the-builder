@@ -4,15 +4,16 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { spawn as childSpawn, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { gitOk, initMirror } from '../modules/M4-workshop/git/safe-git.mjs';
 import { prepareWorkerCopy } from '../modules/M4-workshop/launcher/worker-copy.mjs';
 import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.mjs';
 import { CHECKS, LOCKED_PROMPT } from '../modules/M4-workshop/launcher/launch.mjs';
-import { BASELINE_MS, WALK_DEPTH, baselineCommand, baselineFile, setupFilesProblem, workerChecks, commandMissing } from './runner-checks.mjs';
-import { LOCKED_MS, groupFile, lockedCommand } from './runner-locked.mjs';
+import { reviewChecks, smokeCommand, smokeFiles } from '../modules/M4-workshop/launcher/review-launch.mjs';
+import { BASELINE_MS, WALK_DEPTH, baselineCommand, baselineFile, setupFilesProblem, smokeRunOf, workerChecks, commandMissing } from './runner-checks.mjs';
+import { LOCKED_MS, groupFile, lockedCommand, lockedJobOf } from './runner-locked.mjs';
 import { RECHECK, checkRunnerConfig, lockedOf, lockedWiring, realRunnerPorts, startDeps, workerCheckInputs } from './runner-main.mjs';
 import { rulesText } from '../setup/worker-rules.mjs';
 import { renderRoleSettings } from '../modules/M4-workshop/launcher/render-settings.mjs';
@@ -68,19 +69,21 @@ test('step 6, check 2: the copy\'s setup files are main\'s exactly; one changed,
 // group is not the command's; claude ends when the command does.
 const bashTool = (cmd, opts) => childSpawn(process.execPath, ['-e',
   "const c = require('node:child_process').spawn('/bin/sh', ['-c', process.argv[1]], { detached: true, stdio: 'ignore' }); c.on('exit', (x) => process.exit(x ?? 1));", cmd], opts);
-// A stand-in claude: it runs the one shell command its prompt names, in its working folder, and ends. The baseline's runs
-// as the Bash tool runs it (bashTool), its group's record and the runner's go-ahead (#463 r2 M3) for real; `baseline:
-// false`, it runs nothing (a claude that never ran the command).
+// A stand-in claude: it runs the one shell command its prompt names, in its working folder, and ends. The smoke's and the
+// baseline's run as the Bash tool runs them (bashTool), the guard's record and the runner's go-ahead (#463 r2 M3) for
+// real (L1352: both are the guard's one command, the line its job); `baseline: false`, the baseline runs nothing (a
+// claude that never ran the command).
 function standIn(calls, { sandbox = false, baseline = true } = {}) {
   return (bin, args, opts) => {
     assert.ok(args.at(-1).startsWith(LOCKED_PROMPT)); const cmd = args.at(-1).slice(LOCKED_PROMPT.length);
     calls.push({ bin, args, cwd: opts.cwd, env: opts.env, cmd });
-    const smoke = cmd.includes('.orch-smoke-');
-    if (!smoke && baseline) return bashTool(cmd, opts);
-    const c = new EventEmitter(); c.kill = () => {};
+    const job = lockedJobOf(cmd);
+    const smoke = job?.includes('.orch-smoke-') === true;
     // Sandboxed: the smoke's first step (marking it ran, inside the copy) runs; its write outside and network reach do not.
-    const run = smoke && sandbox ? cmd.split(';')[0] : smoke ? cmd : null;
-    setImmediate(() => { if (run) spawnSync('/bin/sh', ['-c', run], { cwd: opts.cwd, stdio: 'ignore' }); c.emit('close', 0); });
+    if (smoke) return bashTool(sandbox ? lockedCommand({ gfile: [...cmd.matchAll(/'([^']*)'/g)][1][1], inner: job.split(';')[0] }) : cmd, opts);
+    if (baseline) return bashTool(cmd, opts);
+    const c = new EventEmitter(); c.kill = () => {};
+    setImmediate(() => c.emit('close', 0));
     return c;
   };
 }
@@ -104,6 +107,8 @@ function inputs(over = {}) {
   const spare = join(d, 'spare');
   // Its settings file holds the sandbox on (L1352: the job's own settings are made from it, so it is checked and read).
   const spareSettings = `${JSON.stringify({ permissions: {}, sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false, network: { allowedDomains: [], strictAllowlist: true } } })}\n`;
+  // The session's settings file, as the start writes it: the smoke's own settings are made from it (L1352).
+  writeFileSync(join(d, 'settings.json'), spareSettings);
   const throwaway = async () => { mkdirSync(join(spare, 'copy'), { recursive: true }); writeFileSync(join(d, 'spare.json'), spareSettings); return { ok: true, copy: join(spare, 'copy'), settingsFile: join(d, 'spare.json'), done: async () => rmSync(spare, { recursive: true, force: true }) }; };
   return { d, spare, x: { role: 'worker', profile: DESIGN_PROFILES.worker, kind: 'editing', sessionId: SID, card: 'C-1', cardDoc: { product: 'p1' }, product: 'p1',
     copy, outbox: join(d, 'outbox'), env: { PATH: '/usr/bin:/bin' }, head: 'b'.repeat(40), claudeBin: '/x/claude-code/2.1.300/claude',
@@ -239,8 +244,11 @@ test('step 6, check 11 (#369 M2): the smoke runs first; a worker\'s baseline run
       const r = await workerChecks(x)[11]();
       if (re) { assert.equal(r.ok, false); assert.match(r.reason, re, testCommand); } else assert.deepEqual(r, { ok: true });
       assert.equal(calls.length, n, `${testCommand}: the baseline runs only after the smoke passed`);
-      assert.ok(calls[0].cmd.includes(`'${x.home}/`), 'the smoke is first, and tries to write in the owner\'s home, outside the copy');
-      assert.equal(calls[0].cwd, x.copy); assert.ok(calls[0].args.includes(x.settings.file), 'the smoke: the role\'s own settings, in the session\'s copy');
+      assert.ok(lockedJobOf(calls[0].cmd).includes(`'${x.home}/`), 'the smoke is first, and tries to write in the owner\'s home, outside the copy');
+      // L1352: one plain command, the guard's, with the smoke's line as its job, under the role's own settings with exactly
+      // that command allowed (its own file, made from the session's and removed after), in the session's copy.
+      assert.equal(calls[0].cmd, lockedCommand({ gfile: groupFile({ cwd: x.copy, job: 'smoke', sessionId: SID, run: 'r1' }), inner: smokeCommand(smokeFiles({ copy: x.copy, reviewHome: x.home, sessionId: SID })) }));
+      assert.equal(calls[0].cwd, x.copy); assert.match(calls[0].args[calls[0].args.indexOf('--settings') + 1], new RegExp(`^${join(d, 'settings')}\\.job-[0-9a-f]{16}\\.json$`));
       if (n === 2) {
         // #369 r1 M1: the baseline runs in the throwaway copy with its settings, never in the session's copy.
         assert.equal(calls[1].cwd, join(spare, 'copy')); assert.equal(calls[1].args.includes(x.settings.file), false);
@@ -275,7 +283,7 @@ test('step 6, check 11 (#369 M2): the smoke runs first; a worker\'s baseline run
   // A command that ran, kept, but never wrote its exit code can't say: refused.
   {
     const smoke = standIn([], { sandbox: true });
-    const spawn = (b, a, o) => { if (a.at(-1).includes('.orch-smoke-')) return smoke(b, a, o); const c = new EventEmitter(); c.pid = 4320; c.kill = () => {}; handshake(a, () => c.emit('close', 0)); return c; };
+    const spawn = (b, a, o) => { if (a.at(-1).includes('.orch-job-smoke-')) return smoke(b, a, o); const c = new EventEmitter(); c.pid = 4320; c.kill = () => {}; handshake(a, () => c.emit('close', 0)); return c; };
     const { d, x } = inputs({ spawn, killGroup: () => {}, groupThere: () => false, jobPorts: fakeJob() });
     try { assert.match((await workerChecks(x)[11]()).reason, /exit not written; claude exited 0/); } finally { rmSync(d, { recursive: true, force: true }); }
   }
@@ -283,7 +291,7 @@ test('step 6, check 11 (#369 M2): the smoke runs first; a worker\'s baseline run
   for (const [more, re] of [[{ jobGone: () => { throw new Error('ps'); } }, /the baseline run did not finish: the baseline may still be running after claude ended \(claude exited 0\); its process group can't be told about/],
     [{ info: () => null }, /the baseline run did not finish: its job's process group can't be kept \(the job's shell 7777 can't be read\), so it is stopped/]]) {
     const smoke = standIn([], { sandbox: true });
-    const spawn = (b, a, o) => { if (a.at(-1).includes('.orch-smoke-')) return smoke(b, a, o); const c = new EventEmitter(); c.pid = 4319; c.kill = () => {};
+    const spawn = (b, a, o) => { if (a.at(-1).includes('.orch-job-smoke-')) return smoke(b, a, o); const c = new EventEmitter(); c.pid = 4319; c.kill = () => {};
       handshake(a, () => { writeFileSync(baselineFile({ copy: o.cwd, sessionId: SID }), '0\n'); c.emit('close', 0); }); return c; };
     const { d, x } = inputs({ spawn, killGroup: () => {}, groupThere: () => false, jobPorts: fakeJob(more) });
     try { assert.match((await workerChecks(x)[11]()).reason, re); } finally { rmSync(d, { recursive: true, force: true }); }
@@ -292,7 +300,7 @@ test('step 6, check 11 (#369 M2): the smoke runs first; a worker\'s baseline run
   {
     const killed = []; const spawned = [];
     const smoke = standIn([], { sandbox: true });
-    const spawn = (b, a, o) => { spawned.push(o.detached); if (a.at(-1).includes('.orch-smoke-')) return smoke(b, a, o); const c = new EventEmitter(); c.pid = 4321; c.kill = () => { killed.push('child'); }; return c; };
+    const spawn = (b, a, o) => { spawned.push(o.detached); if (a.at(-1).includes('.orch-job-smoke-')) return smoke(b, a, o); const c = new EventEmitter(); c.pid = 4321; c.kill = () => { killed.push('child'); }; return c; };
     const { d, x } = inputs({ spawn, baselineMs: 50, killGroup: (g) => killed.push(g), jobPorts: fakeJob() });
     try {
       assert.match((await workerChecks(x)[11]()).reason, /did not finish in time/);
@@ -303,7 +311,7 @@ test('step 6, check 11 (#369 M2): the smoke runs first; a worker\'s baseline run
   {
     const killed = [];
     const smoke = standIn([], { sandbox: true });
-    const spawn = (b, a, o) => { if (a.at(-1).includes('.orch-smoke-')) return smoke(b, a, o); const c = new EventEmitter(); c.pid = 4322; c.kill = () => {}; handshake(a, () => c.emit('close', 0)); return c; };
+    const spawn = (b, a, o) => { if (a.at(-1).includes('.orch-job-smoke-')) return smoke(b, a, o); const c = new EventEmitter(); c.pid = 4322; c.kill = () => {}; handshake(a, () => c.emit('close', 0)); return c; };
     const { d, x } = inputs({ spawn, killGroup: (g) => killed.push(g), groupThere: (g) => g === 4322, jobPorts: fakeJob() });
     try { assert.match((await workerChecks(x)[11]()).reason, /exit not written/); assert.deepEqual(killed, [4322]); } finally { rmSync(d, { recursive: true, force: true }); }
   }
@@ -311,7 +319,7 @@ test('step 6, check 11 (#369 M2): the smoke runs first; a worker\'s baseline run
   {
     const killed = [];
     const smoke = standIn([], { sandbox: true });
-    const spawn = (b, a, o) => { if (a.at(-1).includes('.orch-smoke-')) return smoke(b, a, o); const c = new EventEmitter(); c.pid = 4323; c.kill = () => {}; handshake(a, () => c.emit('close', 0)); return c; };
+    const spawn = (b, a, o) => { if (a.at(-1).includes('.orch-job-smoke-')) return smoke(b, a, o); const c = new EventEmitter(); c.pid = 4323; c.kill = () => {}; handshake(a, () => c.emit('close', 0)); return c; };
     const { d, x } = inputs({ spawn, killGroup: (g) => killed.push(g), groupThere: () => false, jobPorts: fakeJob() });
     try { assert.match((await workerChecks(x)[11]()).reason, /exit not written/); assert.deepEqual(killed, []); } finally { rmSync(d, { recursive: true, force: true }); }
   }
@@ -320,7 +328,7 @@ test('step 6, check 11 (#369 M2): the smoke runs first; a worker\'s baseline run
     ['a link', (f, d) => { writeFileSync(join(d, 'zero'), '0\n'); symlinkSync(join(d, 'zero'), f); }]]) {
     const smoke = standIn([], { sandbox: true });
     let dd;
-    const spawn = (b, a, o) => { if (a.at(-1).includes('.orch-smoke-')) return smoke(b, a, o); const c = new EventEmitter(); c.pid = 4324; c.kill = () => {}; handshake(a, () => { write(baselineFile({ copy: o.cwd, sessionId: SID }), dd); c.emit('close', 0); }); return c; };
+    const spawn = (b, a, o) => { if (a.at(-1).includes('.orch-job-smoke-')) return smoke(b, a, o); const c = new EventEmitter(); c.pid = 4324; c.kill = () => {}; handshake(a, () => { write(baselineFile({ copy: o.cwd, sessionId: SID }), dd); c.emit('close', 0); }); return c; };
     const { d, x } = inputs({ spawn, killGroup: () => {}, groupThere: () => false, jobPorts: fakeJob() }); dd = d;
     try { const r = await workerChecks(x)[11](); assert.equal(r.ok, false, what); assert.match(r.reason, /baseline tests failed inside the lock-down \(exit (|abc|not written; claude exited 0)\)/, what); } finally { rmSync(d, { recursive: true, force: true }); }
   }
@@ -582,4 +590,31 @@ test('#528 r4 c2: a worker product\'s rules.secrets.paths, when there, must be a
   const production = { env_files: [], programs: [], hosts: [] };
   conf(undefined)(); conf({ production })(); conf({ production, secrets: { paths: ['/a/k'] } })();
   for (const secrets of [{ paths: '/a/k' }, { paths: [1] }, {}, null]) assert.throws(conf({ production, secrets }), /rules\.secrets\.paths must list/, JSON.stringify(secrets));
+});
+
+// A real claude (L1352): check 11's smoke as the runner gives it (smokeRunOf), dontAsk, the sandbox on, only the product's
+// command allowed. It calls the model, so it runs only when asked: ORCH_LIVE_CLAUDE=1 and a claude on the PATH, or
+// ORCH_LIVE_CLAUDE_BIN (the pin, /Library/orchestrate/install/orchestrate/claude-code/<pin>/claude, to prove the pin).
+// Before, this smoke's compound line was refused under dontAsk (claude ended at its one turn, the line in its denials).
+const liveClaude = (() => {
+  if (process.env.ORCH_LIVE_CLAUDE !== '1') return null;
+  const bin = process.env.ORCH_LIVE_CLAUDE_BIN ?? spawnSync('/bin/sh', ['-c', 'command -v claude'], { encoding: 'utf8' }).stdout.trim();
+  return bin && existsSync(bin) ? realpathSync(bin) : null;
+})();
+test('L1352 live: a real claude under dontAsk runs check 11\'s smoke: the write inside the copy lands, outside and the network do not', {
+  skip: liveClaude ? false : 'set ORCH_LIVE_CLAUDE=1 with a claude on the PATH (it calls the model)',
+  timeout: 180_000,
+}, async () => {
+  const d = realpathSync(tempDir('orch-smoke-live-'));
+  try {
+    const copy = join(d, 'copy'); const home = join(d, 'home'); mkdirSync(copy); mkdirSync(home);
+    const file = join(d, 'S-1.json');
+    writeFileSync(file, `${JSON.stringify({ permissions: { defaultMode: 'dontAsk', allow: ['Bash(npm test)'], deny: [], ask: [] },
+      sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false, network: { allowedDomains: [], strictAllowlist: true } } })}\n`);
+    const x = { role: 'worker', profile: DESIGN_PROFILES.worker, sessionId: 'S-1', copy, reviewHome: home, claudeBin: liveClaude,
+      settings: { file, settings: {} }, spawn: childSpawn, env: { ...process.env }, probeMs: 120_000 };
+    x.lockedRun = smokeRunOf(x);
+    assert.deepEqual(await reviewChecks(x)[11](), { ok: true });
+    assert.deepEqual(readdirSync(d).sort(), ['S-1.json', 'copy', 'home'], 'the job\'s own settings file is removed after');
+  } finally { rmSync(d, { recursive: true, force: true }); }
 });
