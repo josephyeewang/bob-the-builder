@@ -466,9 +466,13 @@ export function jobGuard(settings) {
   const dirs = new Set();
   const events = settings?.[S.hooks];
   if (events !== undefined && (!events || typeof events !== 'object' || Array.isArray(events))) throw new Error('its settings\' hooks are not an object');
-  for (const groups of Object.values(events ?? {})) {
-    for (const g of Array.isArray(groups) ? groups : []) {
-      for (const h of Array.isArray(g?.[H.hooks]) ? g[H.hooks] : []) {
+  // A shape claude would not read as hooks is refused, not skipped (L1352 r3 minor): a skipped group could hide a hooks
+  // folder, and the guard would then be found from the others or be the runner's own.
+  for (const [event, groups] of Object.entries(events ?? {})) {
+    if (!Array.isArray(groups)) throw new Error(`its settings' ${event} hooks are not a list`);
+    for (const g of groups) {
+      if (!g || typeof g !== 'object' || !Array.isArray(g[H.hooks])) throw new Error(`its settings' ${event} hooks hold a group whose hooks are not a list`);
+      for (const h of g[H.hooks]) {
         const word = String(h?.[H.command] ?? '').split(' ')[1] ?? '';
         if (!word.startsWith('/') || !word.endsWith('.mjs')) throw new Error(`its settings name a hook not in the runner's form (${String(h?.[H.command]).slice(0, 80)})`);
         dirs.add(dirname(word));
