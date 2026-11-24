@@ -171,7 +171,9 @@ export async function startFrontDoor({ product, setupFile = SETUP_FILE, profile 
   let code;
   try { code = await io.run(P.claudeBin, interactiveArgs({ profile, settingsFile, model, sessionUuid: io.uuid(), name: `Front Door ${product}`, skillFile: P.skillFile }), { cwd: outbox, env }); } finally { io.stop(timer); }
   // Step 7: what the tab filed, from the Record, in the tab once the session ends.
-  const filed = filedNow();
+  // A read that throws can't take the session's end with it (#658 audit m4): the tab says so and points to `filed`.
+  let filed;
+  try { filed = filedNow(); } catch (e) { filed = `What this tab filed can't be read now (${String(e?.message ?? e).slice(0, 200)}). Type \`node …/setup/front-door.mjs filed ${product}\` to read it later.`; }
   return { ok: true, sessionId, outbox, code, filed };
 }
 

@@ -182,3 +182,14 @@ test('step 7: `filed <product>` reads back the product\'s latest tabs, newest fi
   assert.equal(await main(['filed', P, '--setup', w.setupFile], w.io, (s) => said.push(s)), 1);
   assert.match(said.pop(), /names no Record owner/);
 });
+
+test('#658 audit m4: a read-back that throws can\'t crash the tab\'s end: the session still ends well and says how to read it later', async () => {
+  const w = world();
+  w.io.readFiled = () => { throw new Error('EIO'); };
+  w.io.run = async (bin, args, opts) => { w.calls.run.push({ bin, args, opts }); return 0; };
+  const r = await startFrontDoor({ product: P, setupFile: w.setupFile }, w.io);
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(r.code, 0);
+  assert.match(r.filed, /can't be read now \(EIO\)\. Type `node …\/setup\/front-door\.mjs filed /);
+  assert.equal(w.calls.run.length, 1, 'claude still ran: the first .filed.md write failing is tried again on the timer');
+});

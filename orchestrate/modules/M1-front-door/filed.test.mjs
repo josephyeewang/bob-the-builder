@@ -10,7 +10,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { UID, must, product, setup } from '../M9-record/fixtures.test-helper.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
-import { NONE_YET, NOT_TAKEN, appliedFactId, readFiled } from './filed.mjs';
+import { NONE_YET, NOT_TAKEN, appliedFactId, holdPrefixes, readFiled } from './filed.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SID = 'fd-p-20261123090507';
@@ -50,4 +50,34 @@ test('step 7: the fact name read here is still the one intake writes (M11 outbox
   const src = readFileSync(join(HERE, '..', 'M11-dispatcher', 'outbox-intake.mjs'), 'utf8');
   assert.ok(src.includes('const appliedId = (sessionId, name) => `intake-applied-${sessionId}-${name}`;'), 'intake renamed its fact: change appliedFactId with it');
   assert.equal(appliedFactId('S', 'idea-1.md'), 'intake-applied-S-idea-1.md');
+});
+
+test('#658 audit m1: a file intake held before filing it (a refused read, a failed check) shows its hold, not "not taken yet" for ever', () => {
+  const env = setup({ prefix: 'm1-filed-' });
+  product(env);
+  const outbox = join(tempDir('m1-filed-outbox-'), SID);
+  mkdirSync(outbox);
+  for (const n of ['idea-a.md', 'idea-b.md', 'idea-c.md']) writeFileSync(join(outbox, n), 'x');
+  const [readA] = holdPrefixes(SID, 'idea-a.md');
+  const [, noteB] = holdPrefixes(SID, 'idea-b.md');
+  fact(env, `${readA}0123456789ab`, { text: `an outbox file from front_door ${SID} (idea-a.md) was refused: the file is not the owner's`, told_at: '2026-11-23T17:05:00.000Z' });
+  fact(env, `${noteB}launcher`, { text: `outbox file idea-b.md from front_door ${SID} not used yet: the idea names no product`, at: '2026-11-23T17:05:00.000Z' });
+  const r = readFiled({ outbox, sessionId: SID, recordRoot: env.root, recordUid: UID });
+  assert.deepEqual(r.rows, [
+    { name: 'idea-a.md', state: `held, not filed: an outbox file from front_door ${SID} (idea-a.md) was refused: the file is not the owner's` },
+    { name: 'idea-b.md', state: `held, not filed: outbox file idea-b.md from front_door ${SID} not used yet: the idea names no product` },
+    { name: 'idea-c.md', state: NOT_TAKEN },
+  ]);
+});
+
+test('#658 audit m1: the hold names read here are still the ones intake writes (outbox-intake.mjs readHoldsOfFile, noteDaily)', () => {
+  const src = readFileSync(join(HERE, '..', 'M11-dispatcher', 'outbox-intake.mjs'), 'utf8');
+  for (const line of [
+    'const shortHash = (s) => sha256(s).slice(0, 12);',
+    'const readHoldsOf = (sessionId) => HOLD_FACT(`outbox-read-${shortHash(sessionId)}-`);',
+    'const readHoldsOfFile = (sessionId, name) => `${readHoldsOf(sessionId)}${shortHash(name)}-`;',
+    'const id = HOLD_FACT(`outbox-note-${shortHash(`${s.sessionId} ${name}`)}-${causeOf(reason)}`);',
+  ]) assert.ok(src.includes(line), `intake changed a hold's name: change holdPrefixes with it (${line})`);
+  const pass = readFileSync(join(HERE, '..', 'M11-dispatcher', 'pass.mjs'), 'utf8');
+  assert.ok(pass.includes('export const HOLD_FACT = (cause) => `hold-${cause}`;'));
 });
