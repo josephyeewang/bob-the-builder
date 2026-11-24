@@ -813,3 +813,13 @@ test('C (#456 r1 m4): the tick\'s signal ends a wait for the runner as timedOut,
   assert.equal(g.timedOut, true);
   assert.equal((await inner).timedOut, true, 'the port\'s wait ended with the tick\'s');
 });
+
+test('Track A step 6: outboxSessions adds this product\'s Front Door tabs, by their folder\'s name, as the owner\'s front_door sessions', () => {
+  const ws = syncWorld();
+  const fd = join(ws.c.outboxRoot, 'front_door');
+  const mine = `fd-${P}-20261123120000`;
+  for (const n of [mine, 'fd-other-app-20261123120000', `fd-${P}-x`, 'lead-1']) mkdirSync(join(fd, n), { recursive: true });
+  const got = ws.ports.outboxSessions();
+  assert.deepEqual(got.map((x) => x.sessionId), ['S-1', mine], 'the runner\'s first; another product\'s tab and odd names left out');
+  assert.deepEqual(got[1], { sessionId: mine, role: 'front_door', outbox: join(fd, mine), uid: ws.c.hostLockUid, card: null, product: P });
+});

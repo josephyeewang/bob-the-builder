@@ -55,6 +55,7 @@ const CLAUDE_VERSION = "claude's path (the worker runner config's claudeBin, or 
 const LIVE_TESTS = "settings-names' TESTS: each run(side, dir) gives claude fixed flags (with, per test, an --effort level, the --mcp-config JSON of an empty or test tool-server list, or a random --session-id), the path of a settings file written in the proof's own temp folder (the settings object goes in the file, not on the command line) and a prompt made of fixed text and paths in that folder (dir)";
 const SHARED = { SETUP_CFG, SETUP_IO, DESTRUCTURED, GIT_ANSWER, RECORD_DOC, CLAUDE_START, INSTALL_PATHS, PROOF_ROWS, CAPTURE_TOOL, REVIEW_CONFIG, GITLEAKS_SETUP, GITLEAKS_ARGS, CLAUDE_VERSION, LIVE_TESTS };
 const SHARED_COUNT = { SETUP_CFG: 4, SETUP_IO: 17, DESTRUCTURED: 9, GIT_ANSWER: 15, RECORD_DOC: 17, CLAUDE_START: 14, INSTALL_PATHS: 13, PROOF_ROWS: 31, CAPTURE_TOOL: 6, REVIEW_CONFIG: 4, GITLEAKS_SETUP: 2, GITLEAKS_ARGS: 1, CLAUDE_VERSION: 3, LIVE_TESTS: 3 };
+const FRONT_DOOR_WORDS = "the Front Door's start (Track A step 6): claude's words are M4's fixed role flags (roleArgs, sourcesArgs, the locked DESIGN_PROFILES tools and mode), the settings file's path, a model name, a fresh session uuid and the product's name; no key reaches them, and the tab's environment is cut to its basics (frontDoorEnv)";
 const REVIEWED = {
   "modules/M11-dispatcher/cleanup.mjs unread git(…, ['merge-base', '--is-ancestor', a.merge_commit, 'refs/heads/): rec.list('merge') is a call whose answer is not read @d02e91a1": "rec is the Record store: rec.list('merge') gives merge records, whose merge_commit is a 40-hex commit id (checked before git sees it), and rec.list('product') gives product ids",
   "modules/M11-dispatcher/cleanup.mjs unread mirrorTree's sha reaches git(…, ['ls-tree', '-r', '-z', '--full-tree', sha]), and mirrorTree is called from other modules @879170a7": "mirrorTree(git, mirror, sha): git ls-tree on a commit id; its callers pass a card's recorded commit",
@@ -269,6 +270,9 @@ const REVIEWED = {
   "setup/live-proofs/settings-names.mjs unread claude's args reaches runToEnd(…, args), and claude is called from other modules @e43b0132": CLAUDE_START,
   "setup/live-proofs/settings-names.mjs unread start's args reaches runToInit(…, args), and start is called from other modules @ae8656fa": CLAUDE_START,
   "setup/live-proofs/transcript-place.mjs unread version's bin reaches execFileSync(…, bin), and version is called from other modules @37189a6c": CLAUDE_VERSION,
+  "setup/front-door.mjs unread run(…, interactiveArgs({ profile, settingsFile, model, sessionUuid:): sourcesArgs() is a call whose answer is not read @9123e96c": FRONT_DOOR_WORDS,
+  "setup/front-door.mjs unread run(…, interactiveArgs({ profile, settingsFile, model, sessionUuid:): roleArgs({ profile, settingsFile, model }) is a call whose answer is not read @cd891620": FRONT_DOOR_WORDS,
+  "setup/front-door.mjs unread run(…, interactiveArgs({ profile, settingsFile, model, sessionUuid:): DESIGN_PROFILES's values become words, and DESIGN_PROFILES comes from another module @714d28f8": FRONT_DOOR_WORDS,
   "setup/proofs.mjs unread noList(…, ownerHome): readUser(io, cfg.owner) is a call whose answer is not read @6556a4e2": PROOF_ROWS,
   "setup/proofs.mjs unread proveList(…, proofList(cfg, { ...inputs, kindOf, walkOf, stickyOf: sticky): io.readText(file) is a call whose answer is not read @2d0c1107": PROOF_ROWS,
   "setup/proofs.mjs unread proofList's cfg reaches noWrite(…, p('products', prod, 'store')), and proofList is called from other modules @8d3e8664": PROOF_ROWS,
