@@ -19,6 +19,7 @@ import { ACCOUNT_NAMES, accountEnv } from './accounts.mjs';
 import { startGate } from '../../M11-dispatcher/gate.mjs';
 import { rulesWith, recWith } from '../../M11-dispatcher/fixtures.test-helper.mjs';
 import { reviewChecks, launchReview, sessionArgs, spawnClaude, smokeFiles, smokeCommand, GATE_KIND, FIRST_ROUND_EFFORT, SEND_BACK_EFFORT } from './review-launch.mjs';
+import { LOCKED_PROMPT } from './launch.mjs';
 import { sourcesProblem } from './readback.mjs';
 
 const PIN = '2.1.300';
@@ -40,7 +41,7 @@ function fakeClaude(dir) {
   writeFileSync(f, `
 import { writeFileSync } from 'node:fs';
 const prompt = process.argv.at(-1);
-if (prompt.startsWith('Run exactly this shell command once')) {
+if (prompt.startsWith(${JSON.stringify(LOCKED_PROMPT)})) {
   const [ran, outside, net] = [...prompt.matchAll(/'([^']+)'/g)].map((m) => m[1]);
   const mode = process.env.FAKE_SMOKE;
   if (mode !== 'none') writeFileSync(ran, '');

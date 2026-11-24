@@ -29,8 +29,8 @@
 // for the install), and no result, one over RESULT_MAX_BYTES, or one that is not the job's form ("not written").
 // The job's own process group (#463 r2 M1): claude's Bash tool (read in 2.1.317, 2.1.322 and the pin, 2.1.316; the Mini
 // proof runs it) runs each command detached, in a group of its
-// own, so claude's group alone does not hold the job. The job's shell first records its pid (groupRecordCommand) and
-// waits; the runner reads its group and leader start time outside the sandbox, keeps them (onGroup is told claude's
+// own, so claude's group alone does not hold the job. The job's shell (the guard, M4's jobs/guard.sh) first records its
+// pid and waits; the runner reads its group and leader start time outside the sandbox, keeps them (onGroup is told claude's
 // group, then the same record with `job`), and only then lets the job run. Both groups are killed at the time limit, on
 // a stop and on a restart (worker-runner.mjs step 0); one still there once claude closed is killed and refused (m6). A
 // job whose group can't be recorded or kept never runs. Each claude's Bash tool also gets the job's limit as its own
@@ -51,10 +51,11 @@
 // sets it to the job's limit. A product whose tests need longer splits its test command, or the cap is raised here.
 import { closeSync, constants, fstatSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync, spawn as childSpawn } from 'node:child_process';
 import { lockedRunCommand } from '../modules/M4-workshop/launcher/launch.mjs';
+import { renderAllowRules } from '../modules/M4-workshop/launcher/render-settings.mjs';
 import { roleArgs } from '../modules/M4-workshop/launcher/readback.mjs';
 import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.mjs';
 import { SESSION_ID } from '../shared/record.mjs';
@@ -213,17 +214,26 @@ export async function runLockedCommand({ spawn, claudeBin, settingsFile, command
 /**
  * #463 r2 M3 (L1010): the one way claude runs a long command (an install, a save, check 11's baseline), with its own
  * process group kept (#463 r2 M1) and the Bash tool's wait set to the limit (m1). `inner` is the command; it runs only
- * after its shell's record (groupRecordCommand into `gfile`) is read, kept (onGroup: claude's group, then the same record
- * with `job`) and answered. → runToEnd's { exitCode, job: { recorded, left, bad? } } (jobGroupProblem says what is
- * wrong with it), or a throw (`label`'s old record can't be removed, marked `beforeRun`; a spawn, a time limit or a
- * group that can't be kept).
- * The record and its answer are removed before and after.
+ * after the guard's record (lockedCommand: its pid into `gfile`) is read, kept (onGroup: claude's group, then the same
+ * record with `job`) and answered. → runToEnd's { exitCode, job: { recorded, left, bad? } } (jobGroupProblem says what
+ * is wrong with it), or a throw (marked `beforeRun` when nothing ran: `label`'s old record can't be removed, its
+ * settings can't be used or its own settings file can't be written; else a spawn, a time limit or a group that can't
+ * be kept).
+ * L1352: claude runs one plain command (lockedCommand), under a settings file of the job's own: `settingsFile`'s bytes,
+ * held to settingsProblem (`sha`, `noNetwork` as runLocked's) as read here, with that command's exact allow rule added
+ * (jobSettings), written new beside it and removed after. The settings file itself is never changed, so a session's own
+ * allow list never holds the rule. The record, its answer and the job's settings file are removed before and after.
  */
-export async function guardedRun({ spawn, claudeBin, settingsFile, inner, profile, cwd, env, ms, killGroup, groupThere: there, gfile, onGroup, label,
+export async function guardedRun({ spawn, claudeBin, settingsFile, inner, profile, cwd, env, ms, killGroup, groupThere: there, gfile, onGroup, label, sha, noNetwork = false,
   read = readNoLink, info = processInfo, pidStartOf = leaderStart, jobGone = processGroupPorts().groupGone, pollMs = JOB_GROUP_POLL_MS,
-  answer = answerFile, rm = rmSync }) {
+  answer = answerFile, rm = rmSync, write = newFile, nonce = () => randomBytes(8).toString('hex') }) {
   if (!env || typeof env !== 'object') throw new Error(`no environment to run ${label} with`);
   if (!Number.isInteger(ms) || ms <= 0 || ms > LOCKED_MS) throw new Error(`${label}'s limit is not a time limit within the lock-down's cap (${LOCKED_MS} ms)`);
+  const before = (m) => Object.assign(new Error(m), { beforeRun: true });
+  if (typeof settingsFile !== 'string' || !settingsFile.startsWith('/') || !settingsFile.endsWith('.json')) throw before(`${label} names no settings file`);
+  let command; let text;
+  try { command = lockedCommand({ gfile, inner }); text = jobSettings(settingsFile, command, { sha, noNetwork, read }); } catch (e) { throw before(`${label} can't be run inside the lock-down (${e?.message ?? e})`); }
+  const own = jobSettingsFile(settingsFile, nonce());
   // The Bash tool's own wait is the limit (#463 r2 m1): it never moves the command to the background before it.
   const wait = { ...env, BASH_DEFAULT_TIMEOUT_MS: String(ms), BASH_MAX_TIMEOUT_MS: String(ms) };
   // Claude's start time bounds the record: { pgid, pid, pid_start, job?: { pgid, pid, pid_start } }.
@@ -239,11 +249,12 @@ export async function guardedRun({ spawn, claudeBin, settingsFile, inner, profil
     // The answer the shell waits for: written only once its group is kept.
     ack: () => { try { answer(ackFile(gfile)); } catch (e) { throw new Error(`the job's go-ahead can't be written (${e?.code ?? e?.message})`); } } };
   for (const [f, what] of [[gfile, 'process-group record'], [ackFile(gfile), 'go-ahead']]) {
-    try { rm(f, { force: true }); } catch (e) { throw Object.assign(new Error(`${label}'s old ${what} can't be removed (${e?.code ?? e?.message})`), { beforeRun: true }); }
+    try { rm(f, { force: true }); } catch (e) { throw before(`${label}'s old ${what} can't be removed (${e?.code ?? e?.message})`); }
   }
+  try { write(own, text); } catch (e) { throw before(`${label}'s own settings file can't be written (${e?.code ?? e?.message})`); }
   try {
-    return await runLockedCommand({ spawn, claudeBin, settingsFile, command: `${groupRecordCommand(gfile)} && { ${inner}; }`, profile, cwd, env: wait, ms, killGroup, groupThere: there, onSpawn, job: watch });
-  } finally { for (const f of [gfile, ackFile(gfile)]) try { rm(f, { force: true }); } catch { /* left; removed before the next run */ } }
+    return await runLockedCommand({ spawn, claudeBin, settingsFile: own, command, profile, cwd, env: wait, ms, killGroup, groupThere: there, onSpawn, job: watch });
+  } finally { for (const f of [gfile, ackFile(gfile), own]) try { rm(f, { force: true }); } catch { /* left; removed before the next run */ } }
 }
 
 /** What guardedRun's end says is wrong with the command's own group (#463 r2 M1, m6), or null. `recorded`: also refuse
@@ -258,6 +269,7 @@ export function jobGroupProblem(r, label, { recorded = true, killedOk = false } 
 }
 
 const answerFile = (f) => writeFileSync(f, '', { flag: 'wx', mode: 0o600 });
+const newFile = (f, text) => writeFileSync(f, text, { flag: 'wx', mode: 0o600 });
 
 /** Claude's own end, said beside a job's answer (#463 r1 c3), with its last words when it left any (L1351). */
 export const claudeEnd = (r) => `${r?.exitCode === null ? 'claude was ended by a signal' : `claude exited ${r?.exitCode}`}${typeof r?.said === 'string' && r.said ? `, saying "${r.said}"` : ''}`;
@@ -328,19 +340,75 @@ export const ackFile = (gfile) => `${gfile}.ok`;
 /** How long the job's shell waits for that answer before it gives up (the job then never runs). */
 export const JOB_ACK_WAIT_MS = 10_000; // a runner slowed by other ports' waits still answers in time (self-review m7)
 
+/** The guard every job's command runs (L1352): M4's jobs/guard.sh, orchestrate's own code, never the copy's. */
+export const GUARD = join(JOBS_DIR, 'guard.sh');
+
 /**
- * The shell words that start a job (#463 r2 M1): the shell claude's Bash tool runs it in writes its own pid, as a new
- * file (noclobber, never through one already there), then waits up to JOB_ACK_WAIT_MS for the runner's answer
- * (ackFile). The runner, outside the sandbox, reads that pid's process group and its leader's start time while the
- * shell waits, keeps them, and only then answers; so the group is known before the job (or any of an install's
- * scripts) runs, and nothing the job does can change what was kept. No ps runs inside the sandbox: /bin/ps is setuid,
- * which a sandboxed process can't run (seen under sandbox-exec on this Mac). A record that can't be made, or no answer,
- * stops the job before it runs, so its result is never written.
+ * The one command claude runs for a job (L1352; #463 r2 M1): `/bin/sh <guard> <record> <go-ahead> <waits> <job>`, every
+ * word a plain quoted one, so a settings file can allow exactly it (jobSettings) and dontAsk runs it. The compound line
+ * it replaces (a subshell, a loop, `&&`, `>`) matched no exact allow rule, so dontAsk refused it (L1352, card R-S1-2).
+ * The guard writes its own pid into `gfile`, as a new file (noclobber, never through one already there), then waits up
+ * to JOB_ACK_WAIT_MS for the runner's answer (ackFile). The runner, outside the sandbox, reads that pid's process group
+ * and its leader's start time while the guard waits, keeps them, and only then answers; so the group is known before the
+ * job (or any of an install's scripts) runs, and nothing the job does can change what was kept. The guard then runs
+ * `inner` in that same process (exec). No ps runs inside the sandbox: /bin/ps is setuid, which a sandboxed process can't
+ * run (seen under sandbox-exec on this Mac). A record that can't be made, or no answer, stops the job before it runs, so
+ * its result is never written.
+ * `inner` goes as base64, decoded by the guard, rather than in a file the runner writes for it: the allow rule then names
+ * the whole job, so the settings file (in the runner's own folder, walled from every session) fixes what runs, and no
+ * file in the copy, where the branch's code runs, can change it between the write and the run. Base64's letters are
+ * plain (A-Z a-z 0-9 + / =), so the rule holds no shell joiner. The cost: the session's hooks see the guard's words, not
+ * the job's (the job is the runner's own: the product's declared command, or M4's save-work script); the sandbox is the wall.
+ * The hooks read this shape whole (M4 hooks/lib.mjs LOCKED_JOB_COMMAND), so they do not refuse its `/bin/sh`; the old line
+ * was refused by them too (its `$$`, and save-work's node run by its path).
+ * Capability note (Principle 9, L1352): that dontAsk runs this command under an exact `Bash(<command>)` rule, with the
+ * sandbox on and --max-turns 1, and that the model then sends it unchanged (LOCKED_PROMPT), was seen on 23 Nov 2026 in
+ * 2 of 2 trials and the opt-in live test in runner-locked.test.mjs, not on the pin, which was not installed to check
+ * (checked: claude-code 2.1.329, open until 2027-01-20 (L1352)). Void when the pin moves: run that live test on the pin.
  */
-export const groupRecordCommand = (gfile) => {
-  const ack = quoted(ackFile(gfile));
-  return `( set -C; /bin/echo $$ > ${quoted(gfile)} ) && n=0 && while [ ! -e ${ack} ] && [ $n -lt ${JOB_ACK_WAIT_MS / 50} ]; do /bin/sleep 0.05; n=$((n+1)); done && [ -e ${ack} ]`;
+export function lockedCommand({ gfile, inner, guard = GUARD }) {
+  if (typeof inner !== 'string' || !inner.trim() || /[\0\n]/.test(inner)) throw new Error('the job is not one line');
+  if (typeof gfile !== 'string' || !gfile.startsWith('/')) throw new Error('the job names no process-group record');
+  return `/bin/sh ${quoted(guard)} ${quoted(gfile)} ${quoted(ackFile(gfile))} ${JOB_ACK_WAIT_MS / 50} ${quoted(Buffer.from(inner, 'utf8').toString('base64'))}`;
+}
+
+/** The job inside a lock-down command (L1352): its base64 word decoded, or null for a command not in lockedCommand's form.
+ *  For reading claude's own record of what it ran (the live proofs), never for deciding what runs. */
+export function lockedJobOf(command) {
+  const m = /^\/bin\/sh '([^']+)' '[^']+' '[^']+' [0-9]+ '([A-Za-z0-9+/]+={0,2})'$/.exec(String(command ?? ''));
+  return m && basename(m[1]) === 'guard.sh' ? Buffer.from(m[2], 'base64').toString('utf8') : null;
+}
+
+/** The exact allow rule for one job's command (L1352): render-settings' own form (renderAllowRules), so a command it would
+ *  refuse (a shell joiner, a wildcard) is refused here too, and checkSettings reads the rule as one exact command. */
+export function lockedRule(command) {
+  const r = renderAllowRules({ job: command });
+  if (!r.ok) throw new Error(r.reason);
+  return r.rules[0];
+}
+
+/** The job's own settings file (L1352): beside `settingsFile`, named for it and the run, removed after. */
+export const jobSettingsFile = (settingsFile, run) => {
+  if (!/^[0-9a-z]{1,32}$/.test(String(run))) throw new Error('the job\'s settings file has no plain run name');
+  return `${settingsFile.slice(0, -'.json'.length)}.job-${run}.json`;
 };
+
+/**
+ * The job's own settings (L1352): `settingsFile`'s bytes, read once and held to settingsProblem (sha, noNetwork) as read,
+ * with lockedRule(command) added to its allow list and nothing else changed. → the file's text, or a throw.
+ */
+export function jobSettings(settingsFile, command, { sha, noNetwork = false, read = readNoLink } = {}) {
+  let bytes; try { bytes = read(settingsFile); } catch (e) { throw new Error(`the settings file ${settingsFile} can't be read (${e?.code ?? e?.message})`); }
+  const bad = settingsProblem(settingsFile, { sha, noNetwork, read: () => bytes });
+  if (bad) throw new Error(bad);
+  const v = JSON.parse(bytes.toString('utf8'));
+  const p = v[S.permissions];
+  if (p !== undefined && (!p || typeof p !== 'object' || Array.isArray(p))) throw new Error(`the settings file ${settingsFile}'s permissions are not an object`);
+  const allow = p?.[S.allow] ?? [];
+  if (!Array.isArray(allow)) throw new Error(`the settings file ${settingsFile}'s allow list is not a list`);
+  v[S.permissions] = { ...(p ?? {}), [S.allow]: [...allow, lockedRule(command)] };
+  return `${JSON.stringify(v, null, 2)}\n`;
+}
 
 /** A process's group and start time, read outside the sandbox (ps in UTC and the C locale, M9's form): { pgid, start } or null. */
 export function processInfo(pid, { run = execFileSync, timeoutMs = 1_000 } = {}) {
@@ -436,7 +504,7 @@ export function lockedRunner({ claudeBin, envOf, spawn = childSpawn, node = proc
     if (!env || typeof env !== 'object') throw new Error(`no environment to run the ${job} job with`);
     try { rm(file, { force: true }); } catch (e) { throw new Error(`the ${job} job's old result can't be removed (${e?.code ?? e?.message})`); }
     try {
-      let r; try { r = await guardedRun({ spawn, claudeBin, settingsFile, inner, profile, cwd, env, ms: limit, killGroup, groupThere: there, gfile, onGroup, label: `the ${job} job`, read, info, pidStartOf, jobGone, pollMs, answer, rm }); } catch (e) {
+      let r; try { r = await guardedRun({ spawn, claudeBin, settingsFile, inner, profile, cwd, env, ms: limit, killGroup, groupThere: there, gfile, onGroup, label: `the ${job} job`, sha, noNetwork: job === 'save-work', read, info, pidStartOf, jobGone, pollMs, answer, rm, nonce }); } catch (e) {
         if (e?.beforeRun === true) throw e; // nothing ran: said as it is, as the result file's own removal is
         throw new Error(`the ${job} job did not finish inside the lock-down (${e?.message ?? e})`);
       }

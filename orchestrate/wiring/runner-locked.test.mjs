@@ -12,16 +12,21 @@ import { tempDir } from '../shared/test-tmp.mjs';
 import { pushWorld } from '../modules/M4-workshop/git/push-world.test-helper.mjs';
 import { createSaveWork } from '../modules/M4-workshop/git/save-work.mjs';
 import { bundleName } from '../modules/M4-workshop/git/push.mjs';
-import { JOBS_DIR, JOB_ACK_WAIT_MS, LOCKED_JOBS, LOCKED_MS, LOCKED_SAVE_MS, RESULT_MAX_BYTES, SAVE_DELAYS_MS, ackFile, groupFile, groupRecordCommand, guardedRun, jobFile, lockedRunner, readGroupRecord, runToEnd, settingsSha, claudeEnd, sayable, hearing, resultWords, SAID_MAX } from './runner-locked.mjs';
+import { JOBS_DIR, JOB_ACK_WAIT_MS, LOCKED_JOBS, LOCKED_MS, LOCKED_SAVE_MS, RESULT_MAX_BYTES, SAVE_DELAYS_MS, GUARD, ackFile, groupFile, guardedRun, jobSettings, jobSettingsFile, lockedCommand, lockedJobOf, lockedRule, jobFile, jobGroupProblem, lockedRunner, readGroupRecord, runToEnd, settingsSha, claudeEnd, sayable, hearing, resultWords, SAID_MAX } from './runner-locked.mjs';
 import { EventEmitter } from 'node:events';
 import { SAVE_DEADLINE_MS } from '../modules/M11-dispatcher/pass.mjs';
+import { LOCKED_PROMPT } from '../modules/M4-workshop/launcher/launch.mjs';
+import { POLICY_HOOKS } from '../modules/M4-workshop/launcher/render-settings.mjs';
+import { DESIGN_PROFILES, outboxKindsFor } from '../modules/M4-workshop/launcher/role-profiles.mjs';
+import { makeSnapshot } from '../modules/M4-workshop/hooks/snapshot.mjs';
+import { LOCKED_JOB_COMMAND, unreadable } from '../modules/M4-workshop/hooks/lib.mjs';
 import { partialName } from '../modules/M4-workshop/git/save-work.mjs';
 import { RUNNER_STATUS_EVERY_MS } from './owner-status.mjs';
 import { RUNNER_PORT_MS } from './worker-runner.mjs';
 import { RUNNER_TICK_MS } from './runner-loop.mjs';
 import { ASK_POLL_MS } from './owner-asks.mjs';
 
-const ASK = 'Run exactly this shell command once and report its exit code: ';
+const ASK = LOCKED_PROMPT;
 // claude, stood in for: the command it is asked to run, by /bin/sh, in its folder, with its environment and group.
 const sh = (calls = []) => (bin, args, opts) => {
   const prompt = args.at(-1);
@@ -42,8 +47,11 @@ const world = () => {
 const runner = (more = {}) => lockedRunner({ claudeBin: '/x/claude', envOf: () => ({ PATH: '/usr/bin:/bin' }), ...more });
 // The Bash tool's own wait, set to the job's limit (#463 r2 m1), beside the environment given.
 const bashWait = (ms) => ({ BASH_DEFAULT_TIMEOUT_MS: String(ms), BASH_MAX_TIMEOUT_MS: String(ms) });
-// The words before the job itself: its shell's record and the wait for the runner's go-ahead (#463 r2 M1).
-const recordOf = (args) => args.at(-1).slice(ASK.length).split(' && { ')[0];
+// The command's quoted words (L1352): [the guard, the record, the go-ahead, the job in base64].
+const wordsOf = (args) => [...args.at(-1).slice(ASK.length).matchAll(/'([^']*)'/g)].map((m) => m[1]);
+const innerOf = (args) => Buffer.from(wordsOf(args)[3], 'base64').toString('utf8');
+// The guard alone: its record and the wait for the runner's go-ahead (#463 r2 M1), then a job that does nothing.
+const recordOf = (args) => lockedCommand({ gfile: wordsOf(args)[1], inner: 'exit 0' });
 // claude as its Bash tool runs a command (#463 r2 M1, claude 2.1.322; checked: claude-code 2.1.316): detached, in a process group of its own, so
 // claude's group is not the job's. `leave`: claude ends at once, leaving its command running (as a Bash tool that moved
 // a command to the background would).
@@ -65,7 +73,11 @@ test('L969: the install job runs the declared command in the copy under the sess
   assert.deepEqual(await run({ job: 'install', command: 'touch installed', sessionId: 'S-1', role: 'worker', settingsFile, cwd }), { ok: true });
   assert.ok(existsSync(join(cwd, 'installed')), 'ran in the copy');
   assert.equal(calls[0].bin, '/x/claude');
-  assert.equal(calls[0].args[calls[0].args.indexOf('--settings') + 1], settingsFile, 'under the session\'s settings file');
+  // L1352: under the job's own settings file, the session's with this command's exact rule added, removed after.
+  const own = calls[0].args[calls[0].args.indexOf('--settings') + 1];
+  assert.ok(own.startsWith(settingsFile.slice(0, -'.json'.length)) && /\.job-[0-9a-f]{16}\.json$/.test(own), own);
+  assert.equal(existsSync(own), false, 'the job\'s own settings file is removed');
+  assert.equal(readFileSync(settingsFile, 'utf8'), SAFE, 'the session\'s settings file is untouched');
   assert.equal(calls[0].opts.cwd, cwd); assert.equal(calls[0].opts.detached, true, 'it leads its own group');
   assert.deepEqual(calls[0].opts.env, { PATH: '/usr/bin:/bin', ...bashWait(LOCKED_MS) }, 'the sign-in environment, as envOf gave it, and the Bash tool\'s wait');
   assert.deepEqual(await run({ job: 'install', command: 'exit 3', sessionId: 'S-1', role: 'worker', settingsFile, cwd }), { ok: false, reason: 'the install exited 3' });
@@ -100,9 +112,12 @@ test('L969: a real save-work job (M4\'s own script, run by node) makes the card\
   assert.equal(spawnSync('git', ['bundle', 'verify', '-q', saved.bundle], { cwd: w.mirror, encoding: 'utf8' }).status, 0, 'git bundle verify');
   const cmd = calls[0].args.at(-1).slice(ASK.length);
   const g = groupFile({ cwd: at, job: 'save-work', sessionId: 'S-1', run: 'r1' });
-  assert.ok(cmd.startsWith(`${groupRecordCommand(g)} && { '${process.execPath}' '${join(JOBS_DIR, 'save-work.mjs')}' '`), cmd);
-  assert.ok(cmd.endsWith(` '${jobFile({ cwd: at, job: 'save-work', sessionId: 'S-1' })}'; }`), 'of the copy, only the record, its go-ahead and the result file are named');
-  assert.equal(cmd.split(w.clone).length, 5, 'the copy is named for the record (once), its go-ahead (twice) and the result file');
+  const inner = innerOf(calls[0].args);
+  assert.equal(cmd, lockedCommand({ gfile: g, inner }), 'one plain command: the guard, the record, its go-ahead and the job (L1352)');
+  assert.ok(inner.startsWith(`'${process.execPath}' '${join(JOBS_DIR, 'save-work.mjs')}' '`), inner);
+  assert.ok(inner.endsWith(` '${jobFile({ cwd: at, job: 'save-work', sessionId: 'S-1' })}'`), 'of the copy, the job names the result file only');
+  assert.equal(cmd.split(w.clone).length, 3, 'the command names the copy for the record and its go-ahead');
+  assert.equal(inner.split(w.clone).length, 2, 'the job names it for the result file');
   assert.deepEqual(calls[0].opts.env, { PATH: process.env.PATH, HOME: process.env.HOME, ...bashWait(LOCKED_SAVE_MS) }, 'the Bash tool waits as long as the save may run');
   assert.equal(calls[0].opts.cwd, at, 'run in the copy\'s .git');
   assert.equal(existsSync(jobFile({ cwd: at, job: 'save-work', sessionId: 'S-1' })), false, 'the result file is removed');
@@ -218,7 +233,7 @@ test('L969: every way runLocked can fail is a throw with a plain reason, and not
   assert.deepEqual(LOCKED_JOBS, ['save-work', 'install']);
   // After claude: no result, a result that is not the job's form, claude failing to start.
   // Each runs the job's record and waits for the go-ahead first (#463 r2 M1), then writes what it is given in place of the job.
-  const quiet = (write) => (bin, args, opts) => childSpawn('/bin/sh', ['-c', `${recordOf(args)} && ${write ? `printf '%s' '${write}' > '${jobFile({ cwd, job: args.at(-1).includes('save-work.mjs') ? 'save-work' : 'install', sessionId: 'S-1' })}'` : 'exit 0'}`], opts);
+  const quiet = (write) => (bin, args, opts) => childSpawn('/bin/sh', ['-c', `${recordOf(args)} && ${write ? `printf '%s' '${write}' > '${jobFile({ cwd, job: wordsOf(args)[1].includes('-save-work-') ? 'save-work' : 'install', sessionId: 'S-1' })}'` : 'exit 0'}`], opts);
   await assert.rejects(runner({ spawn: quiet() })(base), /the install job's result was not written \(claude exited 0; ENOENT\)/);
   const big = (bin, args, opts) => childSpawn('/bin/sh', ['-c', `${recordOf(args)} && head -c ${RESULT_MAX_BYTES + 1} /dev/zero > '${jobFile({ cwd, job: 'install', sessionId: 'S-1' })}'`], opts);
   await assert.rejects(runner({ spawn: big })(base), new RegExp(`the install job's result was not written \\(claude exited 0; over ${RESULT_MAX_BYTES} bytes\\)`), 'a result over the limit is refused unread');
@@ -404,7 +419,7 @@ test('#463 r2 M1: no job runs without the runner\'s go-ahead, and a record that 
   const older = childSpawn('/bin/sleep', ['60'], { detached: true, stdio: 'ignore' });
   try {
     await new Promise((r) => setTimeout(r, 1_500));
-    const recordPath = (args) => /\/bin\/echo \$\$ > '([^']+)'/.exec(recordOf(args))[1];
+    const recordPath = (args) => wordsOf(args)[1];
     const old = (bin, args, opts) => childSpawn('/bin/sh', ['-c', `echo ${older.pid} > '${recordPath(args)}'; sleep 1; touch '${ran}'`], opts);
     await assert.rejects(runner({ spawn: old })({ job: 'install', command: 'true', sessionId: 'S-1', role: 'worker', settingsFile, cwd }), /names a process that did not start after claude/);
   } finally { try { process.kill(-older.pid, 'SIGKILL'); } catch { /* already gone */ } }
@@ -414,7 +429,7 @@ test('#463 r2 M1: no job runs without the runner\'s go-ahead, and a record that 
     /the install job's process group was not recorded/);
   // The shell gives up waiting for a go-ahead that never comes, and the job does not run.
   const g = join(cwd, 'g');
-  const r = spawnSync('/bin/sh', ['-c', `${groupRecordCommand(g)} && touch '${ran}'`], { encoding: 'utf8', timeout: JOB_ACK_WAIT_MS + 5_000 });
+  const r = spawnSync('/bin/sh', ['-c', lockedCommand({ gfile: g, inner: `touch '${ran}'` })], { encoding: 'utf8', timeout: JOB_ACK_WAIT_MS + 5_000 });
   assert.notEqual(r.status, 0); assert.equal(existsSync(ran), false);
   assert.equal(readFileSync(g, 'utf8').trim(), String(r.pid ?? readFileSync(g, 'utf8').trim()), 'its record is its own pid');
   // The record's form: none yet, half written, not a pid.
@@ -444,7 +459,7 @@ test('#463 r2 P4: a pid-less child is never signalled, even at the time limit', 
 test('#463 r2 self-review m2: each run\'s record has a name of its own, so a shell left by an earlier run never takes its go-ahead', async () => {
   const { cwd, settingsFile } = world();
   const seen = [];
-  const spy = (bin, args, opts) => { seen.push(/\/bin\/echo \$\$ > '([^']+)'/.exec(recordOf(args))[1]); return childSpawn('/bin/sh', ['-c', 'exit 0'], opts); };
+  const spy = (bin, args, opts) => { seen.push(wordsOf(args)[1]); return childSpawn('/bin/sh', ['-c', 'exit 0'], opts); };
   const run = runner({ spawn: spy });
   for (let i = 0; i < 2; i += 1) await assert.rejects(run({ job: 'install', command: 'true', sessionId: 'S-1', role: 'worker', settingsFile, cwd }), /result was not written/);
   assert.equal(seen.length, 2); assert.notEqual(seen[0], seen[1]);
@@ -540,4 +555,166 @@ test('L1351: resultWords reads the last result event; a strange subtype is not s
   assert.deepEqual(resultWords('{"type":"result","subtype":"X; rm","is_error":true,"result":"boom"}'), { sub: 'a subtype not shown', why: 'boom' });
   assert.equal(resultWords('not json\n{"type":"assistant"}'), null);
   const h = hearing(); assert.equal(h.said(), ''); // never listened: nothing said
+});
+
+// ---- L1352: one plain command, allowed by one exact rule ----
+// On the Mini (card R-S1-2) the install's claude, under the worker's dontAsk with only the product's commands allowed,
+// was refused the compound line (subshell, loop, `&&`, `>`) it was told to run, so the result was never written.
+
+// claude, stood in for, that also keeps the settings file it was started with (read as it starts, as the live proof does).
+const keeping = (calls = []) => (bin, args, opts) => {
+  const f = args[args.indexOf('--settings') + 1];
+  const settings = JSON.parse(readFileSync(f, 'utf8'));
+  const child = childSpawn('/bin/sh', ['-c', args.at(-1).slice(ASK.length)], opts);
+  calls.push({ args, settingsFile: f, settings, child });
+  return child;
+};
+
+test('L1352: every job\'s command is one plain command, and its settings allow exactly it: the rule and the command are one string', async () => {
+  const { cwd, settingsFile, sha } = world();
+  const calls = [];
+  const run = runner({ spawn: keeping(calls) });
+  assert.deepEqual(await run({ job: 'install', command: 'touch installed', sessionId: 'S-1', role: 'worker', settingsFile, cwd }), { ok: true });
+  // The real save-work.mjs runs here, with an empty row: whatever it answers, claude was started once.
+  await run({ job: 'save-work', args: {}, sessionId: 'S-1', role: 'worker', settingsFile, settingsSha: sha, cwd }).catch(() => null);
+  assert.equal(calls.length, 2);
+  for (const c of calls) {
+    const cmd = c.args.at(-1).slice(ASK.length);
+    assert.equal(c.args.at(-1), `${LOCKED_PROMPT}${cmd}`, 'the prompt: the exact-string wording, then the command');
+    assert.deepEqual(c.settings.permissions.allow, [`Bash(${cmd})`], 'exactly the command claude is given, byte for byte');
+    assert.equal(c.settings.permissions.allow[0], lockedRule(cmd));
+    // One plain command: the guard and four words, no joiner, redirection or line break outside the quotes.
+    assert.match(cmd, /^\/bin\/sh '[^']+' '[^']+' '[^']+' \d+ '[A-Za-z0-9+/=]+'$/, cmd);
+    assert.equal(wordsOf(c.args)[0], GUARD);
+    assert.equal(wordsOf(c.args)[2], ackFile(wordsOf(c.args)[1]));
+    // Everything else is the session's settings as they were.
+    const { permissions: _p, ...rest } = c.settings; const { permissions: _q, ...was } = JSON.parse(SAFE);
+    assert.deepEqual(rest, was);
+    assert.equal(existsSync(c.settingsFile), false, 'removed after');
+  }
+  assert.equal(readFileSync(settingsFile, 'utf8'), SAFE, 'the settings file itself never holds the rule');
+});
+
+test('L1352: lockedCommand refuses what can\'t be one plain command; lockedRule refuses what render-settings would', () => {
+  assert.throws(() => lockedCommand({ gfile: '/a/g', inner: 'a\nb' }), /not one line/);
+  assert.throws(() => lockedCommand({ gfile: '/a/g', inner: ' ' }), /not one line/);
+  assert.throws(() => lockedCommand({ gfile: 'g', inner: 'true' }), /no process-group record/);
+  assert.throws(() => lockedCommand({ gfile: "/a/it's", inner: 'true' }), /quote/);
+  for (const bad of ['true; rm -rf x', 'a && b', 'a | b', 'a > b', 'a\nb', '$(x)', ' a']) assert.throws(() => lockedRule(bad), /not one exact command/, bad);
+  // Any job at all, joiners and quotes included, goes through as plain base64 letters.
+  const c = lockedCommand({ gfile: '/a/g', inner: "( npm ci && echo '*?' | tee x ); /bin/echo $? > '/a/r'" });
+  assert.equal(lockedRule(c), `Bash(${c})`);
+  assert.equal(lockedJobOf(c), "( npm ci && echo '*?' | tee x ); /bin/echo $? > '/a/r'", 'read back for the live proofs');
+  for (const not of ['npm ci', `${c}; x`, c.replace('guard.sh', 'g.sh')]) assert.equal(lockedJobOf(not), null, not);
+});
+
+test('L1352: jobSettings adds only the rule, to the bytes it checked (the save\'s hash, its shut network); the file is the job\'s own', () => {
+  const { d, settingsFile, sha } = world();
+  const more = join(d, 'more.json');
+  const v = { permissions: { defaultMode: 'dontAsk', allow: ['Bash(true)'], deny: ['Read(//x/**)'] }, sandbox: sandbox(), hooks: { PreToolUse: [] } };
+  writeFileSync(more, `${JSON.stringify(v)}\n`);
+  const cmd = lockedCommand({ gfile: '/a/g', inner: 'true' });
+  assert.deepEqual(JSON.parse(jobSettings(more, cmd)), { ...v, permissions: { ...v.permissions, allow: ['Bash(true)', `Bash(${cmd})`] } });
+  assert.deepEqual(JSON.parse(jobSettings(settingsFile, cmd, { sha, noNetwork: true })).permissions.allow, [`Bash(${cmd})`]);
+  assert.throws(() => jobSettings(settingsFile, cmd, { sha: 'f'.repeat(64) }), /its hash differs/);
+  // The bytes checked are the bytes used: one read only.
+  let reads = 0;
+  jobSettings(settingsFile, cmd, { sha, read: (f) => { reads += 1; return readFileSync(f); } });
+  assert.equal(reads, 1);
+  assert.throws(() => jobSettings(join(d, 'gone.json'), cmd), /can't be read \(ENOENT\)/);
+  const odd = join(d, 'odd.json'); writeFileSync(odd, JSON.stringify({ permissions: { allow: 'x' }, sandbox: sandbox() }));
+  assert.throws(() => jobSettings(odd, cmd), /allow list is not a list/);
+  assert.equal(jobSettingsFile('/s/S-1.save.json', 'ab12'), '/s/S-1.save.job-ab12.json');
+  assert.throws(() => jobSettingsFile('/s/S-1.json', '../x'), /no plain run name/);
+});
+
+test('L1352: a job whose settings can\'t be used, or whose own settings file can\'t be written, never starts claude', async () => {
+  const { d, cwd, settingsFile } = world();
+  const calls = [];
+  const g = groupFile({ cwd, job: 'baseline', sessionId: 'S-1', run: 'r1' });
+  const base = { spawn: keeping(calls), claudeBin: '/x/claude', inner: 'true', cwd, env: {}, ms: 1_000, gfile: g, label: 'the baseline' };
+  const off = join(d, 'off.json'); writeFileSync(off, JSON.stringify({ sandbox: sandbox({ enabled: false }) }));
+  await assert.rejects(guardedRun({ ...base, settingsFile: off }), (e) => e.beforeRun === true && /the baseline can't be run inside the lock-down \(.*does not turn the sandbox on\)/.test(e.message));
+  await assert.rejects(guardedRun({ ...base, settingsFile: join(d, 'x.txt') }), (e) => e.beforeRun === true && /names no settings file/.test(e.message));
+  await assert.rejects(guardedRun({ ...base, settingsFile, write: () => { throw Object.assign(new Error('x'), { code: 'EEXIST' }); } }),
+    (e) => e.beforeRun === true && e.message === 'the baseline\'s own settings file can\'t be written (EEXIST)');
+  assert.equal(calls.length, 0);
+});
+
+test('L1352: the guard records its own pid (in the group the Bash tool made, as readGroupRecord reads it), waits for the go-ahead, then runs the job, whose exit code is written', async () => {
+  const d = tempDir('orch-locked-');
+  const g = join(d, 'job.group.r1'); const res = join(d, 'res');
+  // Run as claude's Bash tool runs it: detached, in a group of its own.
+  const child = childSpawn('/bin/sh', ['-c', lockedCommand({ gfile: g, inner: `( exit 7 ); /bin/echo $? > '${res}'` })], { cwd: d, detached: true, stdio: 'ignore' });
+  // Until the record is whole (its line break written), as readGroupRecord waits: the file is made before its pid is in it.
+  const whole = () => existsSync(g) && readFileSync(g, 'utf8').endsWith('\n');
+  for (let n = 0; n < 1_000 && !whole(); n += 1) await new Promise((r) => setTimeout(r, 10));
+  assert.equal(existsSync(res), false, 'nothing runs before the go-ahead');
+  const pid = Number(readFileSync(g, 'utf8').trim());
+  const ps = spawnSync('ps', ['-o', 'pgid=', '-p', String(pid)], { encoding: 'utf8' });
+  assert.equal(Number(ps.stdout.trim()), child.pid, 'the recorded process is in the group the Bash tool made');
+  assert.equal(readGroupRecord(g, { since: '2000-01-01T00:00:00Z' }).pgid, child.pid);
+  writeFileSync(ackFile(g), '');
+  assert.equal(await new Promise((r) => child.on('exit', r)), 0);
+  assert.equal(readFileSync(res, 'utf8'), '7\n', 'the job\'s own exit code');
+  // A record already there is never written through (noclobber): the job does not run.
+  const res2 = join(d, 'res2');
+  const again = spawnSync('/bin/sh', ['-c', lockedCommand({ gfile: g, inner: `touch '${res2}'` })], { encoding: 'utf8' });
+  assert.equal(again.status, 65); assert.equal(existsSync(res2), false);
+  assert.equal(spawnSync('/bin/sh', [GUARD, g], { encoding: 'utf8' }).status, 64, 'four words or nothing');
+});
+
+test('L1352: the worker\'s Bash hooks let every job\'s command through (install, save-work in .git, the baseline)', () => {
+  const d = tempDir('orch-locked-');
+  const outbox = join(d, 'outbox'); const copy = join(d, 'copy'); mkdirSync(outbox); mkdirSync(join(copy, '.git'), { recursive: true });
+  const snapshot = join(d, 'rules.json');
+  writeFileSync(snapshot, makeSnapshot({ production: { env_files: [join(d, 'prod', 'settings.production')], programs: ['fakedb'], hosts: ['db.prod.example.net'] }, secrets: { paths: [join(d, 'keys')] } }));
+  const hooksDir = join(JOBS_DIR, '..', 'hooks');
+  const at = join(copy, '.git');
+  const jobs = [
+    [copy, lockedCommand({ gfile: groupFile({ cwd: copy, job: 'install', sessionId: 'S-1', run: 'ab' }), inner: `( npm ci ); /bin/echo $? > '${jobFile({ cwd: copy, job: 'install', sessionId: 'S-1' })}'` })],
+    [at, lockedCommand({ gfile: groupFile({ cwd: at, job: 'save-work', sessionId: 'S-1', run: 'ab' }), inner: `'${process.execPath}' '${join(JOBS_DIR, 'save-work.mjs')}' '${Buffer.from('{"card":"C-1"}').toString('base64')}' '${jobFile({ cwd: at, job: 'save-work', sessionId: 'S-1' })}'` })],
+    [copy, lockedCommand({ gfile: groupFile({ cwd: copy, job: 'baseline', sessionId: 'S-1', run: 'ab' }), inner: `( npm test ); /bin/echo $? > '${join(copy, '.orch-baseline-S-1')}'` })],
+  ];
+  const bashHooks = Object.entries(POLICY_HOOKS).filter(([, m]) => m === '*' || m.split('|').includes('Bash')).map(([n]) => n);
+  assert.deepEqual(bashHooks.sort(), ['merge-guard', 'no-verify-block', 'production-write-guard', 'secret-file-block']);
+  // Near misses are still refused: the shape is read whole, or not let through.
+  const [, one] = jobs[0];
+  for (const near of [`${one}; touch x`, `${one} && touch x`, one.replace("/bin/sh '", "sh '"), one.replace('/jobs/guard.sh', '/jobs/other.sh'), one.replace(".ok'", ".no'"), `${one.slice(0, -1)}$(x)'`]) {
+    assert.equal(LOCKED_JOB_COMMAND.test(near), false, near);
+    assert.notEqual(unreadable(near), null, near);
+  }
+  for (const [cwd, command] of jobs) {
+    assert.ok(LOCKED_JOB_COMMAND.test(command), command);
+    for (const name of bashHooks) {
+      const r = spawnSync(process.execPath, [join(hooksDir, `${name}.mjs`), '--role', 'worker', '--outbox', outbox, '--snapshot', snapshot, '--kinds', outboxKindsFor('worker').join(','), '--copy', copy],
+        { input: JSON.stringify({ tool_name: 'Bash', tool_input: { command }, cwd }), encoding: 'utf8', timeout: 10_000 });
+      assert.equal(r.status, 0, `${name} on ${command}: ${r.stderr}`);
+    }
+  }
+});
+
+// A real claude (L1352), as the Mini runs it but with no hooks: dontAsk, the sandbox on, only the product's command
+// allowed in the settings, --max-turns 1, the exact-string prompt. It calls the model, so it runs only when asked:
+// ORCH_LIVE_CLAUDE=1 and a claude on the PATH (or ORCH_LIVE_CLAUDE_BIN). It proves the claude that runs it, not the pin.
+const liveClaude = (() => {
+  if (process.env.ORCH_LIVE_CLAUDE !== '1') return null;
+  const bin = process.env.ORCH_LIVE_CLAUDE_BIN ?? spawnSync('/bin/sh', ['-c', 'command -v claude'], { encoding: 'utf8' }).stdout.trim();
+  return bin && existsSync(bin) ? realpathSync(bin) : null;
+})();
+test('L1352 live: a real claude under dontAsk runs the job\'s one command, so its group is recorded and its exit code written', {
+  skip: liveClaude ? false : 'set ORCH_LIVE_CLAUDE=1 with a claude on the PATH (it calls the model)',
+  timeout: 180_000,
+}, async () => {
+  const d = realpathSync(tempDir('orch-locked-'));
+  const cwd = join(d, 'copy'); mkdirSync(cwd);
+  const settingsFile = join(d, 'S-1.json');
+  writeFileSync(settingsFile, `${JSON.stringify({ permissions: { defaultMode: 'dontAsk', allow: ['Bash(true)'], deny: [], ask: [] }, sandbox: sandbox() })}\n`);
+  const res = join(cwd, 'res');
+  const told = [];
+  const r = await guardedRun({ spawn: childSpawn, claudeBin: liveClaude, settingsFile, inner: `( true ); /bin/echo $? > '${res}'`, profile: DESIGN_PROFILES.worker, cwd,
+    env: { ...process.env }, ms: 120_000, gfile: groupFile({ cwd, job: 'install', sessionId: 'S-1', run: 'live1' }), label: 'the live job', onGroup: (g) => told.push(g) });
+  assert.equal(jobGroupProblem(r, 'the live job'), null, claudeEnd(r));
+  assert.equal(readFileSync(res, 'utf8'), '0\n', claudeEnd(r));
+  assert.ok(told.some((g) => g.job), 'the job\'s own group was kept');
 });

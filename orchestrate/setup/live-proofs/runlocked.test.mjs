@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { CURL_UNREACHED, LEFTOVER_INSTALL, LEFTOVER_WAIT_MS, SLOW_INSTALL, STEPS, TEST_REPO, blockedBy, commandsProblem, guardProblem, cleanupProof, hooksSet, main, proofInputs, underLock, proveRunLocked, readStream, realWiring, recordGroups, report, variant, walledInstall } from './runlocked.mjs';
-import { JOBS_DIR, LOCKED_SAVE_MS, quoted } from '../../wiring/runner-locked.mjs';
+import { JOBS_DIR, LOCKED_SAVE_MS, lockedCommand, quoted } from '../../wiring/runner-locked.mjs';
 import { CLONE_CONFIG_TEMPLATE } from '../../modules/M4-workshop/git/save-work.mjs';
 
 const INSTALL = 'npm ci';
@@ -274,6 +274,11 @@ test('proveRunLocked: each step fails on its own break', async () => {
     assert.equal(report(r).ok, false);
   }
   assert.equal((await run({ saveMs: LOCKED_SAVE_MS })).by[7].result, 'PASS', 'at the limit is inside it');
+  // L1352: claude runs the job inside the guard's one command, as base64; step 6 reads it decoded.
+  const guarded = lockedCommand({ gfile: '/c/.orch-job-save-work-S-1.group.ab', inner: `'/n/node' ${SCRIPT} 'e30=' '/c/.orch-job'` });
+  assert.equal((await run({ stream: stream({ command: guarded }) })).by[6].result, 'PASS', 'the guarded save-work command');
+  const other = lockedCommand({ gfile: '/c/.orch-job-save-work-S-1.group.ab', inner: "'/n/node' '/elsewhere/save-work.mjs'" });
+  assert.match((await run({ stream: stream({ command: other }) })).by[6].why, /did not run/);
   let k = 0;
   assert.equal((await run({ listed: () => (k++ < 3) })).by[5].result, 'PASS', 'a group still being reaped is waited for');
   for (const code of CURL_UNREACHED) assert.equal((await run({ walled: { ok: false, reason: `the install exited ${code}` } })).by[2].result, 'PASS', String(code));

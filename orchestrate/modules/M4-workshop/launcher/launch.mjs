@@ -159,12 +159,20 @@ export function checkBobFolder({ folder, manifest, settings }) {
 // ---- Check 11: baseline and smoke inside the lock-down (R-0b-41) ----
 
 /**
+ * What claude is told for a locked run (L1352): call the Bash tool once with the command exactly as given. Asked to
+ * "report its exit code", claude added `; echo "EXIT=$?"` to the command, so an exact allow rule no longer matched it
+ * and dontAsk refused it; with this wording it sent the command unchanged (checked: claude-code 2.1.329, open until
+ * 2027-01-20 (L1352)). The command is the prompt's end, after this text.
+ */
+export const LOCKED_PROMPT = 'Call the Bash tool once with this exact command string, character for character, adding nothing before or after it (no echo, no exit-code check): ';
+
+/**
  * The baseline and smoke runs go through the worker's own start: the worker's settings file,
  * the owner's user (no user switch), only the Bash tool. `roleArgs` builds the start command.
  */
 export function lockedRunCommand({ claudeBin, settingsFile, command, roleArgs, profile }) {
   if (typeof command !== 'string' || !command.trim()) return refuse('no command declared');
-  const args = roleArgs({ profile: { ...profile, tools: ['Bash'] }, settingsFile, prompt: `Run exactly this shell command once and report its exit code: ${command}` });
+  const args = roleArgs({ profile: { ...profile, tools: ['Bash'] }, settingsFile, prompt: `${LOCKED_PROMPT}${command}` });
   return { ok: true, bin: claudeBin, args, spawnOptions: {} }; // no uid or gid: runs as the launcher's own user
 }
 

@@ -10,9 +10,9 @@ import { tempDir } from '../shared/test-tmp.mjs';
 import { gitOk, initMirror } from '../modules/M4-workshop/git/safe-git.mjs';
 import { prepareWorkerCopy } from '../modules/M4-workshop/launcher/worker-copy.mjs';
 import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.mjs';
-import { CHECKS } from '../modules/M4-workshop/launcher/launch.mjs';
+import { CHECKS, LOCKED_PROMPT } from '../modules/M4-workshop/launcher/launch.mjs';
 import { BASELINE_MS, WALK_DEPTH, baselineCommand, baselineFile, setupFilesProblem, workerChecks, commandMissing } from './runner-checks.mjs';
-import { LOCKED_MS, groupFile, groupRecordCommand } from './runner-locked.mjs';
+import { LOCKED_MS, groupFile, lockedCommand } from './runner-locked.mjs';
 import { RECHECK, checkRunnerConfig, lockedOf, lockedWiring, realRunnerPorts, startDeps, workerCheckInputs } from './runner-main.mjs';
 import { rulesText } from '../setup/worker-rules.mjs';
 import { renderRoleSettings } from '../modules/M4-workshop/launcher/render-settings.mjs';
@@ -73,7 +73,7 @@ const bashTool = (cmd, opts) => childSpawn(process.execPath, ['-e',
 // false`, it runs nothing (a claude that never ran the command).
 function standIn(calls, { sandbox = false, baseline = true } = {}) {
   return (bin, args, opts) => {
-    const cmd = args.at(-1).replace(/^Run exactly this shell command once and report its exit code: /, '');
+    assert.ok(args.at(-1).startsWith(LOCKED_PROMPT)); const cmd = args.at(-1).slice(LOCKED_PROMPT.length);
     calls.push({ bin, args, cwd: opts.cwd, env: opts.env, cmd });
     const smoke = cmd.includes('.orch-smoke-');
     if (!smoke && baseline) return bashTool(cmd, opts);
@@ -89,7 +89,8 @@ function standIn(calls, { sandbox = false, baseline = true } = {}) {
 const T0 = '2026-01-01T00:00:00.000Z';
 const fakeJob = (more = {}) => ({ info: (pid) => ({ pgid: pid, start: T0 }), pidStartOf: () => T0, jobGone: () => true, pollMs: 5, ...more });
 const handshake = async (args, then, pid = 7777) => {
-  const g = /^\( set -C; \/bin\/echo \$\$ > '([^']+)' \)/.exec(args.at(-1).replace(/^Run exactly this shell command once and report its exit code: /, ''))[1];
+  // The guard's record is its command's second quoted word (L1352: /bin/sh '<guard>' '<record>' '<go-ahead>' <waits> '<job>').
+  const g = [...args.at(-1).slice(LOCKED_PROMPT.length).matchAll(/'([^']*)'/g)][1][1];
   writeFileSync(g, `${pid}\n`);
   for (let n = 0; n < 400 && !existsSync(`${g}.ok`); n += 1) await new Promise((r) => setTimeout(r, 5));
   if (existsSync(`${g}.ok`)) then();
@@ -101,7 +102,9 @@ function inputs(over = {}) {
   const home = join(d, 'home'); mkdirSync(home);
   // The baseline's throwaway copy (#369 r1 M1), as the start port makes it: its own folder and settings file.
   const spare = join(d, 'spare');
-  const throwaway = async () => { mkdirSync(join(spare, 'copy'), { recursive: true }); return { ok: true, copy: join(spare, 'copy'), settingsFile: join(d, 'spare.json'), done: async () => rmSync(spare, { recursive: true, force: true }) }; };
+  // Its settings file holds the sandbox on (L1352: the job's own settings are made from it, so it is checked and read).
+  const spareSettings = `${JSON.stringify({ permissions: {}, sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false, network: { allowedDomains: [], strictAllowlist: true } } })}\n`;
+  const throwaway = async () => { mkdirSync(join(spare, 'copy'), { recursive: true }); writeFileSync(join(d, 'spare.json'), spareSettings); return { ok: true, copy: join(spare, 'copy'), settingsFile: join(d, 'spare.json'), done: async () => rmSync(spare, { recursive: true, force: true }) }; };
   return { d, spare, x: { role: 'worker', profile: DESIGN_PROFILES.worker, kind: 'editing', sessionId: SID, card: 'C-1', cardDoc: { product: 'p1' }, product: 'p1',
     copy, outbox: join(d, 'outbox'), env: { PATH: '/usr/bin:/bin' }, head: 'b'.repeat(40), claudeBin: '/x/claude-code/2.1.300/claude',
     settings: { file: join(d, 'settings.json'), settings: {} }, ownUid: () => process.getuid(), mirror: '/m', pin: '2.1.300', hooksDir: '/h', rules: {},
@@ -240,9 +243,11 @@ test('step 6, check 11 (#369 M2): the smoke runs first; a worker\'s baseline run
       assert.equal(calls[0].cwd, x.copy); assert.ok(calls[0].args.includes(x.settings.file), 'the smoke: the role\'s own settings, in the session\'s copy');
       if (n === 2) {
         // #369 r1 M1: the baseline runs in the throwaway copy with its settings, never in the session's copy.
-        assert.equal(calls[1].cwd, join(spare, 'copy')); assert.ok(calls[1].args.includes(join(d, 'spare.json'))); assert.equal(calls[1].args.includes(x.settings.file), false);
+        assert.equal(calls[1].cwd, join(spare, 'copy')); assert.equal(calls[1].args.includes(x.settings.file), false);
+        // L1352: under its own settings file, made from the throwaway's with the one command's exact rule added.
+        assert.match(calls[1].args[calls[1].args.indexOf('--settings') + 1], new RegExp(`^${join(d, 'spare')}\\.job-[0-9a-f]{16}\\.json$`));
         // #463 r2 M3: its shell's record first, in a process group of its own, and the Bash tool's wait the baseline's limit.
-        assert.equal(calls[1].cmd, `${groupRecordCommand(groupFile({ cwd: join(spare, 'copy'), job: 'baseline', sessionId: SID, run: 'r1' }))} && { ${baselineCommand(testCommand, baselineFile({ copy: join(spare, 'copy'), sessionId: SID }))}; }`);
+        assert.equal(calls[1].cmd, lockedCommand({ gfile: groupFile({ cwd: join(spare, 'copy'), job: 'baseline', sessionId: SID, run: 'r1' }), inner: baselineCommand(testCommand, baselineFile({ copy: join(spare, 'copy'), sessionId: SID })) }));
         assert.deepEqual(calls[1].env, { PATH: '/usr/bin:/bin', BASH_DEFAULT_TIMEOUT_MS: String(BASELINE_MS), BASH_MAX_TIMEOUT_MS: String(BASELINE_MS) });
       }
       assert.equal(existsSync(spare), false, 'the throwaway copy, its exit file with it, is removed');

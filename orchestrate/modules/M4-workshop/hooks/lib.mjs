@@ -627,7 +627,18 @@ const SETS_SAFE_VAR = [
 ];
 
 /** Why a guard can't read this command (refuse it), or null when it is plain words. */
+/**
+ * The lock-down job's one command (L1352; wiring/runner-locked.mjs lockedCommand builds it): orchestrate's own guard
+ * script, run by /bin/sh with four plain words, the record, its go-ahead, a wait count, and the job as base64 letters.
+ * The shape is read whole, so it is not refused as "sh runs commands the guard can't see": the job inside was written by
+ * the runner, never by the session, and claude runs it only under a settings file allowing exactly that one command
+ * (a session's own settings allow no such command). The other checks still read its words. Paths are held to the plain
+ * names (PLAIN_PATH, no quote), the record to the runner's spelling (runner-locked.mjs groupFile, ackFile).
+ */
+export const LOCKED_JOB_COMMAND = /^\/bin\/sh '\/[A-Za-z0-9._\-/@]+\/modules\/M4-workshop\/jobs\/guard\.sh' '(\/[A-Za-z0-9._\-/@]+\/\.orch-job-[a-z-]+-[A-Za-z0-9._-]+\.group\.[0-9a-z]{1,32})' '\1\.ok' [0-9]{1,4} '[A-Za-z0-9+/]+={0,2}'$/;
+
 export function unreadable(cmd) {
+  if (LOCKED_JOB_COMMAND.test(String(cmd ?? ''))) return null;
   const h = heredocs(cmd);
   if (h.why) return h.why;
   const c = joinLines(h.text);
