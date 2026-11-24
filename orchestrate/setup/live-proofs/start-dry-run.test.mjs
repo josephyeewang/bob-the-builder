@@ -104,7 +104,7 @@ test('several planted failures are all told in one run, and the run is not ready
     assert.equal(s.recheck.result, 'FAIL'); assert.match(s.recheck.why, /builder wall is down/, 'the wall asked again just before claude');
     for (const n of [4, 6, 11]) {
       assert.equal(s[`check${n}`].result, 'NOT TRIED', `check ${n} runs the branch's code: not past a failed gate`);
-      assert.match(s[`check${n}`].why, /past a failed safety gate: the builder wall lets sessions start/);
+      assert.match(s[`check${n}`].why, /past a stage the real start refuses at: the builder wall lets sessions start/);
       assert.equal(w.ran[n], undefined, `check ${n}'s port was never called`);
     }
     assert.match(s.start.why, /reached only past 8 failed stages/);
@@ -117,7 +117,7 @@ test('several planted failures are all told in one run, and the run is not ready
   } finally { w.done(); }
 });
 
-test('keep going really continues: after a failing check, the later checks run (their ports are called), each told on its stand-ins', async () => {
+test('keep going really continues: after a failing check, the later checks that read run (their ports are called), each told on its stand-ins; the ones that run code do not', async () => {
   const w = world({ plant: { prompt: 'the card has no plan', checks: { 7: 'the hooks are not the pinned ones' } } });
   try {
     const out = await w.run();
@@ -125,7 +125,8 @@ test('keep going really continues: after a failing check, the later checks run (
     assert.equal(s.prompt.result, 'FAIL');
     assert.ok(w.calls.some((x) => Array.isArray(x) && x[0] === 'walled'), 'the settings were made after the prompt failed');
     assert.equal(s.check7.result, 'FAIL');
-    for (const n of [1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12]) {
+    for (const n of [4, 6, 11]) { assert.equal(w.ran[n], undefined, `check ${n} runs code: not past a failed stage`); assert.equal(s[`check${n}`].result, 'NOT TRIED'); }
+    for (const n of [1, 2, 3, 5, 8, 9, 10, 12]) {
       assert.ok(w.ran[n] >= 1, `check ${n}'s port was called`);
       assert.equal(s[`check${n}`].result, 'PASS', `check ${n}`);
       assert.ok(s[`check${n}`].on.includes('the worker prompt'), `check ${n} says it ran on the prompt's stand-in`);
@@ -233,6 +234,7 @@ test('a card the runner already has a session or a waiting start for: the reques
       const s = w.byStage(out);
       assert.equal(s.request.result, 'FAIL'); assert.match(s.request.why, /already has a session the runner started, or a start still on/);
       assert.equal(s.start.result, 'NOT TRIED'); assert.equal(w.spawns, 0);
+      for (const n of [4, 6, 11]) assert.equal(w.ran[n], undefined, `no install, claude or tests beside a session of the same card (check ${n})`);
     } finally { w.done(); }
   }
 });
@@ -259,6 +261,22 @@ test('stopped part way: no later check starts, nothing is spawned, the run ends 
     assert.equal(s.start.result, 'NOT TRIED'); assert.equal(w.spawns, 0);
     assert.equal(s.cleanup.result, 'PASS'); assert.deepEqual(w.leftovers(), []);
     assert.equal(report(out.results).ok, false);
+  } finally { w.done(); }
+});
+
+test('stopped while a check runs: that check is waited for and told, no later check starts', async () => {
+  const w = world();
+  let stop = null; let ended = false;
+  const wire = (c, o) => { const r = w.io.wire(c, o); const ports = r.startDeps.checksFor(); return { startDeps: { ...r.startDeps, checksFor: () => ({ ...ports,
+    4: async (x) => { stop('SIGINT'); await new Promise((res) => setTimeout(res, 50)); ended = true; return ports[4](x); } }) } }; };
+  try {
+    const out = await w.run({ onAbort: (f) => { stop = f; }, wire });
+    const s = w.byStage(out);
+    assert.equal(ended, true, 'the running check was waited for');
+    assert.equal(s.check4.result, 'PASS');
+    for (const n of [5, 6, 7, 8, 9, 10, 11, 12, 13]) assert.equal(w.ran[n], undefined, `check ${n} not started after the stop`);
+    assert.match(s.check5.why, /stopped \(SIGINT\)/);
+    assert.equal(s.start.result, 'NOT TRIED'); assert.deepEqual(w.leftovers(), []); assert.equal(w.spawns, 0);
   } finally { w.done(); }
 });
 

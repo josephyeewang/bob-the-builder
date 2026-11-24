@@ -97,9 +97,8 @@ const ORDER = STAGES.map(([k]) => k);
 const INSIDE = ORDER.slice(ORDER.indexOf('request'), ORDER.indexOf('cleanup'));
 // The launch checks that run the branch's code: 4 the install, 6 a headless claude, 11 the smoke and the tests.
 export const RUNS_CODE = new Set([4, 6, 11]);
-// The gates the real start holds every start at (or refuses at) before any of that code runs. One failed, or not
-// tried, means those checks are not tried either: keep-going goes on only through checks that read.
-export const SAFETY = Object.freeze(['roots', 'wall', 'testProduct', 'snapshot', 'memory', 'liveWalls', 'settings', 'saveSettings', 'check0', 'check1', 'check2', 'check3']);
+// Each is run only when every stage before it passed: the real start refuses at the first failed stage, so it never
+// runs that code past one, and nor does the dry run. Keep-going goes on through the checks that only read.
 
 /** A session id the Dispatcher never makes (its are UUIDs), within the start port's SESSION_ID. */
 export const drySessionId = (now = Date.now(), rand = () => randomBytes(4).toString('hex')) => `DRYRUN-${now.toString(36)}-${rand()}`;
@@ -307,10 +306,10 @@ export async function dryRun({ c, configWhy, product, card, io = {} }) {
             let r;
             if (abortWhy) { set(`check${k.n}`, 'NOT TRIED', abortWhy); return refuse(abortWhy); }
             if (RUNS_CODE.has(k.n)) {
-              // The real start runs no install, claude or tests past a failed safety gate, and nor does the dry run:
-              // those gates are why the branch's code may run here at all (the sandbox alone is not trusted).
-              const gates = SAFETY.filter((g) => res.get(g)?.result === 'FAIL' || res.get(g)?.result === 'NOT TRIED');
-              if (gates.length) { set(`check${k.n}`, 'NOT TRIED', `it would run the branch's code (an install, claude or the tests) past a failed safety gate: ${gates.map((g) => LABEL[g]).join('; ')}`); return { ok: true }; }
+              // The real start runs no install, claude or tests past any stage it refuses at, and nor does the dry
+              // run: those stages are why the branch's code may run here at all (the sandbox alone is not trusted).
+              const gates = [...res.values()].filter((x) => x.result === 'FAIL' || x.result === 'NOT TRIED').map((x) => x.label);
+              if (gates.length) { set(`check${k.n}`, 'NOT TRIED', `it would run the branch's code (an install, claude or the tests) past a stage the real start refuses at: ${gates.join('; ')}`); return { ok: true }; }
             }
             if (typeof port !== 'function') r = refuse('no check is wired');
             else { try { r = await port(ctx); } catch (e) { r = refuse(`the check failed: ${said(e)}`); } }
@@ -471,7 +470,7 @@ export async function main(argv, { print = (t) => process.stdout.write(t), uid =
       : `\nStill stopping: waiting for the running check to end (each has its own time limit). Ending it any harder would leave files.\n`);
     stop?.(sig);
   };
-  const sigs = ['SIGINT', 'SIGTERM', 'SIGHUP'];
+  const sigs = ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'];
   for (const s of sigs) signals.on(s, onSignal);
   let out;
   try {

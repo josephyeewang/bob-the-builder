@@ -343,11 +343,15 @@ around it differs a little, so a check 6, 9 or 11 FAIL that names the environmen
 Ctrl-C does not end it at once: no further check starts, the one running (an install or the tests can take minutes)
 is waited for, then everything is removed and the report shows what was not tried. A real start of the same card while
 it runs removes the dry run's check-11 test copy (each start clears its card's old ones), which shows as a check 11 FAIL;
-run it again. ALL PASS covers the start only: whether the runner is up is `daemons check`'s.
-Past a failed safety gate (the roots, the wall, the test-product mark, the rules snapshot, the other sessions' walls,
-the settings walls, or launch checks 0 to 3) it does not run checks 4, 6 and 11, which run the branch's code: they
-show NOT TRIED, as the real start would not run them either. Fix the gate and run it again. Claude Code keeps its own
-transcript of check 6's (and the lock-down's) claude runs in the workers' home, as it does for any start; those stay.
+run it again. ALL PASS covers the start only: whether the runner is up is `daemons check`'s, and it reads the config
+as it is now, so it assumes the runner was restarted after the last config or install change (a runner still on the
+old one refuses every start with "restart it"). Like a real start, it can't stop a process the branch's install or
+tests detach on purpose; and a `kill -9` can leave the running check's processes, not just files.
+Past any failed stage it does not run checks 4, 6 and 11, which run the branch's code (the install, a claude, the
+tests): they show NOT TRIED, as the real start, which stops at the first failed stage, would not run them either. The
+checks that only read still run, so one run lists every gap it can; fix those and run it again for the rest. Claude Code keeps its own
+transcript of check 6's (and the lock-down's) claude runs in the workers' home, and a project entry in the account's
+`.claude.json`, as it does for any start; those stay.
 
 ## Part 4 — the watch-only week's rules copy and hourly job (R-0b-122)
 
