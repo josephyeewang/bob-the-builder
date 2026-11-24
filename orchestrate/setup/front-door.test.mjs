@@ -12,7 +12,8 @@ import { tempDir } from '../shared/test-tmp.mjs';
 import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.mjs';
 import { RUNNER_CONFIG } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { NO_FILE_SOURCES } from '../modules/M4-workshop/launcher/settings-names.mjs';
-import { SETTINGS_NAME, SETUP_FILE, SKILL_FILE, USAGE, frontDoorEnv, main, startFrontDoor } from './front-door.mjs';
+import { FILED_NAME } from '../modules/M1-front-door/filed.mjs';
+import { FILED_EVERY_MS, FILED_TABS, SETTINGS_NAME, SETUP_FILE, SKILL_FILE, USAGE, frontDoorEnv, main, startFrontDoor } from './front-door.mjs';
 
 const P = 'orchestrate-test';
 const OWNER = 'joe';
@@ -28,9 +29,9 @@ function world({ rc = {}, check = { ok: true, version: '2.1.316' } } = {}) {
   writeFileSync(setupFile, JSON.stringify({ base, owner: OWNER, products: ['insiderintent', P], dispatcher: { product: P } }));
   const installRoot = join(base, 'install', 'orchestrate');
   const review = { claudeBin: join(installRoot, 'claude-code', '2.1.316', 'claude'), hooksDir: join(installRoot, 'hooks'), pin: '2.1.316', bobFolder: join(base, 'bob'),
-    recordRoot: join(base, 'products', P, 'store'), rules: { secrets: { paths: [join(base, 'secret-one')] }, production: { env_files: [], hosts: [], programs: [] } }, ...rc };
+    recordRoot: join(base, 'products', P, 'store'), recordUid: process.getuid(), rules: { secrets: { paths: [join(base, 'secret-one')] }, production: { env_files: [], hosts: [], programs: [] } }, ...rc };
   writeFileSync(join(installRoot, RUNNER_CONFIG), JSON.stringify(review));
-  const calls = { check: [], run: [] };
+  const calls = { check: [], run: [], timers: [] };
   const io = {
     readText: (f) => readFileSync(f, 'utf8'),
     mkdir: (d, mode) => mkdirSync(d, { mode }),
@@ -39,7 +40,10 @@ function world({ rc = {}, check = { ok: true, version: '2.1.316' } } = {}) {
     uid: 501, user: OWNER, home, env: { PATH: '/usr/bin', HOME: home, TERM: 'xterm-ghostty', ANTHROPIC_API_KEY: 'never-passed', GH_TOKEN: 'never-passed' },
     now: () => new Date(2026, 10, 23, 9, 5, 7).getTime(), uuid: () => '00000000-0000-4000-8000-000000000001',
     check: async (x) => { calls.check.push(x); return check; },
-    run: async (bin, args, opts) => { calls.run.push({ bin, args, opts }); return 0; },
+    run: async (bin, args, opts) => { calls.run.push({ bin, args, opts, filedAtStart: readFileSync(join(opts.cwd, FILED_NAME), 'utf8'), timers: calls.timers.length }); return 0; },
+    putFiled: (f, text) => writeFileSync(f, text, { mode: 0o600 }),
+    every: (fn, ms) => { calls.timers.push({ fn, ms, stopped: false }); return calls.timers.length - 1; },
+    stop: (t) => { calls.timers[t].stopped = true; },
   };
   return { base, home, setupFile, installRoot, review, io, calls, outbox: join(base, 'outboxes', 'front_door', `fd-${P}-20261123090507`) };
 }
@@ -49,7 +53,7 @@ const flagValue = (args, f) => args[args.indexOf(f) + 1];
 test('step 6: the start makes the session\'s outbox, writes the rendered settings there, runs check 6 on the full profile, then starts claude in the tab', async () => {
   const w = world();
   const r = await startFrontDoor({ product: P, setupFile: w.setupFile }, w.io);
-  assert.deepEqual(r, { ok: true, sessionId: `fd-${P}-20261123090507`, outbox: w.outbox, code: 0 });
+  assert.deepEqual(r, { ok: true, sessionId: `fd-${P}-20261123090507`, outbox: w.outbox, code: 0, filed: `What Front Door tab fd-${P}-20261123090507 filed (from the Record):\n  nothing filed in this tab` });
   const settingsFile = join(w.outbox, SETTINGS_NAME);
   const settings = JSON.parse(readFileSync(settingsFile, 'utf8'));
   const deny = JSON.stringify(settings.permissions.deny);
@@ -147,4 +151,34 @@ test('step 6: the command line says how to use it, and says plainly when the sta
   assert.equal(await main(['start', P, '--setup', w.setupFile], w.io, (s) => said.push(s)), 1);
   assert.match(said.pop(), /^The Front Door did not start: launch check 6 refused/);
   assert.deepEqual(frontDoorEnv({ PATH: 'p', SECRET: 's', LANG: 'en' }), { PATH: 'p', LANG: 'en' });
+});
+
+test('step 7: `filed <product>` reads back the product\'s latest tabs, newest first, from its own Record; none started says so', async () => {
+  const w = world();
+  const said = [];
+  assert.equal(await main(['filed', P, '--setup', w.setupFile], w.io, (s) => said.push(s)), 0);
+  assert.equal(said.pop(), `No Front Door tab has been started for ${P}.`);
+  const fd = join(w.base, 'outboxes', 'front_door');
+  const ids = ['20261120080000', '20261121080000', '20261122080000', '20261123080000', '20261123090000', '20261123100000'].map((t) => `fd-${P}-${t}`);
+  for (const id of [...ids, 'fd-insiderintent-20261123100000']) mkdirSync(join(fd, id));
+  const asked = [];
+  w.io.readFiled = (x) => { asked.push(x); return { text: `read ${x.sessionId}` }; };
+  assert.equal(await main(['filed', P, '--setup', w.setupFile], w.io, (s) => said.push(s)), 0);
+  assert.deepEqual(asked.map((x) => x.sessionId), ids.slice(1).reverse(), `the ${FILED_TABS} newest of this product's tabs`);
+  assert.ok(asked.every((x) => x.recordRoot === w.review.recordRoot && x.recordUid === w.review.recordUid && x.outbox === join(fd, x.sessionId)));
+  assert.equal(said.pop(), ids.slice(1).reverse().map((id) => `read ${id}`).join('\n'));
+  // The session's own read-back is printed when the tab ends.
+  assert.equal(await main(['start', P, '--setup', w.setupFile], w.io, (s) => said.push(s)), 0);
+  assert.equal(said.pop(), `read fd-${P}-20261123090507`);
+  // While the tab runs, .filed.md holds the read-back, from before claude starts, kept fresh on a timer stopped at the end.
+  const run = w.calls.run.at(-1);
+  assert.equal(run.filedAtStart, `read fd-${P}-20261123090507\n`);
+  const t = w.calls.timers.at(-1);
+  assert.equal(t.ms, FILED_EVERY_MS); assert.equal(t.stopped, true); assert.equal(run.timers, w.calls.timers.length, 'the timer runs while claude does');
+  w.io.readFiled = () => ({ text: 'fresher' }); t.fn();
+  assert.equal(readFileSync(join(fd, `fd-${P}-20261123090507`, FILED_NAME), 'utf8'), 'fresher\n');
+  // Rules that name no Record owner can't read anything back: refused, not "nothing filed".
+  writeFileSync(join(w.installRoot, RUNNER_CONFIG), JSON.stringify({ ...w.review, recordUid: undefined }));
+  assert.equal(await main(['filed', P, '--setup', w.setupFile], w.io, (s) => said.push(s)), 1);
+  assert.match(said.pop(), /names no Record owner/);
 });

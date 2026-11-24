@@ -30,6 +30,12 @@ Rules that hold for every file:
 
 Reply: **"I can file a new idea, sort a piece of work on a product into a Bob mode and read it back, file a research ask, and flag a merged change to undo. Pause, away, back, wrap up and rotate aren't wired yet."** Write nothing.
 
+## What did I file? ("what did I file", "what's filed", "did that go in")
+
+Read `.filed.md` in your folder and reply with its lines exactly as they are. It is read from the Record by code, not by
+you, every few seconds. Never say a file was filed that it does not list as filed; if `.filed.md` is missing, reply
+**"I can't see what was filed yet. Type `node …/setup/front-door.mjs filed <product>` in another tab to read it."**
+
 ## New idea ("new: …", "idea: …", "I have an idea")
 
 Write `idea-<id>.md`: the owner's words exactly as they said them, with `> ` at the start of every line. Nothing else in the file.

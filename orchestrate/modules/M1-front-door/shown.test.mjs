@@ -59,13 +59,14 @@ export const SHOWN = Object.freeze({
       `- **You should see:** "${NOT_WIRED} nothing changed for your products. To set trip mode now, open a session on the Mini." and "${NOT_WIRED} nothing changed for X. To pause it now, open a session on the Mini.", where X is the test product's name as the product list spells it. No notification. With one test product no question box should appear; if one does, pick the test product. Claude checks that the outbox holds no new \`state-\` or \`request-\` file.`,
       '- This step proves nothing for R-0b-83. The trip dry run is parked in `parked-skill-wording.md`; the PR that lands the trip consumer brings it back here and proves it on the phone before merging (L167 M-2).'],
   },
-  headings: ['What can you do? ("hello", "what can you do?", "help")', 'New idea ("new: …", "idea: …", "I have an idea")',
+  headings: ['What can you do? ("hello", "what can you do?", "help")', 'What did I file? ("what did I file", "what\'s filed", "did that go in")', 'New idea ("new: …", "idea: …", "I have an idea")',
     'A piece of work: sort it into a Bob mode, read it back, wait for [Go]', 'Research ask ("find out …", "research …", "look into …")',
     'That change was wrong ("that change was wrong", "undo #41", "take that back")',
     'Not available yet: pause, away, back, wrap up, rotate', 'Not wired yet'],
   // Every reply the skill gives in bold quotes, in file order (wrapped lines joined by one space).
   replies: [
     "I can file a new idea, sort a piece of work on a product into a Bob mode and read it back, file a research ask, and flag a merged change to undo. Pause, away, back, wrap up and rotate aren't wired yet.",
+    'I can\'t see what was filed yet. Type `node …/setup/front-door.mjs filed <product>` in another tab to read it.',
     'Filed: idea <id>, saved for the Lead. The Mini confirms in a minute.',
     'To start X, open a session on the Mini and say `bob NEW X`.',
     "That isn't wired yet, so nothing was filed. To start it now, open a session on the Mini and say `bob <MODE> X`.",
@@ -77,7 +78,7 @@ export const SHOWN = Object.freeze({
   ],
   // The whole skill, so a sentence added to a section pinned nowhere above still fails (L197 m1, P15). When the skill
   // changes on purpose: update this, and tell lane 1 (its ALLOWED list).
-  skillSha256: 'e2cd4da78b3f3d77b576c8f575acb43eb1701fd129180c632cce69fb7b659863',
+  skillSha256: '81bb190b0d7ce4a78a4737561280e417766832a96cbe71d3fe5b6ae3373646b9',
   // Step 2 of the work section, wrapped lines joined by one space (L202 N1): the rule that each option is its label.
   step2: '2. **Unsure (no cues fit, more than one mode\'s do, "build a new …" on its own, or a new-project cue that names one of the owner\'s products):** ask one question box, "Which of these do you mean?", with the modes that fit as options, each written exactly as its label in the table, and the one you recommend first with " (Recommended)" after its label. When no cue fits, recommend think: the first option is then `Think it through in a thinking room (Recommended)`. Then go to step 1.',
   ownerHeadings: { 1: '1. Reach it from the phone (R-0b-81)', 3: '3. A question box, and a write outside the outbox (R-0b-81)',
