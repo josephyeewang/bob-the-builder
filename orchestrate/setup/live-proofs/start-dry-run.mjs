@@ -95,6 +95,11 @@ export const STAGES = Object.freeze([
 const LABEL = Object.fromEntries(STAGES);
 const ORDER = STAGES.map(([k]) => k);
 const INSIDE = ORDER.slice(ORDER.indexOf('request'), ORDER.indexOf('cleanup'));
+// The launch checks that run the branch's code: 4 the install, 6 a headless claude, 11 the smoke and the tests.
+export const RUNS_CODE = new Set([4, 6, 11]);
+// The gates the real start holds every start at (or refuses at) before any of that code runs. One failed, or not
+// tried, means those checks are not tried either: keep-going goes on only through checks that read.
+export const SAFETY = Object.freeze(['roots', 'wall', 'testProduct', 'snapshot', 'memory', 'liveWalls', 'settings', 'saveSettings', 'check0', 'check1', 'check2', 'check3']);
 
 /** A session id the Dispatcher never makes (its are UUIDs), within the start port's SESSION_ID. */
 export const drySessionId = (now = Date.now(), rand = () => randomBytes(4).toString('hex')) => `DRYRUN-${now.toString(36)}-${rand()}`;
@@ -301,6 +306,12 @@ export async function dryRun({ c, configWhy, product, card, io = {} }) {
           checks[k.n] = async (ctx) => {
             let r;
             if (abortWhy) { set(`check${k.n}`, 'NOT TRIED', abortWhy); return refuse(abortWhy); }
+            if (RUNS_CODE.has(k.n)) {
+              // The real start runs no install, claude or tests past a failed safety gate, and nor does the dry run:
+              // those gates are why the branch's code may run here at all (the sandbox alone is not trusted).
+              const gates = SAFETY.filter((g) => res.get(g)?.result === 'FAIL' || res.get(g)?.result === 'NOT TRIED');
+              if (gates.length) { set(`check${k.n}`, 'NOT TRIED', `it would run the branch's code (an install, claude or the tests) past a failed safety gate: ${gates.map((g) => LABEL[g]).join('; ')}`); return { ok: true }; }
+            }
             if (typeof port !== 'function') r = refuse('no check is wired');
             else { try { r = await port(ctx); } catch (e) { r = refuse(`the check failed: ${said(e)}`); } }
             if (r?.ok === true) pass(`check${k.n}`);
@@ -433,6 +444,13 @@ export async function main(argv, { print = (t) => process.stdout.write(t), uid =
   umask = (m) => process.umask(m), say = (t) => process.stderr.write(t), signals = process, configOf = configFrom } = {}) {
   // The runner's job runs with this umask (runner-job.mjs); sudo's is 022, and check 1 refuses a copy others can read.
   umask(RUNNER_JOB_UMASK);
+  // A closed window makes every later write fail; a failed write must never end the run before it removes what it
+  // made, so both writers swallow their errors, and after a hang-up nothing more is written.
+  let hungUp = false;
+  if (signals === process) for (const st of [process.stdout, process.stderr]) st.on?.('error', () => {});
+  const sayRaw = say; const printRaw = print;
+  say = (t) => { if (hungUp) return; try { sayRaw(t); } catch { /* the window is gone */ } };
+  print = (t) => { if (hungUp) return; try { printRaw(t); } catch { /* the window is gone */ } };
   const product = arg(argv, '--product'); const card = arg(argv, '--card');
   let c = null; let configWhy;
   try { c = configOf(readConfig(arg(argv, '--config'))); } catch (e) { configWhy = configUnreadable(e); }
@@ -448,6 +466,7 @@ export async function main(argv, { print = (t) => process.stdout.write(t), uid =
   let stop = null; let asked = 0;
   const onSignal = (sig) => {
     asked += 1;
+    if (sig === 'SIGHUP') { stop?.(sig); hungUp = true; return; }
     say(asked === 1 ? `\nStopping (${sig}): no further check starts; waiting for the running one to end, then removing what the dry run made.\n`
       : `\nStill stopping: waiting for the running check to end (each has its own time limit). Ending it any harder would leave files.\n`);
     stop?.(sig);

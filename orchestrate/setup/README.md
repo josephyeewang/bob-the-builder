@@ -344,6 +344,10 @@ Ctrl-C does not end it at once: no further check starts, the one running (an ins
 is waited for, then everything is removed and the report shows what was not tried. A real start of the same card while
 it runs removes the dry run's check-11 test copy (each start clears its card's old ones), which shows as a check 11 FAIL;
 run it again. ALL PASS covers the start only: whether the runner is up is `daemons check`'s.
+Past a failed safety gate (the roots, the wall, the test-product mark, the rules snapshot, the other sessions' walls,
+the settings walls, or launch checks 0 to 3) it does not run checks 4, 6 and 11, which run the branch's code: they
+show NOT TRIED, as the real start would not run them either. Fix the gate and run it again. Claude Code keeps its own
+transcript of check 6's (and the lock-down's) claude runs in the workers' home, as it does for any start; those stay.
 
 ## Part 4 — the watch-only week's rules copy and hourly job (R-0b-122)
 

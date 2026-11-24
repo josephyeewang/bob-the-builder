@@ -102,7 +102,12 @@ test('several planted failures are all told in one run, and the run is not ready
     }
     assert.equal(s.start.result, 'NOT TRIED');
     assert.equal(s.recheck.result, 'FAIL'); assert.match(s.recheck.why, /builder wall is down/, 'the wall asked again just before claude');
-    assert.match(s.start.why, /reached only past 5 failed stages/);
+    for (const n of [4, 6, 11]) {
+      assert.equal(s[`check${n}`].result, 'NOT TRIED', `check ${n} runs the branch's code: not past a failed gate`);
+      assert.match(s[`check${n}`].why, /past a failed safety gate: the builder wall lets sessions start/);
+      assert.equal(w.ran[n], undefined, `check ${n}'s port was never called`);
+    }
+    assert.match(s.start.why, /reached only past 8 failed stages/);
     const r = report(out.results);
     assert.equal(r.ok, false);
     assert.match(r.text, /5 stages failed:/);
@@ -113,14 +118,14 @@ test('several planted failures are all told in one run, and the run is not ready
 });
 
 test('keep going really continues: after a failing check, the later checks run (their ports are called), each told on its stand-ins', async () => {
-  const w = world({ plant: { prompt: 'the card has no plan', checks: { 1: 'the copy holds another head' } } });
+  const w = world({ plant: { prompt: 'the card has no plan', checks: { 7: 'the hooks are not the pinned ones' } } });
   try {
     const out = await w.run();
     const s = w.byStage(out);
     assert.equal(s.prompt.result, 'FAIL');
     assert.ok(w.calls.some((x) => Array.isArray(x) && x[0] === 'walled'), 'the settings were made after the prompt failed');
-    assert.equal(s.check1.result, 'FAIL');
-    for (const n of [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]) {
+    assert.equal(s.check7.result, 'FAIL');
+    for (const n of [1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12]) {
       assert.ok(w.ran[n] >= 1, `check ${n}'s port was called`);
       assert.equal(s[`check${n}`].result, 'PASS', `check ${n}`);
       assert.ok(s[`check${n}`].on.includes('the worker prompt'), `check ${n} says it ran on the prompt's stand-in`);
@@ -180,7 +185,7 @@ test('the card can\'t be read: the start is not tried; the gates before it were 
   } finally { w.done(); }
 });
 
-test('a throw inside the start (past the copy and the outbox): the dry run removes them itself', async () => {
+test('a throw inside the start (past the copy and the outbox): told, and nothing is left (the start\'s own undo, then the dry run\'s cleanup)', async () => {
   const w = world({ plant: { walledThrows: true } });
   try {
     const out = await w.run();
@@ -273,6 +278,22 @@ test('main: a signal during the run waits for it to end (no early exit), takes i
       assert.deepEqual(w.leftovers(), []); assert.equal(w.spawns, 0);
     } finally { w.done(); }
   }
+});
+
+test('main: a closed window (SIGHUP, then every write failing) still ends the run and removes everything', async () => {
+  const w = world();
+  const handlers = {}; let writes = 0;
+  const signals = { on: (k, f) => { handlers[k] = f; }, off: (k) => { delete handlers[k]; } };
+  const gone = () => { writes += 1; throw Object.assign(new Error('write EIO'), { code: 'EIO' }); };
+  const deps = { ...w.io.deps, promptFor: () => { handlers.SIGHUP('SIGHUP'); return 'do the card'; } };
+  const argv = ['--product', 'p1', '--card', 'C-1'];
+  try {
+    const code = await main(argv, { print: gone, say: gone, uid: 603, readConfig: () => w.c, configOf: (x) => x, umask: () => {}, signals,
+      io: { ...w.io, ownDirUid: 603, deps } });
+    assert.equal(code, 1);
+    assert.ok(writes >= 1, 'it did try to write before the hang-up');
+    assert.deepEqual(w.leftovers(), []); assert.deepEqual(w.ran, {}, 'no check started after the hang-up'); assert.equal(w.spawns, 0);
+  } finally { w.done(); }
 });
 
 test('the recheck just before claude: a gate or check failing there is told, and claude still not spawned', async () => {
