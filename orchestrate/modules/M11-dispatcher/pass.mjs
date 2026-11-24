@@ -216,7 +216,8 @@ export async function stopProcessGroup({ pgid, kill = (p, s) => process.kill(-p,
 
 // An undo card is M9's kind exact_reverse (L74); the session kind stays 'undo'.
 const isUndo = (card) => card.kind === 'exact_reverse';
-const kindOf = (card) => (isUndo(card) ? 'undo' : card.kind === 'script' ? 'script' : 'editing');
+// Exported for the start dry run (setup/live-proofs/start-dry-run.mjs, L1346), which starts the card as a pass would.
+export const kindOf = (card) => (isUndo(card) ? 'undo' : card.kind === 'script' ? 'script' : 'editing');
 // The M10 profile a start is asked for: a script card runs the script profile, every other start a worker.
 const startRole = (kind) => (kind === 'script' ? 'script' : 'worker');
 // A script session reports role 'script' (its M10 profile, startRole) and follows the worker's safe point (L759).

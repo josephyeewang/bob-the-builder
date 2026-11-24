@@ -44,7 +44,7 @@ import { loadMemory, processGroupPorts } from '../../wiring/runner-loop.mjs';
 import { runnerCopy, runnerOutbox, RUNNER_ROLE_OF } from '../../wiring/owner-status.mjs';
 import { CLONE_CONFIG_TEMPLATE } from '../../modules/M4-workshop/git/save-work.mjs';
 import { bundleName } from '../../modules/M4-workshop/git/push.mjs';
-import { configUnreadable, lockRefused, notOwnUser, pinProblem, recordUnwritten } from './before-run.mjs';
+import { configUnreadable, lockRefused, notInConfig, notOwnUser, pinProblem, recordUnwritten } from './before-run.mjs';
 
 export const TEST_REPO = 'orchestrate-test';
 export const STEPS = Object.freeze([
@@ -72,7 +72,7 @@ export function guardProblem({ c, product, uid, ownDirUid, claudeVersion }) {
   const own = notOwnUser({ c, uid, ownDirUid }); if (own) return own;
   if (typeof product !== 'string' || !product) return 'no --product was named. Name the test product';
   const p = Object.hasOwn(c?.products ?? {}, product) ? c.products[product] : null;
-  if (!p) return `product ${product} is not in the worker runner's config`;
+  if (!p) return notInConfig(product);
   if (String(p.repo).split('/')[1] !== TEST_REPO) return `product ${product}'s repository is ${p.repo}, not the test repository (${TEST_REPO}). This proof runs on the test product only`;
   if (typeof c.claudeBin !== 'string' || !c.claudeBin.startsWith('/')) return 'the config names no pinned claude (claudeBin), so nothing can run inside the lock-down';
   const pin = pinProblem({ c, claudeVersion }); if (pin) return pin;

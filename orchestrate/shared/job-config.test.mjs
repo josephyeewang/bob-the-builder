@@ -176,7 +176,9 @@ export const LOADERS = {
     // One reader for the runner and the runLocked proof (L1121 m1): main reads through it, and it through the checked reader.
     ['export async function main(argv, { readConfig = (f) => readRunnerConfig(f, selfPath()), lock = (dir) => makeLock({ dir, timeoutMs: 2_000 }),', 1],
     ["  if (!self) throw new Error('its own script\\'s path can\\'t be read, so it can\\'t be checked');\n  return readJobConfig(file, { code: [], optionalCode: ['budget'], self });", 1],
-    ['  try { const raw = readConfig(argv[0]); c = { ...checkRunnerConfig(raw), sourceSha256: sourceOf(raw) }; } catch (e) {', 1],
+    // main reads through configFrom (L1346: the start dry run reads the same way), and configFrom through the check.
+    ['  try { c = configFrom(readConfig(argv[0]), sourceOf); } catch (e) {', 1],
+    ['export const configFrom = (raw, sourceOf = readSha256) => ({ ...checkRunnerConfig(raw), sourceSha256: sourceOf(raw) });', 1],
     [`export async function importBudget(file, config) { return (await ${IMPORT}(pathToFileURL(file).href)).budget(config); }`, 1]] },
 };
 const CALL_ANY = /(?<![\w$.])import\s*\(/g;

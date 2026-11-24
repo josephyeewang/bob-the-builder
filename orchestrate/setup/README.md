@@ -320,6 +320,52 @@ to sign in. Replace it as above.
 Checked on macOS 27.0.1 (these notes expire with an OS upgrade): `dscl . -read` of a missing key prints `No such key` on
 stderr with exit 0; opening a link with `O_NOFOLLOW|O_DIRECTORY` gives `ENOTDIR` (Linux: `ELOOP`).
 
+### The start dry run: every start check on one card at once (L1346)
+
+When the worker runner keeps refusing a card's start, the runner's log shows one reason per Dispatcher pass, so each gap
+costs a pass. The dry run runs the runner's own start on that card once, through every launch check, and stops where
+claude would be started. Run it on the Mini, as builder, from the installed copy:
+
+`sudo -H -u builder <installRoot>/bin/node <installRoot>/setup/live-proofs/start-dry-run.mjs --config <installRoot>/worker-runner.json --product <product> --card <card> --run-code`
+
+Leave out `--run-code` for a first look: every check that only reads runs, and checks 4, 6 and 11 (the install, a
+headless claude, the smoke and baseline tests: the branch's code) are not run. Add it only for a card the Dispatcher
+would start: its go given, its dependencies merged, its round within the cap. The dry run reads what it can of that
+(the card ready with no claim, a kind the Dispatcher starts, no outage open, and launch check 12, asked before the
+checks that run code) but not the rest, which needs the Dispatcher's own Record and rules.
+
+It prints one PASS, FAIL or NOT TRIED line per stage, then every failure. A failed stage is replaced by a stand-in where a
+later stage can still be tried; those later lines name the stand-ins they ran on, and nothing on a stand-in counts as a
+pass. It exits 0 only when every stage passed (or does not apply to this card). The launch checks run for real (the install, one headless claude
+read-back, the smoke and baseline tests: a few minutes). It makes only what the real start makes, under its own
+`DRYRUN-` session id and a copy beside the card's own, and removes all of it at the end; it never writes the Record, the
+requests folder or the status file, and takes no runner lock. The card must be ready: the Dispatcher starts no other (a claimed card is another session's, whose start may be on now), so any other state is a FAIL, and the
+install, claude and tests are then not run. Nor are they when the card holds a claim, is a kind the Dispatcher never
+starts, an outage is open, launch check 12 (the budget, the caps, the files no other card holds) refuses it, or the
+card moved (claimed, or no longer ready) while the run went on. The Dispatcher's other holds before it claims are not
+asked: the card's round, dependencies and go, M10's start_session (the product's own start rules, and whether the
+script profile is on), the host lock's copy and the amber Tier-1 queue. Nor is whether the runner is up on its current config: run setup.mjs
+daemons check first, and restart the runner after a config or install change, or a real start is refused there even
+after ALL PASS.
+Each stage's line also shows as it is decided, while it runs. Stopped part way (Ctrl-C, a closed window), it removes
+what it made before it exits; only a `kill -9` or a power cut can leave files, named with `DRYRUN-`, in the runner's
+settings, copies and outbox folders, to remove by hand. While it runs, its settings files would stop the runner from
+restarting with an empty memory (the runner refuses settings files it has no session for), so run it while the runner
+is up. It runs as builder from a Terminal, not from launchd: it sets the runner job's umask itself, but the environment
+around it differs a little, so a check 6, 9 or 11 FAIL that names the environment is worth one real start to confirm.
+Ctrl-C does not end it at once: no further check starts, the one running (an install or the tests can take minutes)
+is waited for, then everything is removed and the report shows what was not tried. A real start of the same card while
+it runs removes the dry run's check-11 test copy (each start clears its card's old ones), which shows as a check 11 FAIL;
+run it again. ALL PASS covers the start only: whether the runner is up is `daemons check`'s, and it reads the config
+as it is now, so it assumes the runner was restarted after the last config or install change (a runner still on the
+old one refuses every start with "restart it"). Like a real start, it can't stop a process the branch's install or
+tests detach on purpose; and a `kill -9` can leave the running check's processes, not just files.
+Past any failed stage it does not run checks 4, 6 and 11, which run the branch's code (the install, a claude, the
+tests): they show NOT TRIED, as the real start, which stops at the first failed stage, would not run them either. The
+checks that only read still run, so one run lists every gap it can; fix those and run it again for the rest. Claude Code keeps its own
+transcript of check 6's (and the lock-down's) claude runs in the workers' home, and a project entry in the account's
+`.claude.json`, as it does for any start; those stay.
+
 ## Part 4 — the watch-only week's rules copy and hourly job (R-0b-122)
 
 Config: an optional `"watch": { "repo": "<owner/name>", "rulesSha256": "<64 hex>", "app": { "id": "<digits>", "installation": "<digits>", "keyFile": "<name>" } }` in the root-owned config. Without it,
