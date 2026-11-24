@@ -32,13 +32,13 @@ function world({ plant = {} } = {}) {
     if (plant.checkThrows === n) throw new Error(`check ${n} blew up`);
     return plant.checks?.[n] ? { ok: false, reason: plant.checks[n] } : { ok: true };
   };
-  const ports = Object.fromEntries([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].map((n) => [n, check(n)]));
+  const ports = Object.fromEntries([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].filter((n) => !(plant.noPort ?? []).includes(n)).map((n) => [n, check(n)]));
   w.io = {
     sessionId: SID,
     roots: () => plant.roots ?? null,
     inputs: async () => ({ budget: plant.noBudget ? null : { rec: plant.rec ?? {
       read: (e, id) => { if (plant.readThrows) throw new Error(plant.readThrows); return e === 'fact' && id === 'outage' && plant.outage ? { doc: { state: 'open' } } : null; } } }, bobManifest: null }),
-    wallGate: async () => () => plant.wall ?? null,
+    wallGate: async () => () => { w.wallAsks = (w.wallAsks ?? 0) + 1; return plant.wall ?? (plant.wallLater && w.wallAsks > 1 ? plant.wallLater : null); },
     snapshots: () => ({ held: () => plant.snapshot ?? null }),
     testProduct: () => plant.testProduct ?? null,
     memory: () => { w.memoryReads = (w.memoryReads ?? 0) + 1; if (plant.memory) throw new Error(plant.memory); if (plant.memoryLater && w.memoryReads > 1) return plant.memoryLater; return { sessions: [], requests: {} }; },
@@ -104,16 +104,16 @@ test('several planted failures are all told in one run, and the run is not ready
       assert.equal(s[k].result, 'FAIL', k); assert.match(s[k].why, re, k);
     }
     assert.equal(s.start.result, 'NOT TRIED');
-    assert.equal(s.recheck.result, 'FAIL'); assert.match(s.recheck.why, /builder wall is down/, 'the wall asked again just before claude');
+    assert.equal(s.recheck.result, 'PASS', 'the wall, asked again just before claude, says what was told already: not told twice');
     for (const n of [4, 6, 11]) {
       assert.equal(s[`check${n}`].result, 'NOT TRIED', `check ${n} runs the branch's code: not past a failed gate`);
       assert.match(s[`check${n}`].why, /past a stage the real start refuses at: the builder wall lets sessions start/);
       assert.equal(w.ran[n], undefined, `check ${n}'s port was never called`);
     }
-    assert.match(s.start.why, /reached only past 8 stages failed or not tried/);
+    assert.match(s.start.why, /reached only past 7 stages failed or not tried/);
     const r = report(out.results);
     assert.equal(r.ok, false);
-    assert.match(r.text, /5 stages failed:/);
+    assert.match(r.text, /4 stages failed:/);
     assert.match(r.text, /NOT READY/);
     assert.deepEqual(w.leftovers(), []);
     assert.equal(w.spawns, 0);
@@ -526,4 +526,31 @@ test('main: a config that can\'t be read is a FAIL line and exit 1, with every o
   assert.equal(code, 1);
   assert.match(text, /^FAIL\s+the worker runner's config is read/m);
   assert.match(text, /NOT READY/);
+});
+
+test('the recheck tells a hold that is new just before claude (the wall down since it was first asked)', async () => {
+  const w = world({ plant: { wallLater: 'the builder wall went down' } });
+  try {
+    const out = await w.run();
+    const s = w.byStage(out);
+    assert.equal(s.wall.result, 'PASS');
+    assert.equal(s.recheck.result, 'FAIL'); assert.match(s.recheck.why, /builder wall went down/);
+    assert.equal(s.start.result, 'NOT TRIED');
+    assert.equal(w.spawns, 0);
+    assert.deepEqual(w.leftovers(), []);
+  } finally { w.done(); }
+});
+
+test('a check that runs code with no port wired FAILs as unwired, with or without --run-code (never hidden as not asked)', async () => {
+  for (const runCode of [false, true]) {
+    const w = world({ plant: { noPort: [4] } });
+    try {
+      const out = await w.run({}, { runCode });
+      const s = w.byStage(out);
+      assert.equal(s.check4.result, 'FAIL', `runCode ${runCode}`); assert.match(s.check4.why, /no check is wired/);
+      assert.equal(report(out.results).ok, false);
+      assert.equal(w.spawns, 0);
+      assert.deepEqual(w.leftovers(), []);
+    } finally { w.done(); }
+  }
 });

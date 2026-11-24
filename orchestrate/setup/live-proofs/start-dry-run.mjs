@@ -165,7 +165,9 @@ export async function dryRun({ c, configWhy, product, card, runCode = false, io 
     const wallGate = await (io.wallGate ?? ((x) => wallGateOf(x, { log })))(c);
     const snaps = (io.snapshots ?? ((x) => rootSnapshots(x, { log })))(c);
     const testProduct = io.testProduct ?? testProductProblem;
-    const ask = (k, f) => { let w; try { w = f(); } catch (e) { w = `it can't be checked (${said(e)})`; } if (w) failOn(k, w, `${LABEL[k]} (let through)`); else pass(k); };
+    // The holds told here; the recheck asks the same three again (heldOf) and tells only a hold not told already.
+    const toldHolds = new Set();
+    const ask = (k, f) => { let w; try { w = f(); } catch (e) { w = `it can't be checked (${said(e)})`; } if (w) { toldHolds.add(w); failOn(k, w, `${LABEL[k]} (let through)`); } else pass(k); };
     ask('wall', () => wallGate());
     ask('testProduct', () => testProduct(budget, product));
     ask('snapshot', () => snaps.held(product));
@@ -281,6 +283,7 @@ export async function dryRun({ c, configWhy, product, card, runCode = false, io 
         heldCalls += 1;
         if (heldCalls === 1) { reach('signin'); return null; }   // the gates were told above, each on its own
         try { heldAgain = realHeld(q); } catch (e) { heldAgain = said(e); }
+        if (heldAgain && toldHolds.has(heldAgain)) heldAgain = null;
         return null;
       },
       account: () => {
@@ -351,7 +354,8 @@ export async function dryRun({ c, configWhy, product, card, runCode = false, io 
           checks[k.n] = async (ctx) => {
             let r;
             if (abortWhy) { set(`check${k.n}`, 'NOT TRIED', abortWhy); return refuse(abortWhy); }
-            if (RUNS_CODE.has(k.n)) {
+            if (typeof port !== 'function') r = refuse('no check is wired');
+            else if (RUNS_CODE.has(k.n)) {
               if (!runCode) { set(`check${k.n}`, 'NOT TRIED', NOT_ASKED); return { ok: true }; }
               // The real start runs no install, claude or tests past any stage it refuses at, and nor does the dry
               // run: those stages are why the branch's code may run here at all (the sandbox alone is not trusted).
@@ -370,8 +374,9 @@ export async function dryRun({ c, configWhy, product, card, runCode = false, io 
               }
               if (gates.length) { set(`check${k.n}`, 'NOT TRIED', `it would run the branch's code (an install, claude or the tests) past a stage the real start refuses at: ${gates.join('; ')}`); return { ok: true }; }
             }
-            if (typeof port !== 'function') r = refuse('no check is wired');
-            else { try { r = await port(ctx); } catch (e) { r = refuse(`the check failed: ${said(e)}`); } }
+            // A stop may have landed while check 12 was asked: no code runs after it.
+            if (abortWhy) { set(`check${k.n}`, 'NOT TRIED', abortWhy); return refuse(abortWhy); }
+            if (typeof port === 'function') { try { r = await port(ctx); } catch (e) { r = refuse(`the check failed: ${said(e)}`); } }
             // A stop while it ran may have killed its children (Ctrl-C reaches the ones in the Terminal's group): what it
             // answered then proves nothing either way.
             if (abortWhy) { set(`check${k.n}`, 'NOT TRIED', `${abortWhy} while it ran`); return refuse(abortWhy); }
