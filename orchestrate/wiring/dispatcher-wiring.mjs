@@ -8,6 +8,7 @@
 //
 // WHAT IS REAL (PR A of R-0b-162):
 //   - the Record: M9 openRecord, the Store Writer, at config.recordRoot, owned by config.ownerUid;
+//     it reads the sessions' outboxes under config.outboxRoot, each role's files owned by its own Mac user (recordOutbox);
 //   - the rules: M10's reader (GitHub main, Joe-approved versions only) behind M10's engine and shared/rules.mjs, the
 //     same build the day-one test uses; the GitHub client can only read (M6 watch-only readOnlyClient) and takes its
 //     token from a private file of this user's (watch-only tokenFile), never from the config itself;
@@ -77,7 +78,10 @@ import { isAbsolute, join } from 'node:path';
 import { spawnSync as nodeSpawnSync } from 'node:child_process';
 import { openRecord } from '../modules/M9-record/writer.mjs';
 import { makeReader, readProducts } from '../modules/M10-rules/reader.mjs';
-import { PRODUCT } from '../shared/product-paths.mjs';
+import { PRODUCT, PRODUCT_OUTBOX_ROLES } from '../shared/product-paths.mjs';
+import { AI_ROLES } from '../shared/record.mjs';
+import { RUNNER_ROLES } from '../shared/review-roles.mjs';
+import { FOLDERS as REVIEW_FOLDERS } from '../modules/M4-workshop/launcher/review-runner.mjs';
 // The refusal for a config's product name, shared with the Sensors' wiring (sensors-wiring.mjs): one home (I7).
 export const PRODUCT_NAME_PROBLEM = 'config: product must be a product name (lower case letters, digits and -, a letter or digit first)';
 import { makeEngine } from '../modules/M10-rules/engine.mjs';
@@ -176,6 +180,22 @@ export function logOnlyAlert(log) {
 }
 
 /**
+ * Where the Record finds the sessions' outboxes (M9 openRecord's `outbox`): the top outbox folder, the Mac user that must
+ * own each role's files, and the review runner's launch records. Each role's user is the one that runs it, by the rule
+ * review-config.mjs writes into review.json: the review roles the review user's, the worker runner's roles (worker,
+ * script) the builder's, every other role (the Lead, the Front Door, the helpers) the owner's. Without it every hand-in,
+ * verdict and idea is refused as "no outbox root configured". → null when the config names no outboxRoot (a job that
+ * takes no hand-ins); a role whose user the config does not name is left out, and the Record refuses its files.
+ */
+export function recordOutbox(c) {
+  if (typeof c?.outboxRoot !== 'string' || !isAbsolute(c.outboxRoot)) return null;
+  const uidOf = (r) => (RUNNER_ROLES.includes(r) ? c.reviewUid : PRODUCT_OUTBOX_ROLES.includes(r) ? c.workerUid : c.hostLockUid);
+  const uids = Object.fromEntries(AI_ROLES.map((r) => [r, uidOf(r)]).filter(([, u]) => Number.isSafeInteger(u) && u >= 0));
+  const launches = typeof c.reviewRoot === 'string' && isAbsolute(c.reviewRoot) ? { launches: join(c.reviewRoot, REVIEW_FOLDERS.launches) } : {};
+  return { root: c.outboxRoot, uids, ...launches };
+}
+
+/**
  * The Record and the rules, built the one way both jobs use (this file and robot-wiring.mjs). `c` is a checked config
  * with product, recordRoot, ownerUid, productsFile, rulesStateDir and tokenFile; `who` names the job in its log lines.
  * → { rec, rules, gh (read-only), entry (the product's products.json entry), reader (M10's, refreshed once), products }
@@ -215,7 +235,8 @@ export async function recordAndRules(c, { who, log, fetchFn, now, sessionsIo = {
   // its unsent file and are told again; a refused write (`say`) is the log only. Never into the record's queue: the store
   // alerts from inside its own writes.
   const storeAlert = (e) => { log(`${who}: record alert not sent: ${JSON.stringify(e)}`); return false; };
-  ({ record: rec } = openRecord({ root: c.recordRoot, product: c.product, ownerUid: c.ownerUid, rules, alert: storeAlert, now }));
+  const outbox = recordOutbox(c);
+  ({ record: rec } = openRecord({ root: c.recordRoot, product: c.product, ownerUid: c.ownerUid, rules, alert: storeAlert, now, ...(outbox ? { outbox } : {}) }));
   await reader.refresh();
   return { rec, rules, gh, entry, reader, products: products.map((p) => p.product) };
 }

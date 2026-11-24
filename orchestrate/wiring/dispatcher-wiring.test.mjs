@@ -19,7 +19,7 @@ import { openRecord } from '../modules/M9-record/writer.mjs';
 import { FIRST, ENTRY, SAMPLE } from '../modules/M10-rules/first-cutover.test-helper.mjs';
 import { ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
 import { LAST_PASS_FACT, STEPS, STEP_ERROR_FACT, runTick } from '../modules/M11-dispatcher/tick.mjs';
-import { wire, notWiredText, refusing, checkConfig, CONFIG_KEYS, OPTIONAL_CONFIG_KEYS, PORT_GROUPS, TICK_PORTS } from './dispatcher-wiring.mjs';
+import { wire, notWiredText, refusing, checkConfig, recordOutbox, CONFIG_KEYS, OPTIONAL_CONFIG_KEYS, PORT_GROUPS, TICK_PORTS } from './dispatcher-wiring.mjs';
 import { fakeAlert } from '../test/fake-alert.test-helper.mjs';
 import { CLEANUP_PORTS, NOT_WIRED_CLEANUP, NOT_WIRED_WORKER, cleanupProblem, workerPorts } from './worker-ports.mjs';
 import { NOT_WIRED_REVIEW, reviewPorts } from './review-ports.mjs';
@@ -706,4 +706,36 @@ test('L1325: a claim written in this pass is counted by the next start\'s check'
   assert.equal(n(), 0);
   cards.push({ id: 'a', rev: 2, doc: { product: 'p', kind: 'ordinary', state: 'claimed', claim: { kind: 'session', session_id: 's' } } });
   assert.equal(n(), 1);
+});
+
+// Step 6 of the Front Door (Track A): the Dispatcher's Record finds the sessions' outboxes. Before this the wiring opened
+// the Record with no outbox root, so every hand-in, verdict and idea was refused as "no outbox root configured".
+test('Track A step 6: recordOutbox names the top outbox folder, each role\'s Mac user, and the review launches folder', () => {
+  const c = { outboxRoot: '/o', reviewRoot: '/r', hostLockUid: 501, workerUid: 603, reviewUid: 602 };
+  const o = recordOutbox(c);
+  assert.equal(o.root, '/o');
+  assert.equal(o.launches, '/r/launches');
+  // The rule review-config.mjs writes into review.json: review roles the review user's, the runner's roles the builder's,
+  // every other role the owner's.
+  for (const r of ['reviewer', 'auditor', 'plan_reviewer']) assert.equal(o.uids[r], 602, r);
+  for (const r of ['worker', 'script']) assert.equal(o.uids[r], 603, r);
+  for (const r of ['lead', 'front_door', 'scout', 'writer', 'thinking', 'incident', 'learning']) assert.equal(o.uids[r], 501, r);
+  assert.equal(recordOutbox({ ...c, outboxRoot: undefined }), null, 'no outbox root: no outbox');
+  assert.equal(recordOutbox({ ...c, outboxRoot: 'rel' }), null, 'a relative root is no root');
+  assert.equal(recordOutbox({ ...c, workerUid: undefined }).uids.worker, undefined, 'a user not named is left out');
+});
+
+test('Track A step 6: through wire(), the Record reads a Front Door idea from its outbox, and refuses it only for its owner', async () => {
+  const w = world();
+  const { rec } = await wire(w.config, { log: () => {}, fetchFn: fakeGitHubFetch(w.fake), groups: workerAsMe() });
+  const box = join(w.config.outboxRoot, 'front_door', 'fd-test-1');
+  mkdirSync(box, { recursive: true, mode: 0o750 });
+  const idea = join(box, 'idea-one.md');
+  writeFileSync(idea, 'An idea.');
+  const r = rec.applyOutbox({ role: 'front_door', sessionId: 'fd-test-1', card: null }, idea);
+  assert.equal(r.ok, false);
+  // The test's files are this user's, and the Front Door's outbox is the owner's (hostLockUid, never the Dispatcher's own
+  // user): so the refusal is the owner check, which is read only once the root and the role's user are known.
+  assert.doesNotMatch(r.reason, /no outbox root configured/);
+  assert.match(r.reason, /not the front_door outbox owner/);
 });
