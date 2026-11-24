@@ -49,7 +49,8 @@
 // The 10 minutes of LOCKED_MS (and check 11's BASELINE_MS, guardedRun, #463 r2 M3) is our own cap, a choice, not a tool
 // limit (#463 r3 m2): the Bash tool's longest wait is BASH_MAX_TIMEOUT_MS when it is set (2.1.317, 2.1.322, 2.1.316), and the runner
 // sets it to the job's limit. A product whose tests need longer splits its test command, or the cap is raised here.
-import { closeSync, constants, fstatSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, fstatSync, mkdtempSync, openSync, readFileSync, readSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { createHash, randomBytes } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -132,9 +133,14 @@ export function exitCodeCommand(command, file, what = 'command') {
 // group is then killed with claude's on the time limit and on every stop, and at claude's close: one still there then is
 // killed and said (`job.left` 'killed'; 'unknown' when it can't be told), so runLocked refuses it (#463 r2 m6).
 export function runToEnd(spawn, bin, args, opts, timeoutMs, kill = (g) => process.kill(-g, 'SIGKILL'), there = groupThere, onSpawn, job) {
-  return new Promise((resolve, reject) => {
+  return new Promise((done0, fail0) => {
     let child;
-    try { child = spawn(bin, args, { ...opts, detached: true, stdio: ['ignore', 'ignore', 'ignore'] }); } catch (e) { reject(e); return; }
+    // What claude says (L1351): its output goes to a private file of the runner's own, never a pipe (a job's process that
+    // kept a pipe open would hold claude's close), and its last words are kept for the refusal (`said`).
+    const out = sayFile();
+    const fin = (v) => { const said = out.take(); return said ? { ...v, said } : v; };
+    const resolve = (v) => done0(fin(v)); const reject = (e) => { out.take(); fail0(e); };
+    try { child = spawn(bin, args, { ...opts, detached: true, stdio: ['ignore', out.fd ?? 'ignore', out.fd ?? 'ignore'] }); } catch (e) { reject(e); return; }
     const group = () => Number.isInteger(child.pid) && child.pid > 1;
     // The job's group once read (`jg`); `seen` also when the record named claude's own group (nothing more to kill).
     let jg = null; let seen = false;
@@ -252,8 +258,34 @@ export function jobGroupProblem(r, label, { recorded = true, killedOk = false } 
 
 const answerFile = (f) => writeFileSync(f, '', { flag: 'wx', mode: 0o600 });
 
-/** Claude's own end, said beside a job's answer (#463 r1 c3). */
-export const claudeEnd = (r) => (r?.exitCode === null ? 'claude was ended by a signal' : `claude exited ${r?.exitCode}`);
+/** Claude's own end, said beside a job's answer (#463 r1 c3), with its last words when it left any (L1351). */
+export const claudeEnd = (r) => `${r?.exitCode === null ? 'claude was ended by a signal' : `claude exited ${r?.exitCode}`}${typeof r?.said === 'string' && r.said ? `, saying "${r.said}"` : ''}`;
+
+export const SAID_MAX = 300;
+/** Claude's last words, safe to show (L1351): printable text on one line, the last SAID_MAX characters, and anything
+ *  shaped like a key or token (a long unbroken run of letters, digits, `-` and `_`, or sk-…) hidden. */
+export function sayable(text) {
+  const t = String(text ?? '').replace(/[^\x20-\x7e]+/g, ' ').replace(/\s+/g, ' ').trim()
+    .replace(/sk-[A-Za-z0-9_-]+/g, '[hidden]').replace(/[A-Za-z0-9_-]{32,}/g, '[hidden]').replace(/"/g, "'");
+  return t.length > SAID_MAX ? `…${t.slice(-SAID_MAX)}` : t;
+}
+
+/** A private file for claude's output (0600, in a fresh 0700 folder of the runner's temp folder). → { fd, take() → its
+ *  last words, sayable, then the file and folder removed }. One that can't be made gives fd null: claude's output is then
+ *  thrown away, as before, and nothing is refused for it. */
+export function sayFile({ dir = tmpdir() } = {}) {
+  let d = null; let fd = null;
+  try { d = mkdtempSync(join(dir, 'orch-said-')); fd = openSync(join(d, 'out'), 'wx+', 0o600); } catch { if (d) try { rmSync(d, { recursive: true, force: true }); } catch { /* left */ } d = null; fd = null; }
+  let taken = false;
+  return { fd, take() {
+    if (taken || fd === null) return ''; taken = true;
+    let text = '';
+    try { const size = fstatSync(fd).size; const n = Math.min(size, 8192); const b = Buffer.alloc(n); if (n) readSync(fd, b, 0, n, size - n); text = b.toString('utf8'); } catch { text = ''; }
+    try { closeSync(fd); } catch { /* closed */ }
+    try { rmSync(d, { recursive: true, force: true }); } catch { /* left in the temp folder */ }
+    return sayable(text);
+  } };
+}
 
 /** The job's result file: in the folder it runs in, named for the job and the session. */
 export const jobFile = ({ cwd, job, sessionId }) => join(cwd, `.orch-job-${job}-${sessionId}`);

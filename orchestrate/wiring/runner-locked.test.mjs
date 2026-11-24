@@ -12,7 +12,7 @@ import { tempDir } from '../shared/test-tmp.mjs';
 import { pushWorld } from '../modules/M4-workshop/git/push-world.test-helper.mjs';
 import { createSaveWork } from '../modules/M4-workshop/git/save-work.mjs';
 import { bundleName } from '../modules/M4-workshop/git/push.mjs';
-import { JOBS_DIR, JOB_ACK_WAIT_MS, LOCKED_JOBS, LOCKED_MS, LOCKED_SAVE_MS, RESULT_MAX_BYTES, SAVE_DELAYS_MS, ackFile, groupFile, groupRecordCommand, guardedRun, jobFile, lockedRunner, readGroupRecord, runToEnd, settingsSha } from './runner-locked.mjs';
+import { JOBS_DIR, JOB_ACK_WAIT_MS, LOCKED_JOBS, LOCKED_MS, LOCKED_SAVE_MS, RESULT_MAX_BYTES, SAVE_DELAYS_MS, ackFile, groupFile, groupRecordCommand, guardedRun, jobFile, lockedRunner, readGroupRecord, runToEnd, settingsSha, claudeEnd, sayable, sayFile, SAID_MAX } from './runner-locked.mjs';
 import { EventEmitter } from 'node:events';
 import { SAVE_DEADLINE_MS } from '../modules/M11-dispatcher/pass.mjs';
 import { partialName } from '../modules/M4-workshop/git/save-work.mjs';
@@ -498,4 +498,40 @@ test('#463 r3 m4 A8: guardedRun refuses a limit past LOCKED_MS, a zero and a non
       /the x job's limit is not a time limit/);
     assert.equal(spawned, false, String(ms));
   }
+});
+
+test('L1351: a claude that fails says why: its last words reach the refusal, keys hidden; its file is removed', async () => {
+  const dir = tempDir('orch-said-');
+  const r = await runToEnd(childSpawn, '/bin/sh', ['-c', 'echo start; echo "Error: sign-in refused sk-ant-api03-SECRETSECRET token AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" >&2; exit 1'], { cwd: dir }, 10_000, () => {}, () => false);
+  assert.equal(r.exitCode, 1);
+  assert.match(r.said, /start Error: sign-in refused \[hidden\] token \[hidden\]/);
+  assert.doesNotMatch(r.said, /SECRET|AAAAAAAA/);
+  assert.match(claudeEnd(r), /^claude exited 1, saying "start Error: sign-in refused/);
+  assert.equal(claudeEnd({ exitCode: 1 }), 'claude exited 1'); // nothing said: as before
+  assert.equal(claudeEnd({ exitCode: null, said: 'x' }), 'claude was ended by a signal, saying "x"');
+  // A run that says nothing leaves no `said`.
+  const q = await runToEnd(childSpawn, '/bin/sh', ['-c', 'exit 0'], { cwd: dir }, 10_000, () => {}, () => false);
+  assert.equal(q.said, undefined);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('L1351: sayable keeps one printable line, the last words only, quotes made plain', () => {
+  assert.equal(sayable('a\n\tb\u0007 "c"'), "a b 'c'");
+  const long = sayable('x '.repeat(400) + 'END');
+  assert.ok(long.length <= SAID_MAX + 1 && long.startsWith('…') && long.endsWith('END'));
+});
+
+test('L1351: the said file is private and removed once read; one that cannot be made says nothing and refuses nothing', () => {
+  const dir = tempDir('orch-saidf-');
+  const f = sayFile({ dir });
+  assert.equal(typeof f.fd, 'number');
+  const [sub] = readdirSync(dir);
+  writeFileSync(join(dir, sub, 'out'), 'hello');
+  assert.equal(f.take(), 'hello');
+  assert.deepEqual(readdirSync(dir), []);
+  assert.equal(f.take(), '');
+  const none = sayFile({ dir: join(dir, 'missing') });
+  assert.equal(none.fd, null);
+  assert.equal(none.take(), '');
+  rmSync(dir, { recursive: true, force: true });
 });
