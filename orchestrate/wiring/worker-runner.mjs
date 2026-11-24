@@ -75,10 +75,10 @@ import { DRAIN_CAUSES, drainHeldOk } from '../modules/M11-dispatcher/drain-alert
 import { heldOk } from '../modules/M4-workshop/send-safe/hook-store.mjs';
 import { FUTURE_SKEW_MS } from '../shared/still-waiting.mjs';
 
-/** How long the runner waits on one port before it answers for it, or (a start) leaves it to a later pass. Under the
- * status rewrite cadence, so a hung port never leaves the status unwritten for longer (L769). */
 // One session per card's copy (#358 r1 m4): the refusal, here and in the start dry run (L1346).
 export const cardTaken = (card) => `card ${card} already has a session the runner started, or a start still on`;
+/** How long the runner waits on one port before it answers for it, or (a start) leaves it to a later pass. Under the
+ * status rewrite cadence, so a hung port never leaves the status unwritten for longer (L769). */
 export const RUNNER_PORT_MS = 10_000;
 if (RUNNER_PORT_MS >= RUNNER_STATUS_EVERY_MS) throw new Error('RUNNER_PORT_MS must be under RUNNER_STATUS_EVERY_MS');
 /** The `pending` key of a save still on (a start's is its session id, which this can't be). */

@@ -21,8 +21,9 @@
 // takes its place (the sign-in: account a's folder with no token; the worker prompt: a short stand-in text; a settings
 // wall that fails: the same settings with the wall check left out; launch check 0's unconfirmed names: confirmed for this
 // run; a failing launch check: passed on). Every stage tried after a stand-in says which stand-ins it ran on, and a stage
-// that could not be tried says NOT TRIED with the stage that stopped it. Nothing on a stand-in, and nothing not tried, is
-// ever a PASS: "claude would start now" is a PASS only when every stage before it passed.
+// that could not be tried says NOT TRIED with the stage that stopped it. A stage tried on a stand-in can PASS, and says
+// which stand-ins it ran on; the run as a whole is never ready then: "claude would start now" is a PASS, and the run
+// ALL PASS, only when every stage before it passed. A failure while a stop was landing proves nothing: NOT TRIED.
 //
 // What it changes: only what the real start makes, under names that hold this run's own session id (DRYRUN-…, never a
 // Dispatcher's: those are UUIDs): a copy beside the card's own (<card>..dryrun-<id>, so the card's real copy is never
@@ -57,12 +58,12 @@ import { CHECKS, launch } from '../../modules/M4-workshop/launcher/launch.mjs';
 import { CONFIRMED, NAMES_CHECK_REFUSALS as NCR, unconfirmedNames } from '../../modules/M4-workshop/launcher/settings-names.mjs';
 import { accountDir, accountEnv } from '../../modules/M4-workshop/launcher/accounts.mjs';
 import { CARD_ID } from '../../modules/M9-record/outbox.mjs';
-import { kindOf } from '../../modules/M11-dispatcher/pass.mjs';
+import { kindOf, startRole } from '../../modules/M11-dispatcher/pass.mjs';
+import { riskOf } from '../../modules/M11-dispatcher/gate.mjs';
 import { configUnreadable, maskSignin, notInConfig, notOwnUser } from './before-run.mjs';
 import { cardTaken } from '../../wiring/worker-runner.mjs';
 
 export const DRY_START_SAID = 'dry run: would start claude now';
-// startPort's own words when stopped() answers true inside start(), just before claude would be spawned.
 
 /** Every stage, in the start's order: [key, what it shows]. */
 export const STAGES = Object.freeze([
@@ -74,7 +75,8 @@ export const STAGES = Object.freeze([
   ['snapshot', 'the product\'s rules snapshot is root\'s, fresh and matches'],
   ['memory', 'the runner\'s memory is read (its other live sessions)'],
   ['liveWalls', 'every other live session is walled off from this product'],
-  ['card', 'the card is read from the Record, and is this product\'s'],
+  ['card', 'the card is read from the Record, is this product\'s, and is ready'],
+  ['rules', 'the rules allow the start (M10\'s start_session, as the Dispatcher\'s pass asks before it claims)'],
   ['request', 'the start request is one the runner takes'],
   ['signin', 'the sign-in is read'],
   ['commit', 'the copy\'s start commit is read'],
@@ -139,7 +141,9 @@ export async function dryRun({ c, configWhy, product, card, io = {} }) {
   // then the run ends as any other, removing what it made.
   let abortWhy = null;
   io.onAbort?.((sig) => { abortWhy = abortWhy ?? `the dry run was stopped (${sig})`; });
-  io.onCrash?.(() => cleanup());   // an error outside the run's own try: remove what it made before node ends
+  io.onCrash?.(() => cleanup());
+  // A stage that fails while a stop is landing (Ctrl-C reaches git in the Terminal's group): what it answered proves nothing.
+  const stopLanding = (k) => { if (abortWhy) set(k, 'NOT TRIED', `${abortWhy} while it ran`); };   // an error outside the run's own try: remove what it made before node ends
   try {
     if (!c) { stopAt('config', configWhy ?? 'no config'); return finish(); }
     pass('config');
@@ -191,9 +195,23 @@ export async function dryRun({ c, configWhy, product, card, io = {} }) {
     if (rc.doc?.product !== product) { stopAt('card', rc.doc?.product === undefined ? 'the card names no product' : `the card is product ${rc.doc.product}'s`); return finish(); }
     const kind = kindOf(rc.doc);
     if (kind === 'undo') { stopAt('card', 'it is an undo card; the dry run does not try an undo\'s start (its reversed commit is the pass\'s to name)'); return finish(); }
-    // The Dispatcher claims only a ready card, so only a ready card (or one claimed now) reaches a real start.
-    if (rc.doc.state === 'ready' || rc.doc.state === 'claimed') set('card', 'PASS', `its state is ${rc.doc.state}; read as claimed for this run`);
+    // The Dispatcher claims only a ready card. A claimed one is another session's, whose start may be on now (its
+    // request not yet in the runner's memory), and the real start of any other session refuses it: so ready only.
+    if (rc.doc.state === 'ready') set('card', 'PASS', 'its state is ready; read as claimed for this run');
+    else if (rc.doc.state === 'claimed') failOn('card', 'it is claimed already: the Dispatcher has handed it to a session, whose start may be on now; try it when it is ready', 'the card read as claimed for this run');
     else failOn('card', `its state is ${rc.doc.state ?? 'not named'}: the Dispatcher starts only a ready card`, 'the card read as claimed');
+    // M10's start_session, asked as the Dispatcher's pass asks it (pass.mjs), with the card as the pass holds it.
+    const rules = budget?.rules;
+    if (!rules || typeof rules.may !== 'function') set('rules', 'NOT TRIED', 'the Dispatcher\'s rules are not loaded (the config names no budget, or it did not load)');
+    else {
+      let may;
+      try {
+        const cardDoc = { id: card, ...rc.doc };
+        let readAt = null; try { readAt = budget.bandsNow?.()?.read_at ?? null; } catch { readAt = null; }
+        may = rules.may('start_session', { product, card: cardDoc, role: startRole(kind), tier: riskOf(rules, cardDoc).tier, editing: true, ...(readAt ? { usage: { read_at: readAt } } : {}) });
+      } catch (e) { may = { decision: 'refuse', reason: `could not be asked (${said(e)})` }; }
+      if (may?.decision === 'allow') pass('rules'); else failOn('rules', `rules: ${may?.reason ?? 'no answer'}`, 'the rules taken as allowing the start');
+    }
     // What the real start meets that a dry run, beside the card, would not: the runner's one session per card, and
     // the card's own copy still there (prepareWorkerCopy refuses a copy folder that exists).
     if (busy) failOn('request', busy, 'the card taken as free');
@@ -260,13 +278,13 @@ export async function dryRun({ c, configWhy, product, card, io = {} }) {
         return { account: 'a', dir: accountDir(c.home, 'a'), env: accountEnv(c.home, 'a') };
       },
       startCommit: async (x) => {
-        try { const h = await baseCommit(x); pass('commit'); return h; } catch (e) { stopAt('commit', said(e)); throw e; }
+        try { const h = await baseCommit(x); pass('commit'); return h; } catch (e) { stopLanding('commit'); stopAt('commit', said(e)); throw e; }
       },
       mainOf: async (m) => {
         mainCalls += 1;
         if (mainCalls === 1) {
           reach('main');
-          try { const h = await baseMain(m); pass('main'); return h; } catch (e) { stopAt('main', said(e)); throw e; }
+          try { const h = await baseMain(m); pass('main'); return h; } catch (e) { stopLanding('main'); stopAt('main', said(e)); throw e; }
         }
         return baseMain(m);
       },
@@ -274,6 +292,7 @@ export async function dryRun({ c, configWhy, product, card, io = {} }) {
         if (x.dest !== copyPath) return abortWhy ? refuse(abortWhy) : basePrepare(x);   // check 11's throwaway copy: none after a stop
         let r; try { r = await basePrepare(x); } catch (e) { r = refuse(said(e)); }
         if (!r?.ok) {
+          stopLanding('copy');
           if (res.get('copy')?.result === 'FAIL') res.get('copy').why += `; and the dry run's own copy can't be made either (${r?.reason ?? 'no answer'})`;
           stopAt('copy', `the copy can't be made (${r?.reason ?? 'no answer'})`);
         }
@@ -292,7 +311,8 @@ export async function dryRun({ c, configWhy, product, card, io = {} }) {
         if (key === 'settings') reach('settings');
         if (!key) return wallStandIn ? baseWalled({ ...x, check: noWallCheck }) : baseWalled(x);
         let r; try { r = baseWalled(x); } catch (e) { r = refuse(said(e)); }
-        if (r?.ok) { pass(key); return r; }
+        // Told PASS when the start goes past it: the start writes the file next, and a write that fails is this stage's.
+        if (r?.ok) return r;
         fail(key, r?.reason ?? 'no answer');
         let s; try { s = baseWalled({ ...x, check: noWallCheck }); } catch (e) { s = refuse(said(e)); }
         if (!s?.ok) { stopper = stopper ?? key; return r; }
@@ -323,6 +343,13 @@ export async function dryRun({ c, configWhy, product, card, io = {} }) {
               let again = null; try { again = busyIn(readMemory()); } catch (e) { again = `the runner's memory can't be read (${said(e)})`; }
               if (again) gates.push(again);
               const own = ownCopyThere(); if (own) gates.push(`the card's own copy is there now (${own})`);
+              // Check 12 is the Dispatcher's own start gate (the budget, the caps, the files no other card holds), asked
+              // before it claims; the launch asks it after 4, 6 and 11. It only reads, so it is asked here first.
+              const k12 = CHECKS.find((q) => q.n === 12);
+              if (k12?.applies(a.role, a.profile)) {
+                let g; try { g = typeof a.checks?.[12] === 'function' ? await a.checks[12](ctx) : refuse('no check is wired'); } catch (e) { g = refuse(`the check failed: ${said(e)}`); }
+                if (g?.ok !== true) gates.push(`launch check 12, the Dispatcher's own start gate, refuses it now (${g?.reason ?? 'no answer'})`);
+              }
               if (gates.length) { set(`check${k.n}`, 'NOT TRIED', `it would run the branch's code (an install, claude or the tests) past a stage the real start refuses at: ${gates.join('; ')}`); return { ok: true }; }
             }
             if (typeof port !== 'function') r = refuse('no check is wired');
@@ -347,9 +374,9 @@ export async function dryRun({ c, configWhy, product, card, io = {} }) {
           armed = false;
           if (r?.ok === false && r.reason === STOPPING_AT_START) {
             const why = [heldAgain, recheckWhy].filter(Boolean).join('; ');
-            if (why) fail('recheck', why); else pass('recheck');
+            if (why) { stopLanding('recheck'); fail('recheck', why); } else pass('recheck');
             const bad = [...res.values()].filter((x) => x.stage !== 'start' && (x.result === 'FAIL' || x.result === 'NOT TRIED'));
-            if (bad.length) set('start', 'NOT TRIED', `reached only past ${bad.length} failed stage${bad.length === 1 ? '' : 's'} (on stand-ins)`);
+            if (bad.length) set('start', 'NOT TRIED', `reached only past ${bad.length} stage${bad.length === 1 ? '' : 's'} failed or not tried (on stand-ins)`);
             else set('start', 'PASS', DRY_START_SAID);
             return refuse(DRY_START_SAID);
           }
@@ -456,7 +483,8 @@ export function guardProblem({ c, product, card, uid, ownDirUid }) {
 }
 
 export async function main(argv, { print = (t) => process.stdout.write(t), uid = process.getuid?.(), readConfig = (f) => readRunnerConfig(f, selfPath()), io = {},
-  umask = (m) => process.umask(m), errOut = (t) => process.stderr.write(t), signals = process, configOf = configFrom } = {}) {
+  umask = (m) => process.umask(m), errOut = (t) => process.stderr.write(t), signals = process, configOf = configFrom,
+  crashes = signals === process ? process : null, exit = (n) => process.exit(n) } = {}) {
   // The runner's job runs with this umask (runner-job.mjs); sudo's is 022, and check 1 refuses a copy others can read.
   umask(RUNNER_JOB_UMASK);
   // A closed window makes every later write fail; a failed write must never end the run before it removes what it
@@ -479,9 +507,9 @@ export async function main(argv, { print = (t) => process.stdout.write(t), uid =
   // everything made is removed and the report says what was not tried. It never exits early: an early exit would
   // leave a check's install or tests running in their own process groups, writing into a removed copy.
   let stop = null; let asked = 0; let crashClean = null;
-  const onCrash = (e) => { try { crashClean?.(); } finally { toErr(`\nThe dry run failed (${mask(e?.message ?? e)}); what it made is removed.\n`); process.exit(1); } };
-  const crashes = signals === process ? ['uncaughtException', 'unhandledRejection'] : [];
-  for (const s of crashes) process.on(s, onCrash);
+  const onCrash = (e) => { try { crashClean?.(); } finally { toErr(`\nThe dry run failed (${mask(e?.message ?? e)}); what it made is removed.\n`); exit(1); } };
+  const crashKinds = crashes ? ['uncaughtException', 'unhandledRejection'] : [];
+  for (const s of crashKinds) crashes.on(s, onCrash);
   const onSignal = (sig) => {
     asked += 1;
     if (sig === 'SIGHUP') { stop?.(sig); hungUp = true; return; }
@@ -494,7 +522,7 @@ export async function main(argv, { print = (t) => process.stdout.write(t), uid =
   let out;
   try {
     out = await dryRun({ c, configWhy, product, card, io: { progress: (t) => toErr(`  ${t}\n`), log: (t) => toErr(`  (log) ${mask(t)}\n`), ...io, onAbort: (f) => { stop = f; io.onAbort?.(f); }, onCrash: (f) => { crashClean = f; io.onCrash?.(f); } } });
-  } finally { for (const s of sigs) signals.off(s, onSignal); for (const s of crashes) process.off(s, onCrash); }
+  } finally { for (const s of sigs) signals.off(s, onSignal); for (const s of crashKinds) crashes.off(s, onCrash); }
   const r = report(out.results, { sessionId: out.sessionId });
   print(r.text);
   return r.ok ? 0 : 1;

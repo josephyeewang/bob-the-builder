@@ -219,7 +219,7 @@ const isUndo = (card) => card.kind === 'exact_reverse';
 // Exported for the start dry run (setup/live-proofs/start-dry-run.mjs, L1346), which starts the card as a pass would.
 export const kindOf = (card) => (isUndo(card) ? 'undo' : card.kind === 'script' ? 'script' : 'editing');
 // The M10 profile a start is asked for: a script card runs the script profile, every other start a worker.
-const startRole = (kind) => (kind === 'script' ? 'script' : 'worker');
+export const startRole = (kind) => (kind === 'script' ? 'script' : 'worker');
 // A script session reports role 'script' (its M10 profile, startRole) and follows the worker's safe point (L759).
 const roleOf = (s) => s.role ?? (s.kind === 'editing' || s.kind === 'script' ? 'worker' : s.kind);
 const factDoc = (rec, id) => rec.read('fact', id);

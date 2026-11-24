@@ -330,11 +330,13 @@ claude would be started. Run it on the Mini, as builder, from the installed copy
 
 It prints one PASS, FAIL or NOT TRIED line per stage, then every failure. A failed stage is replaced by a stand-in where a
 later stage can still be tried; those later lines name the stand-ins they ran on, and nothing on a stand-in counts as a
-pass. It exits 0 only when every stage passed. The launch checks run for real (the install, one headless claude
+pass. It exits 0 only when every stage passed (or does not apply to this card). The launch checks run for real (the install, one headless claude
 read-back, the smoke and baseline tests: a few minutes). It makes only what the real start makes, under its own
 `DRYRUN-` session id and a copy beside the card's own, and removes all of it at the end; it never writes the Record, the
-requests folder or the status file, and takes no runner lock. The card must be ready (or claimed): the Dispatcher starts no other, so any other state is a FAIL, and the
-install, claude and tests are then not run.
+requests folder or the status file, and takes no runner lock. The card must be ready: the Dispatcher starts no other (a claimed card is another session's, whose start may be on now), so any other state is a FAIL, and the
+install, claude and tests are then not run. Nor are they when the Dispatcher's own gates before it claims refuse the
+card: M10's start_session (its own stage) and launch check 12 (the budget, the caps, the files), which the dry run asks
+before the checks that run code.
 Each stage's line also shows as it is decided, while it runs. Stopped part way (Ctrl-C, a closed window), it removes
 what it made before it exits; only a `kill -9` or a power cut can leave files, named with `DRYRUN-`, in the runner's
 settings, copies and outbox folders, to remove by hand. While it runs, its settings files would stop the runner from
