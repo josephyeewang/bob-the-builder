@@ -132,9 +132,16 @@ export function exitCodeCommand(command, file, what = 'command') {
 // group is then killed with claude's on the time limit and on every stop, and at claude's close: one still there then is
 // killed and said (`job.left` 'killed'; 'unknown' when it can't be told), so runLocked refuses it (#463 r2 m6).
 export function runToEnd(spawn, bin, args, opts, timeoutMs, kill = (g) => process.kill(-g, 'SIGKILL'), there = groupThere, onSpawn, job) {
-  return new Promise((resolve, reject) => {
+  return new Promise((done0, fail0) => {
     let child;
-    try { child = spawn(bin, args, { ...opts, detached: true, stdio: ['ignore', 'ignore', 'ignore'] }); } catch (e) { reject(e); return; }
+    // What claude says (L1351): its output is read through pipes of the runner's own (never a file a session could open),
+    // only the last of each kept, and summed up for the refusal (`said`). Claude's exit starts a short wait after which the
+    // pipes are closed, so a process that kept one open can't hold claude's close.
+    const heard = hearing();
+    const resolve = (v) => { const said = heard.said(); done0(said ? { ...v, said } : v); };
+    const reject = (e) => { heard.stop(); fail0(e); };
+    try { child = spawn(bin, args, { ...opts, detached: true, stdio: ['ignore', 'pipe', 'pipe'] }); } catch (e) { reject(e); return; }
+    heard.listen(child);
     const group = () => Number.isInteger(child.pid) && child.pid > 1;
     // The job's group once read (`jg`); `seen` also when the record named claude's own group (nothing more to kill).
     let jg = null; let seen = false;
@@ -252,8 +259,62 @@ export function jobGroupProblem(r, label, { recorded = true, killedOk = false } 
 
 const answerFile = (f) => writeFileSync(f, '', { flag: 'wx', mode: 0o600 });
 
-/** Claude's own end, said beside a job's answer (#463 r1 c3). */
-export const claudeEnd = (r) => (r?.exitCode === null ? 'claude was ended by a signal' : `claude exited ${r?.exitCode}`);
+/** Claude's own end, said beside a job's answer (#463 r1 c3), with its last words when it left any (L1351). */
+export const claudeEnd = (r) => `${r?.exitCode === null ? 'claude was ended by a signal' : `claude exited ${r?.exitCode}`}${typeof r?.said === 'string' && r.said ? `, saying "${r.said}"` : ''}`;
+
+export const SAID_MAX = 200;
+export const HEARD_OUT_MAX = 65536;
+export const HEARD_ERR_MAX = 8192;
+export const HEARD_DRAIN_MS = 2000;
+
+/** Text safe to show (L1351): printable, on one line, the last SAID_MAX characters, a URL's sign-in part and any run of
+ *  16 or more characters that could be part of a key or token (letters, digits and - _ + / = . : %) hidden; a URL's
+ *  sign-in is hidden up to its last @. */
+export function sayable(text) {
+  const t = String(text ?? '').replace(/[^\x20-\x7e]+/g, ' ').replace(/\s+/g, ' ').trim()
+    .replace(/:\/\/[^\s]*@/g, '://[hidden]@').replace(/[A-Za-z0-9_\-+/=.:%]{16,}/g, '[hidden]').replace(/"/g, "'");
+  return t.length > SAID_MAX ? `…${t.slice(-SAID_MAX)}` : t;
+}
+
+/** What claude's own result says (stream-json's last `result` event) → { sub, why } (sub: its subtype when it is a plain
+ *  name, else 'a subtype not shown'; why: its error words when it failed), or null with no result event. */
+export function resultWords(stdout) {
+  const lines = String(stdout ?? '').split('\n').map((l) => l.trim()).filter(Boolean).reverse();
+  for (const l of lines) {
+    let e; try { e = JSON.parse(l); } catch { continue; }
+    if (e?.type !== 'result') continue;
+    const sub = typeof e.subtype === 'string' && /^[a-z_]{1,40}$/.test(e.subtype) ? e.subtype : 'a subtype not shown';
+    const errs = Array.isArray(e.errors) ? e.errors.filter((x) => typeof x === 'string').join('; ') : '';
+    return { sub, why: errs || (e.is_error === true && typeof e.result === 'string' ? e.result : '') };
+  }
+  return null;
+}
+
+/** Claude's output, heard through its pipes: the last HEARD_OUT_MAX of stdout and HEARD_ERR_MAX of stderr. listen(child)
+ *  once spawned; said() → its result's words and its stderr's last words, sayable ('' when it said nothing); stop() at a
+ *  refusal. At claude's exit the pipes are closed after HEARD_DRAIN_MS (unref'd), so its close always comes. */
+export function hearing({ drainMs = HEARD_DRAIN_MS } = {}) {
+  let out = ''; let err = ''; let pipes = [];
+  const cut = (s, max) => (s.length > max ? s.slice(-max) : s);
+  const end = () => { for (const p of pipes) try { p.destroy(); } catch { /* closed */ } pipes = []; };
+  return {
+    listen(child) {
+      for (const [p, put] of [[child?.stdout, (d) => { out = cut(out + d, HEARD_OUT_MAX); }], [child?.stderr, (d) => { err = cut(err + d, HEARD_ERR_MAX); }]]) {
+        if (!p || typeof p.on !== 'function') continue;
+        p.setEncoding?.('utf8'); p.on('data', put); p.on('error', () => { /* a pipe that fails says nothing more */ });
+        pipes.push(p);
+      }
+      if (pipes.length && typeof child.on === 'function') child.on('exit', () => { const t = setTimeout(end, drainMs); t.unref?.(); });
+    },
+    said() {
+      end();
+      const r = resultWords(out);
+      const free = sayable([r?.why, err.trim() ? `stderr: ${err.trim()}` : ''].filter(Boolean).join('; '));
+      return [r ? `result ${r.sub}` : '', free].filter(Boolean).join(': ');
+    },
+    stop: end,
+  };
+}
 
 /** The job's result file: in the folder it runs in, named for the job and the session. */
 export const jobFile = ({ cwd, job, sessionId }) => join(cwd, `.orch-job-${job}-${sessionId}`);
