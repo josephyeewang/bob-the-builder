@@ -7,9 +7,10 @@ import { tempDir } from '../../shared/test-tmp.mjs';
 import { launchInputProblem } from '../../wiring/owner-asks.mjs';
 import { STATES, FINAL_STATES } from '../../shared/record.mjs';
 import { STOP_QUIET_REASONS } from '../M4-workshop/launcher/review-runner.mjs';
-import { LAUNCH_SKIP_FACT, LAUNCH_SKIP_CAUSE, LAUNCH_SKIP_TELL, dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts as undoStarts0, stopProcessGroup, guarded, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, RESET_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RUN, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, LIMIT_H5_MS, resetEndsLimit, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0, UNKNOWN_FACT, REVIEW_STOP_FACT, REVIEW_STOP_RUNNER_REASON, REVIEW_STOP_AGAIN_MS, REVIEW_STOP_TELL_FACT, REVIEW_STOP_MAX_ASKS, HOST_COPY_FAIL, HOST_COPY_CAUSE, HOLD_FACT, adoptLate as adoptLate0, lapseStop, LAUNCH_DEADLINE_MS, PORT_DEADLINE_MS, DEAD_RERUN_FACT, DEAD_RERUN_MOVE_CAUSE, DEAD_SESSION_WAIT, deadRerunText, missingText } from './pass.mjs';
+import { LAUNCH_SKIP_FACT, LAUNCH_SKIP_CAUSE, LAUNCH_SKIP_TELL, dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts as undoStarts0, stopProcessGroup, guarded, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, RESET_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RUN, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, LIMIT_H5_MS, resetEndsLimit, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0, UNKNOWN_FACT, REVIEW_STOP_FACT, REVIEW_STOP_RUNNER_REASON, REVIEW_STOP_AGAIN_MS, REVIEW_STOP_TELL_FACT, REVIEW_STOP_MAX_ASKS, HOST_COPY_FAIL, HOST_COPY_CAUSE, HOLD_FACT, adoptLate as adoptLate0, lapseStop, LAUNCH_DEADLINE_MS, LAUNCH_MARGIN_MS, PORT_DEADLINE_MS, DEAD_RERUN_FACT, DEAD_RERUN_MOVE_CAUSE, DEAD_SESSION_WAIT, deadRerunText, missingText } from './pass.mjs';
 import { USAGE_FACT, BAND_FACT } from './usage.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
+import { STEP_DEADLINE_MS } from './tick.mjs';
 import { retellWaits, WAIT_TELL_FACT } from './joe-waits.mjs';
 import { KEYS as K } from './keys.mjs';
 import { makeRules } from '../../shared/rules.mjs';
@@ -2941,8 +2942,12 @@ test('L1361: a claim made on another Mac is never asked about', async () => {
   assert.equal(w.rec.read('card', 'C-1').doc.state, 'claimed');
 });
 
-test('L1361 lead call: the launch alone gets LAUNCH_DEADLINE_MS (45 s); other port calls keep PORT_DEADLINE_MS (30 s), and the late hold names the launch limit', async () => {
-  assert.equal(LAUNCH_DEADLINE_MS, 45_000);
+test('L1361 lead call (L1369: 55 s): the launch alone gets LAUNCH_DEADLINE_MS (55 s); other port calls keep PORT_DEADLINE_MS (30 s), and the late hold names the launch limit', async () => {
+  assert.equal(LAUNCH_DEADLINE_MS, 55_000);
+  // L1369: at least 1.5x the slowest on-time launch seen on the Mini (36.2 s, R-S1-2), and one launch plus its margin
+  // still fits the step's own limit.
+  assert.ok(LAUNCH_DEADLINE_MS >= 1.5 * 36_200 && LAUNCH_DEADLINE_MS % 5_000 === 0);
+  assert.ok(LAUNCH_DEADLINE_MS + LAUNCH_MARGIN_MS < STEP_DEADLINE_MS, 'the first launch fits the pass step');
   assert.equal(PORT_DEADLINE_MS, 30_000);
   const slow = (ms) => () => new Promise((r) => setTimeout(() => r({ ok: true }), ms));
   const go = (w, more) => dispatcherPass({ product: 'p1', rec: w.rec, rules: rulesWith({}, startAnswer(w.rec)), now: T0, account: ACCT, sessions: [], probe: () => idle,

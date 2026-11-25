@@ -61,11 +61,10 @@ export function isDead(s, { now, quietMs }) {
  */
 // L1364 amended (#674 review M1, round 2): `canEnd` is true only when both ways out are wired (the healthy and the resume
 // port); false, the default, opens no new outage, since one opened then might never end and would hold every start
-// for ever. Those deaths are decided one card at a time, as outside an outage. An outage already open is handled as before.
-// Open: L1364 — an outage already open while healthy or resume is unwired has no way out in code: it ends only once
-// both are wired (three healthy passes, or Joe's resume). There is no owner command to end it; the one manual way is
-// to stop the Dispatcher and have its own actor write the `outage` fact to state 'ended' (ended_by 'joe'), which no
-// tool does today.
+// for ever. Those deaths are decided one card at a time, as outside an outage.
+// L1369 (#674 r2 minor): an outage already open while a way out is unwired (one opened before that change) had no way
+// out: it is ended at once, ended_by 'unwired', and its held deaths decided one card at a time, as outside an outage.
+// While unwired no outage is opened, so none held open would ever end. A refused end keeps it open, as any refused end.
 export function outageStep({ rec, rules, board, now, healthy, resume = false, alert, canEnd = false }) {
   const quietMs = minutes(rules, KEYS.deadQuietMin);
   const minDead = need(rules, KEYS.outageMinDead);
@@ -82,10 +81,10 @@ export function outageStep({ rec, rules, board, now, healthy, resume = false, al
     const fresh = dead.filter((s) => !held0.some((d) => d.id === s.id) && !counted.has(deathKey(s)));
     const surge = tripped(fresh.length, board.length - (dead.length - fresh.length), minDead, share);
     const passes = healthy && !surge ? (cur.doc.healthy_passes ?? 0) + 1 : 0;
-    const ending = !surge && (resume || passes >= HEALTHY_PASSES);
+    const ending = !canEnd || (!surge && (resume || passes >= HEALTHY_PASSES));
     let endRefused;
     if (ending) {
-      const ew = write({ ...cur.doc, state: 'ended', healthy_passes: passes, ended_at: new Date(now).toISOString(), ended_by: resume ? 'joe' : 'healthy', counted_dead: [...new Set(dead.map(deathKey))] }, 'outage_end');
+      const ew = write({ ...cur.doc, state: 'ended', healthy_passes: passes, ended_at: new Date(now).toISOString(), ended_by: !canEnd ? 'unwired' : resume ? 'joe' : 'healthy', counted_dead: [...new Set(dead.map(deathKey))] }, 'outage_end');
       // Refused (L765), the pass goes on as one inside the outage: its new deaths are held, an undelivered alert retold.
       if (!ew?.ok) endRefused = ew?.reason ?? 'refused';
     }
