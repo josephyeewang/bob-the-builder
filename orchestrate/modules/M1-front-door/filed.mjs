@@ -16,9 +16,8 @@
 
 import { createHash } from 'node:crypto';
 import { readdirSync } from 'node:fs';
-import { join } from 'node:path';
 import { OUTBOX_NAME } from '../M4-workshop/launcher/outbox.mjs';
-import { readDocFile, recordFolderProblem } from '../M9-record/read-view.mjs';
+import { factIds, readDocFile } from '../M9-record/read-view.mjs';
 
 /** Intake's fact for one handed-in file (M11 outbox-intake.mjs appliedId, not exported there). */
 export const appliedFactId = (sessionId, name) => `intake-applied-${sessionId}-${name}`;
@@ -39,7 +38,9 @@ export function stateText(fact) {
     case 'refused': return `refused, not filed: ${cut(fact.alert_text ?? fact.reason ?? 'no reason given', 300)}`;
     case 'waiting': return `waiting: ${cut(fact.reason ?? fact.alert_text ?? 'no reason given', 300)}`;
     case 'applying': return 'being filed now';
-    case 'interrupted': return 'stopped while being filed; the next pass tries it again';
+    // Never tried again (intake's MAT-7): whether it reached the Record is not known (#682 r2 C-1).
+    case 'interrupted': return 'stopped while being filed, and not tried again: it may or may not have reached the Record. '
+      + 'Check the board; for a Lead\'s plan from which no cards were filed, `node …/setup/lead.mjs release <product> <idea id>` frees its idea';
     default: return `in a state this read-back does not know (${cut(fact?.state, 40)})`;
   }
 }
@@ -78,15 +79,10 @@ export function readFiled({ outbox, sessionId, recordRoot, recordUid, list = (d)
   let files;
   try { files = list(outbox); } catch (e) { return { text: `What Front Door tab ${sessionId} filed can't be read: its folder can't be listed (${e?.code ?? e?.message})`, rows: null }; }
   const fact = (id) => readDocFile({ recordRoot, recordUid, entity: 'fact', id });
-  // Listed once per read-back, only when a file has no applied fact, after read-view's checks of each folder on the way
-  // (as M4 review-runner-main.mjs recordPlanFile lists it; only M9 may import its store.mjs). Each hold is then read
-  // through readDocFile's checks. A folder that fails a check throws, and the file reads as not taken yet.
+  // Listed once per read-back, only when a file has no applied fact (read-view.mjs factIds, its checks of each folder on
+  // the way). Each hold is then read through readDocFile's checks. A folder that fails a check throws, and the file reads
+  // as not taken yet.
   let ids = null;
-  const factIds = () => {
-    if (ids) return ids;
-    const dir = join(recordRoot, 'docs', 'fact');
-    for (const d of [recordRoot, join(recordRoot, 'docs'), dir]) { const bad = recordFolderProblem(d, recordUid); if (bad) throw new Error(bad); }
-    return (ids = readdirSync(dir).filter((n) => n.endsWith('.json')).map((n) => n.slice(0, -5)));
-  };
-  return filedReadback({ sessionId, files, fact, factIds });
+  const listIds = () => (ids ??= factIds({ recordRoot, recordUid }));
+  return filedReadback({ sessionId, files, fact, factIds: listIds });
 }

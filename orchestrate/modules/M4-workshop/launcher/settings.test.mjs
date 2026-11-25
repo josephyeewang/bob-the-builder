@@ -357,8 +357,8 @@ test('round 3 MIN-2: a production file the rules list but the role file does not
 
 // L751: the workers run as the worker runner's own Mac user, so its status and requests folders are walled off from them.
 const RUNNER = { requestsDir: '/u/runner/requests', statusFile: '/u/runner/state/status.json' };
-test('L751: every role the runner starts is denied the worker runner\'s requests and status folders; the Lead and review roles are not given them', () => {
-  for (const role of Object.keys(DESIGN_PROFILES).filter((r) => r !== 'lead' && !REVIEW_ROLES.includes(r))) {
+test('L751, L1370: every role given them but the review roles, the one-shot Lead too, is denied the worker runner\'s requests and status folders', () => {
+  for (const role of Object.keys(DESIGN_PROFILES).filter((r) => !REVIEW_ROLES.includes(r))) {
     const r = render(role, { paths: { ...(RUNNER_ROLES.includes(role) ? REVIEW_PATHS : PATHS), workerRunner: RUNNER } });
     assert.equal(r.ok, true, `${role}: ${r.reason}`);
     const deny = r.settings[S.permissions][S.deny];
@@ -370,7 +370,7 @@ test('L751: every role the runner starts is denied the worker runner\'s requests
       assert.ok(fs[S.denyWrite].includes(dir) && fs[S.denyWrite].includes(`${dir}/**`), `${role}: the shell may not write ${dir}`);
     }
   }
-  for (const role of ['lead', ...REVIEW_ROLES]) {
+  for (const role of REVIEW_ROLES) {
     const r = render(role, { paths: { ...(RUNNER_ROLES.includes(role) ? REVIEW_PATHS : PATHS), workerRunner: RUNNER } });
     assert.equal(r.ok, true, `${role}: ${r.reason}`);
     assert.ok(!JSON.stringify(r.settings).includes('/u/runner'), `${role} is not a runner role`);
@@ -510,6 +510,53 @@ test('L760: the script profile renders with the worker\'s walls, passes checkRun
   assert.ok(hook.includes(' --copy /w/copy'), hook);
   // M10's published script.json lists Workflow: still refused here, as on the never-list.
   assert.match(checkProfile('script', { ...DESIGN_PROFILES.script, tools: [...DESIGN_PROFILES.script.tools, 'Workflow'] }).reason, /never-list/);
+});
+
+test('L1370: the one-shot Lead reads its code from a read-only added folder and starts in its outbox; no other role gets one', () => {
+  const code = '/w/lead-main/sample-app';
+  const r = render('lead', { paths: { ...PATHS, readCode: code } });
+  assert.equal(r.ok, true, r.reason);
+  const s = r.settings;
+  assert.deepEqual(s[S.permissions][S.additionalDirectories], [PATHS.outbox, PATHS.bobFolder, code]);
+  for (const rule of bobFolderDeny(code)) assert.ok(s[S.permissions][S.deny].includes(rule), rule);
+  for (const w of bobFolderShell(code)) assert.ok(s[S.sandbox][S.filesystem][S.denyWrite].includes(w), w);
+  assert.equal(s[S.permissions][S.deny].some((x) => x.startsWith('Read(') && x.includes(code.slice(1))), false, 'it can be read');
+  assert.equal(checkSettings(s, { profile: DESIGN_PROFILES.lead, role: 'lead' }).ok, true);
+  // Without Bob, it is the second added folder.
+  const noBob = render('lead', { paths: { ...PATHS, bobFolder: undefined, readCode: code } });
+  assert.deepEqual(noBob.settings[S.permissions][S.additionalDirectories], [PATHS.outbox, code]);
+  assert.equal(checkSettings(noBob.settings, { profile: DESIGN_PROFILES.lead, role: 'lead' }).ok, true);
+  // Refused: any other role, a folder inside the outbox or holding it, one under a read-denied folder, a bad spelling.
+  assert.match(render('worker', { paths: { ...PATHS, readCode: code } }).reason ?? '', /only the Lead is given a read-only code folder/);
+  assert.match(render('front_door', { paths: { ...PATHS, readCode: code } }).reason ?? '', /only the Lead/);
+  for (const [bad, why] of [['/w/outbox/code', /apart from the session's own folders/], ['/w', /apart from the session's own folders/],
+    ['/w/record/x', /apart from every read-denied folder/], ['/w/x/../code', /not a plain absolute path/], ['/w/code 2', /not a plain absolute path/]]) {
+    assert.match(render('lead', { paths: { ...PATHS, readCode: bad } }).reason ?? '', why, bad);
+  }
+  // The written-settings check: the code folder's tools or shell wall gone, or a fourth folder, is beyond the session's own.
+  const drift = (f) => { const c = structuredClone(s); f(c); return checkSettings(c, { profile: DESIGN_PROFILES.lead, role: 'lead' }); };
+  for (const [name, f] of [
+    ['its Edit rule gone', (c) => { c[S.permissions][S.deny] = c[S.permissions][S.deny].filter((x) => x !== bobFolderDeny(code)[0]); }],
+    ['its shell wall gone', (c) => { c[S.sandbox][S.filesystem][S.denyWrite] = c[S.sandbox][S.filesystem][S.denyWrite].filter((x) => !x.startsWith(code)); }],
+    ['a fourth folder, walled', (c) => { c[S.permissions][S.additionalDirectories].push('/w/more'); c[S.permissions][S.deny].push(...bobFolderDeny('/w/more')); c[S.sandbox][S.filesystem][S.denyWrite].push(...bobFolderShell('/w/more')); }],
+    ['the code folder holding Bob', (c) => { c[S.permissions][S.additionalDirectories][2] = '/w'; c[S.permissions][S.deny].push(...bobFolderDeny('/w')); c[S.sandbox][S.filesystem][S.denyWrite].push(...bobFolderShell('/w')); }],
+  ]) assert.match(drift(f).reason ?? '', /beyond the session's own outbox/, name);
+});
+
+test('L1370 audit (#682 r1 m6): only the Lead\'s written settings may add a code folder; any other role, or one not named, is refused', () => {
+  const code = '/w/lead-main/sample-app';
+  const lead = render('lead', { paths: { ...PATHS, readCode: code } }).settings;
+  assert.equal(checkSettings(lead, { profile: DESIGN_PROFILES.lead, role: 'lead' }).ok, true);
+  assert.match(checkSettings(lead, { profile: DESIGN_PROFILES.lead }).reason ?? '', /beyond the session's own outbox/, 'a check not told the role');
+  // A worker's settings with a third folder, walled exactly as the Lead's code folder is: refused for the worker.
+  const w = structuredClone(render('worker').settings);
+  w[S.permissions][S.additionalDirectories].push(code);
+  w[S.permissions][S.deny].push(...bobFolderDeny(code));
+  w[S.sandbox][S.filesystem][S.denyWrite].push(...bobFolderShell(code));
+  for (const role of ['worker', 'front_door', null]) assert.match(checkSettings(w, { profile: DESIGN_PROFILES.worker, role }).reason ?? '', /beyond the session's own outbox/, String(role));
+  assert.match(writeRoleSettings(join(tmp(), 'role.json'), w, { profile: DESIGN_PROFILES.worker, role: 'worker' }).reason ?? '', /beyond the session's own outbox/);
+  // The worker's own two folders still pass, told its role or not.
+  assert.equal(checkSettings(render('worker').settings, { profile: DESIGN_PROFILES.worker, role: 'worker' }).ok, true);
 });
 
 test('L881: the shell\'s write wall between sessions: the only added folders are the session\'s own outbox and the read-only Bob folder', () => {

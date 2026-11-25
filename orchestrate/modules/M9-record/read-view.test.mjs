@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { appendFileSync, chmodSync, linkSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { LIST_ENTITIES, listDocFiles, readDocFile, readMeta, readProductFile, recordView } from './read-view.mjs';
+import { LIST_ENTITIES, factIds, listDocFiles, readDocFile, readMeta, readProductFile, recordView } from './read-view.mjs';
 import { docPathOf } from './store.mjs';
 import { PRODUCT, UID, leadCard, must, product, setup } from './fixtures.test-helper.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
@@ -45,6 +45,25 @@ test('L998: a document, a product and the lists read what the Store Writer wrote
   assert.match(readDocFile({ ...v, entity: 'go', id: 'x' }).reason, /not an entity this view reads/);
   // Not yet made: docs/session/ until a first session.
   assert.equal(readDocFile({ ...v, entity: 'session', id: 'S-1' }).ok, false);
+});
+
+test('L1370: factIds lists every fact by name, none before the first fact, and throws on a fact folder that fails a check', () => {
+  const empty = setup({ prefix: 'm9-view-' });
+  product(empty);
+  const e = { recordRoot: empty.root, recordUid: UID };
+  assert.deepEqual(factIds(e), [], 'a Record with no fact yet has no fact folder');
+  const env = filled();
+  const v = { recordRoot: env.root, recordUid: UID };
+  assert.deepEqual(factIds(v).sort(), ['band-usage', 'usage-acct-1']);
+  chmodSync(join(env.root, 'docs', 'fact'), 0o777);
+  assert.throws(() => factIds(v), /is not the Record owner's alone/);
+  chmodSync(join(env.root, 'docs', 'fact'), 0o755);
+  rmSync(join(env.root, 'docs', 'fact'), { recursive: true });
+  writeFileSync(join(env.root, 'docs', 'fact'), 'x');
+  assert.throws(() => factIds(v), /is not a plain folder/);
+  // The report a one-shot Lead starts on is one this view reads (READ_ENTITIES).
+  assert.equal(readDocFile({ ...v, entity: 'report', id: 'idea-x-1' }).ok, false);
+  assert.doesNotMatch(readDocFile({ ...v, entity: 'report', id: 'idea-x-1' }).reason, /not an entity this view reads/);
 });
 
 test('L998: a file that fails a check is never read; a list names it unread, and the view refuses rather than drop it', () => {

@@ -101,7 +101,7 @@ export const bobFolderShell = (folder) => [folder, `${folder}/**`];
 
 /** A session's own paths, the one list the render's apart check and checkRunnerWall both use: [path, isFolder]. The node
  * binary and the rules snapshot are files (node is often a link to its install), so only where they resolve is checked. */
-export const sessionOwnPaths = (paths) => [['outbox', true], ['copy', true], ['notes', true], ['hooksDir', true], ['snapshot', false], ['node', false], ['bobFolder', true]]
+export const sessionOwnPaths = (paths) => [['outbox', true], ['copy', true], ['notes', true], ['hooksDir', true], ['snapshot', false], ['node', false], ['bobFolder', true], ['readCode', true]]
   .filter(([k]) => typeof paths?.[k] === 'string').map(([k, f]) => [paths[k], f]);
 
 /** The worker runner's folders (L751): its requests folder and its status file's folder, or a refusal. */
@@ -269,7 +269,10 @@ export function checkRunnerWall({ settings, workerRunner, paths, realpath = (p) 
 
 /**
  * paths: { copy, outbox, hooksDir, snapshot, node, deny: { secrets: [], claudeHome, ssh, gh, robotKeys, record, otherCopies: [], proposals: [] },
- *          bobFolder?, reviewWalls?, notes?, workerRunner?, ownerTaps?, snapshotOwner? }
+ *          bobFolder?, readCode?, reviewWalls?, notes?, workerRunner?, ownerTaps?, snapshotOwner? }
+ * readCode: the one-shot Lead's read-only code folder (setup/lead.mjs, L1370: <base>/lead-main/<product>), lead only. It
+ * is added as a folder the tools may read, and walled from writing as the Bob folder is (bobFolderDeny, bobFolderShell),
+ * so the Lead starts in its outbox, never inside a copy the Dispatcher's lead-main step may swap out under it.
  * snapshotOwner: the uid whose alone the snapshot must be (L1226; the worker runner gives 0): each hook gets
  * `--snapshot-owner <uid>`. Left out (the review roles): none, read as before.
  * workerRunner { requestsDir, statusFile }: the worker runner's two paths (lane 4's owner-ports.mjs names, L751). The
@@ -328,10 +331,11 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
   }
 
   const d = paths.deny ?? {};
-  // The worker runner's folders (L751), walled off from every role the runner starts: all but the Lead (whose launch
-  // requests the Dispatcher writes there; whether its own tools get a write wall is the lead's call) and the review roles.
+  // The worker runner's folders (L751), walled off from every role given them but the review roles (which run as the
+  // review user, shut out of them by the disk): every role the runner starts, and the one-shot Lead (L1370), which
+  // setup/lead.mjs starts as the owner and gives them, so its tools can't read the runner's status or requests.
   let runnerDirs = [];
-  if (paths.workerRunner !== undefined && role !== 'lead' && !REVIEW_ROLES.includes(role)) {
+  if (paths.workerRunner !== undefined && !REVIEW_ROLES.includes(role)) {
     const w = runnerWallDirs(paths.workerRunner);
     if (!w.ok) return w;
     const own = sessionOwnPaths(paths).map(([p]) => p);
@@ -365,6 +369,14 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
     for (const pat of ['//**/.claude/**', '//**/.mcp.json', '//**/SKILL.md']) deny.push(`Read(${pat})`, `Edit(${pat})`, `Write(${pat})`);
   }
   if (paths.bobFolder) deny.push(...bobFolderDeny(paths.bobFolder));
+  if (paths.readCode !== undefined) {
+    if (role !== 'lead') return refuse(`only the Lead is given a read-only code folder, not a ${role}`);
+    if (wallPath(paths.readCode) !== paths.readCode || /[^A-Za-z0-9._/-]/.test(paths.readCode)) return refuse(`path "${paths.readCode}" is not a plain absolute path, spelled as it resolves`);
+    const own = [paths.outbox, paths.notes, paths.bobFolder].filter((x) => x !== undefined);
+    if (own.some((x) => !apart(x, paths.readCode))) return refuse('the read-only code folder must be apart from the session\'s own folders (outbox, notes, Bob)');
+    if (denyPaths.some((x) => !apart(x, paths.readCode))) return refuse('the read-only code folder must be apart from every read-denied folder');
+    deny.push(...bobFolderDeny(paths.readCode));
+  }
   for (const dir of runnerDirs) deny.push(...runnerWallDeny(dir));
   const walls = [];
   if (role === 'front_door') {
@@ -428,7 +440,7 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
     const sd = dirname(paths.snapshot);
     if (wallPath(sd) !== sd || sd.split('/').length < 3) return refuse('the rules snapshot must sit in a folder of its own below the top, spelled as it resolves');
     // The wall shuts the whole folder, so it may hold none of the session's own folders, nor sit inside one.
-    const own = [paths.outbox, paths.copy, paths.notes, paths.bobFolder].filter((x) => x !== undefined);
+    const own = [paths.outbox, paths.copy, paths.notes, paths.bobFolder, paths.readCode].filter((x) => x !== undefined);
     // Say which folder is badly spelled, before apart refuses it as not apart (as the runner wall does, #420 r1 c1).
     const odd = own.find((x) => wallPath(x) !== x);
     if (odd !== undefined) return refuse(`path "${odd}" is not a plain absolute path, spelled as it resolves`);
@@ -475,14 +487,14 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
       [S.deny]: deny,
       [S.ask]: [],
       // The save (L991 M1) reaches its outbox only: the Bob folder is not one of its folders.
-      [S.additionalDirectories]: [paths.outbox, ...(paths.bobFolder && phase !== 'save' ? [paths.bobFolder] : [])],
+      [S.additionalDirectories]: [paths.outbox, ...(paths.bobFolder && phase !== 'save' ? [paths.bobFolder] : []), ...(paths.readCode !== undefined ? [paths.readCode] : [])],
     },
     [S.sandbox]: {
       [S.sandboxEnabled]: true,
       [S.failIfUnavailable]: true,
       [S.allowUnsandboxedCommands]: false,
       [S.network]: { [S.allowedDomains]: allowedDomains, [S.strictAllowlist]: true, ...(proxy ? { [S.httpProxyPort]: proxy, [S.socksProxyPort]: proxy } : {}) },
-      [S.filesystem]: { [S.denyRead]: [...denyPaths, ...runnerDirs], [S.denyWrite]: [`${paths.outbox}/.*`, `${paths.outbox}/**/.*`, ...(paths.bobFolder ? bobFolderShell(paths.bobFolder) : []), ...runnerDirs.flatMap(runnerWallShell), ...snapDirs.flatMap(snapshotWallShell), ...walls] },
+      [S.filesystem]: { [S.denyRead]: [...denyPaths, ...runnerDirs], [S.denyWrite]: [`${paths.outbox}/.*`, `${paths.outbox}/**/.*`, ...(paths.bobFolder ? bobFolderShell(paths.bobFolder) : []), ...(paths.readCode !== undefined ? bobFolderShell(paths.readCode) : []), ...runnerDirs.flatMap(runnerWallShell), ...snapDirs.flatMap(snapshotWallShell), ...walls] },
     },
     [S.hooks]: hooks,
     [S.env]: { [ENV.autoCompactWindow]: String(profile.compactWindow), [ENV.disableUpdates]: '1' },
@@ -579,10 +591,11 @@ function sandboxKeysProblem(obj, machineWide, phase = null) {
  * it writes: a sibling's outbox, one of the same product included, then can't be written, renamed or deleted (shown
  * on claude 2.1.322 with worker settings: touch, mv and rm in a sibling's outbox all refused; checked: claude-code
  * 2.1.322, open until 2027-01-20 (R-0b-176), which runs worker settings on the pin). The only other added
- * folder may be the Bob folder, read-only to the tools and walled from the shell. The outbox is the one every
+ * folders may be the Bob folder and, for `role` lead only, the one-shot Lead's code folder (L1370, #682 r1 m6), each
+ * read-only to the tools and walled from the shell. The outbox is the one every
  * hook is told (--outbox). → the reason, or null.
  */
-function ownFoldersProblem(obj) {
+function ownFoldersProblem(obj, role) {
   const p = obj[S.permissions] ?? {};
   if (!Object.hasOwn(p, S.additionalDirectories)) return null;
   const dirs = p[S.additionalDirectories];
@@ -603,13 +616,16 @@ function ownFoldersProblem(obj) {
   if (outboxes.size !== 1) return `${beyond} (its hooks name ${outboxes.size ? 'more than one outbox' : 'no outbox'})`;
   const [outbox] = outboxes;
   if (wallPath(outbox) !== outbox) return `${beyond} (the outbox is not a plain absolute path)`;
-  if (dirs[0] !== outbox || dirs.length > 2) return beyond;
-  if (dirs.length === 2) {
-    const bob = dirs[1];
-    const deny = p[S.deny] ?? [];
-    const shellWrite = obj[S.sandbox]?.[S.filesystem]?.[S.denyWrite] ?? [];
-    if (wallPath(bob) !== bob || !apart(bob, outbox)
-      || !bobFolderDeny(bob).every((r) => deny.includes(r)) || !bobFolderShell(bob).every((r) => shellWrite.includes(r))) return beyond;
+  // Past the outbox: the Bob folder, and for the Lead alone its read-only code folder (L1370; #682 r1 m6: a role the
+  // check is not told is the Lead gets the Bob folder only), each read-only to the tools and the shell, apart from the
+  // outbox and from each other.
+  if (dirs[0] !== outbox || dirs.length > (role === 'lead' ? 3 : 2)) return beyond;
+  const deny = p[S.deny] ?? [];
+  const shellWrite = obj[S.sandbox]?.[S.filesystem]?.[S.denyWrite] ?? [];
+  const extra = dirs.slice(1);
+  for (const [i, d] of extra.entries()) {
+    if (wallPath(d) !== d || !apart(d, outbox) || extra.some((o, j) => j !== i && !apart(o, d))
+      || !bobFolderDeny(d).every((r) => deny.includes(r)) || !bobFolderShell(d).every((r) => shellWrite.includes(r))) return beyond;
   }
   return null;
 }
@@ -620,7 +636,7 @@ function ownFoldersProblem(obj) {
  * excludedCommands entry or an unsandboxed escape refuses every role. `phase` ('session', 'install' or 'save'), when
  * the caller knows it: the builder proxy's port must be that phase's (proxyPortsProblem).
  */
-export function checkSettings(obj, { machineWide = false, profile = null, phase = null } = {}) {
+export function checkSettings(obj, { machineWide = false, profile = null, phase = null, role = null } = {}) {
   const sb = obj?.[S.sandbox];
   const p = obj?.[S.permissions];
   if (sb && Object.hasOwn(sb, S.excludedCommands)) return refuse(`${machineWide ? 'machine-wide' : 'role'} settings hold excludedCommands`);
@@ -644,7 +660,7 @@ export function checkSettings(obj, { machineWide = false, profile = null, phase 
   if (!p || p[S.ask]?.length) return refuse('role settings hold ask rules');
   if ((p[S.allow] ?? []).some((r) => !/^Bash\(.+\)$/.test(r) || BAD_COMMAND.test(r.slice(5, -1)))) return refuse('an allow rule is not one exact command');
   if (profile && p[S.defaultMode] !== profile.mode) return refuse('permission mode differs from the profile');
-  const folders = ownFoldersProblem(obj);
+  const folders = ownFoldersProblem(obj, role);
   if (folders) return refuse(folders);
   for (const list of Object.values(obj[S.hooks] ?? {})) {
     for (const m of Array.isArray(list) ? list : []) for (const h of m?.[H.hooks] ?? []) {
@@ -693,13 +709,13 @@ export function machineWideSettings({ node, hooksDir, snapshot }) {
 }
 
 /** Writes the role file (atomically), reads it back from disk and checks it, with the phase when given (its proxy port). */
-export function writeRoleSettings(file, settings, { profile, phase = null } = {}) {
+export function writeRoleSettings(file, settings, { profile, phase = null, role = null } = {}) {
   const text = `${JSON.stringify(settings, null, 2)}\n`;
   const tmp = join(dirname(file), `.${basename(file)}.tmp`);
   writeFileSync(tmp, text, { mode: 0o644 });
   renameSync(tmp, file);
   let back; try { back = JSON.parse(readFileSync(file, 'utf8')); } catch { return refuse('role settings did not read back'); }
   if (JSON.stringify(back) !== JSON.stringify(settings)) return refuse('role settings read back differently');
-  const c = checkSettings(back, { profile, phase });
+  const c = checkSettings(back, { profile, phase, role });
   return c.ok ? { ok: true, file, settings: back } : c;
 }

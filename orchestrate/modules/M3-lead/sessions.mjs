@@ -12,7 +12,8 @@
 // With no record a Lead's plans are refused and the owner is told (M9 applyPlan), so a bad or missing file holds plans,
 // never lets one through.
 //
-// STILL OWED: the start command that makes the folder and writes this file (step 8 PR 3), and the export check (PR 2).
+// The start command that makes the folder and writes this file is setup/lead.mjs (step 8 PR 3); the export check is M11
+// lead-main.mjs's (PR 2). STILL OWED: starting it by itself for each confirmed idea (PR 4).
 
 import { join } from 'node:path';
 import { ownerSessionId, isOwnerSession, ownerSessions } from '../../shared/owner-sessions.mjs';
@@ -32,10 +33,12 @@ export const isLeadSession = (name, product) => isOwnerSession(LEAD_PREFIX, name
 /** This product's one-shot Lead sessions (shared/owner-sessions.mjs ownerSessions, role lead). */
 export const leadSessions = (o) => ownerSessions({ ...o, role: LEAD_ROLE, prefix: LEAD_PREFIX, label: 'Lead' });
 
-/** The launch file's text for a start: what the start command writes. */
-export function launchFileText({ session, product, head }) {
-  return `${JSON.stringify({ session, product, head })}\n`;
+/** The launch file's text for a start: what the start command writes. `idea`, the idea's report id a one-shot Lead was
+ * started for, when given (#682 r1 M1): setup/lead.mjs reads it to refuse a second Lead for an idea one is planning. */
+export function launchFileText({ session, product, head, idea }) {
+  return `${JSON.stringify({ session, product, head, ...(idea !== undefined ? { idea } : {}) })}\n`;
 }
+const LAUNCH_IDEA = /^idea-[A-Za-z0-9-]{1,180}$/;
 
 /**
  * The launch file of session `s` ({ sessionId, outbox, uid, product }): { ok: true, head } | { ok: false, none?, reason }.
@@ -54,9 +57,10 @@ export function readLaunchFile(s, { open } = {}) {
   try { doc = JSON.parse(f.text); } catch { return no('the launch file does not read as JSON'); }
   if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return no('the launch file is not a JSON object');
   const keys = Object.keys(doc).sort().join(',');
-  if (keys !== 'head,product,session') return no('the launch file must hold session, product and head only');
+  if (keys !== 'head,product,session' && keys !== 'head,idea,product,session') return no('the launch file must hold session, product and head, and an idea id, only');
+  if (Object.hasOwn(doc, 'idea') && (typeof doc.idea !== 'string' || !LAUNCH_IDEA.test(doc.idea))) return no('the launch file\'s idea is not an idea id');
   if (doc.session !== s.sessionId) return no('the launch file names another session');
   if (doc.product !== s.product) return no('the launch file names another product');
   if (typeof doc.head !== 'string' || !/^[0-9a-f]{40}$/.test(doc.head)) return no('the launch file\'s head is not a full commit sha');
-  return { ok: true, head: doc.head };
+  return { ok: true, head: doc.head, ...(Object.hasOwn(doc, 'idea') ? { idea: doc.idea } : {}) };
 }

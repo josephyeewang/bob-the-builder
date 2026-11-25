@@ -19,6 +19,8 @@
 //   listDocFiles({ recordRoot, recordUid, entity })            → { ok: true, docs: [{ id, doc, rev }], unread: [{ id, reason }] } | { ok: false, reason }
 //                                                                (cards, for check 12's gate; products, for the runner's requestGapMs)
 //                                                                (asks, for the worker runner's delete-copy check, L1357)
+//   factIds({ recordRoot, recordUid })                         → every fact's id, after each folder's check ([] before the first fact); throws on a folder that fails one
+//                                                                (intake's holds for M1 filed.mjs; a one-shot Lead's plan facts, setup/lead.mjs)
 //   readMeta({ recordRoot, recordUid, entity, id })            → { ok: true, meta: { createdBy, createdKind, stateSince, ts, seq } | null } | { ok: false, reason }
 //   recordView({ recordRoot, recordUid })                      → { read(entity, id), list(entity), meta(entity, id) }: M11 gate.mjs's `rec`, read only
 //
@@ -32,8 +34,9 @@ import { absorbDiaryLine, docPathOf } from './store.mjs';
 export const MAX_DOC_BYTES = 1024 * 1024;
 const ID = /^[A-Za-z0-9._-]{1,200}$/;
 // The entities a reader may name: those check 12's gate reads (card, product, fact, and merge for an undo's exact reverse,
-// M11 undo.mjs mergeOf), and the session the worker runner's drain reads.
-export const READ_ENTITIES = Object.freeze(['card', 'product', 'fact', 'merge', 'session']);
+// M11 undo.mjs mergeOf), the session the worker runner's drain reads, and the report a one-shot Lead is started on (its
+// idea, setup/lead.mjs, L1370).
+export const READ_ENTITIES = Object.freeze(['card', 'product', 'fact', 'merge', 'session', 'report']);
 
 // A folder of the Record: a plain folder of the Record's owner that no one else writes. Null, or the problem.
 export function recordFolderProblem(d, recordUid) {
@@ -115,6 +118,20 @@ export function listDocFiles({ recordRoot, recordUid, entity }) {
     if (r.ok) docs.push({ id, doc: r.doc, rev: r.rev }); else unread.push({ id, reason: r.reason });
   }
   return { ok: true, docs, unread };
+}
+
+/**
+ * Every fact's id, from the names in docs/fact/, after read-view's check of each folder on the way (only M9 may import
+ * its store.mjs). A folder that fails a check throws. Each fact is then read through readDocFile's own checks.
+ */
+export function factIds({ recordRoot, recordUid }) {
+  const dir = entityDir(recordRoot, 'fact');
+  for (const d of [recordRoot, dirname(dir)]) { const bad = recordFolderProblem(d, recordUid); if (bad) throw new Error(bad); }
+  // A Record that has no fact yet has no fact folder: no ids. Anything else in its place is a problem.
+  try { lstatSync(dir); } catch (e) { if (e?.code === 'ENOENT') return []; throw e; }
+  const bad = recordFolderProblem(dir, recordUid);
+  if (bad) throw new Error(bad);
+  return readdirSync(dir).filter((n) => n.endsWith('.json')).map((n) => n.slice(0, -5));
 }
 
 const CHUNK = 64 * 1024;

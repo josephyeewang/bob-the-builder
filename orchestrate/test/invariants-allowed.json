@@ -632,6 +632,11 @@
    "why": "a wait with its own check for a time ahead (L1157 d): COPY_AHEAD_MS ahead is refused"
   },
   {
+   "file": "setup/lead.mjs",
+   "line": "return m ? new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime() : null;",
+   "why": "the start stamp of a Lead folder from before claims, read only by heldBy's fallback (L1370 audit, #682 r2 M-A): a claim keeps its own started_at_ms in UTC epoch ms; a stamp ahead only keeps the idea held longer"
+  },
+  {
    "file": "shared/still-waiting.mjs",
    "line": "const t = typeof value === 'string' ? Date.parse(value) : NaN;",
    "why": "pastTime itself: the one home of the stored-time read (I4)"

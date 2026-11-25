@@ -1,8 +1,9 @@
-import { test as nodeTest } from 'node:test';
+import { test as nodeTest, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync, symlinkSync, mkdirSync, rmSync, existsSync, lstatSync, utimesSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { intakePass, kindsFor, sha256, INTAKE_PORT_MS, INTAKE_START_MS, INTAKE_PASS_MS, LEFT_OUT_TELL_MS, LEAD_LAUNCH_CHECKS_PER_PASS, LEAD_LAUNCH_LOOK_MS, LAUNCH_LOOK_FACT } from './outbox-intake.mjs';
+import { intakePass, kindsFor, sha256, INTAKE_PORT_MS, INTAKE_START_MS, INTAKE_PASS_MS, LEFT_OUT_TELL_MS, LEAD_LAUNCH_CHECKS_PER_PASS, LEAD_LAUNCH_LOOK_MS, LAUNCH_LOOK_FACT,
+  LEAD_LAUNCH_SPAN_MS, LAUNCH_CHECKED } from './outbox-intake.mjs';
 import { STEP_DEADLINE_MS } from './tick.mjs';
 import { note } from './moves.mjs';
 import { recordLeadLaunch } from './lead-restart.mjs';
@@ -18,6 +19,8 @@ import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 const UID = process.getuid();
 // A hung call must fail a named test, never hang the run (L497 m3).
 const test = (name, opts, fn) => (fn ? nodeTest(name, { timeout: 10_000, ...opts }, fn) : nodeTest(name, { timeout: 10_000 }, opts));
+// The Dispatcher's in-memory launch checks (#680 r3 m1) start empty for each test, as for each Dispatcher.
+beforeEach(() => LAUNCH_CHECKED.clear());
 
 function world() {
   const root = tempDir('m11-outbox-');
@@ -1850,7 +1853,8 @@ test('L1370: a launch file that is not this start\'s is never used, and the expo
     [{ session: 'ld-orchestrate-test-20261125090001', product: PRODUCT, head: HEAD }, /another session/],
     [{ session: ONE_SHOT, product: 'other', head: HEAD }, /another product/],
     [{ session: ONE_SHOT, product: PRODUCT, head: HEAD.slice(0, 12) }, /not a full commit sha/],
-    [{ session: ONE_SHOT, product: PRODUCT, head: HEAD, card: 'C-1' }, /session, product and head only/],
+    [{ session: ONE_SHOT, product: PRODUCT, head: HEAD, card: 'C-1' }, /session, product and head, and an idea id, only/],
+    [{ session: ONE_SHOT, product: PRODUCT, head: HEAD, idea: 'idea-../x' }, /the launch file's idea is not an idea id/],
     ['{"session":', /does not read as JSON/],
     [`"${HEAD}"`, /not a JSON object/],
     [`${JSON.stringify({ session: ONE_SHOT, product: PRODUCT, head: HEAD })}${' '.repeat(5000)}`, /too big/],
@@ -1989,7 +1993,7 @@ test('L1370 audit r2 MAT-1: a Lead is past its day a day after its first check, 
   const out = await p.run({ exportedHead: (x) => { p.asked.push(x); return refuse(); } });
   assert.equal(out[0].launch, 'held', 'a file written a day before the Dispatcher first saw it is still checked');
   assert.equal(p.asked.length, 1);
-  assert.deepEqual(p.rec.read('fact', LAUNCH_LOOK_FACT(ONE_SHOT)).doc, { first_checked_at: new Date(first).toISOString(), last_checked_at: new Date(first).toISOString() });
+  assert.deepEqual(p.rec.read('fact', LAUNCH_LOOK_FACT(ONE_SHOT)).doc, { first_checked_at: new Date(first).toISOString(), first_export_at: new Date(first).toISOString(), last_checked_at: new Date(first).toISOString() });
   // The file dated a year ahead changes nothing: a day of checks still ends it.
   const ahead = new Date(p.E.clock.t + 365 * 24 * 3600_000);
   utimesSync(join(p.ob, '.launch.json'), ahead, ahead);
@@ -2114,4 +2118,145 @@ test('L1370 audit r2 m4: a hold mark that cannot be cleared after the launch is 
   assert.equal(p.launches().length, 1);
   assert.ok(logged.some((t) => t.includes(`the Lead ${ONE_SHOT}'s launch was recorded; a hold mark could not be cleared (the fact could not be read)`)), logged.join('\n'));
   assert.equal(logged.some((t) => /failed, so its plans wait/.test(t)), false, logged.join('\n'));
+});
+
+// #680 round 3's logged minors, folded into Step 8 PR 3, the first PR to make Leads exist.
+const lookRev = (rec) => rec.read('fact', LAUNCH_LOOK_FACT(ONE_SHOT))?.rev ?? 0;
+const lookDoc = (rec) => rec.read('fact', LAUNCH_LOOK_FACT(ONE_SHOT))?.doc;
+
+test('#680 r3 m3: a Lead held on a bad launch file writes its check record once, not every pass', async () => {
+  const p = oneShotWorld();
+  p.launchFile('{ not json');
+  const first = p.E.clock.t;
+  for (let i = 0; i < 5; i += 1, p.E.clock.t += 60_000) assert.equal((await p.run({ exportedHead: p.exported() }))[0].launch, 'held');
+  assert.equal(lookRev(p.rec), 1, 'one write for five passes');
+  assert.deepEqual(lookDoc(p.rec), { first_checked_at: new Date(first).toISOString() });
+  assert.deepEqual(p.asked, []);
+});
+
+test('#680 r3 m3: a pass whose export checks are used up writes no check record; one that ran writes its time', async () => {
+  const p = oneShotWorld();
+  p.launchFile({ session: ONE_SHOT, product: PRODUCT, head: HEAD });
+  const refuse = (x) => { p.asked.push(x); return { ok: false, reason: 'not an export' }; };
+  const first = p.E.clock.t;
+  await p.run({ exportedHead: refuse });
+  assert.equal(lookRev(p.rec), 1);
+  p.E.clock.t += 60_000;
+  // A pass with no checks left: launchFromFile is asked straight, as the pass does once its checks are spent.
+  const { launchFromFile } = await import('./outbox-intake.mjs');
+  const s = { sessionId: ONE_SHOT, role: 'lead', outbox: p.ob, uid: UID, card: null, product: PRODUCT };
+  const later = await launchFromFile({ rec: p.rec, now: p.E.clock.t, alert: fakeAlert(), s, exportedHead: refuse, checks: { left: 0 } });
+  assert.equal(later.launch, 'later');
+  assert.equal(lookRev(p.rec), 1, 'no check ran, so nothing is written');
+  await p.run({ exportedHead: refuse });
+  assert.equal(lookRev(p.rec), 2);
+  assert.deepEqual(lookDoc(p.rec), { first_checked_at: new Date(first).toISOString(), first_export_at: new Date(first).toISOString(), last_checked_at: new Date(p.E.clock.t).toISOString() });
+});
+
+test('#680 r3 m3: the check record is cleared once the launch is recorded, and once the Lead is stale, and then left alone', async () => {
+  const p = oneShotWorld();
+  p.launchFile({ session: ONE_SHOT, product: PRODUCT, head: HEAD });
+  await p.run({ exportedHead: () => ({ ok: false, reason: 'not an export' }) });
+  assert.ok(lookDoc(p.rec)?.last_checked_at);
+  p.E.clock.t += 60_000;
+  assert.equal((await p.run({ exportedHead: p.exported() }))[0].launch, 'recorded');
+  assert.deepEqual(lookDoc(p.rec), {}, 'cleared at the record');
+  assert.equal(LAUNCH_CHECKED.has(ONE_SHOT), false);
+
+  const q = oneShotWorld();
+  q.launchFile('{ not json');
+  await q.run({ exportedHead: q.exported() });
+  q.E.clock.t += LEAD_LAUNCH_LOOK_MS + 60_000;
+  assert.equal((await q.run({ exportedHead: q.exported() }))[0].launch, 'stale');
+  // Cleared once the stale tell has landed (its told_at), which is the next pass when the alert is queued: a tell that
+  // did not land keeps the record, so the day is not started afresh.
+  q.E.clock.t += 60_000;
+  assert.equal((await q.run({ exportedHead: q.exported() }))[0].launch, 'ignored');
+  assert.deepEqual(lookDoc(q.rec), {}, 'cleared once stale');
+  const rev = lookRev(q.rec);
+  for (let i = 0; i < 3; i += 1) {
+    q.E.clock.t += 60_000;
+    assert.equal((await q.run({ exportedHead: q.exported() }))[0].launch, 'ignored');
+  }
+  assert.equal(lookRev(q.rec), rev, 'an ignored Lead writes nothing');
+});
+
+test('#680 r3 m3: a clear refused when the Lead went stale is tried again on a later pass', async () => {
+  const p = oneShotWorld();
+  p.launchFile('{ not json');
+  await p.run({ exportedHead: p.exported() });
+  const real = p.rec;
+  let refuse = true;
+  const rec = Object.create(real, { write: { value: (x) => (refuse && x.entity === 'fact' && x.id === LAUNCH_LOOK_FACT(ONE_SHOT) ? { ok: false, reason: 'refused' } : real.write(x)) } });
+  const s = [{ sessionId: ONE_SHOT, role: 'lead', outbox: p.ob, uid: UID, card: null, product: PRODUCT }];
+  const logged = [];
+  const pass = () => withAlerts(real, p.E.clock.t, () => true, (alert) => intakePass({ rec, sessions: s, ...world().ports, alert, now: p.E.clock.t,
+    replyToLead: async () => ({ ok: true }), failureLog: (t) => logged.push(t) }));
+  p.E.clock.t += LEAD_LAUNCH_LOOK_MS + 60_000;
+  assert.equal((await pass())[0].launch, 'stale');
+  p.E.clock.t += 60_000;
+  assert.equal((await pass())[0].launch, 'ignored');
+  assert.ok(lookDoc(real)?.first_checked_at, 'the refused clear left it');
+  assert.ok(logged.some((t) => t.includes(`the Lead ${ONE_SHOT}'s launch checks could not be cleared (refused)`)), logged.join('\n'));
+  refuse = false;
+  p.E.clock.t += 60_000;
+  assert.equal((await pass())[0].launch, 'ignored');
+  assert.deepEqual(lookDoc(real), {});
+});
+
+test('#680 r3 m1: a Lead whose check record the Record refuses goes after the Leads checked since, not first every pass', async () => {
+  const p = oneShotWorld();
+  const root = dirname(p.ob);
+  const sessions = [];
+  for (let i = 0; i < 6; i += 1) {
+    const sid = `ld-orchestrate-test-2026112508${String(i).padStart(4, '0')}`;
+    const ob = mk(join(root, sid));
+    writeFileSync(join(ob, '.launch.json'), JSON.stringify({ session: sid, product: PRODUCT, head: HEAD }));
+    sessions.push({ sessionId: sid, role: 'lead', outbox: ob, uid: UID, card: null, product: PRODUCT });
+  }
+  const ids = sessions.map((s) => s.sessionId);
+  const real = p.rec;
+  const rec = Object.create(real, { write: { value: (x) => (x.entity === 'fact' && x.id === LAUNCH_LOOK_FACT(ids[0]) ? { ok: false, reason: 'refused' } : real.write(x)) } });
+  const w = world();
+  const logged = [];
+  const pass = async () => {
+    const asked = [];
+    await intakePass({ rec, sessions, ...w.ports, alert: fakeAlert(), now: p.E.clock.t, replyToLead: async () => ({ ok: true }), failureLog: (t) => logged.push(t),
+      exportedHead: (x) => { asked.push(x.session); return { ok: false, reason: 'not an export' }; } });
+    p.E.clock.t += 60_000;
+    return asked;
+  };
+  assert.deepEqual(await pass(), ids.slice(0, 5));
+  assert.ok(logged.some((t) => t.includes(`the Lead ${ids[0]}'s launch check could not be noted (refused)`)), logged.join('\n'));
+  assert.deepEqual(await pass(), [ids[5], ids[0], ids[1], ids[2], ids[3]], 'the never-checked Lead first; the refused one with the others checked then');
+  assert.deepEqual(await pass(), [ids[4], ids[0], ids[1], ids[2], ids[3]]);
+  assert.equal(lookDoc(real), undefined, 'still never noted');
+});
+
+test('#680 r3 m2: a Lead whose file reads is stale only after two export checks an hour apart, so Dispatcher downtime is not its day', async () => {
+  const refuse = (p) => (x) => { p.asked.push(x); return { ok: false, reason: 'not an export' }; };
+  assert.equal(LEAD_LAUNCH_SPAN_MS, 60 * 60 * 1000);
+  // Down for a day after the first check: the next pass checks again, and only the pass after it is stale.
+  const p = oneShotWorld();
+  p.launchFile({ session: ONE_SHOT, product: PRODUCT, head: HEAD });
+  const first = p.E.clock.t;
+  await p.run({ exportedHead: refuse(p) });
+  p.E.clock.t = first + 25 * 3600_000;
+  assert.equal((await p.run({ exportedHead: refuse(p) }))[0].launch, 'held', 'one check before the downtime is not a day of checks');
+  assert.equal(p.asked.length, 2);
+  p.E.clock.t += 60_000;
+  assert.equal((await p.run({ exportedHead: refuse(p) }))[0].launch, 'stale');
+  assert.equal(p.asked.length, 2);
+  // Two checks under an hour apart, then a day: still one more check first.
+  const q = oneShotWorld();
+  q.launchFile({ session: ONE_SHOT, product: PRODUCT, head: HEAD });
+  const qFirst = q.E.clock.t;
+  await q.run({ exportedHead: refuse(q) });
+  q.E.clock.t = qFirst + 30 * 60_000;
+  await q.run({ exportedHead: refuse(q) });
+  q.E.clock.t = qFirst + LEAD_LAUNCH_LOOK_MS + 60_000;
+  assert.equal((await q.run({ exportedHead: refuse(q) }))[0].launch, 'held', 'thirty minutes apart is not an hour');
+  q.E.clock.t += 60_000;
+  assert.equal((await q.run({ exportedHead: refuse(q) }))[0].launch, 'stale');
+  assert.equal(q.asked.length, 3);
 });
