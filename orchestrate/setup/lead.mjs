@@ -10,10 +10,13 @@
 //   1. reads the setup config and the installed rules (role-start.mjs readSetup), and the profile is the Lead's locked
 //      one (M4 role-profiles.mjs checkProfile: no never-list tool, nothing beyond the design);
 //   2. reads the idea from the product's Record, as the owner (M9 read-view.mjs: report idea-<id>, of kind idea-);
-//   3. refuses an idea that already has a plan, or a Lead planning it (#682 r1 M1): a fact intake-applied-<Lead
-//      session>-plan-<idea id>.json in any state but refused, or a Lead outbox of this product whose launch file names the
-//      idea or that holds plan-<idea id>.json, unless that plan was refused or that run ended with no plan handed in
-//      (heldBy). One plan per idea; a refused plan may be planned again;
+//   3. refuses an idea that already has a plan: a fact intake-applied-<Lead session>-plan-<idea id>.json in any state
+//      but refused, or one that can't be read (an interrupted one names `lead.mjs release`, below). Then it takes the
+//      idea's one claim, <outboxRoot>/lead/.claim-<product>.<idea id>, a new file { session, started_at_ms } (#682 r2
+//      M-A), so of two starts at once only one goes on; a claim already there holds the idea unless sessionHold frees its
+//      Lead (its plan refused, its run ended or over with no plan handed in, or intake marked it stale), and is then
+//      retaken. Lead folders from before claims are still scanned (heldBy, #682 r1 M1). Every refusal from here, and a
+//      run that never started, lets the claim go. One plan per idea; a refused plan may be planned again;
 //   4. reads the head the lead-main copy names (<base>/lead-main/<product>/.head, M11 lead-main.mjs copyHead): the main
 //      commit the Lead reads, which the Dispatcher's lead-main step exported; the copy must be a folder, not a link
 //      (#682 r1 m3);
@@ -33,12 +36,17 @@
 //   8. waits for the Dispatcher to take plan-<idea id>.json (its intake fact), at most OUTCOME_WAIT_MS, and prints what
 //      the Record made of it: the draft cards it created, or why it was refused or held.
 //
+//   node …/setup/lead.mjs release <product> <idea id> frees an idea whose plan was interrupted while being filed, once
+//   no card was filed from it (releasePlan): the owner can't write the Record, so it leaves a request the Dispatcher's
+//   intake checks again and records (#682 r2 M-B). A Lead whose start was never recorded has its waiting plans refused
+//   by intake when it marks it stale, which frees their ideas.
+//
 // The Lead's walls (M4 render-settings.mjs, for role lead): tools Read, Glob, Grep, Write and AskUserQuestion, no shell,
 // no tool server, no plugin; its tools write only its outbox (the plain-files hook, given its kinds and no copy), never a
 // dot-name there; the Record, secrets, the owner's keys and every product's proposals are read-denied. A headless run has
 // no one to answer AskUserQuestion: the one-shot wording says to put the question in a card that waits on the owner.
 
-import { closeSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
+import { closeSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { userInfo } from 'node:os';
 import { join } from 'node:path';
@@ -46,11 +54,12 @@ import { fileURLToPath } from 'node:url';
 import { DESIGN_PROFILES, checkProfile } from '../modules/M4-workshop/launcher/role-profiles.mjs';
 import { readBack } from '../modules/M4-workshop/launcher/readback.mjs';
 import { FLAGS as F } from '../modules/M4-workshop/launcher/settings-names.mjs';
-import { factIds, readDocFile } from '../modules/M9-record/read-view.mjs';
+import { factIds, listDocFiles, readDocFile } from '../modules/M9-record/read-view.mjs';
 import { LAUNCH_FILE, LEAD_ROLE, isLeadSession, launchFileText, leadSessionId } from '../modules/M3-lead/sessions.mjs';
 import { LEAD_ONE_SHOT, LEAD_WORDING, oneShotPlanName } from '../modules/M3-lead/lead-wording.mjs';
 import { leadInputText } from '../modules/M3-lead/lead-input.mjs';
 import { copyHead } from '../modules/M11-dispatcher/lead-main.mjs';
+import { LEAD_STALE_FACT, RELEASE_PREFIX, releaseText } from '../modules/M11-dispatcher/outbox-intake.mjs';
 import { appliedFactId, stateText } from '../modules/M1-front-door/filed.mjs';
 import { PROMPT_FILE_FLAG, SETUP_FILE, prepareStart, readSetup, roleFlags } from './role-start.mjs';
 import { WORKER_STATUS_FILE, leadMainPath, reviewCopiesPath, workerCopiesPath, workerRunnerPaths } from './layout.mjs';
@@ -69,7 +78,7 @@ export const RUN_OVER_MS = RUN_MS + 5 * 60 * 1000;
 /** How long, after the Lead ends, to wait for the Dispatcher to take its plan, and how often to look. */
 export const OUTCOME_WAIT_MS = 15 * 60 * 1000;
 export const OUTCOME_EVERY_MS = 15_000;
-export const USAGE = 'usage: node lead.mjs plan <product> <idea id> [--setup <setup.json>]';
+export const USAGE = 'usage: node lead.mjs plan|release <product> <idea id> [--setup <setup.json>]';
 const WHO = 'the Lead';
 const IDEA_ID = /^idea-[A-Za-z0-9-]{1,180}$/;
 // Only a refused plan lets the idea be planned again: applied, applying, waiting, interrupted, starting or any other
@@ -77,6 +86,10 @@ const IDEA_ID = /^idea-[A-Za-z0-9-]{1,180}$/;
 const REFUSED = 'refused';
 const DONE = Object.freeze(['applied', REFUSED]);
 const PLAIN_NAME = /^[A-Za-z0-9._-]{1,255}$/;
+/** The ideas' claims, in the Lead folder (#682 r2 M-A); intake lists only ld- names there. */
+export const CLAIM_PREFIX = '.claim-';
+/** A release request the owner leaves in a Lead's outbox for intake (#682 r2 M-B): `.release-<plan file name>`. */
+export { RELEASE_PREFIX } from '../modules/M11-dispatcher/outbox-intake.mjs';
 
 /** The Lead's notes folder (render-settings: apart from its outbox), beside the outbox under the Lead folder; intake lists only ld- names. */
 export const notesFolder = (outboxRoot, sessionId) => join(outboxRoot, LEAD_ROLE, `.notes-${sessionId}`);
@@ -88,7 +101,8 @@ export function ideaIdOf(arg) {
 }
 
 /**
- * Intake's facts for a plan of this idea from any one-shot Lead of this product: [{ sessionId, doc }].
+ * Intake's facts for a plan of this idea from any one-shot Lead of this product: [{ sessionId, doc }], doc null with
+ * `unread` (its reason) for a fact that is there but can't be read: it is held, as everywhere else (#682 r2 m-3).
  * `ids` every fact id, `fact(id)` read-view's answer.
  */
 export function earlierPlans({ product, ideaId, ids, fact }) {
@@ -101,47 +115,132 @@ export function earlierPlans({ product, ideaId, ids, fact }) {
     if (!isLeadSession(sessionId, product) || id !== appliedFactId(sessionId, name)) continue;
     const r = fact(id);
     if (r?.ok) out.push({ sessionId, doc: r.doc });
+    else if (!r?.missing) out.push({ sessionId, doc: null, unread: String(r?.reason ?? 'no answer').slice(0, 200) });
   }
   return out;
 }
 
-/** When a Lead session was started, from its id's stamp (local time, M3 leadSessionId), or null. */
+/** What an earlier plan's fact says, for a refusal: its state, or that it can't be read. */
+const planStateText = (x) => (x.doc ? stateText(x.doc) : `unreadable (${x.unread}), so it is held`);
+
+/**
+ * When a Lead folder from before claims was started, from its id's stamp (local time, M3 leadSessionId), or null. Only
+ * heldBy's fallback reads it; a claim keeps its own started_at_ms (#682 r2 M-A).
+ */
 export function sessionStart(sessionId) {
   const m = /-(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/.exec(sessionId ?? '');
   return m ? new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime() : null;
 }
 
 /**
- * A Lead of this product that holds the idea (#682 r1 M1): one whose outbox's launch file names it, or that holds its
- * plan file, unless that plan's intake fact is refused, or the run ended (RUN_ENDED, or started more than RUN_OVER_MS
- * ago) with no plan file. → { sessionId, why } | null. A folder that can't be read holds it: it can't be shown not to.
- * io: list, readText, now; `fact(id)` read-view's answer.
+ * Why the Lead `sid` still holds the idea whose plan file is `name`, or null when it is free (#682 r2 M-A, one rule for
+ * the claim and the fallback): free when (a) its plan's fact is refused, (b) its run ended (RUN_ENDED) with no plan file,
+ * (c) it started more than RUN_OVER_MS ago with no plan file, or (d) intake marked it stale (its start was never
+ * recorded; intake refuses its waiting plans then, M-B). A fact or folder that can't be read holds it.
+ * Not covered, by design: a claude killed by -9 past RUN_OVER_MS whose plan file lands later, and a plan written after
+ * .run-ended; each is a plan file in the outbox, so it holds by (a)'s rule again until refused (#682 r2 m-1).
+ * `names` the Lead folder's names (null: none), `startedAt` epoch ms or null, `fact(id)` read-view's answer.
  */
-export function heldBy({ leadRoot, product, ideaId, fact }, io) {
+export function sessionHold({ sid, name, names, startedAt, fact, now }) {
+  const f = fact(appliedFactId(sid, name));
+  if (f?.ok && f.doc?.state === REFUSED) return null;
+  if (!f?.ok && !f?.missing) return `its ${name}'s record can't be read (${String(f?.reason ?? 'no answer').slice(0, 120)})`;
+  const stale = fact(LEAD_STALE_FACT(sid));
+  if (stale?.ok) return null;
+  // No folder yet is not an end: a claim is taken before its folder is made, so only its time ends it then.
+  const hasPlan = (names ?? []).includes(name);
+  const ended = (names ?? []).includes(RUN_ENDED) || (startedAt !== null && now - startedAt > RUN_OVER_MS);
+  if (!hasPlan && ended) return null;
+  return f?.ok ? `its ${name} is ${stateText(f.doc)}` : hasPlan ? `it handed in ${name}, which the Dispatcher has not taken yet` : 'it is still planning it';
+}
+
+// A Lead folder's names: null when it is gone; throws when it can't be read.
+function folderNames(dir, io) {
+  try { return io.list(dir); } catch (e) { if (e?.code === 'ENOENT') return null; throw e; }
+}
+
+/** The idea's claim (#682 r2 M-A): `.` parts it, as no product or idea id holds one. */
+export const claimPath = (leadRoot, product, ideaId) => join(leadRoot, `${CLAIM_PREFIX}${product}.${ideaId}`);
+
+/** A claim's text, and its reading: { ok, session, startedAt } | { ok: false, gone? , reason }. */
+export const claimText = ({ session, startedAt }) => `${JSON.stringify({ session, started_at_ms: startedAt })}\n`;
+export function readClaim(file, product, io) {
+  let t;
+  try { t = io.readText(file); } catch (e) { return { ok: false, gone: e?.code === 'ENOENT', reason: `it can't be read (${e?.code ?? e?.message})` }; }
+  let d;
+  try { d = JSON.parse(t); } catch { return { ok: false, reason: 'it does not read as JSON' }; }
+  if (!d || typeof d !== 'object' || Object.keys(d).sort().join(',') !== 'session,started_at_ms') return { ok: false, reason: 'it must hold session and started_at_ms only' };
+  if (!isLeadSession(d.session, product)) return { ok: false, reason: 'its session is not a Lead of this product' };
+  if (!Number.isSafeInteger(d.started_at_ms) || d.started_at_ms <= 0) return { ok: false, reason: 'its started_at_ms is not a time' };
+  return { ok: true, session: d.session, startedAt: d.started_at_ms };
+}
+
+/**
+ * Takes the idea's one claim for `sessionId`, before anything is made (#682 r2 M-A): a new file (wx), so of two starts
+ * at once one gets it. A claim already there is held unless sessionHold frees its Lead; a free one is moved aside under
+ * this start's own name and checked to be that one before it is retaken, so two starts that both find it free never
+ * both take it (a fresh claim moved aside by mistake is put back with link, never over another). An unreadable claim
+ * holds. → { ok: true, file, replaced } | { ok: false, sessionId?, reason }. io: writeFile (wx), readText, list, rename,
+ * link, rm, now; `fact(id)` read-view's answer.
+ */
+export function takeClaim({ leadRoot, product, ideaId, sessionId, fact }, io) {
+  const file = claimPath(leadRoot, product, ideaId);
+  const name = oneShotPlanName(ideaId);
+  const text = claimText({ session: sessionId, startedAt: io.now() });
+  let replaced = null;
+  for (let i = 0; i < 3; i += 1) {
+    try { io.writeFile(file, text, 0o600); return { ok: true, file, replaced }; } catch (e) {
+      if (e?.code !== 'EEXIST') return { ok: false, reason: `the idea's claim ${file} can't be written (${e?.code ?? e?.message})` };
+    }
+    const c = readClaim(file, product, io);
+    if (!c.ok) { if (c.gone) continue; return { ok: false, reason: `the idea's claim ${file} can't be used (${c.reason}), so the idea is held` }; }
+    let why;
+    try { why = sessionHold({ sid: c.session, name, names: folderNames(join(leadRoot, c.session), io), startedAt: c.startedAt, fact, now: io.now() }); }
+    catch (e) { why = `its folder can't be read (${e?.code ?? e?.message})`; }
+    if (why) return { ok: false, sessionId: c.session, reason: why };
+    const aside = `${file}~${sessionId}`;
+    try { io.rename(file, aside); } catch (e) { if (e?.code === 'ENOENT') continue; return { ok: false, reason: `the idea's free claim can't be moved aside (${e?.code ?? e?.message})` }; }
+    const moved = readClaim(aside, product, io);
+    if (!moved.ok || moved.session !== c.session || moved.startedAt !== c.startedAt) {
+      try { io.link(aside, file); } catch { /* another took it meanwhile: theirs stands */ }
+      try { io.rm(aside); } catch { /* left aside */ }
+      return { ok: false, sessionId: moved.session ?? null, reason: 'another start took the idea just now' };
+    }
+    try { io.rm(aside); } catch { /* left aside; the claim is free */ }
+    replaced = c.session;
+  }
+  return { ok: false, reason: `the idea's claim ${file} kept changing; try again` };
+}
+
+/** Lets go of this start's own claim (a start refused or never started after it took it). */
+export function dropClaim(file, sessionId, product, io) {
+  const c = readClaim(file, product, io);
+  if (c.ok && c.session === sessionId) { try { io.rm(file); } catch { /* it frees itself by its run's end */ } }
+}
+
+/**
+ * The fallback for Lead folders from before claims (#682 r1 M1): one of this product whose launch file names the idea,
+ * or that holds its plan file, and that sessionHold does not free, its start read from its stamp. Sessions in `skip`
+ * (this start's, and one whose claim was found free) are not looked at. → { sessionId, why } | null. A folder that can't
+ * be read holds it. io: list, readText, now; `fact(id)` read-view's answer.
+ */
+export function heldBy({ leadRoot, product, ideaId, fact, skip = [] }, io) {
   const name = oneShotPlanName(ideaId);
   let sessions;
-  try { sessions = io.list(leadRoot).filter((n) => isLeadSession(n, product)).sort(); } catch (e) {
+  try { sessions = io.list(leadRoot).filter((n) => isLeadSession(n, product) && !skip.includes(n)).sort(); } catch (e) {
     if (e?.code === 'ENOENT') return null;
     return { sessionId: null, why: `the Lead folders in ${leadRoot} can't be listed (${e?.code ?? e?.message})` };
   }
   for (const sid of sessions) {
     const dir = join(leadRoot, sid);
     let names;
-    try { names = io.list(dir); } catch (e) {
-      if (e?.code === 'ENOENT') continue;   // gone since the list: it holds nothing
-      return { sessionId: sid, why: `its folder ${dir} can't be read (${e?.code ?? e?.message})` };
-    }
-    const hasPlan = names.includes(name);
+    try { names = folderNames(dir, io); } catch (e) { return { sessionId: sid, why: `its folder ${dir} can't be read (${e?.code ?? e?.message})` }; }
+    if (names === null) continue;   // gone since the list: it holds nothing
     let idea = null;
     if (names.includes(LAUNCH_FILE)) { try { idea = JSON.parse(io.readText(join(dir, LAUNCH_FILE)))?.idea ?? null; } catch { /* names no idea */ } }
-    if (!hasPlan && idea !== ideaId) continue;
-    const f = fact(appliedFactId(sid, name));
-    if (f?.ok && f.doc?.state === REFUSED) continue;
-    const started = sessionStart(sid);
-    const ended = names.includes(RUN_ENDED) || (started !== null && io.now() - started > RUN_OVER_MS);
-    if (!hasPlan && ended) continue;
-    const why = f?.ok ? `its ${name} is ${stateText(f.doc)}` : hasPlan ? `it handed in ${name}, which the Dispatcher has not taken yet` : 'it is still planning it';
-    return { sessionId: sid, why };
+    if (!names.includes(name) && idea !== ideaId) continue;
+    const why = sessionHold({ sid, name, names, startedAt: sessionStart(sid), fact, now: io.now() });
+    if (why) return { sessionId: sid, why };
   }
   return null;
 }
@@ -161,6 +260,7 @@ export function leadOtherCopies({ cfg, product, outboxRoot }, io) {
     try { names = io.list(dir); } catch (e) { if (e?.code === 'ENOENT') continue; return { ok: false, reason: `${dir} can't be listed (${e?.code ?? e?.message})` }; }
     for (const n of names) {
       if (dir === lm && n === product) continue;
+      if (dir !== lm && n.startsWith(CLAIM_PREFIX)) continue;   // the ideas' claims: files that hold only a session and a time
       if (!PLAIN_NAME.test(n) || n === '.' || n === '..') return { ok: false, reason: `${dir} holds ${JSON.stringify(n.slice(0, 80))}, a name the Lead's walls can't spell` };
       out.add(join(dir, n));
     }
@@ -191,7 +291,7 @@ function outcomeText(name, doc) {
  * code, timedOut, plan, state, text } once claude has ended (state: the plan's intake state, 'none' when it handed in
  * none, 'not taken' when the Dispatcher had not taken it in time), or { ok: false, reason } with nothing left behind.
  * io: role-start's (readText, mkdir, writeFile, rm, uid, user, home, env, check) and now, list (folder → names), lstat,
- *   runHeadless (bin, args, { cwd, env, log, timeoutMs, started }) → { code, timedOut, started }, sleep (ms), progress (a
+ *   rename and link (the idea's claim, takeClaim), runHeadless (bin, args, { cwd, env, log, timeoutMs, started }) → { code, timedOut, started }, sleep (ms), progress (a
  *   line to the terminal). A run that never started answers { ok: false } with its outbox and log left to read.
  */
 export async function planLead({ product, idea, setupFile = SETUP_FILE, profile = DESIGN_PROFILES[LEAD_ROLE] }, io) {
@@ -213,32 +313,44 @@ export async function planLead({ product, idea, setupFile = SETUP_FILE, profile 
   try { ids = factIds(at); } catch (e) { return no(`the Record's facts can't be listed, so whether ${ideaId} has a plan can't be told (${String(e?.message ?? e).slice(0, 200)})`); }
   const fact = (id) => readDocFile({ ...at, entity: 'fact', id });
   const had = earlierPlans({ product, ideaId, ids, fact }).find((x) => x.doc?.state !== REFUSED);
-  if (had) return no(`the idea ${ideaId} already has a plan: ${name} from the Lead ${had.sessionId} is ${stateText(had.doc)}`);
-  const held = heldBy({ leadRoot: join(P.outboxRoot, LEAD_ROLE), product, ideaId, fact }, io);
-  if (held) return no(`the idea ${ideaId} is held by ${held.sessionId ? `the Lead ${held.sessionId}` : 'a Lead'}: ${held.why}. Start another only once that plan is refused or that run has ended with none`);
+  if (had) {
+    const release = had.doc?.state === 'interrupted' ? `. If no cards were filed from it, \`node …/setup/lead.mjs release ${product} ${ideaId}\` frees the idea` : '';
+    return no(`the idea ${ideaId} already has a plan: ${name} from the Lead ${had.sessionId} is ${planStateText(had)}${release}`);
+  }
+  let sessionId; try { sessionId = leadSessionId(product, new Date(io.now())); } catch (e) { return no(e.message); }
+  // The idea's one claim, taken before anything is made (#682 r2 M-A); every refusal from here lets it go.
+  const leadRoot = join(P.outboxRoot, LEAD_ROLE);
+  // A fact not in the list read above is not there (a Record with no fact yet has no fact folder, which read-view
+  // answers as a problem, not as missing); one written since is read as missing, which holds by the files alone.
+  const holdFact = (id) => (ids.includes(id) ? fact(id) : { ok: false, missing: true });
+  const claim = takeClaim({ leadRoot, product, ideaId, sessionId, fact: holdFact }, io);
+  if (!claim.ok) return no(`the idea ${ideaId} is held by ${claim.sessionId ? `the Lead ${claim.sessionId}` : 'a Lead'}: ${claim.reason}. Start another only once that plan is refused or that run has ended with none`);
+  const fail = (reason) => { dropClaim(claim.file, sessionId, product, io); return no(reason); };
+  // Lead folders from before claims (r1 M1's scan), apart from the one whose claim was just found free.
+  const held = heldBy({ leadRoot, product, ideaId, fact: holdFact, skip: [sessionId, ...(claim.replaced ? [claim.replaced] : [])] }, io);
+  if (held) return fail(`the idea ${ideaId} is held by ${held.sessionId ? `the Lead ${held.sessionId}` : 'a Lead'}: ${held.why}. Start another only once that plan is refused or that run has ended with none`);
   const code = join(leadMainPath(cfg), product);
   // Its own folder, never a link to somewhere else (#682 r1 m3).
   let cs;
-  try { cs = (io.lstat ?? lstatSync)(code); } catch (e) { return no(`the Lead's copy of main, ${code}, can't be found (${e?.code ?? e?.message}): the Dispatcher's lead-main step makes it (is leadMainRoot in its config?)`); }
-  if (cs.isSymbolicLink() || !cs.isDirectory()) return no(`the Lead's copy of main, ${code}, is ${cs.isSymbolicLink() ? 'a link' : 'not a folder'}, so it is not the copy the Dispatcher made`);
+  try { cs = (io.lstat ?? lstatSync)(code); } catch (e) { return fail(`the Lead's copy of main, ${code}, can't be found (${e?.code ?? e?.message}): the Dispatcher's lead-main step makes it (is leadMainRoot in its config?)`); }
+  if (cs.isSymbolicLink() || !cs.isDirectory()) return fail(`the Lead's copy of main, ${code}, is ${cs.isSymbolicLink() ? 'a link' : 'not a folder'}, so it is not the copy the Dispatcher made`);
   const head = copyHead(code);
-  if (!head) return no(`the Lead's copy of main, ${code}, names no commit (.head): the Dispatcher's lead-main step makes it (is leadMainRoot in its config?)`);
-  let sessionId; try { sessionId = leadSessionId(product, new Date(io.now())); } catch (e) { return no(e.message); }
-  const outbox = join(P.outboxRoot, LEAD_ROLE, sessionId);
+  if (!head) return fail(`the Lead's copy of main, ${code}, names no commit (.head): the Dispatcher's lead-main step makes it (is leadMainRoot in its config?)`);
+  const outbox = join(leadRoot, sessionId);
   const input = leadInputText({ items: [{ source: 'idea-file', text: r.doc.text }] });
-  if (!input.ok) return no(`the idea can't be given to the Lead (${input.reason})`);
+  if (!input.ok) return fail(`the idea can't be given to the Lead (${input.reason})`);
   const promptText = `${[...LEAD_WORDING, ...LEAD_ONE_SHOT].join('\n\n')}\n\n${input.text}`;
   const promptFile = join(outbox, PROMPT_NAME);
   const workerRunner = cfg.workerRunner ? { requestsDir: workerRunnerPaths(cfg).requests, statusFile: join(workerRunnerPaths(cfg).state, WORKER_STATUS_FILE) } : undefined;
   const others = leadOtherCopies({ cfg, product, outboxRoot: P.outboxRoot }, io);
-  if (!others.ok) return no(`the Lead's walls can't be made: ${others.reason}`);
+  if (!others.ok) return fail(`the Lead's walls can't be made: ${others.reason}`);
   const deny = { ...(P.paths?.deny ?? {}), otherCopies: [...(P.paths?.deny?.otherCopies ?? []), ...others.paths] };
   // It starts in its outbox; the code is an added read-only folder it reads by full paths (render-settings readCode), so a
   // swap of the copy mid-run never leaves it in a deleted folder (#681 audit).
   const st = await prepareStart({ role: LEAD_ROLE, who: WHO, profile, model: LEAD_MODEL, effort: LEAD_EFFORT, places: P, outbox,
     notes: notesFolder(P.outboxRoot, sessionId), paths: { readCode: code, deny, ...(workerRunner ? { workerRunner } : {}) }, promptFile,
     files: [[PROMPT_NAME, promptText]] }, io);
-  if (!st.ok) return st;
+  if (!st.ok) return fail(st.reason);
   progress(`The Lead ${sessionId} is planning ${ideaId} on main at ${head.slice(0, 12)} (at most ${RUN_MS / 60000} minutes).`);
   const launchFile = join(outbox, LAUNCH_FILE);
   let launchProblem = null;
@@ -254,7 +366,7 @@ export async function planLead({ product, idea, setupFile = SETUP_FILE, profile 
   try { io.writeFile(join(outbox, RUN_ENDED), `${new Date(io.now()).toISOString()}\n`, 0o600); } catch { /* its start's stamp still ends it */ }
   if (ran?.started !== true || launchProblem) {
     try { io.rm(launchFile); } catch { /* none was written */ }
-    return no(`the Lead ${sessionId} ${launchProblem ?? `did not start (claude ended with ${ran?.code ?? 'no answer'})`}; nothing was handed in. Its output is in ${join(outbox, RUN_LOG)}`);
+    return fail(`the Lead ${sessionId} ${launchProblem ?? `did not start (claude ended with ${ran?.code ?? 'no answer'})`}; nothing was handed in. Its output is in ${join(outbox, RUN_LOG)}`);
   }
   // The copy may have been swapped while it ran: the launch keeps the head it started on, and the owner is told.
   const headAfter = copyHead(code);
@@ -278,6 +390,44 @@ export async function planLead({ product, idea, setupFile = SETUP_FILE, profile 
   }
 }
 
+/**
+ * Frees an idea whose plan was interrupted while being filed (#682 r2 M-B), when no card was filed from it: the Record's
+ * cards are read as the owner, and one whose plan_sha256 is the plan's refuses it, naming them. The owner can't write
+ * the Record, so the release is a request, `.release-<plan file name>` { name, sha256 } in that Lead's outbox (the Lead
+ * can't write a dot-name there), which the Dispatcher's intake checks again and records as the plan's fact refused,
+ * "released by Joe; no cards were filed", on its next pass. → { ok, text } | { ok: false, reason, cards? }.
+ */
+export function releasePlan({ product, idea, setupFile = SETUP_FILE }, io) {
+  const no = (reason, extra = {}) => ({ ok: false, reason, ...extra });
+  const ideaId = ideaIdOf(idea);
+  if (!ideaId) return no(`${String(idea).slice(0, 80)} is not an idea id (idea-<letters, digits and dashes>)`);
+  const s = readSetup({ product, setupFile, who: WHO, howToRun: 'run it as your own Mac user, with no sudo' }, io);
+  if (!s.ok) return s;
+  const at = { recordRoot: s.places.recordRoot, recordUid: s.places.recordUid };
+  let ids;
+  try { ids = factIds(at); } catch (e) { return no(`the Record's facts can't be listed (${String(e?.message ?? e).slice(0, 200)})`); }
+  const fact = (id) => readDocFile({ ...at, entity: 'fact', id });
+  const plans = earlierPlans({ product, ideaId, ids, fact }).filter((x) => x.doc?.state === 'interrupted');
+  if (!plans.length) return no(`the idea ${ideaId} has no plan that was interrupted while being filed, so there is nothing to release`);
+  const cardsOf = listDocFiles({ ...at, entity: 'card' });
+  if (!cardsOf.ok) return no(`the Record's cards can't be read, so whether any were filed can't be told (${cardsOf.reason})`);
+  if (cardsOf.unread?.length) return no(`some of the Record's cards can't be read (${cardsOf.unread.length}), so whether any were filed from the plan can't be told`);
+  const out = [];
+  for (const p of plans) {
+    const cards = cardsOf.docs.filter((c) => c.doc?.plan_sha256 === p.doc.sha256).map((c) => c.id).sort();
+    if (cards.length) return no(`cards were filed from ${p.doc.name ?? oneShotPlanName(ideaId)} of the Lead ${p.sessionId}: ${cards.slice(0, 20).join(', ')}${cards.length > 20 ? ' and more' : ''}. Look at them on the board; the idea stays held`, { cards });
+    const file = join(s.places.outboxRoot, LEAD_ROLE, p.sessionId, `${RELEASE_PREFIX}${oneShotPlanName(ideaId)}`);
+    const text = releaseText({ name: oneShotPlanName(ideaId), sha256: p.doc.sha256 });
+    try { io.writeFile(file, text, 0o600); } catch (e) {
+      let same = false;
+      if (e?.code === 'EEXIST') { try { same = io.readText(file) === text; } catch { /* read as not the same */ } }
+      if (!same) return no(`the release request ${file} can't be written (${e?.code ?? e?.message})`);
+    }
+    out.push(`${p.doc.name ?? oneShotPlanName(ideaId)} from the Lead ${p.sessionId}`);
+  }
+  return { ok: true, text: `Released ${out.join(' and ')}: the Dispatcher records it on its next pass, within a few minutes; then \`node …/setup/lead.mjs plan ${product} ${ideaId}\` may start a new Lead for it.` };
+}
+
 /** The real ports. */
 export function realIo() {
   const u = userInfo();
@@ -286,6 +436,8 @@ export function realIo() {
     mkdir: (d, mode) => { mkdirSync(d, { mode }); chmodSync(d, mode); },
     writeFile: (f, text, mode) => { writeFileSync(f, text, { mode, flag: 'wx' }); },
     rm: (d) => rmSync(d, { recursive: true, force: true }),
+    rename: (a, b) => renameSync(a, b),
+    link: (a, b) => linkSync(a, b),
     uid: process.getuid(), user: u.username, home: u.homedir, env: process.env, now: () => Date.now(),
     check: (x) => readBack(x),
     list: (d) => readdirSync(d),
@@ -315,7 +467,12 @@ export function realIo() {
 export async function main(argv, io = realIo(), print = (s) => process.stderr.write(`${s}\n`)) {
   const [cmd, product, idea, ...rest] = argv;
   const i = rest.indexOf('--setup');
-  if (cmd !== 'plan' || !product || !idea || (i >= 0 && !rest[i + 1])) { print(USAGE); return 2; }
+  if (!['plan', 'release'].includes(cmd) || !product || !idea || (i >= 0 && !rest[i + 1])) { print(USAGE); return 2; }
+  if (cmd === 'release') {
+    const x = releasePlan({ product, idea, ...(i >= 0 ? { setupFile: rest[i + 1] } : {}) }, io);
+    print(x.ok ? x.text : `Nothing was released: ${x.reason}`);
+    return x.ok ? 0 : 1;
+  }
   const r = await planLead({ product, idea, ...(i >= 0 ? { setupFile: rest[i + 1] } : {}) }, io);
   if (!r.ok) { print(`The Lead did not start: ${r.reason}`); return 1; }
   print(r.text);

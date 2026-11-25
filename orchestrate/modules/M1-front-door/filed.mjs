@@ -38,7 +38,9 @@ export function stateText(fact) {
     case 'refused': return `refused, not filed: ${cut(fact.alert_text ?? fact.reason ?? 'no reason given', 300)}`;
     case 'waiting': return `waiting: ${cut(fact.reason ?? fact.alert_text ?? 'no reason given', 300)}`;
     case 'applying': return 'being filed now';
-    case 'interrupted': return 'stopped while being filed; the next pass tries it again';
+    // Never tried again (intake's MAT-7): whether it reached the Record is not known (#682 r2 C-1).
+    case 'interrupted': return 'stopped while being filed, and not tried again: it may or may not have reached the Record. '
+      + 'Check the board; for a Lead\'s plan from which no cards were filed, `node …/setup/lead.mjs release <product> <idea id>` frees its idea';
     default: return `in a state this read-back does not know (${cut(fact?.state, 40)})`;
   }
 }
