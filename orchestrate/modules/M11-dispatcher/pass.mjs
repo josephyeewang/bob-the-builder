@@ -21,7 +21,7 @@
 // Product-state starts are M10's `may('start_session')` answer; this file does not repeat them.
 // Every outside effect is a port, so tests run on fakes.
 
-import { KEYS, need, minutes, MissingKey, missingFor } from './keys.mjs';
+import { KEYS, need, minutes, MissingKey, missingFor, HOLDS_NO_START, missingKeyOf } from './keys.mjs';
 import { currentBands, recordBands, USAGE_FACT } from './usage.mjs';
 import { startGate, riskOf } from './gate.mjs';
 import { atSafePoint } from './transcript.mjs';
@@ -111,7 +111,23 @@ export const DEAD_SESSION_WAIT = 'dead_session';
 export const isDeadSessionWait = (what) => typeof what === 'string' && what.startsWith(`${DEAD_SESSION_WAIT}:`);
 export const DEAD_RERUN_FACT = (card) => `dead-rerun-${card}`;
 export const DEAD_RERUN_WINDOW_MS = 24 * 60 * 60_000;
-export const deadRerunText = (card, n, cap) => `card ${card}: its session ended without finishing; started again (${n} of ${cap} today)`;
+export const deadRerunText = (card, n, cap) => `card ${card}: its session ended without finishing; started again (${n} of ${cap} in the last 24 hours)`;
+/** The tail of actOnDead's tell for a card at the cap (L1365 m4): it waits on Joe until the oldest re-run is 24 h old. */
+export const deadCapText = (n, oldest) => `; it was started again ${n} times in the last 24 hours, the most claims.dead_reruns_per_day allows, so it is not started again by itself ${oldest === null ? 'while its re-run times cannot be read' : `before ${new Date(oldest + DEAD_RERUN_WINDOW_MS).toISOString()}`}`;
+/**
+ * The re-runs that count against the cap (L1365 M1). It fails closed: a time that can't be read, or lies ahead of now
+ * past the skew allowed (pastTime, I4: a clock stepped back), counts as inside the window and is kept, and a fact
+ * whose `times` is not a list is corrupt, so the card stays on Joe. -> { corrupt } | { doc, times, oldest } (`oldest`:
+ * the earliest readable time kept, or null).
+ */
+export function deadReruns(rec, card, now) {
+  const f = factDoc(rec, DEAD_RERUN_FACT(card));
+  if (f?.corrupt) return { corrupt: f.reason };
+  if (f?.doc && !Array.isArray(f.doc.times)) return { corrupt: 'its times are not a list' };
+  const times = (f?.doc?.times ?? []).filter((t) => { const at = pastTime(t, now); return at === null || at > now - DEAD_RERUN_WINDOW_MS; });
+  const dated = times.map((t) => pastTime(t, now)).filter((t) => t !== null);
+  return { doc: f?.doc, times, oldest: dated.length ? Math.min(...dated) : null };
+}
 // Used only when timeouts.cancel_grace_min itself is missing (audit MAT-2): Cancel must still stop.
 export const CANCEL_GRACE_FLOOR_MS = 2 * 60_000;
 export const TERM_WAIT_MS = 10_000;
@@ -141,6 +157,20 @@ export async function guarded(f, ms = PORT_DEADLINE_MS) {
 }
 
 /**
+ * The missing-rules text (L1365 m2): keys that hold back starts get `what`; a key marked in HOLDS_NO_START is said not
+ * to, with what is not done until it has a value, so the alert never claims a hold that isn't there.
+ */
+export function missingText(tell, what) {
+  const free = tell.filter((k) => Object.hasOwn(HOLDS_NO_START, missingKeyOf(k)));
+  const held = tell.filter((k) => !free.includes(k));
+  const effects = [...new Set(free.map((k) => HOLDS_NO_START[missingKeyOf(k)]))];
+  return [
+    held.length ? `the rules have no value for ${held.join(', ')}: ${what}` : null,
+    free.length ? `${held.length ? 'the rules also have' : 'the rules have'} no value for ${free.join(', ')}: starts go on, but until ${free.length > 1 ? 'they have one' : 'it has one'}, ${effects.join(', and ')}` : null,
+  ].filter(Boolean).join('; ');
+}
+
+/**
  * Tells Joe once per missing rules value, on the fact `factId` (audit MAT-2; 0b-6 r3 MAT-3: values only
  * the start gate reads are told too, once for the whole tick). A key leaves the fact when a pass no
  * longer reports it; a pass in which some step failed (`complete` false) drops nothing, since that step
@@ -167,7 +197,7 @@ export async function rulesMissingAlert({ rec, factId = RULES_MISSING_FACT, keys
   const toldNow = () => [...new Set([...told, ...tell])].sort().join(', ');
   // A new key told alone keeps the day clock of the keys told before (audit 0b-6 r6 m-5).
   const at = again || last === null ? iso(now) : doc.told_at;
-  if (tell.length) tellThen(alert, `the rules have no value for ${tell.join(', ')}: ${what}`, { fact: factId, fields: { told_keys: toldNow(), told_at: at }, kind: 'rules_missing_told' });
+  if (tell.length) tellThen(alert, missingText(tell, what), { fact: factId, fields: { told_keys: toldNow(), told_at: at }, kind: 'rules_missing_told' });
   return seen.join(', ') || null;
 }
 
@@ -719,28 +749,34 @@ export async function dispatcherPass({ rec, rules, now, clock = () => now, accou
       else askJoe(id, { what: 'limit_hit: the limit reset; Tier-1 work does not resume by itself', now, kind: 'limit_reset', alert,
         text: `card ${id}: the usage limit it waited on reset, but Tier-1 work does not resume by itself; it waits on you` });
     } else if (isDeadSessionWait(what)) {
-      // L1365: the bounded re-run. A wait that does not go back to ready (one from a claimed card keeps its claim's
-      // state) is left on Joe, as is every one past the cap or with no key (told with the other missing keys).
+      // L1365: the bounded re-run. Every card not started again here (past the cap, no key, a count that can't be read
+      // or written) stays waiting on Joe; the missing key is told with the others, the rest by holdAlert, once a day.
       // Open: L1365 — Joe has no command or answer to retry or cancel a card waiting on him; past the cap it waits.
+      // Open: L1365 m3 — a wait whose return_to is not ready is left on Joe. The Record's release (writer.mjs) frees
+      // only a card still claimed, and claimed -> waiting is not a move the Record allows, so actOnDead's ask for a
+      // claimed card is itself refused and no such wait is made today.
       if (doc.wait?.return_to !== 'ready') continue;
+      const tellDead = (line) => {
+        failing(line);
+        try { holdAlert({ rec, cause: DEAD_RERUN_FACT(id), text: `${line}; it waits on you`, alert, now }); } catch (e) { failing(`card ${id}: ${e?.message ?? e}`); }
+      };
       let cap;
       try { cap = need(rules, KEYS.claimsDeadRerunsPerDay, { product: doc.product }); } catch (e) {
         if (!(e instanceof MissingKey)) throw e;
         missing.push(missingFor(e.key, doc.product));
         continue;
       }
-      const f = factDoc(rec, DEAD_RERUN_FACT(id));
-      if (f?.corrupt) { failing(`card ${id}: its dead-session re-runs can't be read (${f.reason}), so it is not started again`); continue; }
-      // A time that can't be read, or lies ahead of now past the skew allowed, is dropped (pastTime, I4).
-      const times = (Array.isArray(f?.doc?.times) ? f.doc.times : []).filter((t) => (pastTime(t, now) ?? -Infinity) > now - DEAD_RERUN_WINDOW_MS);
-      if (times.length >= cap) continue;
-      const counted = putFact(rec, DEAD_RERUN_FACT(id), { ...(f?.doc ?? {}), times: [...times, iso(now)] }, 'dead_rerun_count', f?.doc);
-      if (!counted?.ok) { failing(`card ${id}: its dead-session re-run could not be counted (${counted?.reason ?? 'no answer'}), so it is not started again`); continue; }
-      if (move(rec, 'card', id, { state: 'ready' }, { kind: 'resume_dead_session' }).ok) {
+      const used = deadReruns(rec, id, now);
+      if (used.corrupt) { tellDead(`card ${id}: its dead-session re-runs can't be read (${used.corrupt}), so it is not started again`); continue; }
+      if (used.times.length >= cap) continue;
+      const counted = putFact(rec, DEAD_RERUN_FACT(id), { ...(used.doc ?? {}), times: [...used.times, iso(now)] }, 'dead_rerun_count', used.doc);
+      if (!counted?.ok) { tellDead(`card ${id}: its dead-session re-run could not be counted (${counted?.reason ?? 'no answer'}), so it is not started again`); continue; }
+      const back = move(rec, 'card', id, { state: 'ready' }, { kind: 'resume_dead_session' });
+      if (back.ok) {
         out.resumed.push(id);
         // A notice only: the card is back in the queue whatever the answer; a lost one is in the diary.
-        if (alert(deadRerunText(id, times.length + 1, cap)) === false) failing(`card ${id}: its re-run notice could not be queued`);
-      }
+        if (alert(deadRerunText(id, used.times.length + 1, cap)) === false) failing(`card ${id}: its re-run notice could not be queued`);
+      } else tellDead(`card ${id}: its session ended and a re-run was counted, but it could not be put back in the queue (${back.reason ?? 'no answer'})`);
     } else if (what === PAUSED_WAIT_WHAT) {
       // A card parked for a paused product goes back to ready once the product is no longer paused.
       if (rec.read('product', doc.product)?.doc?.state !== 'paused' && move(rec, 'card', id, { state: 'ready' }, { kind: 'resume_paused' }).ok) out.resumed.push(id);

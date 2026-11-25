@@ -117,3 +117,13 @@ export function need(rules, key, { product, type = 'number' } = {}) {
 export const minutes = (rules, key, opts) => need(rules, key, opts) * 60_000;
 /** How a missing per-product value is listed for Joe: the key, and the product it is missing for (L116 c1). */
 export const missingFor = (key, product) => (product ? `${key} for ${product}` : key);
+
+// L1365 m2: the keys whose missing value holds back no start, each with what is not done until it has one. The
+// missing-rules alert (pass.mjs rulesMissingAlert) tells these apart, so it never says "nothing new starts" for them.
+// The one list: a key that holds nothing back is marked here and nowhere else.
+export const HOLDS_NO_START = Object.freeze({
+  [KEYS.claimsStuckMin]: "no dead session's claim is broken",
+  [KEYS.claimsDeadRerunsPerDay]: 'a card whose session ended waits on you instead of being started again',
+});
+/** The key of a missing entry as missingFor lists it ("key" or "key for product"). */
+export const missingKeyOf = (entry) => String(entry).split(' for ')[0];
