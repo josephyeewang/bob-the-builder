@@ -11,9 +11,9 @@ import { LAUNCH_DOC_FIELDS, OWNER_CLEANUP_PORTS, SESSION_RECORD_PUSH_FIELDS, OWN
 const code = (f) => readFileSync(new URL(`../modules/M11-dispatcher/${f}`, import.meta.url), 'utf8');
 
 test('L741, L925: the owner-side ports are the worker ports the runner answers; the sync ones are wired (B), the asks too (C, L963)', () => {
-  assert.deepEqual(Object.keys(OWNER_PORTS).sort(), ['board', 'launch', 'outboxSessions', 'pauseLead', 'probe', 'saveWork', 'sessions', 'stopGroup', 'stopSession']);
+  assert.deepEqual(Object.keys(OWNER_PORTS).sort(), ['board', 'launch', 'launchOutcome', 'outboxSessions', 'pauseLead', 'probe', 'saveWork', 'sessions', 'stopGroup', 'stopSession']);
   const wired = Object.keys(OWNER_PORTS).filter((k) => OWNER_PORTS[k].sync).sort();
-  assert.deepEqual(wired, ['board', 'outboxSessions', 'probe', 'sessions', 'stopSession']);
+  assert.deepEqual(wired, ['board', 'launchOutcome', 'outboxSessions', 'probe', 'sessions', 'stopSession']);
   assert.deepEqual(NOT_WIRED_WORKER, [], 'every owner port is wired, the asks through owner-asks.mjs (worker-ports.mjs runnerAsyncPorts)');
   // What stays orchestrate-side (L737's chunk for lane 3) is not here.
   for (const k of ['hostLock', 'reviewEnded']) assert.equal(OWNER_PORTS[k], undefined, k);
@@ -55,8 +55,14 @@ test('L741: the launch answer names every field the pass reads from it (pass.mjs
   assert.ok(start > 0);
   const end = pass.indexOf('\n}\n', start); assert.ok(end > start);   // the starts loop's own function, not the rest of the file
   const body = pass.slice(start, end);
-  assert.deepEqual([...body.matchAll(/\bl\b(?!\??\.\w)/g)].map((m) => m.index), [body.search(/\bl = /)], 'the launch answer is read only as l.<field>, never handed on or destructured');
-  const read = new Set([...body.matchAll(/\bl\??\.(\w+)/g)].map((m) => m[1]));
+  // L1361: the loop hands the answer to settleLaunch alone (the one definition of what follows a launch, which the adopt
+  // step shares); everything else reads it only as l.<field>.
+  assert.deepEqual([...body.matchAll(/\bl\b(?!\??\.\w)/g)].map((m) => m.index), [body.search(/\bl = /), body.search(/\bl, id, sessionId/)], 'the launch answer is read only as l.<field>, or handed to settleLaunch');
+  const sStart = pass.indexOf('async function settleLaunch(');
+  assert.ok(sStart > 0);
+  const settle = pass.slice(sStart, pass.indexOf('\n}\n', sStart));
+  assert.deepEqual([...settle.matchAll(/\bl\b(?!\??\.\w)/g)].length, 1, 'settleLaunch reads the answer only as l.<field> (its one parameter aside)');
+  const read = new Set([...`${body}\n${settle}`.matchAll(/\bl\??\.(\w+)/g)].map((m) => m[1]));
   const said = new Set(OWNER_PORTS.launch.out.match(/\{([^}]*)\}/)[1].split(',').map((x) => x.trim().split(':')[0].trim()).concat(['reason', 'timedOut']));
   const unsaid = [...read].filter((f) => !said.has(f));
   assert.deepEqual(unsaid, [], `pass.mjs reads launch fields the interface does not name: ${unsaid}`);

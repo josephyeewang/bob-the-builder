@@ -49,6 +49,15 @@ const LAUNCH_FIELDS = Object.freeze(['sessionId', 'pid', 'pidStart', 'pgid', 'he
 const name = (x) => typeof x === 'string' && x.length > 0;
 const realPid = (n) => Number.isInteger(n) && n > 1;
 
+/** The session, kind, card and product a launch names, checked (launchInputProblem; launchOutcome reads a late start by them, L1361). */
+export function launchNameProblem({ card, kind, product, sessionId } = {}) {
+  if (typeof sessionId !== 'string' || !REQUEST_ID.test(sessionId)) return 'the launch names no session id the runner takes';
+  if (!RUNNER_KINDS.includes(kind)) return `the worker runner does not start ${JSON.stringify(kind)} sessions`;
+  // No leading dot (#328 r1 c1): '.' would name copiesRoot itself, as review-runner.mjs refuses too.
+  if (typeof card !== 'string' || !CARD_ID.test(card) || card.startsWith('.') || !productName(product)) return 'the launch names no card or product';
+  return null;
+}
+
 /**
  * What is wrong with a launch request before it is written, or null (L1332). `card` is the card's id, a string, never
  * the card's Record document: the pass once sent the document and every start was refused before any request was
@@ -56,10 +65,8 @@ const realPid = (n) => Number.isInteger(n) && n > 1;
  * can't drift apart again.
  */
 export function launchInputProblem({ card, kind, product, sessionId, undoCommit } = {}) {
-  if (typeof sessionId !== 'string' || !REQUEST_ID.test(sessionId)) return 'the launch names no session id the runner takes';
-  if (!RUNNER_KINDS.includes(kind)) return `the worker runner does not start ${JSON.stringify(kind)} sessions`;
-  // No leading dot (#328 r1 c1): '.' would name copiesRoot itself, as review-runner.mjs refuses too.
-  if (typeof card !== 'string' || !CARD_ID.test(card) || card.startsWith('.') || !productName(product)) return 'the launch names no card or product';
+  const named = launchNameProblem({ card, kind, product, sessionId });
+  if (named) return named;
   if (kind === 'undo' && !(typeof undoCommit === 'string' && UNDO_COMMIT.test(undoCommit))) return 'the undo launch names no reversed commit (40 hex)';
   if (kind !== 'undo' && undoCommit !== undefined) return 'only an undo launch names a reversed commit';
   return null;
@@ -138,24 +145,48 @@ export function ownerAsyncPorts({ statusFile, uid, outboxRoot, copiesRoot, write
   }) : sleep(ms));
   const told = (a) => ({ ok: false, reason: a.reason });
   const notAsked = (e) => ({ ok: false, reason: `the request could not be written (${e?.message ?? e})` });
+  // The one reading of a launch answer (L1361: the ask and launchOutcome both take it, so a late start is trusted exactly
+  // as an on-time one): the port's answer plus `live`, or undefined while the status does not bear it out.
+  const launchSettled = (a, s, { card, kind, product, sessionId }) => {
+    const state = Object.hasOwn(s.requests, sessionId) ? s.requests[sessionId].state : undefined;
+    // A refusal is the runner's once the request is used up by it: refused, or cancelled (a stop reached it before the
+    // launch did, #456 r1 m1). Both are USED_UP (owner-status.mjs), so neither can still start a session.
+    if (a.ok === false) return state === 'refused' || state === 'cancelled' ? told(a) : undefined;
+    const right = (state === 'started' || state === 'stopped') && a.sessionId === sessionId && !launchAnswerWrong(a, { sessionId, kind, card, product, outboxRoot, copiesRoot });
+    // The session the answer names is the one the status lists (review M2): listed while started, and agreeing.
+    const x = s.sessions.find((y) => y.id === sessionId);
+    const agrees = x ? x.card === card && x.product === product && x.kind === kind && x.pgid === a.pgid && x.signin === a.signin
+      && x.config_dir === a.configDir && x.outbox === a.outbox : state === 'stopped';
+    if (!right || !agrees) return undefined;
+    return { ok: true, ...Object.fromEntries(LAUNCH_FIELDS.filter((f) => f !== 'base' || a.base !== undefined).map((f) => [f, a[f]])), live: !!x && state === 'started' && live(x) };
+  };
 
   return {
     launch: async ({ card, kind, product, sessionId, undoCommit } = {}, { signal } = {}) => {
       // Before the request is written a throw reads as refused (owner-ports.mjs).
       const bad = launchInputProblem({ card, kind, product, sessionId, undoCommit });
       if (bad) throw new Error(bad);
+      const x = { card, kind, product, sessionId };
       return ask(`launch-${sessionId}`, { launch: { card, kind, product, sessionId, ...(kind === 'undo' ? { undo_commit: undoCommit } : {}) } }, (a, s) => {
-        const state = Object.hasOwn(s.requests, sessionId) ? s.requests[sessionId].state : undefined;
-        // A refusal is the runner's once the request is used up by it: refused, or cancelled (a stop reached it before the
-        // launch did, #456 r1 m1). Both are USED_UP (owner-status.mjs), so neither can still start a session.
-        if (a.ok === false) return state === 'refused' || state === 'cancelled' ? told(a) : undefined;
-        const right = (state === 'started' || state === 'stopped') && a.sessionId === sessionId && !launchAnswerWrong(a, { sessionId, kind, card, product, outboxRoot, copiesRoot });
-        // The session the answer names is the one the status lists (review M2): listed while started, and agreeing.
-        const x = s.sessions.find((y) => y.id === sessionId);
-        const agrees = x ? x.card === card && x.product === product && x.kind === kind && x.pgid === a.pgid && x.signin === a.signin
-          && x.config_dir === a.configDir && x.outbox === a.outbox : state === 'stopped';
-        return right && agrees ? { ok: true, ...Object.fromEntries(LAUNCH_FIELDS.filter((f) => f !== 'base' || a.base !== undefined).map((f) => [f, a[f]])) } : undefined;
+        const out = launchSettled(a, s, x);
+        if (!out?.ok) return out;
+        const { live: _, ...answer } = out;
+        return answer;
       }, undefined, signal);
+    },
+    // L1361: a launch the tick gave up on (late) is read here, once, with no request written and no wait: the same
+    // answer and the same checks as the ask above (launchSettled), so an adopted start is trusted exactly as an on-time
+    // one. -> the ask's ok answer plus `live` (whether the session it started still runs), { ok: false, reason } (the
+    // runner refused it, nothing started), or { pending: true, reason } (no answer the status bears out yet). A status
+    // that can't be read throws ("not known"), as every sync port does.
+    launchOutcome: ({ card, kind, product, sessionId } = {}) => {
+      const bad = launchNameProblem({ card, kind, product, sessionId });
+      if (bad) throw new Error(bad);
+      const s = status();
+      const key = `launch-${sessionId}`;
+      const a = Object.hasOwn(s.answers, key) ? s.answers[key] : undefined;
+      if (!a) return { pending: true, reason: `the worker runner has not answered ${key} yet (its request is ${Object.hasOwn(s.requests, sessionId) ? s.requests[sessionId].state : 'not seen'})` };
+      return launchSettled(a, s, { card, kind, product, sessionId }) ?? { pending: true, reason: `the worker runner's answer to ${key} is one the rest of its status does not bear out yet` };
     },
     stopGroup: async (session, { signal } = {}) => {
       const { id, pgid, kind } = session ?? {};
