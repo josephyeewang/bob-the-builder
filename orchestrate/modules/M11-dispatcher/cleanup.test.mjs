@@ -5,7 +5,8 @@ import { chmodSync, mkdirSync, writeFileSync, existsSync, statSync, readFileSync
 import { createHash } from 'node:crypto';
 import { join, resolve, sep } from 'node:path';
 import { LEFTOVER_FOLDER, LEFTOVER_WARN_COUNT } from '../../shared/product-paths.mjs';
-import { cleanupCopy, cleanupPass, ASK_ID, CLEANUP_FACT, COPIES_NOT_PRODUCT_CAUSE, COPIES_UNREAD_CAUSE, STRAY_FACT, namesInMark, hashCopy, mirrorTree, namedCopy, ownCopy, STALE_STAGING_MS, sweepStaging } from './cleanup.mjs';
+import { cleanupCopy, cleanupPass, ASK_ID, CLEANUP_FACT, COPIES_NOT_PRODUCT_CAUSE, COPIES_UNREAD_CAUSE, STRAY_FACT, namesInMark, hashCopy, mirrorTree, namedCopy, ownCopy, STALE_STAGING_MS, sweepStaging, LEFTOVER_MOVED_CAUSE } from './cleanup.mjs';
+import { HOLD_FACT } from './pass.mjs';
 import { createSaveWork } from '../M4-workshop/git/save-work.mjs';
 import { git as safeGit, callLog } from '../M4-workshop/git/safe-git.mjs';
 import { PR_FACT } from './merges.mjs';
@@ -859,4 +860,38 @@ test('L1357 audit M2: each moved copy is told once, a leftover folder past the c
   await sendAlerts(rec, async (t) => { sent.push(t); return true; }, T0 + 5 * MIN, { report: () => {} });
   assert.match(o.find(([n]) => n === 'leftover-moves')[1].reasons[0], /moved copies could not be read: the status is 9 minutes old/);
   assert.equal(sent.length, before);
+});
+
+// L1360 m4 (#670 audit r2): a told mark that can't be read stopped the whole cleanup step each tick. Now the step runs
+// on, the other moves are told, and the unread ones are named in one alert, daily, and in the step's lines.
+test('L1360 m4: a moved copy whose told mark cannot be read does not stop the step; it is told once a day, naming the copy', async () => {
+  const w = world();
+  const real = recFor(w, { copy: null });
+  rmSync(w.copy, { recursive: true, force: true });
+  const aside = join(w.copiesRoot, 'p1', LEFTOVER_FOLDER);
+  mkdirSync(aside);
+  const move = (n) => ({ card: `C-${n}`, product: 'p1', from_session: `S-${n}`, to: join(aside, `C-${n}.before-S-${n + 1}`), at: iso(T0) });
+  const bad = HOLD_FACT(LEFTOVER_MOVED_CAUSE(move(1).to));
+  // The rec as the pass sees it, its read of one move's told mark failing (the rest of the record reads as before).
+  const rec = { ...real, read: (kind, id) => { if (kind === 'fact' && id === bad) throw new Error('the record is busy'); return real.read(kind, id); } };
+  const sent = [];
+  const pass = async (now) => {
+    const out = await cleanupPass({ rec, rules: R, now, copiesRoot: w.copiesRoot, sealRoot: w.sealRoot, mirrorFor: () => w.mirror,
+      git: guardedGit(w.copiesRoot), saveWork: locked, alert: outbox(real, now), leftoverMoves: () => [move(1), move(2)] });
+    await sendAlerts(real, async (t) => { sent.push(t); return true; }, now, { report: () => {} });
+    return out;
+  };
+  mkdirSync(move(1).to); mkdirSync(move(2).to);
+  const out = await pass(T0);
+  const unread = (s) => s.filter((t) => t.includes('whether you were told could not be read'));
+  assert.equal(sent.filter((t) => t.includes("card C-2's copy was left by an earlier start")).length, 1, 'the other move is told');
+  assert.deepEqual(unread(sent), [`worker runner: card C-1's copy at ${move(1).to} was moved aside by an earlier start, and whether you were told could not be read (the record is busy). Nothing removes it: look, keep what you need, then remove that folder yourself. Said daily until the record reads again.`]);
+  assert.deepEqual(out.find(([n]) => n === 'leftover-moves')?.[1].reasons, [`whether ${move(1).to} was told could not be read: the record is busy`]);
+  assert.deepEqual(out.find(([n]) => n === `p1/${LEFTOVER_FOLDER}`)?.[1].reasons, ['2 leftover copies, kept for the owner'], 'the rest of the step ran');
+  await pass(T0 + MIN);
+  assert.equal(unread(sent).length, 1, 'told once a day, not every pass');
+  assert.equal(sent.filter((t) => t.includes('was left by an earlier start')).length, 1, 'the told move is not told again');
+  await pass(T0 + 25 * 60 * MIN);
+  assert.equal(unread(sent).length, 2, 'and again the next day while it lasts');
+  assert.equal(readdirSync(aside).length, 2, 'nothing removed');
 });

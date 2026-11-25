@@ -49,6 +49,8 @@ const LIVE_CARD = Object.freeze(['claimed', 'running']);
 export const LEFTOVER_MOVED_CAUSE = (to) => `leftover-moved-${idHash(to)}`;
 /** A product's leftover folder holding more than LEFTOVER_WARN_COUNT copies, or not countable: told daily. */
 export const LEFTOVER_MANY_CAUSE = (product) => `leftover-many-${product}`;
+/** A moved leftover copy whose told mark could not be read (L1360 m4): told daily, naming the copies, until it can be. */
+export const LEFTOVER_UNREAD_CAUSE = 'leftover-moved-unread';
 const SHA = /^[0-9a-f]{40}$/;
 const CARD = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
 const iso = (ms) => new Date(ms).toISOString();
@@ -415,19 +417,31 @@ export async function cleanupPass({ rec, rules, now, copiesRoot, sealRoot, mirro
  * Each leftover copy the worker runner moved aside (L1357 audit M2), from its status (`leftoverMoves()`, owner-status.mjs:
  * this product's), told to the owner once: where it went, from which session, and that nothing removes it. A status that
  * can't be read is noted in the step's lines only: the runner's status has its own alerts, and a move not told yet stays
- * listed for a week (RUNNER_KEEP_MOVED_MS), so the next pass that reads it tells it.
+ * listed for a week (RUNNER_KEEP_MOVED_MS), so the next pass that reads it tells it. A move whose told mark can't be
+ * read (L1360 m4) neither stops the step nor is lost: the others are told as before, and those are named in one alert,
+ * daily while it lasts (LEFTOVER_UNREAD_CAUSE), and in the step's lines.
  */
 export async function tellLeftoverMoves({ rec, leftoverMoves, alert, now, out = [] }) {
   let moves;
   try { moves = await leftoverMoves(); } catch (e) { out.push(['leftover-moves', { result: 'kept', reasons: [`the worker runner's moved copies could not be read: ${e?.message ?? e}`] }]); return 0; }
   let n = 0;
+  const unread = [];
   for (const m of Array.isArray(moves) ? moves : []) {
     if (typeof m?.to !== 'string' || !m.to) continue;
     const fact = HOLD_FACT(LEFTOVER_MOVED_CAUSE(m.to));
-    if (rec.read('fact', fact)?.doc?.told_at) continue;
+    let told;
+    try { told = rec.read('fact', fact)?.doc?.told_at; } catch (e) { unread.push({ m, why: e?.message ?? String(e) }); continue; }
+    if (told) continue;
     const text = `worker runner: card ${plain(m.card, 140)}'s copy was left by an earlier start${m.from_session ? ` (session ${plain(m.from_session, 140)})` : ''}, so at ${plain(m.at, 40)} it was moved aside to ${plain(m.to, 400)}, and the card started on a fresh copy. Nothing removes it: look at it, keep what you need, then remove that folder yourself.`;
     try { await tellThen(alert, text, { fact, fields: { text, told_at: iso(now) }, kind: 'hold_alert' }); n += 1; }
     catch (e) { alert(`the Dispatcher could not tell a moved leftover copy: ${e?.message ?? e}`); }
+  }
+  if (unread.length) {
+    const where = listed(unread.map(({ m }) => `card ${plain(m.card, 140)}'s copy at ${plain(m.to, 400)}`));
+    out.push(['leftover-moves', { result: 'kept', reasons: unread.map(({ m, why }) => `whether ${plain(m.to, 400)} was told could not be read: ${plain(why, 300)}`) }]);
+    const text = `worker runner: ${where} ${unread.length === 1 ? 'was' : 'were'} moved aside by an earlier start, and whether you were told could not be read (${plain(unread[0].why, 300)}). Nothing removes ${unread.length === 1 ? 'it' : 'them'}: look, keep what you need, then remove ${unread.length === 1 ? 'that folder' : 'those folders'} yourself. Said daily until the record reads again.`;
+    try { await holdAlert({ rec, cause: LEFTOVER_UNREAD_CAUSE, text, alert, now }); }
+    catch (e) { try { alert(`${text} (and its told mark could not be kept: ${e?.message ?? e})`); } catch { /* the step's lines hold it */ } }
   }
   return n;
 }
