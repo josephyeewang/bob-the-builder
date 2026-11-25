@@ -68,6 +68,7 @@ context:
     split_after_compactions: 2
 claims:
   stuck_min: 30
+  dead_reruns_per_day: 2
 `;
 
 // The Dispatcher's single minute limits (M11 keys.mjs), each a whole number under timeouts.

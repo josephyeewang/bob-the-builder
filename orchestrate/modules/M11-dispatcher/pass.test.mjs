@@ -7,7 +7,7 @@ import { tempDir } from '../../shared/test-tmp.mjs';
 import { launchInputProblem } from '../../wiring/owner-asks.mjs';
 import { STATES, FINAL_STATES } from '../../shared/record.mjs';
 import { STOP_QUIET_REASONS } from '../M4-workshop/launcher/review-runner.mjs';
-import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts as undoStarts0, stopProcessGroup, guarded, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, RESET_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RUN, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, LIMIT_H5_MS, resetEndsLimit, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0, UNKNOWN_FACT, REVIEW_STOP_FACT, REVIEW_STOP_RUNNER_REASON, REVIEW_STOP_AGAIN_MS, REVIEW_STOP_TELL_FACT, REVIEW_STOP_MAX_ASKS, HOST_COPY_FAIL, HOST_COPY_CAUSE, HOLD_FACT, adoptLate as adoptLate0, lapseStop, LAUNCH_DEADLINE_MS, PORT_DEADLINE_MS } from './pass.mjs';
+import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts as undoStarts0, stopProcessGroup, guarded, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, RESET_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RUN, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, LIMIT_H5_MS, resetEndsLimit, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0, UNKNOWN_FACT, REVIEW_STOP_FACT, REVIEW_STOP_RUNNER_REASON, REVIEW_STOP_AGAIN_MS, REVIEW_STOP_TELL_FACT, REVIEW_STOP_MAX_ASKS, HOST_COPY_FAIL, HOST_COPY_CAUSE, HOLD_FACT, adoptLate as adoptLate0, lapseStop, LAUNCH_DEADLINE_MS, PORT_DEADLINE_MS, DEAD_RERUN_FACT, DEAD_SESSION_WAIT, deadRerunText, missingText } from './pass.mjs';
 import { USAGE_FACT, BAND_FACT } from './usage.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { retellWaits, WAIT_TELL_FACT } from './joe-waits.mjs';
@@ -917,6 +917,112 @@ test('audit MIN-20 (P13): parked work does not resume while the Dispatcher\'s ow
   assert.equal(w.rec.read('card', 'C-1').doc.state, 'waiting');
   w.setUsage({ week: 30, h5: 20 });
   assert.deepEqual((await w.pass(2)).resumed, ['C-1']);
+});
+
+// L1365: a dead_session wait (tick.mjs actOnDead) is started again by itself while the card's re-runs in the last 24 h
+// are under claims.dead_reruns_per_day; at the cap, or with no key, it stays on Joe.
+const deadWait = (id, over = {}) => card(id, { state: 'waiting', wait: { who: 'joe', what: `${DEAD_SESSION_WAIT}: its session stopped and the card is not marked safe to re-run`,
+  since: iso(T0 - 30 * MIN), next_check: iso(T0), resume: 'retry', return_to: 'ready', link: `card ${id}` }, ...over });
+const reruns = (times) => ['fact', DEAD_RERUN_FACT('C-1'), { times: times.map(iso) }];
+const resumedDead = (w, id) => w.rec.diary({}).filter((l) => l.entity === 'card' && l.id === id && l.kind === 'resume_dead_session').length;
+test('L1365: a dead_session wait under the cap goes back to ready once, is counted, told, and starts in the same pass', async () => {
+  const w = world([deadWait('C-1')], { over: { [K.claimsDeadRerunsPerDay]: 2 } });
+  const r = await w.pass(0);
+  assert.deepEqual(r.resumed, ['C-1']);
+  assert.equal(resumedDead(w, 'C-1'), 1, 'exactly one move back to ready in the pass');
+  assert.deepEqual(w.calls.launched, ['C-1'], 'started again in the same pass');
+  assert.deepEqual(w.rec.read('fact', DEAD_RERUN_FACT('C-1')).doc.times, [iso(T0)]);
+  assert.deepEqual(w.calls.alerts.filter((a) => /ended without finishing/.test(a)), ['card C-1: its session ended without finishing; started again (1 of 2 in the last 24 hours)']);
+  assert.equal(deadRerunText('C-9', 2, 3), 'card C-9: its session ended without finishing; started again (2 of 3 in the last 24 hours)');
+  // A second pass has nothing more to move: the card is no longer waiting.
+  await w.pass(1);
+  assert.equal(resumedDead(w, 'C-1'), 1);
+  assert.equal(w.rec.read('fact', DEAD_RERUN_FACT('C-1')).doc.times.length, 1);
+});
+
+test('L1365: at the cap a dead_session wait stays on Joe; re-runs older than 24 h no longer count', async () => {
+  const capped = world([reruns([T0 - H, T0 - 2 * H]), deadWait('C-1')], { over: { [K.claimsDeadRerunsPerDay]: 2 } });
+  const r = await capped.pass(0);
+  assert.deepEqual(r.resumed, []);
+  assert.equal(capped.rec.read('card', 'C-1').doc.state, 'waiting');
+  assert.deepEqual(capped.calls.launched, []);
+  assert.deepEqual(capped.calls.alerts.filter((a) => /ended without finishing/.test(a)), []);
+  // A cap of 0 turns the re-run off.
+  const off = world([deadWait('C-1')], { over: { [K.claimsDeadRerunsPerDay]: 0 } });
+  assert.deepEqual((await off.pass(0)).resumed, []);
+  // The window: one re-run 25 h ago and one exactly 24 h ago are out of it; the one an hour ago counts.
+  const day = 24 * H;
+  const w = world([reruns([T0 - day - H, T0 - day, T0 - H]), deadWait('C-1')], { over: { [K.claimsDeadRerunsPerDay]: 2 } });
+  assert.deepEqual((await w.pass(0)).resumed, ['C-1']);
+  assert.deepEqual(w.rec.read('fact', DEAD_RERUN_FACT('C-1')).doc.times, [iso(T0 - H), iso(T0)], 'only the window\'s times are kept');
+  assert.deepEqual(w.calls.alerts.filter((a) => /ended without finishing/.test(a)), ['card C-1: its session ended without finishing; started again (2 of 2 in the last 24 hours)']);
+});
+
+test('L1365: with no claims.dead_reruns_per_day a dead_session wait stays on Joe and the key is told', async () => {
+  const w = world([deadWait('C-1')]);
+  const r = await w.pass(0);
+  assert.deepEqual(r.resumed, []);
+  assert.equal(w.rec.read('card', 'C-1').doc.state, 'waiting');
+  assert.ok(r.missing.some((m) => /claims\.dead_reruns_per_day/.test(m)), r.missing.join(' | '));
+  assert.ok(w.calls.alerts.some((a) => /claims\.dead_reruns_per_day/.test(a)), w.calls.alerts.join(' | '));
+});
+
+test('L1365: other waits are left as they were: another joe wait, and one whose what only looks like dead_session', async () => {
+  const w = world([
+    card('C-2', { state: 'waiting', wait: { who: 'joe', what: 'merge refused twice', since: iso(T0 - 30 * MIN), next_check: iso(T0), resume: 'retry', return_to: 'ready' } }),
+    card('C-3', { state: 'waiting', wait: { who: 'joe', what: `${DEAD_SESSION_WAIT}x: not this one`, since: iso(T0 - 30 * MIN), next_check: iso(T0), resume: 'retry', return_to: 'ready' } }),
+  ], { over: { [K.claimsDeadRerunsPerDay]: 2 } });
+  const r = await w.pass(0);
+  assert.deepEqual(r.resumed, []);
+  assert.deepEqual(['C-2', 'C-3'].map((id) => w.rec.read('card', id).doc.state), ['waiting', 'waiting']);
+  assert.equal(w.rec.read('fact', DEAD_RERUN_FACT('C-2')), null);
+  assert.equal(w.rec.read('fact', DEAD_RERUN_FACT('C-3')), null);
+});
+
+test('L1365 M1: the count fails closed: a clock stepped back, an unreadable time and a times that is not a list all keep the card on Joe', async () => {
+  const caps = { over: { [K.claimsDeadRerunsPerDay]: 2 } };
+  // The clock stepped back two hours: both re-runs now lie ahead of now. They still count, so the cap holds.
+  const back = world([reruns([T0 + 2 * H, T0 + H]), deadWait('C-1')], caps);
+  assert.deepEqual((await back.pass(0)).resumed, []);
+  assert.equal(back.rec.read('card', 'C-1').doc.state, 'waiting');
+  // A time that can't be read counts too; one readable re-run beside it fills the cap of two.
+  const junk = world([['fact', DEAD_RERUN_FACT('C-1'), { times: ['not a time', iso(T0 - H)] }], deadWait('C-1')], caps);
+  assert.deepEqual((await junk.pass(0)).resumed, []);
+  // Under the cap, the unreadable time is kept with the new one, never dropped.
+  const keep = world([['fact', DEAD_RERUN_FACT('C-1'), { times: ['not a time'] }], deadWait('C-1')], caps);
+  assert.deepEqual((await keep.pass(0)).resumed, ['C-1']);
+  assert.deepEqual(keep.rec.read('fact', DEAD_RERUN_FACT('C-1')).doc.times, ['not a time', iso(T0)]);
+  // times not a list: corrupt. Not started again, told once, the fact left as it is.
+  const bad = world([['fact', DEAD_RERUN_FACT('C-1'), { times: 'yesterday' }], deadWait('C-1')], caps);
+  const r = await bad.pass(0);
+  assert.deepEqual(r.resumed, []);
+  assert.equal(bad.rec.read('card', 'C-1').doc.state, 'waiting');
+  assert.equal(bad.rec.read('fact', DEAD_RERUN_FACT('C-1')).doc.times, 'yesterday');
+  assert.equal(bad.calls.alerts.filter((a) => /card C-1: its dead-session re-runs can't be read \(its times are not a list\).*waits on you/.test(a)).length, 1, bad.calls.alerts.join(' | '));
+  await bad.pass(1);
+  assert.equal(bad.calls.alerts.filter((a) => /re-runs can't be read/.test(a)).length, 1, 'once a day, not every pass');
+});
+
+test('L1365 m1: a refused move back to ready is told to Joe, and the card stays waiting', async () => {
+  const w = world([deadWait('C-1')], { over: { [K.claimsDeadRerunsPerDay]: 2 } });
+  const rec = { ...w.rec, write: (a) => (a?.kind === 'resume_dead_session' ? { ok: false, reason: 'refused for the test' } : w.rec.write(a)) };
+  const r = await w.pass(0, { rec });
+  assert.deepEqual(r.resumed, []);
+  assert.equal(w.rec.read('card', 'C-1').doc.state, 'waiting');
+  assert.ok(w.calls.alerts.some((a) => /card C-1: its session ended and a re-run was counted, but it could not be put back in the queue \(refused for the test\); it waits on you/.test(a)), w.calls.alerts.join(' | '));
+});
+
+test('L1365 m2: a missing key that holds back no start is not told as one that does', async () => {
+  const w = world([deadWait('C-1')]);
+  await w.pass(0);
+  const told = w.calls.alerts.filter((a) => /claims\.dead_reruns_per_day/.test(a));
+  assert.equal(told.length, 1, w.calls.alerts.join(' | '));
+  assert.doesNotMatch(told[0], /nothing new starts/);
+  assert.match(told[0], /starts go on, but until it has one, a card whose session ended waits on you instead of being started again/);
+  // Mixed: the key that holds starts keeps its text; the others are said apart, each effect once.
+  assert.equal(missingText(['a.b', 'claims.stuck_min for p1', 'claims.dead_reruns_per_day for p1', 'claims.dead_reruns_per_day for p2'], 'nothing new starts until they do; stops still run'),
+    'the rules have no value for a.b: nothing new starts until they do; stops still run; the rules also have no value for claims.stuck_min for p1, claims.dead_reruns_per_day for p1, claims.dead_reruns_per_day for p2: starts go on, but until they have one, no dead session\'s claim is broken, and a card whose session ended waits on you instead of being started again');
+  assert.equal(missingText(['a.b'], 'X'), 'the rules have no value for a.b: X');
 });
 
 test('audit MIN-20 (P30): in red a review session with a card is never parked; an editing one is', async () => {

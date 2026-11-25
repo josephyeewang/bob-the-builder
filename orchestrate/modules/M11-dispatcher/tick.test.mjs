@@ -498,6 +498,23 @@ test('L1364: with healthy and resume not wired, a dead running card still waits 
 });
 // L1364 amended (#674 review M1): an outage opened while healthy is not wired could never end (healthy and resume both
 // refuse), so every start would be held for ever. None opens: each dead card is decided on its own.
+test('L1365 m4: at the re-run cap the dead-session tell says until when the card waits on Joe', () => {
+  const rules = rulesWith({ [K.claimsDeadRerunsPerDay]: 2 }, allow);
+  const fact = (times) => ['fact', 'dead-rerun-C-1', { times }];
+  const told = (entries) => {
+    const alert = fakeAlert();
+    actOnDead({ rec: recWith([card('C-1', { state: 'running' }), ...entries]), rules, now: T0, restart: [], asks: ['C-1'], alert });
+    return alert.texts.filter((t) => /card C-1: its session stopped/.test(t));
+  };
+  // At the cap: the oldest re-run (3 h ago) is 24 h old at T0 + 21 h.
+  assert.deepEqual(told([fact([iso(T0 - 3 * 60 * MIN), iso(T0 - 60 * MIN)])]), [`card C-1: its session stopped and the card is not marked safe to re-run, so it waits on you; it was started again 2 times in the last 24 hours, the most claims.dead_reruns_per_day allows, so it is not started again by itself before ${iso(T0 + 21 * 60 * MIN)}`]);
+  // Under the cap, or with no re-runs: the plain tell (the waits step starts it again).
+  assert.deepEqual(told([fact([iso(T0 - 60 * MIN)])]), ['card C-1: its session stopped and the card is not marked safe to re-run, so it waits on you']);
+  assert.deepEqual(told([]), ['card C-1: its session stopped and the card is not marked safe to re-run, so it waits on you']);
+  // Only unreadable times at the cap: no date to give.
+  assert.match(told([fact(['x', 'y'])])[0], /not started again by itself while its re-run times cannot be read$/);
+});
+
 test('L1364 M1: with healthy not wired, three deaths on a board of six open no outage; each card waits on Joe, told once each', async () => {
   const quiet = minutes(rulesWith({}, allow), K.deadQuietMin) / MIN;
   const gone = (id, c) => ({ id, card: c, alive: false, ended: true, lastWriteAt: T0 - (quiet + 1) * MIN });
@@ -509,6 +526,12 @@ test('L1364 M1: with healthy not wired, three deaths on a board of six open no o
   const wired = world([account(), usage(), ...cards], { over: { board: () => board } });
   await wired.pass();
   assert.equal(wired.rec.read('fact', OUTAGE_FACT)?.doc?.state, 'open');
+  // Round 2: both ways out must be wired. Healthy alone, with resume refusing or missing, opens none either.
+  for (const resume of [refusing('resume'), undefined]) {
+    const half = world([account(), usage(), ...cards], { over: { board: () => board, healthy: () => true, resume } });
+    await half.pass();
+    assert.notEqual(half.rec.read('fact', OUTAGE_FACT)?.doc?.state, 'open', `no outage with resume ${resume ? 'refusing' : 'missing'}`);
+  }
   const w = world([account(), usage(), ...cards], { over: { board: () => board, healthy: refusing('healthy'), resume: refusing('resume') } });
   const r = await w.pass();
   assert.equal(r.steps.outage.ok, true, r.steps.outage.error);

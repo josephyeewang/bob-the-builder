@@ -47,6 +47,9 @@ export const KEYS = Object.freeze({
   // claims (L72): the quiet time before a dead owner's claim is broken (M9 breakIfDead reads it; read here so a missing
   // value is told). A claim whose session never started lapses at M9's claims.unlaunched_min, which has a default.
   claimsStuckMin: 'claims.stuck_min',
+  // L1365: how many times in 24 h a card whose session ended without finishing is started again by itself (pass.mjs
+  // waits step); missing, none is (the card waits on Joe). 0 turns the re-run off.
+  claimsDeadRerunsPerDay: 'claims.dead_reruns_per_day',
   // outage (review M9)
   outageMinDead: 'outage.min_dead',
   outageShare: 'outage.share',
@@ -65,7 +68,7 @@ export const NEW_KEYS = Object.freeze([
   KEYS.paceMinShare, KEYS.shakedown, KEYS.amberEditingPerProduct, KEYS.amberEditingPerMac,
   KEYS.cancelGraceMin, KEYS.parkWaitMin, KEYS.deadQuietMin, KEYS.checkingMaxMin, KEYS.mergingOpenMaxMin,
   KEYS.reportingMaxMin, KEYS.inReviewNoReviewerMin, KEYS.frontDoorStuckMin, KEYS.usageUnknownMaxMin, KEYS.outageMinDead, KEYS.outageShare,
-  KEYS.proposalsOutbox,
+  KEYS.proposalsOutbox, KEYS.claimsDeadRerunsPerDay,
 ]);
 
 // The only defaults: the lead's L13 pace floor (one day of seven), and shakedown on until the
@@ -114,3 +117,13 @@ export function need(rules, key, { product, type = 'number' } = {}) {
 export const minutes = (rules, key, opts) => need(rules, key, opts) * 60_000;
 /** How a missing per-product value is listed for Joe: the key, and the product it is missing for (L116 c1). */
 export const missingFor = (key, product) => (product ? `${key} for ${product}` : key);
+
+// L1365 m2: the keys whose missing value holds back no start, each with what is not done until it has one. The
+// missing-rules alert (pass.mjs rulesMissingAlert) tells these apart, so it never says "nothing new starts" for them.
+// The one list: a key that holds nothing back is marked here and nowhere else.
+export const HOLDS_NO_START = Object.freeze({
+  [KEYS.claimsStuckMin]: "no dead session's claim is broken",
+  [KEYS.claimsDeadRerunsPerDay]: 'a card whose session ended waits on you instead of being started again',
+});
+/** The key of a missing entry as missingFor lists it ("key" or "key for product"). */
+export const missingKeyOf = (entry) => String(entry).split(' for ')[0];

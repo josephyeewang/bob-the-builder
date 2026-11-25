@@ -54,7 +54,7 @@ import { sensorsFact } from './sensor-facts.mjs';
 import { outageStep, OUTAGE_FACT } from './outage.mjs';
 import { intakePass } from './outbox-intake.mjs';
 import { leadRestartStep, leadInFlight, handoffVet, tellLeadSkipped, HANDOFF_NAME } from './lead-restart.mjs';
-import { adoptLate, lapseStop, dispatcherPass, stopPass, undoStarts, rulesMissingAlert, holdAlert, refusalReport, readHostLock, hostCopyReason, hostCopyAlertText, HOST_COPY_CAUSE, HELD_BANDS, HOLD_REPEAT_MS, TOLD_BANDS } from './pass.mjs';
+import { adoptLate, lapseStop, dispatcherPass, stopPass, undoStarts, rulesMissingAlert, holdAlert, refusalReport, readHostLock, hostCopyReason, hostCopyAlertText, HOST_COPY_CAUSE, HELD_BANDS, HOLD_REPEAT_MS, TOLD_BANDS, DEAD_SESSION_WAIT, deadReruns, deadCapText } from './pass.mjs';
 import { startGate } from './gate.mjs';
 import { currentBands, ACCOUNT_FACT } from './usage.mjs';
 import { timeLimits, requestMerges } from './merges.mjs';
@@ -192,6 +192,15 @@ export function signedInAccount({ rec, rules, now }) {
   return { account: d.account, reason: null };
 }
 
+/** actOnDead's at-cap tail (L1365 m4): '' unless the card's re-runs in the window have reached the product's cap. */
+function atCapText(rec, rules, cardId, product, now) {
+  if (!rules) return '';
+  let cap;
+  try { cap = need(rules, KEYS.claimsDeadRerunsPerDay, { product }); } catch (e) { if (e instanceof MissingKey) return ''; throw e; }
+  const used = deadReruns(rec, cardId, now);
+  return !used.corrupt && used.times.length >= cap ? deadCapText(used.times.length, used.oldest) : '';
+}
+
 /**
  * Acts on the outage step's answer (M10): a safe card's claim is broken by the Record, which itself checks the owner is
  * provably dead (breakIfDead: pid and pid_start, the session, no recent activity; L72), and goes back to ready; any
@@ -224,8 +233,10 @@ export function actOnDead({ rec, rules, now, restart, asks, cards = {}, alert = 
     const cur = rec.read('card', cardId);
     if (!cur || !['running', 'claimed'].includes(cur.doc.state)) continue;
     // Told until delivered (L130 M1): waitOnJoe records the tell, and retellWaits asks again while it is not delivered.
-    const w = waitOnJoe(rec, cardId, { what: 'dead_session: its session stopped and the card is not marked safe to re-run', now, link: `card ${cardId}`, kind: 'dead_ask',
-      alert, text: `card ${cardId}: its session stopped and the card is not marked safe to re-run, so it waits on you` });
+    // At the re-run cap (L1365 m4) the tell says until when it waits; under it, the waits step starts it again.
+    const text = `card ${cardId}: its session stopped and the card is not marked safe to re-run, so it waits on you${atCapText(rec, rules, cardId, cur.doc.product, now)}`;
+    const w = waitOnJoe(rec, cardId, { what: `${DEAD_SESSION_WAIT}: its session stopped and the card is not marked safe to re-run`, now, link: `card ${cardId}`, kind: 'dead_ask',
+      alert, text });
     if (w.ok) done.push([cardId, w.tell_refused ? `waiting on Joe; ${w.tell_refused}` : 'waiting on Joe']);
   }
   return done;
@@ -335,9 +346,10 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
     // a running card whose session had died was never handed to actOnDead. An open outage still asks them, so a port
     // that throws there fails the step as before (nothing restarts, the outage holds).
     const openNow = outageInRecord();
-    // L1364 amended (#674 review M1): with no health reading to be had (the healthy port missing, or still the wiring's
-    // refusing port, R-0b-162), no outage is opened, since nothing could end it.
-    const canEnd = typeof p.healthy === 'function' && !isRefusing(p.healthy);
+    // L1364 amended (#674 review M1, round 2): unless both ways out are wired (healthy and resume, neither missing nor
+    // still the wiring's refusing port, R-0b-162), no outage is opened, since nothing might end it.
+    const wired = (f) => typeof f === 'function' && !isRefusing(f);
+    const canEnd = wired(p.healthy) && wired(p.resume);
     const o = outageStep({ rec, rules, board, now, healthy: openNow ? p.healthy() : false, resume: openNow ? (p.resume?.() ?? false) : false, alert, canEnd });
     outageOpen = o.outage;
     // L761: a refused write of the deaths already counted means they may be counted again (a false outage), or that
