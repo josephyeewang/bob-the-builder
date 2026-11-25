@@ -54,7 +54,7 @@ import { sensorsFact } from './sensor-facts.mjs';
 import { outageStep, OUTAGE_FACT } from './outage.mjs';
 import { intakePass } from './outbox-intake.mjs';
 import { leadRestartStep, leadInFlight, handoffVet, tellLeadSkipped, HANDOFF_NAME } from './lead-restart.mjs';
-import { adoptLate, dispatcherPass, stopPass, undoStarts, rulesMissingAlert, holdAlert, refusalReport, readHostLock, hostCopyReason, hostCopyAlertText, HOST_COPY_CAUSE, HELD_BANDS, HOLD_REPEAT_MS, TOLD_BANDS } from './pass.mjs';
+import { adoptLate, lapseStop, dispatcherPass, stopPass, undoStarts, rulesMissingAlert, holdAlert, refusalReport, readHostLock, hostCopyReason, hostCopyAlertText, HOST_COPY_CAUSE, HELD_BANDS, HOLD_REPEAT_MS, TOLD_BANDS } from './pass.mjs';
 import { startGate } from './gate.mjs';
 import { currentBands, ACCOUNT_FACT } from './usage.mjs';
 import { timeLimits, requestMerges } from './merges.mjs';
@@ -264,9 +264,12 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
   const run = async (step, f) => {
     now = Math.max(now, clock());
     let timer;
+    // When this step's limit ends, by the real clock its timer runs on: a start loop begins no launch it can't finish by
+    // then (L1361 audit m4, pass.mjs launchUntil).
+    const until = Date.now() + deadline;
     try {
       const late = new Promise((_, no) => { timer = setTimeout(() => no(new Error(`it did not finish within ${deadline} ms`)), deadline); });
-      res[step] = { ok: true, result: await Promise.race([Promise.resolve().then(f), late]) };
+      res[step] = { ok: true, result: await Promise.race([Promise.resolve().then(() => f(until)), late]) };
       const was = rec.read('fact', STEP_ERROR_FACT(step))?.doc;
       if (was?.error) clearCause(rec, STEP_ERROR_FACT(step), () => putFact(rec, STEP_ERROR_FACT(step), { error: null, at: iso(now) }, 'step_ok', was, ['told_cause', 'told_at']), (line, cause) => { res[step].note = line; refusalReport({ rec, alert, now, lines: [], failureLog: failed(step) })(line, cause); });
     } catch (e) {
@@ -308,8 +311,8 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
     return stops;
   });
   await run('undo', () => undoStep({ rec, rules, now, filesOf: p.filesOf, alert }));
-  await run('undo-starts', async () => {
-    const r = await undoStarts({ rec, rules, now, bands: stops?.bands ?? HELD_BANDS, running: stops?.running ?? p.sessions(), launch: p.launch, stopGroup: p.stopGroup, outboxRoot: p.outboxRoot, filesOf: p.filesOf, alert, failureLog: failed('undo-starts'), hostLock, ...portDeadlines });
+  await run('undo-starts', async (launchUntil) => {
+    const r = await undoStarts({ launchUntil, rec, rules, now, bands: stops?.bands ?? HELD_BANDS, running: stops?.running ?? p.sessions(), launch: p.launch, stopGroup: p.stopGroup, outboxRoot: p.outboxRoot, filesOf: p.filesOf, alert, failureLog: failed('undo-starts'), hostLock, ...portDeadlines });
     missing.push(...r.missing);
     if (stops) stops.running = r.running;
     return { started: r.started, refused: r.refused, notes: r.notes };
@@ -347,7 +350,7 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
   // twice; L72). Not during an outage: this step's or, when that step failed, the Record's (read again just above).
   await run('lapse', async () => {
     if (outageOpen) return { lapsed: [], skipped: 'an outage is open' };
-    const lapse = rec.lapseClaims(now, { stopSession: p.stopSession });
+    const lapse = rec.lapseClaims(now, { stopSession: lapseStop({ rec, launchOutcome: p.launchOutcome, stopSession: p.stopSession }) });
     if (!lapse?.ok) throw new Error(`claims could not be lapsed: ${lapse?.reason ?? 'no answer'}`);
     return { lapsed: lapse.lapsed ?? [] };
   });
@@ -425,8 +428,8 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
   // before the main pass reads it. Runs during an outage: only a plan reviewer starts here, and the read-only gate holds it.
   await run('plan-go', () => approvalsStep({ rec, rules, now, alert, approvals: p.approvals, what: 'plan-go', ...(p.approvalsProductMs !== undefined && { productMs: p.approvalsProductMs }),
     pass: (ctx) => planGoPass(ctx, { alert, startPlanReview: gatedReadonly((x) => p.startPlanReview(x)), planReviewAnswer: (x) => p.planReviewAnswer(x), planRows: (x) => p.planRows(x), planView: (x) => p.planView(x), replyToLead: (x) => p.replyToLead(x), mainSha: (x) => p.mainSha(x), passMs: p.approvalsProductMs ?? APPROVALS_PRODUCT_MS }) }));
-  await run('pass', async () => {
-    const r = await dispatcherPass({ rec, rules, now, account: acct.account, sessions: p.sessions(), probe: p.probe, launch: p.launch, stopGroup: p.stopGroup, outboxRoot: p.outboxRoot,
+  await run('pass', async (launchUntil) => {
+    const r = await dispatcherPass({ launchUntil, rec, rules, now, account: acct.account, sessions: p.sessions(), probe: p.probe, launch: p.launch, stopGroup: p.stopGroup, outboxRoot: p.outboxRoot,
       saveWork: p.saveWork, hostLock, pauseLead: p.pauseLead, filesOf: p.filesOf, alert, failureLog: failed('pass'), startsOff: acct.reason, tellMissing: false, stops, ...portDeadlines });
     missing.push(...r.missing);
     bands = r.bands;

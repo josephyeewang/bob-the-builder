@@ -264,14 +264,6 @@ export function ownerSyncPorts({ statusFile, uid, outboxRoot, product, clock = D
       if (!REQUEST_ID.test(sessionId ?? '')) return false;
       const s = status();
       const r = requestOf(s, sessionId);
-      // L1361: a launch the runner answered ok (started, or started and since stopped) did launch, late or not: the lapse
-      // is for a claim whose session never started, so it is refused here, named. The Dispatcher's adopt step takes such
-      // a start over (or gives its claim back once it ended: M11 pass.mjs adoptLate); the lapse never stops it and never
-      // calls it "never launched". A refusal is a throw, so the claim stays and the owner is told (M9 lapseClaims).
-      const key = `launch-${sessionId}`;
-      if ((r?.state === 'started' || r?.state === 'stopped') && Object.hasOwn(s.answers, key) && s.answers[key].ok === true) {
-        throw new Error(`session ${sessionId} did launch (the worker runner's answer is ok, its request ${r.state}), so its claim is taken over or given back by the Dispatcher's adopt step, never lapsed as never launched`);
-      }
       // True only when the launch request is used up and every session listed under the id is known gone (alive false):
       // a request the runner has not yet seen (no entry) is never true, as it could still start a second session.
       if (r && USED_UP.includes(r.state) && !s.sessions.some((x) => x.id === sessionId && x.alive !== false)) return true;

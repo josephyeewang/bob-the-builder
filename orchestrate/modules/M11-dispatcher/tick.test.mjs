@@ -379,7 +379,9 @@ test('L1340: claims lapse in their own step, so a failed outage step does not ho
   assert.equal(r.steps.outage.ok, false);
   assert.equal(r.steps.lapse.ok, true, r.steps.lapse.error);
   assert.deepEqual(r.steps.lapse.result.lapsed, [{ card: 'C-1', to: 'ready' }]);
-  assert.deepEqual(seen.map((x) => [x.now, x.stopSession]), [[T0, stopSession]]);
+  // L1361 audit M1: the stop port goes through lapseStop, which hands a claim adopt would not take over to it unchanged.
+  assert.deepEqual(seen.map((x) => x.now), [T0]);
+  assert.equal(seen[0].stopSession('S-none'), true, 'no such claim: the plain stop port answers');
   // An outage open in the Record holds the lapse, whether or not the outage step ran.
   for (const healthy of [() => true, () => { throw new Error('not wired yet: healthy'); }]) {
     const o = world([account(), usage(), ['fact', OUTAGE_FACT, { state: 'open', opened_at: iso(T0 - MIN) }]], { over: { healthy } });
@@ -2280,8 +2282,8 @@ test('L1361: an adopt step whose outcome can\'t be read fails alone and is told;
 
 // The stand-in Record's lapse is a no-op, so the order is shown with a spy: when the lapse step reads the claims, the
 // adopt step has already moved the late start to running (a running card is never one the lapse looks at, M9
-// lapseClaims). The real lapse refusing a launched session is shown in worker-runner.test.mjs (L1361) and M9's
-// claims.test.mjs (a stopSession that throws keeps the claim).
+// lapseClaims). The lapse refusing a launched session (lapseStop over the real ports) is shown in worker-runner.test.mjs
+// (L1361) and M9's claims.test.mjs (a stopSession that throws keeps the claim).
 test('L1361: the adopt step runs before the lapse, so the lapse finds the late start already running', async () => {
   const w = world([account(), usage(), ['card', 'C-1', { state: 'ready', module: 'M-test', product: 'p1', tier: 2, files: ['src/C-1.js'], changed_at: new Date(T0 - 10 * MIN).toISOString() }]], { over: {
     launch: async () => ({ ok: false, timedOut: true, reason: 'did not answer within 30000 ms' }),

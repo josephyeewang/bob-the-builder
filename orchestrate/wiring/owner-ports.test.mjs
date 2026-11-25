@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { PORT_DEADLINE_MS, SAVE_DEADLINE_MS } from '../modules/M11-dispatcher/pass.mjs';
+import { LAUNCH_DEADLINE_MS, PORT_DEADLINE_MS, SAVE_DEADLINE_MS } from '../modules/M11-dispatcher/pass.mjs';
 import { atSafePoint } from '../modules/M11-dispatcher/transcript.mjs';
 import { notWiredText } from './not-wired.mjs';
 import { CLEANUP_PORTS, NOT_WIRED_CLEANUP, NOT_WIRED_WORKER } from './worker-ports.mjs';
@@ -35,11 +35,12 @@ test('L741: every port says what goes in, what comes out, and how it fails; sync
     assert.equal(typeof s.in, 'string', k); assert.equal(typeof s.out, 'string', k);
     assert.equal(typeof (s.sync ? s.notKnown : s.fails), 'string', k);
     if (s.sync) assert.equal(s.deadlineMs, null, k);
-    if (!s.sync) assert.ok([PORT_DEADLINE_MS, SAVE_DEADLINE_MS].includes(s.deadlineMs), k);
+    if (!s.sync) assert.ok([LAUNCH_DEADLINE_MS, PORT_DEADLINE_MS, SAVE_DEADLINE_MS].includes(s.deadlineMs), k);
   }
   assert.equal(OWNER_PORTS.saveWork.deadlineMs, SAVE_DEADLINE_MS);
   assert.equal(OWNER_CLEANUP_PORTS.saveWork.deadlineMs, SAVE_DEADLINE_MS);
-  for (const k of ['launch', 'stopGroup', 'pauseLead']) assert.equal(OWNER_PORTS[k].deadlineMs, PORT_DEADLINE_MS, k);
+  for (const k of ['stopGroup', 'pauseLead']) assert.equal(OWNER_PORTS[k].deadlineMs, PORT_DEADLINE_MS, k);
+  assert.equal(OWNER_PORTS.launch.deadlineMs, LAUNCH_DEADLINE_MS, 'the launch has its own limit (L1361)');
   // The ports the tick calls without await must be sync (tick.mjs: p.sessions(), p.board(), stopSession inside lapseClaims).
   for (const k of ['sessions', 'probe', 'board', 'outboxSessions', 'stopSession']) assert.equal(OWNER_PORTS[k].sync, true, k);
   // lapseClaims gives the card back once stopSession answers true, so true must never mean "a launch request not seen yet"
@@ -68,7 +69,7 @@ test('L741: the launch answer names every field the pass reads from it (pass.mjs
   assert.deepEqual(unsaid, [], `pass.mjs reads launch fields the interface does not name: ${unsaid}`);
   // A late launch is known only by guarded's own answer, so the port must never answer its own time-out (M2 of the self-review).
   assert.match(body, /l\?\.reason === `it did not answer within \$\{launchDeadlineMs\} ms`|l\?\.timedOut === true/);
-  assert.match(OWNER_PORTS.launch.fails, /the tick's limit answers and the card stays claimed/);
+  assert.match(OWNER_PORTS.launch.fails, /the tick's launch limit answers and the card stays claimed/);
   // The call itself: the inputs the interface names.
   // L976: an undo's launch adds the reversed commit, and only an undo's.
   assert.match(pass, /launch\(\{ card: id, kind, product, sessionId, \.\.\.\(kind === 'undo' \? \{ undoCommit: exact\.commit \} : \{\}\) \}\)/);

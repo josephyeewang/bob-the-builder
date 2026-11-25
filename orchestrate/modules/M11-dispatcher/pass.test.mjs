@@ -7,7 +7,7 @@ import { tempDir } from '../../shared/test-tmp.mjs';
 import { launchInputProblem } from '../../wiring/owner-asks.mjs';
 import { STATES, FINAL_STATES } from '../../shared/record.mjs';
 import { STOP_QUIET_REASONS } from '../M4-workshop/launcher/review-runner.mjs';
-import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts as undoStarts0, stopProcessGroup, guarded, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, RESET_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RUN, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, LIMIT_H5_MS, resetEndsLimit, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0, UNKNOWN_FACT, REVIEW_STOP_FACT, REVIEW_STOP_RUNNER_REASON, REVIEW_STOP_AGAIN_MS, REVIEW_STOP_TELL_FACT, REVIEW_STOP_MAX_ASKS, HOST_COPY_FAIL, HOST_COPY_CAUSE, HOLD_FACT, adoptLate as adoptLate0, LAUNCH_DEADLINE_MS, PORT_DEADLINE_MS } from './pass.mjs';
+import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts as undoStarts0, stopProcessGroup, guarded, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, RESET_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RUN, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, LIMIT_H5_MS, resetEndsLimit, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0, UNKNOWN_FACT, REVIEW_STOP_FACT, REVIEW_STOP_RUNNER_REASON, REVIEW_STOP_AGAIN_MS, REVIEW_STOP_TELL_FACT, REVIEW_STOP_MAX_ASKS, HOST_COPY_FAIL, HOST_COPY_CAUSE, HOLD_FACT, adoptLate as adoptLate0, lapseStop, LAUNCH_DEADLINE_MS, PORT_DEADLINE_MS } from './pass.mjs';
 import { USAGE_FACT, BAND_FACT } from './usage.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { retellWaits, WAIT_TELL_FACT } from './joe-waits.mjs';
@@ -67,6 +67,7 @@ function world(entries = [], { usage = GREEN, over = {} } = {}) {
     startsOff: extra.startsOff ?? null,
     filesOf: extra.filesOf ?? filesOfCommits,
     failureLog: extra.failureLog,
+    ...(extra.launchUntil !== undefined ? { launchUntil: extra.launchUntil } : {}),
     alert: (t) => calls.alerts.push(t),
   });
   const setCard = (id, patch) => change(rec, 'card', id, patch);
@@ -2688,7 +2689,7 @@ async function lateStart(entries = [card('C-1')]) {
   const w = world(entries);
   w.refuseLaunch(() => LATE);
   const r = await w.pass(0);
-  const ids = entries.map((e) => e[1]);
+  const ids = entries.filter((e) => e[0] === 'card' && e[2].state === 'ready').map((e) => e[1]);
   for (const id of ids) assert.equal(w.rec.read('card', id).doc.state, 'claimed', JSON.stringify(r.refused));
   assert.ok(w.calls.alerts.some((a) => /stays claimed so it cannot start twice/.test(a)), 'the late hold is told');
   const sid = w.rec.read('card', ids[0]).doc.claim.session_id;
@@ -2811,4 +2812,90 @@ test('L1361 lead call: the launch alone gets LAUNCH_DEADLINE_MS (45 s); other po
   assert.deepEqual(r2.started, []);
   assert.equal(b.rec.read('card', 'C-1').doc.state, 'claimed');
   assert.ok(b.calls.alerts.some((t) => /card C-1: the launcher did not answer within its 0\.04 s launch limit \(it did not answer within 40 ms\); the card stays claimed/.test(t)), b.calls.alerts.join(' | '));
+});
+
+// L1361 audit M1: the lapse is refused only for a claim the adopt step would take over (launchOutcome ok, by the same
+// launchSettled); every other claim gets the plain stop, so no launch is held for ever.
+test('L1361 audit M1: lapseStop refuses only a claim whose launch the adopt step would take over', async () => {
+  const { w, sid, answer } = await lateStart();
+  const stops = [];
+  const stopSession = (id) => { stops.push(id); return true; };
+  const asked = [];
+  const guard = (outcome, more = {}) => lapseStop({ rec: w.rec, launchOutcome: (x) => { asked.push(x); return outcome; }, stopSession, ...more });
+  assert.throws(() => guard(answer())(sid), /did launch .*never lapsed as never launched/);
+  assert.throws(() => guard(answer({ live: false }))(sid), /did launch/, 'launched and ended: adopt gives it back, not the lapse');
+  assert.deepEqual(stops, []);
+  assert.deepEqual(asked.at(-1), { card: 'C-1', kind: 'editing', product: 'p1', sessionId: sid }, 'asked by the claim\'s own names, as adopt asks');
+  for (const o of [{ pending: true, reason: 'the worker runner\'s answer to it is one the rest of its status does not bear out yet' }, { ok: false, reason: 'check 7' }]) {
+    stops.length = 0;
+    assert.equal(guard(o)(sid), true, JSON.stringify(o));
+    assert.deepEqual(stops, [sid], 'not one adopt would take: the plain stop');
+  }
+  stops.length = 0; asked.length = 0;
+  assert.equal(guard(answer(), { host: 'other-mac', machine: 'other-machine-id' })(sid), true, 'another Mac\'s claim: adopt never asks, so neither does the lapse');
+  assert.deepEqual(asked, []);
+  assert.equal(guard(answer())('S-no-claim'), true, 'no claim names it: the plain stop');
+  assert.equal(lapseStop({ rec: w.rec, stopSession })(sid), true, 'no launchOutcome port: the plain stop, as before L1361');
+  assert.throws(() => guard(undefined, { launchOutcome: () => { throw new Error('status not known'); } })(sid), /status not known/, 'a status that can\'t be read keeps the claim');
+});
+
+test('L1361 audit m3: a late refusal of an undo is told as the undo\'s own wait, as an on-time one is (refuseStart)', async () => {
+  const { w, adopt } = await lateStart([...undoEntries('U-1')]);
+  w.calls.alerts.length = 0;
+  const r = await adopt({ ok: false, reason: 'check 7: the hook folder is missing' });
+  assert.deepEqual(r.refused, [['U-1', 'launcher: check 7: the hook folder is missing']]);
+  assert.equal(w.rec.read('card', 'U-1').doc.state, 'ready');
+  assert.ok(w.calls.alerts.some((a) => /^your undo \(card U-1\) is waiting: launcher: check 7/.test(a)), w.calls.alerts.join(' | '));
+  assert.ok(!w.calls.alerts.some((a) => /can't start/.test(a)), 'not the card start alert');
+});
+
+test('L1361 audit m4: a late start found already running under its own process is settled, with nothing told', async () => {
+  const { w, sid, answer, adopt } = await lateStart();
+  const stale = w.rec.list('card');
+  assert.deepEqual((await adopt(answer())).started, ['C-1']);
+  const launch = w.rec.read('launch', sid);
+  w.calls.alerts.length = 0;
+  // A second taker that read the card while it was still claimed (the start loop a step limit left running, say).
+  const r = await adoptLate({ rec: { ...w.rec, list: (e) => (e === 'card' ? stale : w.rec.list(e)) }, now: T0 + 2 * MIN, launchOutcome: () => answer(), stopGroup: async () => ({ ok: true }), alert: (t) => w.calls.alerts.push(t) });
+  assert.deepEqual(r.started, ['C-1']);
+  assert.equal(w.rec.read('card', 'C-1').doc.state, 'running');
+  assert.deepEqual(w.rec.read('launch', sid), launch, 'its launch record is kept');
+  assert.deepEqual(w.calls.alerts, [], 'no "could not be marked running" alert');
+});
+
+test('L1361 audit m4: after the first launch, a launch that could not finish inside the step\'s time left is not begun', async () => {
+  const w = world([card('C-1'), card('C-2'), card('C-3')]);
+  const r = await w.pass(0, { launchUntil: Date.now() + LAUNCH_DEADLINE_MS });
+  assert.deepEqual(r.started, ['C-1'], 'the first always runs');
+  assert.deepEqual(w.calls.launched, ['C-1']);
+  for (const id of ['C-2', 'C-3']) {
+    assert.equal(w.rec.read('card', id).doc.state, 'ready', 'left untouched for the next pass');
+    assert.ok(r.notes.some((n) => n.startsWith(`card ${id}: left for the next pass`)), r.notes.join(' | '));
+  }
+  assert.ok(!w.calls.alerts.some((a) => /C-2|C-3/.test(a)), 'noted, not told');
+  const next = await w.pass(1);
+  assert.deepEqual(next.started.sort(), ['C-2', 'C-3']);
+});
+
+test('L1361 audit m5: a wrong-outbox start stopped but not given back is given back later naming its outbox', async () => {
+  const { w, sid, answer } = await lateStart();
+  const bad = { outbox: '/elsewhere/p1/worker/x' };
+  const noRelease = { ...w.rec, release: () => ({ ok: false, reason: 'busy' }) };
+  await adoptLate({ rec: noRelease, now: T0 + MIN, launchOutcome: () => answer(bad), stopGroup: async () => ({ ok: true, how: 'SIGTERM' }), alert: (t) => w.calls.alerts.push(t) });
+  assert.equal(w.rec.read('card', 'C-1').doc.state, 'claimed');
+  const r = await adoptLate({ rec: w.rec, now: T0 + 2 * MIN, launchOutcome: () => answer({ ...bad, live: false }), stopGroup: async () => ({ ok: true }), alert: (t) => w.calls.alerts.push(t) });
+  assert.match(r.released[0][1], /^its outbox .*; its session was stopped$/);
+  const back = w.rec.diary().filter((l) => l.kind === 'claim_release' && l.id === 'C-1');
+  assert.match(back[0].data.reason, /launcher: its outbox /);
+  assert.doesNotMatch(back[0].data.reason, /started after the launch limit/);
+  assert.equal(w.rec.read('launch', sid), null);
+});
+
+test('L1361 audit cosmetic: a start taken over late records when its process started, not when it was taken over', async () => {
+  const { w, sid, answer, adopt } = await lateStart();
+  await adopt(answer({ pidStart: '2026-11-24T10:00:00Z' }), { min: 7 });
+  assert.equal(w.rec.read('session', sid).doc.launched_at, '2026-11-24T10:00:00Z');
+  const b = await lateStart();
+  await b.adopt(b.answer(), { min: 7 });
+  assert.equal(b.w.rec.read('session', b.sid).doc.launched_at, iso(T0 + 7 * MIN), 'a start time that is not one is not taken');
 });

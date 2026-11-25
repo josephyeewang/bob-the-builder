@@ -46,8 +46,8 @@
 //                          review runner reports no size or activity, and no runner here starts the rest (L925 rule 2).
 //   stopSession(id)      → the worker runner's: true once the launch request is used up, else a stop request in its
 //                          requests folder (config workerRequestsDir, the owner's, which orchestrate may add files to; its owner, mode and
-//                          access list are checked on each write, L943 m4). L1361: a launch the runner answered ok is a
-//                          throw, never a stop (it did launch: the adopt step takes it over or gives it back).
+//                          access list are checked on each write, L943 m4). L1361: the lapse asks it only for a claim
+//                          the adopt step would not take over (M11 pass.mjs lapseStop, by launchOutcome).
 //   launchOutcome(x)     → owner-asks.mjs ownerAsyncPorts, though it waits for nothing and writes nothing: one read of the
 //                          status, the launch ask's own answer for a start the tick stopped waiting for (L1361, adoptLate).
 //
