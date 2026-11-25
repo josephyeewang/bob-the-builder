@@ -22,7 +22,7 @@ import { LAST_PASS_FACT, STEPS, STEP_ERROR_FACT, runTick } from '../modules/M11-
 import { wire, notWiredText, refusing, checkConfig, recordOutbox, CONFIG_KEYS, OPTIONAL_CONFIG_KEYS, PORT_GROUPS, TICK_PORTS } from './dispatcher-wiring.mjs';
 import { fakeAlert } from '../test/fake-alert.test-helper.mjs';
 import { CLEANUP_PORTS, NOT_WIRED_CLEANUP, NOT_WIRED_WORKER, cleanupProblem, workerPorts } from './worker-ports.mjs';
-// A config from before leadMainRoot was a key (as this test's) starts, and the lead-main step is skipped quietly, nothing told (L1370).
+// A config from before leadMainRoot was a key (as this test's) starts, and the lead-main step is skipped silently, nothing told or logged (L1370).
 import { NOT_CONFIGURED } from '../modules/M11-dispatcher/lead-main.mjs';
 import { NOT_WIRED_REVIEW, reviewPorts } from './review-ports.mjs';
 import { NOT_WIRED_PHONE, phonePorts } from './phone-ports.mjs';
@@ -132,7 +132,7 @@ test('R-0b-162 A: `node main.mjs <config>` with the real wiring runs one full pa
     assert.equal(rec.read('fact', STEP_ERROR_FACT(s))?.doc?.error, EXPECTED_STEPS[s], s);
     assert.ok(queued(rec).includes(`the Dispatcher's ${s} step failed: ${EXPECTED_STEPS[s]}; the other steps still ran`), `${s} told: ${queued(rec).join('\n')}`);
   }
-  // This config has no leadMainRoot (L1370): the lead-main step is skipped quietly, so nothing about it is queued.
+  // This config has no leadMainRoot (L1370): the lead-main step is skipped silently, so nothing about it is queued.
   assert.ok(!queued(rec).some((t) => t.includes(NOT_CONFIGURED) || t.includes('lead-main step')), queued(rec).join('\n'));
   // The Record was opened with the real rules: each write carries the approved version's revision (audit #127 m-2).
   const line = rec.diary({ since: 0 }).filter((l) => l.id === LAST_PASS_FACT).at(-1);

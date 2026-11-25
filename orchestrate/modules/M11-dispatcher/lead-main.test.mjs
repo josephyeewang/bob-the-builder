@@ -6,8 +6,10 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync,
 import { join } from 'node:path';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { recWith, T0 } from './fixtures.test-helper.mjs';
-import { HEAD_FILE, KEEP_HEADS, LEAD_MAIN_FACT, copyHead, exportMain, exportedHead, leadMainStep, noteExported } from './lead-main.mjs';
-import { leadMainRootProblem, untarInto } from '../../wiring/worker-ports.mjs';
+import { HEAD_FILE, KEEP_HEADS, LEAD_MAIN_FACT, OLD, TEMP, copyHead, exportMain, exportedHead, leadMainStep, noteExported } from './lead-main.mjs';
+import { UNTAR_ARGS, leadMainRootProblem, untarInto } from '../../wiring/worker-ports.mjs';
+import { PRODUCT } from '../../shared/product-paths.mjs';
+import { git as safeGit } from '../M4-workshop/git/safe-git.mjs';
 
 const P = 'sample-app';
 const ME = process.getuid();
@@ -114,9 +116,87 @@ test('L1370: a half-written copy is never seen at <product>, nor with a .head be
 
 test('L1370: a temp or old folder a stopped pass left is deleted on the next pass; another product\'s is not touched', async () => {
   const w = world();
-  for (const n of [`.tmp-${P}-abc`, `.old-${P}-123`, '.tmp-other-abc']) { mkdirSync(join(w.root, n)); writeFileSync(join(w.root, n, HEAD_FILE), 'x'); }
+  for (const n of [`${TEMP(P)}abc`, `${OLD(P)}123`, `${TEMP('other')}abc`]) { mkdirSync(join(w.root, n)); writeFileSync(join(w.root, n, HEAD_FILE), 'x'); }
   await w.run();
-  assert.deepEqual(readdirSync(w.root).sort(), ['.tmp-other-abc', P]);
+  assert.deepEqual(readdirSync(w.root).sort(), [`${TEMP('other')}abc`, P]);
+});
+
+test('L1370 audit m1: product alpha\'s cleanup never deletes product alpha-beta\'s temp or old folder', async () => {
+  const w = world();
+  // alpha-beta's leftovers, by the names its own pass makes them; then alpha's own.
+  const theirs = [`${TEMP('alpha-beta')}abc123`, `${OLD('alpha-beta')}1700000000000`];
+  const mine = [`${TEMP('alpha')}xyz789`, `${OLD('alpha')}1700000000000`];
+  for (const n of [...theirs, ...mine]) mkdirSync(join(w.root, n));
+  await exportMain({ root: w.root, product: 'alpha', git: w.git, untar: untarInto });
+  assert.deepEqual(readdirSync(w.root).sort(), [...theirs, 'alpha'].sort());
+  // The separator is one no product name can hold (shared product-paths.mjs PRODUCT).
+  assert.equal(PRODUCT.test('alpha.beta'), false);
+  for (const n of ['alpha', 'alpha-beta']) assert.ok(TEMP(n).endsWith(`${n}.`) && OLD(n).endsWith(`${n}.`), n);
+});
+
+test('L1370 audit m3: a .head at the top of main fails the export with its cause named, and leaves the copy that was there', async () => {
+  const w = world();
+  const first = (await w.run()).head;
+  writeFileSync(join(w.work, HEAD_FILE), 'mine\n');
+  g(w.work, 'add', HEAD_FILE); g(w.work, 'commit', '-q', '-m', 'head file'); g(w.work, 'push', '-q', w.mirror, 'main:main');
+  await assert.rejects(w.run(), /main [0-9a-f]{12} has a \.head at its top.*renames or removes it/);
+  assert.equal(copyHead(w.dest), first);
+  assert.deepEqual(readdirSync(w.root), [P], 'the temp folder is deleted');
+});
+
+const sleep = (ms) => new Promise((r) => { setTimeout(r, ms); });
+
+test('L1370 audit m2: one budget from until: each git and the tar get what is left, a slow git is stopped by it, and nothing is renamed after it', async () => {
+  const w = world();
+  await w.run();
+  w.move();
+  // Each child is handed what is left of the one budget, never more.
+  const got = [];
+  const watch = async (args, o) => { got.push({ cmd: args[0], ...o }); return w.git(args); };
+  const untarWatch = async (tar, dir, o) => { got.push({ cmd: 'tar', ...o }); return untarInto(tar, dir, o); };
+  await w.run({ git: watch, untar: untarWatch, until: Date.now() + 3_000 });
+  assert.deepEqual(got.map((x) => x.cmd), ['rev-parse', 'archive', 'tar']);
+  for (const x of got) assert.ok(x.timeoutMs > 0 && x.timeoutMs <= 3_000, `${x.cmd}: ${x.timeoutMs}`);
+  assert.ok(got[1].maxOutBytes > 0, 'the archive is capped');
+  // A slow git: the archive hangs until its timeout stops it (as safe-git kills the group), well inside the old 120 s.
+  const v = world();
+  const kept = (await v.run()).head;
+  v.move();
+  const slow = async (args, o) => (args[0] === 'archive' ? (await sleep(o.timeoutMs), { code: -1, stdout: Buffer.alloc(0), stderr: `killed at ${o.timeoutMs} ms` }) : v.git(args));
+  const s0 = Date.now();
+  await assert.rejects(v.run({ git: slow, until: s0 + 300 }), /git archive of [0-9a-f]{12} failed \(killed at/);
+  assert.ok(Date.now() - s0 < 2_000, 'it ended by the budget');
+  assert.equal(copyHead(v.dest), kept);
+  // A slow git that ignores its timeout and answers after the budget: the copy is not swapped in, the old one stays.
+  const late = async (args) => { if (args[0] === 'archive') await sleep(400); return v.git(args); };
+  await assert.rejects(v.run({ git: late, until: Date.now() + 200 }), /ran out of time before (unpacking|swapping the copy in)/);
+  assert.equal(copyHead(v.dest), kept, 'never renamed after the deadline');
+  assert.deepEqual(readdirSync(v.root), [P]);
+  // Unpacked in time but the budget spent before the swap: still no rename.
+  const slowTar = async (tar, dir, o) => { await untarInto(tar, dir, o); await sleep(300); };
+  await assert.rejects(v.run({ untar: slowTar, until: Date.now() + 200 }), /ran out of time before swapping the copy in/);
+  assert.equal(copyHead(v.dest), kept);
+  assert.deepEqual(readdirSync(v.root), [P]);
+});
+
+test('L1370 audit m2: a tar that runs past its budget is killed', async () => {
+  const base = tempDir('m11-lead-main-tar-');
+  const bin = join(base, 'slow-tar.sh');
+  writeFileSync(bin, '#!/bin/sh\nexec /bin/sleep 30\n'); chmodSync(bin, 0o755);
+  const dir = join(base, 'x'); mkdirSync(dir);
+  const t0 = Date.now();
+  await assert.rejects(untarInto(Buffer.from('x'), dir, { bin, timeoutMs: 200 }), /tar did not end within 200 ms/);
+  assert.ok(Date.now() - t0 < 2_000);
+});
+
+test('L1370 audit m2: safe-git stops a git whose output passes maxOutBytes, and keeps none of it', async () => {
+  const base = tempDir('m11-lead-main-big-');
+  const bin = join(base, 'big-git.sh');
+  writeFileSync(bin, '#!/bin/sh\nexec /usr/bin/yes aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'); chmodSync(bin, 0o755);
+  const r = await safeGit(['--version'], { gitDir: '/dev/null', gitBin: bin, maxOutBytes: 64 * 1024, timeoutMs: 10_000 });
+  assert.equal(r.code, -1);
+  assert.equal(r.stdout.length, 0);
+  assert.match(r.stderr, /git wrote more than 65536 bytes and was stopped/);
 });
 
 test('L1370: main that can\'t be read, or an archive that fails, changes nothing and says why', async () => {
@@ -126,6 +206,28 @@ test('L1370: main that can\'t be read, or an archive that fails, changes nothing
   const archiveFails = async (args) => (args[0] === 'archive' ? { code: 1, stdout: Buffer.alloc(0), stderr: 'no' } : w.git(args));
   await assert.rejects(w.run({ git: archiveFails }), /git archive of [0-9a-f]{12} failed \(no\)/);
   assert.deepEqual(readdirSync(w.root), []);
+});
+
+test('L1370 audit C1: tar refuses an entry with .. and one through a link the archive made; nothing lands outside', async () => {
+  const base = tempDir('m11-lead-main-evil-');
+  const T = (...a) => { const r = spawnSync('/usr/bin/tar', a, { cwd: base }); if (r.status !== 0) throw new Error(String(r.stderr)); return r; };
+  const outside = join(base, 'outside'); mkdirSync(outside);
+  mkdirSync(join(base, 'src')); writeFileSync(join(base, 'src', 'evil.txt'), 'evil\n');
+  // ../evil.txt, made with tar's own rename.
+  T('-cf', 'dotdot.tar', '-C', join(base, 'src'), '-s', ',^,../,', 'evil.txt');
+  // link -> outside, then link/evil.txt: a file written through the link would land in outside.
+  mkdirSync(join(base, 'd1')); symlinkSync(outside, join(base, 'd1', 'link'));
+  mkdirSync(join(base, 'd2', 'link'), { recursive: true }); writeFileSync(join(base, 'd2', 'link', 'evil.txt'), 'evil\n');
+  T('-cf', 'sym.tar', '-C', join(base, 'd1'), 'link', '-C', join(base, 'd2'), 'link/evil.txt');
+  for (const [name, why] of [['dotdot.tar', /Path contains '\.\.'/], ['sym.tar', /through symlink/]]) {
+    const dir = join(base, `x-${name}`); mkdirSync(dir);
+    await assert.rejects(untarInto(readFileSync(join(base, name)), dir), why, name);
+    assert.deepEqual(readdirSync(outside), [], `${name}: nothing outside`);
+    assert.equal(existsSync(join(base, 'evil.txt')), false, `${name}: nothing beside the folder`);
+  }
+  // The flags that keep extended attributes, access lists and file flags off the copy are passed; -P never is.
+  for (const f of ['--no-xattrs', '--no-acls', '--no-fflags']) assert.ok(UNTAR_ARGS.includes(f), f);
+  assert.equal(UNTAR_ARGS.includes('-P'), false);
 });
 
 test('L1370: the system tar unpacks the archive; a broken archive is refused', async () => {

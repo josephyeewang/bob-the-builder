@@ -72,10 +72,11 @@ import { appMintClient } from '../modules/M6-merge-gate/watch-run.mjs';
 import { OUTSIDE_KEYS, PUSH_DEADLINE_MS, PUSH_NOT_WIRED, outsideKeysProblem, pushWiring } from './robot-push.mjs';
 
 // approvalsStateDir is the Dispatcher's alone (M2 runs only in its approvals step), and so are the review runner's keys
-// (L639), and the worker and cleanup ports' (L739), so the robot config refuses them.
+// (L639), the worker and cleanup ports' (L739), the rules snapshot (L1001) and the Lead's copy folder leadMainRoot
+// (L1370 audit m5), so the robot config refuses them.
 // The robot App and where its alerts go (L600): all four or none.
 export const APP_KEYS = Object.freeze(['appId', 'appInstallation', 'alertRepo', 'alertOwner']);
-export const CONFIG_KEYS = Object.freeze([...DISPATCHER_KEYS.filter((k) => k !== 'approvalsStateDir' && k !== 'rulesSnapshotFile' && !REVIEW_CONFIG_KEYS.includes(k) && !WORKER_CONFIG_KEYS.includes(k)), 'keyDir', 'dispatcherLockFile',
+export const CONFIG_KEYS = Object.freeze([...DISPATCHER_KEYS.filter((k) => k !== 'approvalsStateDir' && k !== 'rulesSnapshotFile' && k !== 'leadMainRoot' && !REVIEW_CONFIG_KEYS.includes(k) && !WORKER_CONFIG_KEYS.includes(k)), 'keyDir', 'dispatcherLockFile',
   ...APP_KEYS, ...OUTSIDE_KEYS, 'hostLockUid']);
 const PATHS = Object.freeze(['recordRoot', 'productsFile', 'rulesStateDir', 'tokenFile', 'keyDir', 'dispatcherLockFile']);
 // The longest a live Dispatcher pass may hold its lock: M11's run deadline, its watchdog's margin, and a minute (audit
