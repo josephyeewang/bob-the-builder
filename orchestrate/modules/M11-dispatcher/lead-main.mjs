@@ -10,7 +10,12 @@
 // set, `.head` written last, and only then renamed into place: the old copy is first renamed aside, then deleted. So a
 // half-written tree is never seen at <product>, and never with a `.head` beside it. For a moment between the two renames
 // there is no <product> folder at all; a reader then finds no `.head` and starts nothing. A temp or old folder a stopped
-// pass left is deleted on the next pass.
+// pass left is deleted on the next pass; their names end the product with a `.`, which no product name has (shared
+// product-paths.mjs PRODUCT), so product `alpha` never matches `alpha-beta`'s (L1370 audit m1).
+//
+// One time budget, from the `until` the tick's step passes in (L1370 audit m2): each git and the tar get only what is
+// left of it and are killed when it runs out, and nothing is renamed once it has; so no part of the step outlives the
+// step's own deadline. The archive held in memory is capped at LEAD_MAIN_MAX_BYTES (git is stopped past it).
 //
 // Read-only for the Lead, readable by the owner: the folder under it is orchestrate's (setup layout.mjs, 0755, no
 // access list), and every folder this step makes is set to 0755 and every file to 0644 (0755 when git marks it
@@ -33,11 +38,15 @@ export const LEAD_MAIN_FAMILY = 'lead-main-';
 export const LEAD_MAIN_FACT = (product) => `${LEAD_MAIN_FAMILY}${product}`;
 // The two git commands this step runs on the mirror; the port refuses any other (worker-ports.mjs leadMainPorts).
 export const LEAD_MAIN_GIT = Object.freeze(['rev-parse', 'archive']);
-export const LEAD_MAIN_GIT_MS = 120_000;
+// The step's budget when no `until` is passed (a test, a direct call): the tick's own STEP_DEADLINE_MS.
+export const LEAD_MAIN_MS = 120_000;
+// The most archive bytes held in memory: a main bigger than this is refused, told by the step's error.
+export const LEAD_MAIN_MAX_BYTES = 256 * 1024 * 1024;
 export const NOT_CONFIGURED = 'not configured: the Dispatcher\'s config names no leadMainRoot (rerun setup\'s dispatcher step to write it)';
 
-const TEMP = (product) => `.tmp-${product}-`;
-const OLD = (product) => `.old-${product}-`;
+// `.` ends the product: no product name has one, so one product's prefix is never another's (L1370 audit m1).
+export const TEMP = (product) => `.tmp-${product}.`;
+export const OLD = (product) => `.old-${product}.`;
 const iso = (ms) => new Date(ms).toISOString();
 
 /** The head a copy folder names in its `.head`, or null (none, a link, or not one commit id). */
@@ -78,22 +87,34 @@ export function sweepLeftovers(root, product) {
  * and answers { code, stdout, stderr }; `untar(tar, dir)` unpacks the archive into a folder (the wiring's untarInto: no
  * Dispatcher file starts a program itself, only-send-safe.test.mjs). Answers { head, changed }; throws when it can't, leaving the copy that was there.
  */
-export async function exportMain({ root, product, git, untar, now = Date.now }) {
+export async function exportMain({ root, product, git, untar, now = Date.now, until = Date.now() + LEAD_MAIN_MS }) {
+  // What is left of the step's budget, for the next child; none left is a throw naming what was not done.
+  const left = (what) => {
+    const ms = Math.floor(until - Date.now());
+    if (!(ms > 0)) throw new Error(`the lead-main step ran out of time before ${what}`);
+    return ms;
+  };
   sweepLeftovers(root, product);
-  const r = await git(['rev-parse', '--verify', '-q', 'refs/heads/main^{commit}']);
+  const r = await git(['rev-parse', '--verify', '-q', 'refs/heads/main^{commit}'], { timeoutMs: left('reading main') });
   const head = r?.code === 0 ? String(r.stdout).trim() : '';
   if (!/^[0-9a-f]{40}$/.test(head)) throw new Error(`could not read main in the mirror (${String(r?.stderr ?? '').trim().slice(0, 200) || `code ${r?.code}`})`);
   const dest = join(root, product);
   if (copyHead(dest) === head) return { head, changed: false };
-  const a = await git(['archive', '--format=tar', head]);
+  const a = await git(['archive', '--format=tar', head], { timeoutMs: left('the archive'), maxOutBytes: LEAD_MAIN_MAX_BYTES });
   if (a?.code !== 0) throw new Error(`git archive of ${head.slice(0, 12)} failed (${String(a?.stderr ?? '').trim().slice(0, 200)})`);
   const tmp = mkdtempSync(join(root, TEMP(product)));
   try {
-    await untar(a.stdout, tmp);
+    await untar(a.stdout, tmp, { timeoutMs: left('unpacking') });
+    // A `.head` at the top of main itself would stand where the copy's own goes (L1370 audit m3): named, not a bare EEXIST.
+    let own = true;
+    try { lstatSync(join(tmp, HEAD_FILE)); } catch (e) { if (e?.code === 'ENOENT') own = false; else throw e; }
+    if (own) throw new Error(`main ${head.slice(0, 12)} has a ${HEAD_FILE} at its top, the name the copy keeps for the commit it is; no copy can be made until main renames or removes it`);
     openForReading(tmp);
     // Last into the temp folder: a copy with a .head is a whole one.
     writeFileSync(join(tmp, HEAD_FILE), `${head}\n`, { mode: 0o644, flag: 'wx' });
     chmodSync(join(tmp, HEAD_FILE), 0o644);
+    // Nothing is renamed once the budget is spent: the tick has already called the step failed (L1370 audit m2).
+    left('swapping the copy in');
     let old = null;
     try { lstatSync(dest); old = join(root, `${OLD(product)}${now()}`); renameSync(dest, old); } catch (e) { if (e?.code !== 'ENOENT') throw e; }
     renameSync(tmp, dest);
@@ -132,19 +153,16 @@ export function exportedHead(rec, { head, product } = {}) {
 }
 
 /**
- * The tick's step: the port exports main if it moved, then the head is noted (again, when an earlier note failed).
- * A port with no leadMainRoot (`configured: false`: a config written before the key, until setup's dispatcher step runs
- * again, which needs Joe's admin password) is skipped quietly: no alert, no failed step, and at most one line to the log
- * per start (the port's `skipNote` answers it once; `note` is the tick's log). The tick then leaves exportedHead unwired,
- * so no one-shot Lead's launch is recorded. A root that is configured but bad still fails the step, and is told.
+ * The tick's step: the port exports main if it moved, within the step's `until`, then the head is noted (again, when an
+ * earlier note failed). A port with no leadMainRoot (`configured: false`: a config written before the key, until setup's
+ * dispatcher step runs again, which needs Joe's admin password) is skipped silently: no alert, no failed step, no log
+ * line (each pass is its own process, so even "once per start" would be a line a minute; L1370 audit C2). The tick then
+ * leaves exportedHead unwired, so no one-shot Lead's launch is recorded. A root that is configured but bad still fails
+ * the step, and is told.
  */
-export async function leadMainStep({ rec, now, leadMain, note = () => {} }) {
-  if (leadMain?.configured === false) {
-    const line = leadMain.skipNote?.();
-    if (line) note(line);
-    return { skipped: true };
-  }
-  const r = await leadMain.exportMain();
+export async function leadMainStep({ rec, now, leadMain, until }) {
+  if (leadMain?.configured === false) return { skipped: true };
+  const r = await leadMain.exportMain({ until });
   noteExported(rec, { product: leadMain.product, head: r.head, now });
   return r;
 }

@@ -83,7 +83,7 @@ import { PLAN_REVIEW_ROLE } from '../shared/review-roles.mjs';
 import { WORKER_REQUESTS_ACL, aclText } from '../setup/layout.mjs';
 import { READING_FUTURE_MS } from '../modules/M12-sensors/facts.mjs';
 import { HOST_COPY_FAIL } from '../modules/M11-dispatcher/pass.mjs';
-import { LEAD_MAIN_GIT, LEAD_MAIN_GIT_MS, NOT_CONFIGURED, exportMain } from '../modules/M11-dispatcher/lead-main.mjs';
+import { LEAD_MAIN_GIT, NOT_CONFIGURED, exportMain } from '../modules/M11-dispatcher/lead-main.mjs';
 
 const RUNNER_LAUNCHES = RUNNER_FOLDERS.launches;
 
@@ -162,11 +162,19 @@ export function leadMainRootProblem(root, uid, { lstat = lstatSync } = {}) {
 }
 
 export const UNTAR_MS = 120_000;
-/** Unpacks a tar archive into `dir` with the system tar, not as the archive's owner or modes (-o); lead-main's `untar`. */
+// What the archive may not carry onto the copy: extended attributes, access lists, file flags (L1370 audit C1).
+export const UNTAR_ARGS = Object.freeze(['-x', '-o', '--no-xattrs', '--no-acls', '--no-fflags', '-f', '-', '-C']);
+/**
+ * Unpacks a tar archive into `dir` with the system tar, not as the archive's owner or modes (-o), and with no extended
+ * attributes, access lists or file flags; lead-main's `untar`. Killed at `timeoutMs` (lead-main passes what is left of
+ * its step). Its safety also rests on bsdtar's own defaults, kept by never passing -P: an entry with `..` in its path,
+ * one with an absolute path, and one that would be written through a link the archive made are refused (tar then exits
+ * non-zero, so the copy is not swapped in).
+ */
 export function untarInto(tar, dir, { bin = '/usr/bin/tar', timeoutMs = UNTAR_MS } = {}) {
   return new Promise((done, fail) => {
     let err = '';
-    const child = spawn(bin, ['-x', '-o', '-f', '-', '-C', dir], { env: { PATH: '/usr/bin:/bin' }, stdio: ['pipe', 'ignore', 'pipe'] });
+    const child = spawn(bin, [...UNTAR_ARGS, dir], { env: { PATH: '/usr/bin:/bin' }, stdio: ['pipe', 'ignore', 'pipe'] });
     const timer = setTimeout(() => { child.kill('SIGKILL'); fail(new Error(`tar did not end within ${timeoutMs} ms`)); }, timeoutMs);
     child.stderr.on('data', (d) => { if (err.length < 2000) err += d; });
     child.on('error', (e) => { clearTimeout(timer); fail(e); });
@@ -180,27 +188,25 @@ export function untarInto(tar, dir, { bin = '/usr/bin/tar', timeoutMs = UNTAR_MS
  * The lead-main export's port (Track A step 8 G1, L1370; lead-main.mjs): `exportMain()` makes <leadMainRoot>/<product>
  * main's files from this product's mirror. Its git runs only rev-parse and archive, only on the mirror, each time after
  * the mirror's own check; the root is checked on each call too (a plain folder, this job's, others read but don't write).
+ * Each git gets the `timeoutMs` (what is left of the step's budget) and `maxOutBytes` lead-main.mjs passes.
  * A config with no leadMainRoot (one written before it was a key) gives `configured: false`: the tick skips the step
- * quietly and leaves exportedHead unwired, and `skipNote()` answers the log's one line the first time only (one port per
- * start). `exportMain` itself still refuses with NOT_CONFIGURED.
+ * silently and leaves exportedHead unwired. `exportMain` itself still refuses with NOT_CONFIGURED.
  */
 export function leadMainPorts({ config: c, selfUid }, { run = safeGit, untar = untarInto } = {}) {
-  const git = (args) => {
+  const git = (args, { timeoutMs, maxOutBytes } = {}) => {
     if (!LEAD_MAIN_GIT.includes(args?.[0])) return Promise.resolve({ code: -1, stdout: Buffer.alloc(0), stderr: `lead-main git: refused: only ${LEAD_MAIN_GIT.join(' and ')} run on the mirror` });
     const bad = mirrorProblem(c.mirror, selfUid);
     if (bad) return Promise.resolve({ code: -1, stdout: Buffer.alloc(0), stderr: `lead-main git: refused: ${bad}` });
-    return run(args, { gitDir: c.mirror, purpose: 'lead-main-export', timeoutMs: LEAD_MAIN_GIT_MS });
+    return run(args, { gitDir: c.mirror, purpose: 'lead-main-export', timeoutMs, ...(maxOutBytes !== undefined ? { maxOutBytes } : {}) });
   };
-  let skipTold = false;
   return {
     product: c.product,
     configured: c.leadMainRoot !== undefined,
-    skipNote: () => (skipTold ? null : ((skipTold = true), `skipped: ${NOT_CONFIGURED}`)),
-    exportMain: async () => {
+    exportMain: async ({ until } = {}) => {
       if (c.leadMainRoot === undefined) throw new Error(NOT_CONFIGURED);
       const bad = leadMainRootProblem(c.leadMainRoot, selfUid);
       if (bad) throw new Error(bad);
-      return exportMain({ root: c.leadMainRoot, product: c.product, git, untar });
+      return exportMain({ root: c.leadMainRoot, product: c.product, git, untar, ...(until !== undefined ? { until } : {}) });
     },
   };
 }

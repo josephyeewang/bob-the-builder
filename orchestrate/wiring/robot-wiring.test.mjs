@@ -297,6 +297,17 @@ test('L639: the robot config refuses the review runner\'s keys, which are the Di
   }
 });
 
+test('L1370 audit m5: the robot config refuses the Dispatcher-only leadMainRoot, as it does rulesSnapshotFile', async () => {
+  const { CONFIG_KEYS: DISPATCHER, checkConfig } = await import('./dispatcher-wiring.mjs');
+  const { CONFIG_KEYS: ROBOT } = await import('./robot-wiring.mjs');
+  const base = { product: P, ownerUid: process.getuid() };
+  for (const k of ['leadMainRoot', 'rulesSnapshotFile']) {
+    assert.ok(DISPATCHER.includes(k), k);
+    assert.ok(!ROBOT.includes(k), k);
+    assert.throws(() => checkConfig({ ...base, [k]: '/x' }, { keys: ROBOT, paths: [] }), new RegExp(`config: unknown key ${k}`));
+  }
+});
+
 // ---- the #137 follow-up (L265; audit-pr137 M1-M7, M9) ----
 
 const lockOf = (w) => w.config.lockFile;

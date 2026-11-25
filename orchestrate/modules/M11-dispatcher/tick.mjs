@@ -20,8 +20,9 @@
 //   2. intake    — outbox files, so the record is current before anything is decided on it (R-0b-56, 58).
 //                  A one-shot Lead's launch file is recorded only for a head the lead-main step noted (exportedHead, L1370).
 //      lead-main — the Lead's read-only copy of main, from the mirror: swapped in whole when main moved, its head noted
-//                  in the Record (lead-main.mjs, L1370). With no leadMainRoot in the config it is skipped quietly (one log line
-//                  per start, no alert) and exportedHead stays unwired; a configured root that is bad fails it, told.
+//                  in the Record (lead-main.mjs, L1370), its git and tar bounded by the step's own deadline. With no
+//                  leadMainRoot in the config it is skipped silently (no log line, no alert) and exportedHead stays
+//                  unwired; a configured root that is bad fails it, told.
 //      proposals — the owner's proposals folders (proposals-intake.mjs), with the research handler only (L615 grant 3,
 //                  R-0b-162): a research report goes onto its research_copy card. Claim and heartbeat files have no
 //                  handler yet, so they wait, told once; a proposal is refused, since no docs check is passed in (the
@@ -421,8 +422,8 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
     // Only with a configured lead-main port: with none, the intake's own default answers EXPORT_NOT_WIRED.
     ...(p.leadMain?.configured === true ? { exportedHead: (q) => exportedHead(rec, q) } : {}), ...(p.intakeFs ?? {}) })));
   // The Lead's read-only copy of main, swapped in whole when main moved, and its head noted (lead-main.mjs, L1370).
-  // With no leadMainRoot in the config it is skipped quietly, one log line per start (leadMainStep).
-  await run('lead-main', () => leadMainStep({ rec, now, leadMain: p.leadMain, note: failed('lead-main') }));
+  // With no leadMainRoot in the config it is skipped silently (leadMainStep). Its git and tar stop by the step's until.
+  await run('lead-main', (until) => leadMainStep({ rec, now, leadMain: p.leadMain, until }));
   // Each its own step: a proposals folder that can't be read never keeps research cards from being settled. Both run
   // during an outage: neither starts a session.
   await run('proposals', async () => {

@@ -5,7 +5,7 @@ import { mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync, readdirSyn
 import { takePassLock } from './pass-lock.mjs';
 import { RESTART_FACT, HANDOFF_NAME } from './lead-restart.mjs';
 import { leadLaunchHead } from '../../shared/record.mjs';
-import { LEAD_MAIN_FACT, NOT_CONFIGURED } from './lead-main.mjs';
+import { LEAD_MAIN_FACT } from './lead-main.mjs';
 import { EXPORT_NOT_WIRED } from './outbox-intake.mjs';
 import { leadMainPorts } from '../../wiring/worker-ports.mjs';
 import { RULES_MISSING_FACT, STOP_FACT, PAUSE_FACT, UNDO_HELD_FACT, HOLD_FACT, HOST_COPY_FAIL } from './pass.mjs';
@@ -2444,9 +2444,19 @@ test('L1370: a lead-main step that fails (a configured root that is bad) is told
   for (const s of STEPS.filter((x) => x !== 'lead-main')) assert.equal(r.steps[s].ok, true, s);
 });
 
+// L1370 audit m2: the export is bounded by the step's own deadline, so the tick hands the step its until.
+test('L1370 audit m2: the tick passes the lead-main step its until, no later than the step deadline', async () => {
+  const got = [];
+  const w = world([account(), usage()], { over: { stepDeadlineMs: 5_000, leadMain: { product: 'p1', configured: true, exportMain: async (o) => { got.push({ at: Date.now(), until: o?.until }); return { head: 'c'.repeat(40), changed: false }; } } } });
+  const r = await w.pass();
+  assert.equal(r.steps['lead-main'].ok, true, r.steps['lead-main'].error);
+  assert.equal(got.length, 1);
+  assert.ok(Number.isFinite(got[0].until) && got[0].until > got[0].at && got[0].until <= got[0].at + 5_000, JSON.stringify(got));
+});
+
 // L1370 (Lead, before #681's audit): a config written before leadMainRoot was a key (the live one, until setup's
 // dispatcher step runs again with Joe's admin password) must not fail a step or tell Joe daily.
-test('L1370: no leadMainRoot in the config: the step is skipped quietly, one log line per start, no alert, and exportedHead stays unwired', async () => {
+test('L1370: no leadMainRoot in the config: the step is skipped silently, no log line, no alert, and exportedHead stays unwired', async () => {
   let exported = 0;
   // The real port, from a config with no leadMainRoot; its exportMain is watched, never to be called.
   const real = leadMainPorts({ config: { product: 'p1', mirror: '/nonexistent-mirror' }, selfUid: process.getuid() });
@@ -2465,8 +2475,9 @@ test('L1370: no leadMainRoot in the config: the step is skipped quietly, one log
   assert.equal(w.rec.read('fact', STEP_ERROR_FACT('lead-main')), null, 'no step error is kept');
   assert.equal(w.rec.read('fact', LEAD_MAIN_FACT('p1')), null, 'no head is noted');
   assert.ok(!w.calls.alerts.some((a) => /lead-main step|leadMainRoot|not configured/.test(a)), w.calls.alerts.join(' | '));
-  // One line to the log for the start (the port is made once per start), none on later passes.
-  assert.deepEqual(runs.map((r) => r.reports.filter((l) => l.startsWith('lead-main:'))), [[`lead-main: skipped: ${NOT_CONFIGURED}`], [], []]);
+  // No line to the log on any pass: each pass is its own process, so "once per start" was a line a minute (L1370 audit C2).
+  assert.deepEqual(runs.map((r) => r.reports.filter((l) => l.startsWith('lead-main:'))), [[], [], []]);
+  for (const r of runs) assert.deepEqual(r.steps['lead-main'].result, { skipped: true });
   // exportedHead is left to the intake's default: the Lead's launch is not recorded, and the hold says why.
   assert.equal(leadLaunchHead(w.rec, sid), null);
   assert.ok(w.calls.alerts.some((a) => a.includes(EXPORT_NOT_WIRED)), w.calls.alerts.join(' | '));
