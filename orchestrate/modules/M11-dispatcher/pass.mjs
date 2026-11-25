@@ -149,7 +149,10 @@ export const SAVE_DEADLINE_MS = 75_000;
 // L1361 (lead call): a launch gets its own, longer limit. The worker runner's start checks ran ~35 s on the Mini, past
 // PORT_DEADLINE_MS, so every start answered late. Only the launch call takes it; stops, saves and the rest keep theirs.
 // A launch that outruns even this is still taken over by the adopt step (adoptLate), the backstop.
-export const LAUNCH_DEADLINE_MS = 45_000;
+// L1369 (#673 r2 m-b): 45 s was borderline. The slowest launch the Mini has answered on time took 36.2 s (R-S1-2, claim to
+// running, 25 Nov); the limit is 1.5x that, rounded up to 5 s. With LAUNCH_MARGIN_MS a launch needs 65 s of the step's
+// STEP_DEADLINE_MS (120 s, tick.mjs): the first always fits, and the serial cap below uses this same figure.
+export const LAUNCH_DEADLINE_MS = 55_000;
 // What a launch leaves the step after it (L1361 audit m4): the settle steps and the rest of the pass.
 export const LAUNCH_MARGIN_MS = 10_000;
 // `f` gets an AbortSignal that is aborted when guarded gives up on it (L822, #372 m2), so a port that honours it (a
@@ -1272,7 +1275,7 @@ async function starts({ rec, rules, now, b, running, launch, stopGroup, outboxRo
     // can't take the card. The Record stamps claimed_at; rules_rev is the rules the claim was made under.
     // L1361 audit m4: launches run one after another inside the tick step's limit; after the first, one that could not
     // finish inside what is left of it is not begun. The card stays ready, untouched, and the next pass starts it (noted,
-    // not told). The first always runs: the step began with its whole limit (120 s, past one launch's 45 s and margin).
+    // not told). The first always runs: the step began with its whole limit (120 s, past one launch's 55 s and margin).
     // L1368: told once it has been left LAUNCH_SKIP_TELL passes in a row (countLaunchSkip).
     if (launches > 0 && Date.now() + launchDeadlineMs + LAUNCH_MARGIN_MS > launchUntil) {
       out.notes.push(`card ${id}: left for the next pass: the step's time left is under one launch limit`);

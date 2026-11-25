@@ -355,7 +355,9 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
     // still the wiring's refusing port, R-0b-162), no outage is opened, since nothing might end it.
     const wired = (f) => typeof f === 'function' && !isRefusing(f);
     const canEnd = wired(p.healthy) && wired(p.resume);
-    const o = outageStep({ rec, rules, board, now, healthy: openNow ? p.healthy() : false, resume: openNow ? (p.resume?.() ?? false) : false, alert, canEnd });
+    // L1369: an open outage with a way out unwired is ended by outageStep; the ports are not asked (one may be missing).
+    const ask = openNow && canEnd;
+    const o = outageStep({ rec, rules, board, now, healthy: ask ? p.healthy() : false, resume: ask ? (p.resume?.() ?? false) : false, alert, canEnd });
     outageOpen = o.outage;
     // L761: a refused write of the deaths already counted means they may be counted again (a false outage), or that
     // the Record is failing. Told through the refused-save path (refusalReport, holdAlert): once, then daily.

@@ -545,14 +545,23 @@ test('L1364 M1: with healthy not wired, three deaths on a board of six open no o
     assert.equal(w.calls.alerts.filter((a) => new RegExp(`card ${c}: its session stopped .* waits on you`).test(a)).length, 1, w.calls.alerts.join(' | '));
   }
   assert.equal(w.calls.alerts.filter((a) => /running sessions stopped at once/.test(a)).length, 0);
-  // An outage already open in the Record keeps today's fail-safe: the refusing port fails the step and the outage holds.
-  const o = world([account(), usage(), ...cards, ['fact', OUTAGE_FACT, { id: 'o-1', state: 'open', started_at: iso(T0 - MIN), dead: [], board: 6, healthy_passes: 0 }]],
-    { over: { board: () => board, healthy: refusing('healthy'), resume: refusing('resume') } });
-  const ro = await o.pass();
-  assert.equal(ro.steps.outage.ok, false);
-  assert.match(ro.steps.outage.error, /not wired yet: healthy/);
-  assert.equal(o.rec.read('fact', OUTAGE_FACT).doc.state, 'open');
-  assert.deepEqual(dead.map((c) => o.rec.read('card', c).doc.state), ['running', 'running', 'running']);
+  // L1369 (#674 r2 minor): an outage already open in the Record (opened before round 2) while a way out is unwired had
+  // no way out. It ends at this pass (ended_by 'unwired'), the refusing ports are not asked, and its deaths are decided
+  // one card at a time. The same holds with healthy wired and resume missing.
+  for (const over of [{ healthy: refusing('healthy'), resume: refusing('resume') }, { healthy: () => true, resume: undefined }]) {
+    const o = world([account(), usage(), ...cards, ['fact', OUTAGE_FACT, { id: 'o-1', state: 'open', started_at: iso(T0 - MIN), dead: [{ id: 'S-1', card: 'C-1' }], board: 6, healthy_passes: 0 }]],
+      { over: { board: () => board.filter((s) => s.id !== 'S-1'), ...over } });
+    const ro = await o.pass();
+    assert.equal(ro.steps.outage.ok, true, ro.steps.outage.error);
+    const f = o.rec.read('fact', OUTAGE_FACT).doc;
+    assert.deepEqual([f.state, f.ended_by], ['ended', 'unwired']);
+    assert.equal(ro.steps.outage.result.ended, true);
+    // S-1 was held by the outage (off the board now); S-2 and S-3 died on the board: all three wait on Joe.
+    assert.deepEqual(dead.map((c) => o.rec.read('card', c).doc.state), ['waiting', 'waiting', 'waiting']);
+    // The next pass opens no new outage over the same board.
+    await o.pass();
+    assert.equal(o.rec.read('fact', OUTAGE_FACT).doc.state, 'ended');
+  }
 });
 test.todo('M10: a dead card marked safe to re-run goes back to ready and starts in the same tick (needs M9 rerun_safe; a (b) for the lead)');
 

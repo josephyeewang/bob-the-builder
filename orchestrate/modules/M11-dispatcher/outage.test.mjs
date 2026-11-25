@@ -82,6 +82,24 @@ test('L1367 item 4: with canEnd left out (false) a board that would trip opens n
   assert.equal(outageStep({ rec: recWith(cards()), rules: R, board, now: T0, healthy: true, alert: fakeAlert() }).outage, true);
 });
 
+// L1369 (#674 r2 minor): an outage opened before L1364 round 2 is still open in the Record; with canEnd false (a way
+// out unwired) it ends at once, ended_by 'unwired', even unhealthy and amid new deaths, and every death is decided.
+test('L1369: an outage already open with canEnd false ends at once; its held and new deaths are decided', () => {
+  const rec = recWith([...cards(), ['fact', OUTAGE_FACT, { id: 'o-1', state: 'open', started_at: new Date(T0 - MIN).toISOString(), dead: [{ id: 'S1', card: 'C-1' }], board: 4, healthy_passes: 0 }]]);
+  const board = [gone('S2', 'C-2'), gone('S3', 'C-3'), live('S4', 'C-4')];
+  const alert = fakeAlert();
+  const r = outageStep0({ rec, rules: R, board, now: T0, healthy: false, alert });
+  assert.deepEqual([r.outage, r.ended], [false, true]);
+  assert.deepEqual(alert.texts, [], 'no alert');
+  assert.deepEqual(r.asks, ['C-1', 'C-2', 'C-3']);
+  const f = rec.read('fact', OUTAGE_FACT).doc;
+  assert.deepEqual([f.state, f.ended_by], ['ended', 'unwired']);
+  // With canEnd true the same unhealthy pass keeps it open (the ways out are wired and say no).
+  const rec2 = recWith([...cards(), ['fact', OUTAGE_FACT, { id: 'o-1', state: 'open', told_id: 'o-1', started_at: new Date(T0 - MIN).toISOString(), dead: [{ id: 'S1', card: 'C-1' }], board: 4, healthy_passes: 0 }]]);
+  assert.equal(outageStep({ rec: rec2, rules: R, board: [live('S4', 'C-4')], now: T0, healthy: false, alert: fakeAlert() }).outage, true);
+  assert.equal(rec2.read('fact', OUTAGE_FACT).doc.state, 'open');
+});
+
 test('M9: a board of 4 with 1 killed decides that one on its own (an ask: no card is marked safe)', () => {
   const rec = recWith(cards());
   const r = outageStep({ rec, rules: R, board: [gone('S1', 'C-1'), live('S2', 'C-2'), live('S3', 'C-3'), live('S4', 'C-4')], now: T0, healthy: true, alert: () => assert.fail('no alert') });
