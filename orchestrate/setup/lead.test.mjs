@@ -19,12 +19,12 @@ import { RUNNER_CONFIG } from '../modules/M4-workshop/launcher/install-check.mjs
 import { NO_FILE_SOURCES } from '../modules/M4-workshop/launcher/settings-names.mjs';
 import { openRecordWithStore } from '../modules/M9-record/writer.mjs';
 import { HEAD, PRODUCT, UID, rulesFor } from '../modules/M9-record/rules.test-helper.mjs';
-import { LEAD_STALE_FACT, RELEASED_REASON, STALE_PLAN_REASON, intakePass } from '../modules/M11-dispatcher/outbox-intake.mjs';
+import { LEAD_STALE_FACT, RELEASED_REASON, RELEASE_DONE_FACT, STALE_PLAN_REASON, intakePass, refuseStalePlansOnce } from '../modules/M11-dispatcher/outbox-intake.mjs';
 import { withAlerts } from '../modules/M11-dispatcher/fixtures.test-helper.mjs';
 import { leadSessions, readLaunchFile } from '../modules/M3-lead/sessions.mjs';
 import { LEAD_ONE_SHOT, LEAD_WORDING, ONE_SHOT_UNUSED, checkPlan } from '../modules/M3-lead/lead-wording.mjs';
 import { OWNER_WAIT_WHO } from '../shared/record.mjs';
-import { CLAIM_PREFIX, LEAD_EFFORT, LEAD_MODEL, PROMPT_NAME, RUN_ENDED, RUN_LOG, RUN_OVER_MS, USAGE, claimPath, earlierPlans, heldBy, ideaIdOf, main, notesFolder, planLead, realIo, releasePlan, sessionStart, takeClaim } from './lead.mjs';
+import { RELEASED_MARK, CLAIM_PREFIX, LEAD_EFFORT, LEAD_MODEL, PROMPT_NAME, RUN_ENDED, RUN_LOG, RUN_OVER_MS, USAGE, claimPath, earlierPlans, heldBy, ideaIdOf, main, notesFolder, planLead, realIo, releasePlan, sessionStart, takeClaim } from './lead.mjs';
 import { SETTINGS_NAME } from './role-start.mjs';
 
 const P = PRODUCT;
@@ -99,7 +99,7 @@ function world({ check = { ok: true, version: '2.1.316' }, plan, write, moveHead
     readText: (f) => readFileSync(f, 'utf8'),
     mkdir: (d, mode) => mkdirSync(d, { mode }),
     writeFile: (f, t, mode) => writeFileSync(f, t, { mode, flag: 'wx' }),
-    rm: real.rm, list: (d) => readdirSync(d), rename: real.rename, link: real.link,
+    rm: real.rm, list: (d) => readdirSync(d), link: real.link,
     uid: 501, user: OWNER, home, env: { PATH: '/usr/bin:/bin', HOME: home, ANTHROPIC_API_KEY: 'never-passed', GH_TOKEN: 'never-passed' },
     now: () => now, progress: (s) => calls.said.push(s),
     // Check 6 runs before claude: no launch file may be there yet (#682 r1 m5).
@@ -114,6 +114,12 @@ function world({ check = { ok: true, version: '2.1.316' }, plan, write, moveHead
 
 const flagValue = (args, f) => args[args.indexOf(f) + 1];
 const cards = (w) => w.record.list('card').map((c) => [c.id, c.doc.state, c.doc.main_commit]).sort();
+// What a refused start leaves in the Lead folder besides its claim, which it has marked released (#682 r3: never removed).
+const unclaimed = (w) => {
+  const names = readdirSync(join(w.outboxRoot, 'lead'));
+  for (const n of names.filter((x) => x.startsWith(CLAIM_PREFIX) && !x.endsWith(RELEASED_MARK))) assert.ok(names.includes(`${n}${RELEASED_MARK}`), `${n} is let go`);
+  return names.filter((x) => !x.startsWith(CLAIM_PREFIX));
+};
 
 test('G4 end to end: idea in the Record → the one-shot Lead → plan-<idea id>.json → intake → draft cards on the head it started on', async () => {
   const w = world();
@@ -248,7 +254,7 @@ test('L1370 audit (#682 r1 m3): a lead-main copy that is a link, or not a folder
     const r = await planLead({ product: P, idea: w.idea.id, setupFile: w.setupFile }, { ...w.io, lstat: undefined });
     assert.equal(r.ok, false);
     assert.match(r.reason, /is (a link|not a folder), so it is not the copy the Dispatcher made/);
-    assert.deepEqual(readdirSync(join(w.outboxRoot, 'lead')), []);
+    assert.deepEqual(unclaimed(w), []);
     assert.equal(existsSync(join(w.base, 'fake', 'claude-ran.json')), false);
   }
 });
@@ -312,7 +318,7 @@ test('G4: a missing idea, a never-list tool, a check 6 mismatch, no lead-main he
     const r = await planLead({ product: P, idea: over.idea ?? w.idea.id, setupFile: w.setupFile, ...(over.profile ? { profile: over.profile } : {}) }, w.io);
     assert.equal(r.ok, false, String(why));
     assert.match(r.reason, why);
-    assert.deepEqual(readdirSync(join(w.outboxRoot, 'lead')), [], `${why}: no folder left for intake to take`);
+    assert.deepEqual(unclaimed(w), [], `${why}: no folder left for intake to take`);
     assert.equal(existsSync(join(w.base, 'fake', 'claude-ran.json')), false, `${why}: claude never ran`);
   }
 });
@@ -373,59 +379,61 @@ test('L1370 audit (#682 r2 M-A): two starts of one idea a few seconds apart, che
   const [lost] = rs.filter((r) => !r.ok);
   assert.match(lost.reason, new RegExp(`is held by the Lead ${won.sessionId}: it is still planning it`));
   // The claim names the winner, with its start in epoch ms; the loser made no folder.
-  const c = JSON.parse(readFileSync(claimPath(join(w.outboxRoot, 'lead'), P, w.idea.id), 'utf8'));
+  const c = JSON.parse(readFileSync(claimPath(join(w.outboxRoot, 'lead'), P, w.idea.id, 1), 'utf8'));
   assert.equal(c.session, won.sessionId);
   assert.equal(typeof c.started_at_ms, 'number');
   assert.deepEqual(readdirSync(join(w.outboxRoot, 'lead')).filter((n) => n.startsWith('ld-')), [won.sessionId]);
 });
 
-test('L1370 audit (#682 r2 M-A): a refusal after the claim lets it go; a claim that can\'t be read holds the idea', async () => {
+test('L1370 audit (#682 r2 M-A, r3 m3 m4): a refusal or a throw after the claim marks it released; a claim that can\'t be read holds the idea and names its file', async () => {
   const w = world({ check: { ok: false, reason: 'not the pinned claude' } });
+  const lead = join(w.outboxRoot, 'lead');
   const r = await planLead({ product: P, idea: w.idea.id, setupFile: w.setupFile }, w.io);
   assert.equal(r.ok, false);
-  const file = claimPath(join(w.outboxRoot, 'lead'), P, w.idea.id);
-  assert.equal(existsSync(file), false, 'the claim was let go');
-  writeFileSync(file, 'not json');
-  const r2 = await planLead({ product: P, idea: w.idea.id, setupFile: w.setupFile }, { ...w.io, check: async () => ({ ok: true, version: '2.1.316' }) });
+  assert.equal(existsSync(`${claimPath(lead, P, w.idea.id, 1)}${RELEASED_MARK}`), true, 'gen 1 let go by its mark');
+  // A throw past the claim (here the terminal line) lets it go too.
+  const t = await planLead({ product: P, idea: w.idea.id, setupFile: w.setupFile }, { ...w.io, now: () => T + 60_000, check: async () => ({ ok: true, version: '2.1.316' }), progress: () => { throw new Error('boom'); } }).catch((e) => e);
+  assert.equal(t.message, 'boom');
+  assert.equal(existsSync(`${claimPath(lead, P, w.idea.id, 2)}${RELEASED_MARK}`), true, 'gen 2 let go after the throw');
+  // Never removed: both claims are still there.
+  assert.equal(existsSync(claimPath(lead, P, w.idea.id, 1)) && existsSync(claimPath(lead, P, w.idea.id, 2)), true);
+  const bad = claimPath(lead, P, w.idea.id, 3);
+  writeFileSync(bad, 'not json');
+  const r2 = await planLead({ product: P, idea: w.idea.id, setupFile: w.setupFile }, { ...w.io, now: () => T + 120_000, check: async () => ({ ok: true, version: '2.1.316' }) });
   assert.equal(r2.ok, false);
-  assert.match(r2.reason, /claim .* can't be used \(it does not read as JSON\), so the idea is held/);
-  assert.equal(readFileSync(file, 'utf8'), 'not json', 'left as it was');
+  assert.ok(r2.reason.includes(`the idea's claim ${bad} can't be used (it does not read as JSON), so the idea is held. If no Lead is planning ${w.idea.id}, remove that file and start again`), r2.reason);
+  assert.equal(readFileSync(bad, 'utf8'), 'not json', 'left as it was');
 });
 
-test('L1370 audit (#682 r2 M-A): a claim is freed by its plan refused, its run ended or over with no plan, or a stale mark; never by a clock gone back', () => {
-  const leadRoot = '/o/lead';
+test('L1370 audit (#682 r3): numbered claims: a new gen only after a free holder, never a move or a removal; an r2 claim is gen 0', () => {
   const ideaId = 'idea-fd-x-1';
   const plan = `plan-${ideaId}.json`;
   const other = `ld-${P}-20261125090000`;
   const mine = `ld-${P}-20261125100000`;
   const start = Date.UTC(2026, 10, 25, 17, 0, 0);
-  const at = claimPath(leadRoot, P, ideaId);
-  const take = ({ folder, facts = {}, now }) => {
-    const files = { [at]: JSON.stringify({ session: other, started_at_ms: start }) };
-    const no = (code) => Object.assign(new Error(code), { code });
-    const io = {
-      now: () => now,
-      writeFile: (f, t) => { if (files[f] !== undefined) throw no('EEXIST'); files[f] = t; },
-      readText: (f) => { if (files[f] === undefined) throw no('ENOENT'); return files[f]; },
-      list: (d) => { if (d === join(leadRoot, other) && folder) return folder; throw no('ENOENT'); },
-      rename: (a, b) => { files[b] = files[a]; delete files[a]; },
-      link: (a, b) => { if (files[b] !== undefined) throw no('EEXIST'); files[b] = files[a]; },
-      rm: (f) => { delete files[f]; },
-    };
-    const fact = (id) => (facts[id] === 'unread' ? { ok: false, reason: 'not owned' } : facts[id] ? { ok: true, doc: facts[id] } : { ok: false, missing: true });
-    return { r: takeClaim({ leadRoot, product: P, ideaId, sessionId: mine, fact }, io), files };
-  };
   const fid = `intake-applied-${other}-${plan}`;
+  const take = ({ folder, facts = {}, now, old = true, released = false }) => {
+    const leadRoot = realpathSync(tempDir('m3-lead-claim-'));
+    const held = claimPath(leadRoot, P, ideaId, old ? 0 : 4);
+    writeFileSync(held, JSON.stringify({ session: other, started_at_ms: start }));
+    if (released) writeFileSync(`${held}${RELEASED_MARK}`, 'x');
+    if (folder) { mkdirSync(join(leadRoot, other)); for (const n of folder) writeFileSync(join(leadRoot, other, n), '{}'); }
+    const fact = (id) => (facts[id] === 'unread' ? { ok: false, reason: 'not owned' } : facts[id] ? { ok: true, doc: facts[id] } : { ok: false, missing: true });
+    const r = takeClaim({ leadRoot, product: P, ideaId, sessionId: mine, fact }, { ...realIo(), now: () => now });
+    return { r, leadRoot, names: readdirSync(leadRoot).filter((n) => n.startsWith('.claim-')).sort() };
+  };
   // Still running, and a clock gone back an hour: held (its own started_at_ms, not its stamp).
   assert.match(take({ folder: [], now: start + 60_000 }).r.reason, /still planning it/);
   assert.equal(take({ folder: [], now: start - 3600e3 }).r.ok, false);
-  // A plan handed in holds it whatever the time; refused frees it, and the claim is retaken whole.
+  // A plan handed in holds it whatever the time; refused frees it, as a new gen beside the old.
   assert.equal(take({ folder: [plan, RUN_ENDED], now: start + 99 * 3600e3 }).r.ok, false);
   const freed = take({ folder: [plan, RUN_ENDED], facts: { [fid]: { state: 'refused' } }, now: start + 60_000 });
-  assert.equal(freed.r.ok, true);
-  assert.equal(freed.r.replaced, other);
-  assert.equal(JSON.parse(freed.files[at]).session, mine);
-  assert.deepEqual(Object.keys(freed.files), [at], 'nothing left aside');
+  assert.deepEqual([freed.r.ok, freed.r.gen, freed.r.replaced], [true, 1, other]);
+  assert.deepEqual(freed.names, [`.claim-${P}.${ideaId}`, `.claim-${P}.${ideaId}.1`], 'the old one stays; no temporary file left');
+  assert.equal(JSON.parse(readFileSync(freed.r.file, 'utf8')).session, mine);
+  // The next gen after the highest; its release mark frees it.
+  const next = take({ folder: [], now: start + 60_000, old: false, released: true });
+  assert.deepEqual([next.r.ok, next.r.gen], [true, 5]);
   // Ended with no plan, over its time with no plan (folder or none), or marked stale by intake: free.
   assert.equal(take({ folder: [RUN_ENDED], now: start + 60_000 }).r.ok, true);
   assert.equal(take({ folder: [], now: start + RUN_OVER_MS + 1 }).r.ok, true);
@@ -434,6 +442,34 @@ test('L1370 audit (#682 r2 M-A): a claim is freed by its plan refused, its run e
   assert.equal(take({ folder: [plan], facts: { [fid]: { state: 'waiting' }, [LEAD_STALE_FACT(other)]: { told_at: 'x' } }, now: start + 60_000 }).r.ok, true);
   // A plan fact that can't be read holds it, whatever else.
   assert.match(take({ folder: [RUN_ENDED], facts: { [fid]: 'unread' }, now: start + 99 * 3600e3 }).r.reason, /record can't be read/);
+});
+
+test('L1370 audit (#682 r3): many starts racing for one idea in separate processes, with random delays: never two winners', async () => {
+  const { spawn } = await import('node:child_process');
+  const lead = new URL('./lead.mjs', import.meta.url).href;
+  const script = `
+    import { takeClaim, realIo } from ${JSON.stringify(lead)};
+    const [dir, sid] = process.argv.slice(1);
+    const sab = new Int32Array(new SharedArrayBuffer(4));
+    const nap = () => Atomics.wait(sab, 0, 0, Math.random() * 3);
+    const r = realIo();
+    const wrap = (f) => (...a) => { nap(); try { return f(...a); } finally { nap(); } };
+    const io = { writeFile: wrap(r.writeFile), readText: wrap(r.readText), list: wrap(r.list), link: wrap(r.link), rm: wrap(r.rm), now: () => Date.now() };
+    const x = takeClaim({ leadRoot: dir, product: 'p', ideaId: 'idea-x', sessionId: sid, fact: () => ({ ok: false, missing: true }) }, io);
+    process.stdout.write(x.ok ? 'WIN' : 'NO');`;
+  const one = (dir, sid) => new Promise((resolve) => {
+    const c = spawn(process.execPath, ['--input-type=module', '-e', script, dir, sid], { stdio: ['ignore', 'pipe', 'inherit'] });
+    let out = '';
+    c.stdout.on('data', (d) => { out += d; });
+    c.on('exit', () => resolve(out));
+  });
+  for (let round = 0; round < 6; round += 1) {
+    const dir = realpathSync(tempDir('m3-lead-race-'));
+    // An r2 claim long over, so every start finds it free and races for gen 1.
+    writeFileSync(join(dir, '.claim-p.idea-x'), '{"session":"ld-p-20000101000000","started_at_ms":1}\n');
+    const outs = await Promise.all([1, 2, 3, 4, 5].map((i) => one(dir, `ld-p-2026112500000${i}`)));
+    assert.equal(outs.filter((o) => o === 'WIN').length, 1, `round ${round}: ${outs.join(' ')}`);
+  }
 });
 
 test('L1370 audit (#682 r2 M-B): a Lead whose start is never recorded has its waiting plan refused when it goes stale; a new Lead may then plan the idea', async () => {
@@ -447,6 +483,7 @@ test('L1370 audit (#682 r2 M-B): a Lead whose start is never recorded has its wa
   const f = w.record.read('fact', planFact(r1.sessionId, w)).doc;
   assert.deepEqual([f.state, f.reason], ['refused', STALE_PLAN_REASON]);
   assert.ok(w.told.some((t) => /Start a new Lead for the idea/.test(t)));
+  assert.equal(typeof w.record.read('fact', LEAD_STALE_FACT(r1.sessionId)).doc.plans_refused_at, 'string', 'marked done once (m5)');
   const r2 = await planLead({ product: P, idea: w.idea.id, setupFile: w.setupFile }, { ...w.io, now: ticking(T + 61 * 3600e3) });
   assert.equal(r2.ok, true, r2.reason);
   assert.notEqual(r2.sessionId, r1.sessionId);
@@ -503,4 +540,50 @@ test('L1370 audit (#682 r2 m-3, C-1): an earlier plan whose fact can\'t be read 
   assert.doesNotMatch(t, /tries it again/);
   assert.match(t, /not tried again/);
   assert.match(t, /lead\.mjs \w+ <product> <idea id>/);
+});
+
+test('L1370 audit (#682 r3 m1): a released interrupted plan drops its old alert and Lead note, is not told again, and reads "released by Joe"', async () => {
+  const w = world();
+  quiet(w);
+  const r1 = await planLead({ product: P, idea: w.idea.id, setupFile: w.setupFile }, { ...w.io, now: ticking(T) });
+  assert.equal(r1.ok, true, r1.reason);
+  const id = planFact(r1.sessionId, w);
+  const name = `plan-${w.idea.id}.json`;
+  // As intake leaves one (MAT-7): its alert, told; a note for the Lead.
+  const said = `lead ${r1.sessionId} handed in ${name}, which was interrupted while being applied; check the board`;
+  const put = w.record.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: 0, doc: { session: r1.sessionId, name, sha256: planSha(w, r1.sessionId), state: 'interrupted', at: '2026-11-25T09:30:00Z', alert_text: said, told_state: 'interrupted', lead_note: { text: `Your plan ${name} may or may not have been applied; check the board before handing it in again.` } } });
+  assert.equal(put.ok, true, put.reason);
+  assert.equal(releasePlan({ product: P, idea: w.idea.id, setupFile: w.setupFile }, w.io).ok, true);
+  w.told.length = 0;
+  await w.intake();
+  await w.intake();
+  const f = w.record.read('fact', id).doc;
+  assert.deepEqual([f.state, f.reason, f.told_state, 'alert_text' in f, 'lead_note' in f], ['refused', RELEASED_REASON, 'refused', false, false]);
+  assert.equal(w.told.filter((t) => t.includes(said)).length, 0, 'the old alert is not told again');
+  const { stateText } = await import('../modules/M1-front-door/filed.mjs');
+  assert.match(stateText(f), /^refused, not filed: released by Joe; no cards were filed$/);
+});
+
+test('L1370 audit (#682 r3 m5, m6): stale plans are refused once and marked; a release only for plan- files, and one that can\'t be done is told once', async () => {
+  // m5: once marked on its stale hold, a stale Lead is not scanned again.
+  const marked = { read: (e, id) => (id === LEAD_STALE_FACT('ld-x-1') ? { rev: 1, doc: { told_at: 'x', plans_refused_at: 'y' } } : null), list: () => { throw new Error('scanned'); } };
+  refuseStalePlansOnce(marked, 'ld-x-1', T);
+  // m6, on a real Lead: a request for another kind of file is not looked at; one naming other content is told once.
+  const w = world();
+  quiet(w);
+  const r1 = await planLead({ product: P, idea: w.idea.id, setupFile: w.setupFile }, { ...w.io, now: ticking(T) });
+  const id = planFact(r1.sessionId, w);
+  const name = `plan-${w.idea.id}.json`;
+  assert.equal(w.record.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: 0, doc: { session: r1.sessionId, name, sha256: planSha(w, r1.sessionId), state: 'interrupted', at: '2026-11-25T09:30:00Z' } }).ok, true);
+  const dir = join(w.outboxRoot, 'lead', r1.sessionId);
+  writeFileSync(join(dir, `.${'rel'}ease-report-x.md`), JSON.stringify({ name: 'report-x.md', sha256: 'c'.repeat(64) }));
+  writeFileSync(join(dir, `.${'rel'}ease-${name}`), JSON.stringify({ name, sha256: 'd'.repeat(64) }));
+  w.told.length = 0;
+  for (let i = 0; i < 3; i += 1) { w.clock.t += 2 * 86400e3; await w.intake(); }
+  const told = w.told.filter((t) => /was not done/.test(t));
+  assert.equal(told.length, 1, w.told.join('\n'));
+  assert.match(told[0], /names other content than the plan that was interrupted/);
+  assert.equal(w.told.filter((t) => t.includes('report-x.md')).length, 0);
+  assert.equal(w.record.read('fact', id).doc.state, 'interrupted');
+  assert.equal(w.record.read('fact', RELEASE_DONE_FACT(r1.sessionId, name)).doc.outcome, 'not done');
 });

@@ -12,11 +12,12 @@
 //   2. reads the idea from the product's Record, as the owner (M9 read-view.mjs: report idea-<id>, of kind idea-);
 //   3. refuses an idea that already has a plan: a fact intake-applied-<Lead session>-plan-<idea id>.json in any state
 //      but refused, or one that can't be read (an interrupted one names `lead.mjs release`, below). Then it takes the
-//      idea's one claim, <outboxRoot>/lead/.claim-<product>.<idea id>, a new file { session, started_at_ms } (#682 r2
-//      M-A), so of two starts at once only one goes on; a claim already there holds the idea unless sessionHold frees its
-//      Lead (its plan refused, its run ended or over with no plan handed in, or intake marked it stale), and is then
-//      retaken. Lead folders from before claims are still scanned (heldBy, #682 r1 M1). Every refusal from here, and a
-//      run that never started, lets the claim go. One plan per idea; a refused plan may be planned again;
+//      idea's claim (#682 r2 M-A, r3): the next numbered file <outboxRoot>/lead/.claim-<product>.<idea id>.<gen>,
+//      { session, started_at_ms }, made whole by link, so of starts at once only one gets each gen; the highest gen holds
+//      the idea, and a new one is made only when that holder is free (its .released mark, or sessionHold: its plan
+//      refused, its run ended or over with no plan handed in, or intake marked it stale). Claims are never moved or
+//      removed. Lead folders from before claims are still scanned (heldBy, #682 r1 M1). Every refusal or throw from
+//      here, and a run that never started, marks the claim released. One plan per idea; a refused plan may be planned again;
 //   4. reads the head the lead-main copy names (<base>/lead-main/<product>/.head, M11 lead-main.mjs copyHead): the main
 //      commit the Lead reads, which the Dispatcher's lead-main step exported; the copy must be a folder, not a link
 //      (#682 r1 m3);
@@ -46,7 +47,7 @@
 // dot-name there; the Record, secrets, the owner's keys and every product's proposals are read-denied. A headless run has
 // no one to answer AskUserQuestion: the one-shot wording says to put the question in a card that waits on the owner.
 
-import { closeSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
+import { closeSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { userInfo } from 'node:os';
 import { join } from 'node:path';
@@ -159,10 +160,35 @@ function folderNames(dir, io) {
   try { return io.list(dir); } catch (e) { if (e?.code === 'ENOENT') return null; throw e; }
 }
 
-/** The idea's claim (#682 r2 M-A): `.` parts it, as no product or idea id holds one. */
-export const claimPath = (leadRoot, product, ideaId) => join(leadRoot, `${CLAIM_PREFIX}${product}.${ideaId}`);
+/**
+ * The idea's claims (#682 r3): numbered, `.claim-<product>.<idea id>.<gen>`, and only ever added, never moved, renamed
+ * or removed. The one with the highest gen holds the idea. `.` parts the name, as no product or idea id holds one. A
+ * claim from r2, with no number, is gen 0. Old claims pile up, one small file per start; that is by design.
+ */
+const claimBase = (product, ideaId) => `${CLAIM_PREFIX}${product}.${ideaId}`;
+export const claimPath = (leadRoot, product, ideaId, gen = 0) => join(leadRoot, gen ? `${claimBase(product, ideaId)}.${gen}` : claimBase(product, ideaId));
+/** A claim let go: its own file beside it, `<claim>.released`, written once by the start that owns that gen. */
+export const RELEASED_MARK = '.released';
+const GEN = /^[1-9][0-9]{0,14}$/;
 
-/** A claim's text, and its reading: { ok, session, startedAt } | { ok: false, gone? , reason }. */
+/** The idea's claims in the Lead folder: { gens (highest first), released (gens with their mark) }. Throws as list does. */
+export function listClaims(leadRoot, product, ideaId, io) {
+  const base = claimBase(product, ideaId);
+  const gens = new Set();
+  const released = new Set();
+  for (const n of io.list(leadRoot)) {
+    if (n === base) { gens.add(0); continue; }
+    if (!n.startsWith(`${base}.`)) continue;
+    let rest = n.slice(base.length + 1);
+    const mark = rest.endsWith(RELEASED_MARK) || rest === RELEASED_MARK.slice(1);
+    if (rest === RELEASED_MARK.slice(1)) { released.add(0); continue; }
+    if (mark) rest = rest.slice(0, -RELEASED_MARK.length);
+    if (GEN.test(rest)) (mark ? released : gens).add(Number(rest));
+  }
+  return { gens: [...gens].sort((a, b) => b - a), released };
+}
+
+/** A claim's text, and its reading: { ok, session, startedAt } | { ok: false, gone?, reason }. */
 export const claimText = ({ session, startedAt }) => `${JSON.stringify({ session, started_at_ms: startedAt })}\n`;
 export function readClaim(file, product, io) {
   let t;
@@ -175,47 +201,55 @@ export function readClaim(file, product, io) {
   return { ok: true, session: d.session, startedAt: d.started_at_ms };
 }
 
-/**
- * Takes the idea's one claim for `sessionId`, before anything is made (#682 r2 M-A): a new file (wx), so of two starts
- * at once one gets it. A claim already there is held unless sessionHold frees its Lead; a free one is moved aside under
- * this start's own name and checked to be that one before it is retaken, so two starts that both find it free never
- * both take it (a fresh claim moved aside by mistake is put back with link, never over another). An unreadable claim
- * holds. → { ok: true, file, replaced } | { ok: false, sessionId?, reason }. io: writeFile (wx), readText, list, rename,
- * link, rm, now; `fact(id)` read-view's answer.
- */
-export function takeClaim({ leadRoot, product, ideaId, sessionId, fact }, io) {
-  const file = claimPath(leadRoot, product, ideaId);
-  const name = oneShotPlanName(ideaId);
-  const text = claimText({ session: sessionId, startedAt: io.now() });
-  let replaced = null;
-  for (let i = 0; i < 3; i += 1) {
-    try { io.writeFile(file, text, 0o600); return { ok: true, file, replaced }; } catch (e) {
-      if (e?.code !== 'EEXIST') return { ok: false, reason: `the idea's claim ${file} can't be written (${e?.code ?? e?.message})` };
-    }
-    const c = readClaim(file, product, io);
-    if (!c.ok) { if (c.gone) continue; return { ok: false, reason: `the idea's claim ${file} can't be used (${c.reason}), so the idea is held` }; }
-    let why;
-    try { why = sessionHold({ sid: c.session, name, names: folderNames(join(leadRoot, c.session), io), startedAt: c.startedAt, fact, now: io.now() }); }
-    catch (e) { why = `its folder can't be read (${e?.code ?? e?.message})`; }
-    if (why) return { ok: false, sessionId: c.session, reason: why };
-    const aside = `${file}~${sessionId}`;
-    try { io.rename(file, aside); } catch (e) { if (e?.code === 'ENOENT') continue; return { ok: false, reason: `the idea's free claim can't be moved aside (${e?.code ?? e?.message})` }; }
-    const moved = readClaim(aside, product, io);
-    if (!moved.ok || moved.session !== c.session || moved.startedAt !== c.startedAt) {
-      try { io.link(aside, file); } catch { /* another took it meanwhile: theirs stands */ }
-      try { io.rm(aside); } catch { /* left aside */ }
-      return { ok: false, sessionId: moved.session ?? null, reason: 'another start took the idea just now' };
-    }
-    try { io.rm(aside); } catch { /* left aside; the claim is free */ }
-    replaced = c.session;
-  }
-  return { ok: false, reason: `the idea's claim ${file} kept changing; try again` };
+// Makes claim `file` whole or not at all: written to this start's own file first, then linked to its name, which fails
+// (EEXIST) when another start made that gen first. → { ok } | { ok: false, taken } | { ok: false, reason }.
+function makeClaim(tmp, file, text, io) {
+  try { io.rm(tmp); } catch { /* none left by this start */ }
+  try { io.writeFile(tmp, text, 0o600); } catch (e) { return { ok: false, reason: `the idea's claim can't be written (${e?.code ?? e?.message})` }; }
+  try { io.link(tmp, file); return { ok: true }; } catch (e) {
+    return e?.code === 'EEXIST' ? { ok: false, taken: true } : { ok: false, reason: `the idea's claim ${file} can't be made (${e?.code ?? e?.message})` };
+  } finally { try { io.rm(tmp); } catch { /* left; the next start of this session removes it */ } }
 }
 
-/** Lets go of this start's own claim (a start refused or never started after it took it). */
-export function dropClaim(file, sessionId, product, io) {
-  const c = readClaim(file, product, io);
-  if (c.ok && c.session === sessionId) { try { io.rm(file); } catch { /* it frees itself by its run's end */ } }
+/**
+ * Takes the idea for `sessionId`, before anything is made (#682 r3): the next gen after the highest, made only when
+ * there is none or the holder is free (its release mark, or sessionHold's (a)-(d)). Two starts that judge the same
+ * holder free race for one gen, and link lets one have it; the other looks again. Nothing is moved or removed, so no
+ * start can take away another's claim, and a start that stops anywhere leaves only whole files. A holder that can't be
+ * read holds the idea, and the refusal names its file. → { ok: true, file, gen, replaced } | { ok: false, sessionId?,
+ * reason }. io: list, readText, writeFile (wx), link, rm (its own temporary file only), now; `fact(id)` read-view's answer.
+ */
+export function takeClaim({ leadRoot, product, ideaId, sessionId, fact }, io) {
+  const name = oneShotPlanName(ideaId);
+  const text = claimText({ session: sessionId, startedAt: io.now() });
+  const tmp = join(leadRoot, `${CLAIM_PREFIX}~${sessionId}`);
+  for (let i = 0; i < 5; i += 1) {
+    let c;
+    try { c = listClaims(leadRoot, product, ideaId, io); } catch (e) { return { ok: false, reason: `the Lead folder ${leadRoot} can't be listed (${e?.code ?? e?.message})` }; }
+    const top = c.gens.length ? c.gens[0] : null;
+    let replaced = null;
+    if (top !== null && !c.released.has(top)) {
+      const file = claimPath(leadRoot, product, ideaId, top);
+      const h = readClaim(file, product, io);
+      if (!h.ok) return { ok: false, reason: `the idea's claim ${file} can't be used (${h.reason}), so the idea is held. If no Lead is planning ${ideaId}, remove that file and start again` };
+      let why;
+      try { why = sessionHold({ sid: h.session, name, names: folderNames(join(leadRoot, h.session), io), startedAt: h.startedAt, fact, now: io.now() }); }
+      catch (e) { why = `its folder can't be read (${e?.code ?? e?.message})`; }
+      if (why) return { ok: false, sessionId: h.session, reason: why };
+      replaced = h.session;
+    }
+    const gen = top === null ? 1 : top + 1;
+    const file = claimPath(leadRoot, product, ideaId, gen);
+    const made = makeClaim(tmp, file, text, io);
+    if (made.ok) return { ok: true, file, gen, replaced };
+    if (!made.taken) return { ok: false, reason: made.reason };
+  }
+  return { ok: false, reason: `the idea's claims in ${leadRoot} kept changing; try again` };
+}
+
+/** Lets go of this start's own claim (a start refused, thrown or never started after it took it): its mark, never a removal. */
+export function releaseClaim(file, io) {
+  try { io.writeFile(`${file}${RELEASED_MARK}`, `${new Date(io.now()).toISOString()}\n`, 0o600); } catch { /* there already, or it frees itself by its time */ }
 }
 
 /**
@@ -260,7 +294,7 @@ export function leadOtherCopies({ cfg, product, outboxRoot }, io) {
     try { names = io.list(dir); } catch (e) { if (e?.code === 'ENOENT') continue; return { ok: false, reason: `${dir} can't be listed (${e?.code ?? e?.message})` }; }
     for (const n of names) {
       if (dir === lm && n === product) continue;
-      if (dir !== lm && n.startsWith(CLAIM_PREFIX)) continue;   // the ideas' claims: files that hold only a session and a time
+      if (dir !== lm && n.startsWith(CLAIM_PREFIX)) continue;   // the ideas' claims and their marks: a session and a time, or a time
       if (!PLAIN_NAME.test(n) || n === '.' || n === '..') return { ok: false, reason: `${dir} holds ${JSON.stringify(n.slice(0, 80))}, a name the Lead's walls can't spell` };
       out.add(join(dir, n));
     }
@@ -291,7 +325,7 @@ function outcomeText(name, doc) {
  * code, timedOut, plan, state, text } once claude has ended (state: the plan's intake state, 'none' when it handed in
  * none, 'not taken' when the Dispatcher had not taken it in time), or { ok: false, reason } with nothing left behind.
  * io: role-start's (readText, mkdir, writeFile, rm, uid, user, home, env, check) and now, list (folder → names), lstat,
- *   rename and link (the idea's claim, takeClaim), runHeadless (bin, args, { cwd, env, log, timeoutMs, started }) → { code, timedOut, started }, sleep (ms), progress (a
+ *   link (the idea's claim, takeClaim), runHeadless (bin, args, { cwd, env, log, timeoutMs, started }) → { code, timedOut, started }, sleep (ms), progress (a
  *   line to the terminal). A run that never started answers { ok: false } with its outbox and log left to read.
  */
 export async function planLead({ product, idea, setupFile = SETUP_FILE, profile = DESIGN_PROFILES[LEAD_ROLE] }, io) {
@@ -318,14 +352,23 @@ export async function planLead({ product, idea, setupFile = SETUP_FILE, profile 
     return no(`the idea ${ideaId} already has a plan: ${name} from the Lead ${had.sessionId} is ${planStateText(had)}${release}`);
   }
   let sessionId; try { sessionId = leadSessionId(product, new Date(io.now())); } catch (e) { return no(e.message); }
-  // The idea's one claim, taken before anything is made (#682 r2 M-A); every refusal from here lets it go.
+  // The idea's claim, taken before anything is made (#682 r2 M-A, r3); every refusal or throw from here lets it go.
   const leadRoot = join(P.outboxRoot, LEAD_ROLE);
   // A fact not in the list read above is not there (a Record with no fact yet has no fact folder, which read-view
   // answers as a problem, not as missing); one written since is read as missing, which holds by the files alone.
   const holdFact = (id) => (ids.includes(id) ? fact(id) : { ok: false, missing: true });
   const claim = takeClaim({ leadRoot, product, ideaId, sessionId, fact: holdFact }, io);
   if (!claim.ok) return no(`the idea ${ideaId} is held by ${claim.sessionId ? `the Lead ${claim.sessionId}` : 'a Lead'}: ${claim.reason}. Start another only once that plan is refused or that run has ended with none`);
-  const fail = (reason) => { dropClaim(claim.file, sessionId, product, io); return no(reason); };
+  // A start that did not run lets its claim go, by its release mark, whatever stopped it (#682 r3 m4).
+  const kept = { run: false };
+  try {
+    return await claimed({ product, ideaId, sessionId, claim, leadRoot, holdFact, fact, P, cfg, idea: r.doc, name, profile, progress, kept }, io);
+  } finally { if (!kept.run) releaseClaim(claim.file, io); }
+}
+
+// planLead once it holds the idea's claim; `kept.run` is set once claude has started, which keeps the claim.
+async function claimed({ product, ideaId, sessionId, claim, leadRoot, holdFact, fact, P, cfg, idea, name, profile, progress, kept }, io) {
+  const fail = (reason) => ({ ok: false, reason });
   // Lead folders from before claims (r1 M1's scan), apart from the one whose claim was just found free.
   const held = heldBy({ leadRoot, product, ideaId, fact: holdFact, skip: [sessionId, ...(claim.replaced ? [claim.replaced] : [])] }, io);
   if (held) return fail(`the idea ${ideaId} is held by ${held.sessionId ? `the Lead ${held.sessionId}` : 'a Lead'}: ${held.why}. Start another only once that plan is refused or that run has ended with none`);
@@ -337,7 +380,7 @@ export async function planLead({ product, idea, setupFile = SETUP_FILE, profile 
   const head = copyHead(code);
   if (!head) return fail(`the Lead's copy of main, ${code}, names no commit (.head): the Dispatcher's lead-main step makes it (is leadMainRoot in its config?)`);
   const outbox = join(leadRoot, sessionId);
-  const input = leadInputText({ items: [{ source: 'idea-file', text: r.doc.text }] });
+  const input = leadInputText({ items: [{ source: 'idea-file', text: idea.text }] });
   if (!input.ok) return fail(`the idea can't be given to the Lead (${input.reason})`);
   const promptText = `${[...LEAD_WORDING, ...LEAD_ONE_SHOT].join('\n\n')}\n\n${input.text}`;
   const promptFile = join(outbox, PROMPT_NAME);
@@ -356,7 +399,8 @@ export async function planLead({ product, idea, setupFile = SETUP_FILE, profile 
   let launchProblem = null;
   // The launch file only once claude has started (it has a pid): a run that never starts leaves no launch (#682 r1 m5).
   const started = () => {
-    try { io.writeFile(launchFile, launchFileText({ session: sessionId, product, head, idea: ideaId }), 0o600); return true; } catch (e) {
+    // From here claude runs, so the claim is kept: its run's end, its plan's fate or its time free the idea.
+    try { io.writeFile(launchFile, launchFileText({ session: sessionId, product, head, idea: ideaId }), 0o600); kept.run = true; return true; } catch (e) {
       launchProblem = `was stopped: its launch file can't be written (${e?.code ?? e?.message})`;
       return false;
     }
@@ -436,7 +480,6 @@ export function realIo() {
     mkdir: (d, mode) => { mkdirSync(d, { mode }); chmodSync(d, mode); },
     writeFile: (f, text, mode) => { writeFileSync(f, text, { mode, flag: 'wx' }); },
     rm: (d) => rmSync(d, { recursive: true, force: true }),
-    rename: (a, b) => renameSync(a, b),
     link: (a, b) => linkSync(a, b),
     uid: process.getuid(), user: u.username, home: u.homedir, env: process.env, now: () => Date.now(),
     check: (x) => readBack(x),

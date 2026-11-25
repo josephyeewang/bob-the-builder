@@ -239,43 +239,76 @@ export const RELEASED_REASON = 'released by Joe; no cards were filed';
 export const releaseText = ({ name, sha256 }) => `${JSON.stringify({ name, sha256 })}\n`;
 const RELEASE_MAX_BYTES = 4096;
 
-/** Writes each of a stale Lead's waiting plan facts refused, STALE_PLAN_REASON (#682 r2 M-B). */
+/** Writes each of a stale Lead's waiting plan facts refused, STALE_PLAN_REASON (#682 r2 M-B). → true when none is left. */
 export function refuseWaitingPlans(rec, sid, now, report = () => {}) {
   const pre = appliedId(sid, 'plan-');
+  let all = true;
   for (const f of rec.list('fact')) {
     if (!f.id.startsWith(pre) || f.doc?.state !== 'waiting') continue;
     const cur = rec.read('fact', f.id);
     if (cur?.doc?.state !== 'waiting') continue;
     const w = rec.write({ actor: 'dispatcher', entity: 'fact', id: f.id, expectRev: cur.rev, doc: { ...cur.doc, state: 'refused', reason: STALE_PLAN_REASON, at: new Date(now).toISOString() }, kind: 'outbox_applied' });
-    if (!w?.ok) report(`the stale Lead ${sid}'s waiting plan ${cur.doc.name} could not be refused (${plain(w?.reason ?? 'no answer', 200)}), so its idea stays held`, `stale-plan-${shortHash(f.id)}`);
+    if (!w?.ok) { all = false; report(`the stale Lead ${sid}'s waiting plan ${cur.doc.name} could not be refused (${plain(w?.reason ?? 'no answer', 200)}), so its idea stays held`, `stale-plan-${shortHash(f.id)}`); }
   }
+  return all;
 }
 
 /**
- * The owner's release requests in a Lead's outbox (#682 r2 M-B): each names an interrupted plan of that Lead; one whose
- * fact is interrupted with that content and from which no card was filed (a card's plan_sha256) is written refused,
- * RELEASED_REASON. One with cards is not: the owner is told which. → [{ name, released } | { name, cards }].
+ * refuseWaitingPlans once per stale Lead (#682 r3 m5): done is marked on its stale hold (plans_refused_at), and a Lead
+ * marked is not scanned again. Before its hold is written it runs each pass, as nothing marks it yet.
+ */
+export function refuseStalePlansOnce(rec, sid, now, report = () => {}) {
+  const stale = rec.read('fact', LEAD_STALE_FACT(sid))?.doc;
+  if (typeof stale?.plans_refused_at === 'string') return;
+  if (!refuseWaitingPlans(rec, sid, now, report) || !stale) return;
+  const w = writeFrom(rec, LEAD_STALE_FACT(sid), stale, { ...stale, plans_refused_at: new Date(now).toISOString() }, 'lead_stale_plans_refused');
+  if (!w?.ok) report(`the stale Lead ${sid}'s plans were refused, but that could not be noted (${plain(w?.reason ?? 'no answer', 200)}); they are looked at again`, `stale-plans-mark-${shortHash(sid)}`);
+}
+
+/** The fact that says a release request was handled (#682 r3 m6): intake's fact for that request file, by its own name
+ * (session and plan, never name, so the hand-in loops pass it by), with its hash, so a changed request is looked at. */
+export const RELEASE_DONE_FACT = (sid, name) => appliedId(sid, `${RELEASE_PREFIX}${name}`);
+
+/**
+ * The owner's release requests in a Lead's outbox (#682 r2 M-B, r3 m1 m6): only for its `plan-` hand-ins. One whose fact
+ * is interrupted with that content and from which no card was filed (a card's plan_sha256) is written refused,
+ * RELEASED_REASON, its told_state refused and its old alert and Lead note dropped, so neither is told again. One that
+ * can't be done (cards filed, content not the plan's, not interrupted, a file that can't be read) is told to the owner
+ * with its reason. Either way the request is marked handled (RELEASE_DONE_FACT) and not looked at again until it
+ * changes. → [{ name, released } | { name, not: reason }].
  */
 export function releaseFromFiles({ rec, s, now, list = (d) => readdirSync(d), readRelease = readReleaseFile, report = () => {} }) {
   const out = [];
   let names;
-  try { names = list(s.outbox).filter((n) => n.startsWith(RELEASE_PREFIX)); } catch { return out; }
+  try { names = list(s.outbox).filter((n) => n.startsWith(`${RELEASE_PREFIX}plan-`)); } catch { return out; }
   for (const n of names) {
     const name = n.slice(RELEASE_PREFIX.length);
+    const doneId = RELEASE_DONE_FACT(s.sessionId, name);
+    const r = readRelease(join(s.outbox, n));
+    const request = r?.ok ? sha256(r.text) : 'unreadable';
+    const done = rec.read('fact', doneId);
+    if (done?.doc?.request === request) continue;
     const id = appliedId(s.sessionId, name);
     const f = rec.read('fact', id);
-    if (f?.doc?.state !== 'interrupted') continue;
-    const r = readRelease(join(s.outbox, n));
-    if (!r?.ok || r.doc?.name !== name || r.doc?.sha256 !== f.doc.sha256) continue;
-    const cards = rec.list('card').filter((c) => c.doc?.plan_sha256 === f.doc.sha256).map((c) => c.id).sort();
-    if (cards.length) {
-      report(`the release of ${name} from the Lead ${s.sessionId} was not done: cards were filed from it (${cards.slice(0, 20).join(', ')})`, `release-${shortHash(id)}`);
-      out.push({ name, cards });
-      continue;
+    let not = null;
+    if (!r?.ok) not = 'its request file could not be read';
+    else if (r.doc?.name !== name) not = 'its request names another file';
+    else if (f?.doc?.state === 'refused' && f.doc.reason === RELEASED_REASON) not = null;
+    else if (f?.doc?.state !== 'interrupted') not = f?.doc ? `that plan is not interrupted (it is ${plain(f.doc.state, 40)})` : 'that plan is not in the Record';
+    else if (r.doc?.sha256 !== f.doc.sha256) not = 'its request names other content than the plan that was interrupted';
+    else {
+      const cards = rec.list('card').filter((c) => c.doc?.plan_sha256 === f.doc.sha256).map((c) => c.id).sort();
+      if (cards.length) not = `cards were filed from it (${cards.slice(0, 20).join(', ')})`;
+      else {
+        const { alert_text: _a, lead_note: _n, ...kept } = f.doc;
+        const w = rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: f.rev, doc: { ...kept, state: 'refused', reason: RELEASED_REASON, told_state: 'refused', at: new Date(now).toISOString() }, kind: 'outbox_applied' });
+        if (!w?.ok) { report(`the release of ${name} from the Lead ${s.sessionId} could not be recorded (${plain(w?.reason ?? 'no answer', 200)}); it is tried again`, `release-${shortHash(id)}`); continue; }
+      }
     }
-    const w = rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: f.rev, doc: { ...f.doc, state: 'refused', reason: RELEASED_REASON, at: new Date(now).toISOString() }, kind: 'outbox_applied' });
-    if (!w?.ok) report(`the release of ${name} from the Lead ${s.sessionId} could not be recorded (${plain(w?.reason ?? 'no answer', 200)})`, `release-${shortHash(id)}`);
-    out.push({ name, released: w?.ok === true });
+    if (not) report(`the release of ${name} from the Lead ${s.sessionId} was not done: ${not}`, `release-${shortHash(`${id} ${request}`)}`);
+    const m = rec.write({ actor: 'dispatcher', entity: 'fact', id: doneId, expectRev: done?.rev ?? 0, doc: { session: s.sessionId, plan: name, request, outcome: not ? 'not done' : 'released', ...(not ? { reason: not } : {}), at: new Date(now).toISOString() }, kind: 'outbox_release' });
+    if (!m?.ok) report(`the release of ${name} from the Lead ${s.sessionId} could not be marked handled (${plain(m?.reason ?? 'no answer', 200)})`, `release-done-${shortHash(id)}`);
+    out.push(not ? { name, not } : { name, released: true });
   }
   return out;
 }
@@ -284,7 +317,8 @@ function readReleaseFile(p) {
   try {
     const st = lstatSync(p);
     if (!st.isFile() || st.size > RELEASE_MAX_BYTES) return { ok: false };
-    return { ok: true, doc: JSON.parse(readFileSync(p, 'utf8')) };
+    const text = readFileSync(p, 'utf8');
+    return { ok: true, text, doc: JSON.parse(text) };
   } catch { return { ok: false }; }
 }
 const lookOf = (rec, sid) => { const d = rec.read('fact', LAUNCH_LOOK_FACT(sid))?.doc; return d && typeof d === 'object' && !Array.isArray(d) ? d : undefined; };
@@ -335,7 +369,7 @@ export async function launchFromFile({ rec, now, alert, s, readLaunch = readLaun
     // A clear refused when it went stale is tried again; an empty record is not written (#680 r3 m3).
     clearLook(rec, s.sessionId, lookOf(rec, s.sessionId), checked, report);
     // A plan it handed in since, held for its launch, is refused too, so its idea is free (#682 r2 M-B).
-    refuseWaitingPlans(rec, s.sessionId, now, report);
+    refuseStalePlansOnce(rec, s.sessionId, now, report);
     return { session: s.sessionId, launch: 'ignored' };
   }
   let f;
@@ -352,7 +386,7 @@ export async function launchFromFile({ rec, now, alert, s, readLaunch = readLaun
     // record stays, and the first pass after the tell lands takes the 'ignored' path above and clears it then (#682 r1 c1).
     if (staleTold()) clearLook(rec, s.sessionId, look, checked, report);
     // Its plans held for its launch never will be taken: refused, which frees their ideas, so "start a new Lead" holds (#682 r2 M-B).
-    refuseWaitingPlans(rec, s.sessionId, now, report);
+    refuseStalePlansOnce(rec, s.sessionId, now, report);
     return { session: s.sessionId, launch: 'stale' };
   }
   if (f?.ok && checks.left <= 0) return { session: s.sessionId, launch: 'later', reason: 'the export checks for this pass are used up' };
