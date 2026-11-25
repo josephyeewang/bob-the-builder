@@ -38,20 +38,18 @@ export function launchFileText({ session, product, head }) {
 }
 
 /**
- * The launch file of session `s` ({ sessionId, outbox, uid, product }): { ok: true, head, mtimeMs } | { ok: false, none?,
- * reason, mtimeMs? }. `none` is "no file" (nothing to tell: a Lead the runner started has none); `mtimeMs` is when the
- * file was last written, once it was seen (intake stops looking at a start older than a day). Opened through M4's one
- * safe open (readOwnedFile): not following a link, a plain file with one name, `s.uid`'s, small. It must name this
- * session and product with a full commit sha, nothing else.
+ * The launch file of session `s` ({ sessionId, outbox, uid, product }): { ok: true, head } | { ok: false, none?, reason }.
+ * `none` is "no file" (nothing to tell: a Lead the runner started has none). Opened through M4's one safe open
+ * (readOwnedFile): not following a link, a plain file with one name, `s.uid`'s, small. It must name this session and
+ * product with a full commit sha, nothing else. When to stop looking is intake's, from its own checks (L1370 audit r2).
  */
 export function readLaunchFile(s, { open } = {}) {
-  const f = readOwnedFile(join(s.outbox, LAUNCH_FILE), { uid: s.uid, label: 'the launch file', owner: 'the owner', maxBytes: LAUNCH_MAX_BYTES, ...(open ? { open } : {}) });
+  const f = readOwnedFile(join(s.outbox, LAUNCH_FILE), { uid: s.uid, label: 'the launch file', notOwned: 'the launch file is not the owner\'s', maxBytes: LAUNCH_MAX_BYTES, ...(open ? { open } : {}) });
   if (!f.ok) {
     if (f.missing) return { ok: false, none: true, reason: 'no launch file' };
-    return { ok: false, reason: f.code ? `${f.reason} (${f.code})` : f.reason, ...(f.mtimeMs !== undefined ? { mtimeMs: f.mtimeMs } : {}) };
+    return { ok: false, reason: f.code ? `${f.reason} (${f.code})` : f.reason };
   }
-  const at = { mtimeMs: f.mtimeMs };
-  const no = (reason) => ({ ok: false, reason, ...at });
+  const no = (reason) => ({ ok: false, reason });
   let doc;
   try { doc = JSON.parse(f.text); } catch { return no('the launch file does not read as JSON'); }
   if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return no('the launch file is not a JSON object');
@@ -60,5 +58,5 @@ export function readLaunchFile(s, { open } = {}) {
   if (doc.session !== s.sessionId) return no('the launch file names another session');
   if (doc.product !== s.product) return no('the launch file names another product');
   if (typeof doc.head !== 'string' || !/^[0-9a-f]{40}$/.test(doc.head)) return no('the launch file\'s head is not a full commit sha');
-  return { ok: true, head: doc.head, ...at };
+  return { ok: true, head: doc.head };
 }

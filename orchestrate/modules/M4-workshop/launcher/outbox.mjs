@@ -43,27 +43,27 @@ export function emptyOutbox(outbox, { busy, alert = () => {} }) {
  * Reads the file at `path` through a handle opened without following a link. The open file must be a plain file with one
  * link, owned by `uid`, and, when `maxBytes` is given, no bigger than that. The one safe open for an outbox file
  * (readOutboxFile) and a one-shot Lead's launch file (M3 sessions.mjs readLaunchFile; L1370 audit m3).
- * `label` names the file in a refusal and `owner` names `uid`'s user. Answers { ok: true, text, mtimeMs } or
- * { ok: false, reason, missing?, code?, mtimeMs? }: `missing` when there is no file, `mtimeMs` once the file was seen.
+ * `label` names the file in a refusal and `notOwned` is the refusal for a file `uid` does not own. Answers { ok: true,
+ * text } or { ok: false, reason, missing?, code? }: `missing` when there is no file.
  */
-export function readOwnedFile(path, { uid, label, owner = 'the role\'s user', maxBytes, open = openSync }) {
+export function readOwnedFile(path, { uid, label, notOwned = `${label} is not owned by the role's user`, maxBytes, open = openSync }) {
   let fd;
   try { fd = open(path, C.O_RDONLY | C.O_NOFOLLOW | (C.O_NONBLOCK ?? 0)); } catch (e) {
     return { ok: false, missing: e?.code === 'ENOENT', code: e?.code ?? 'error', reason: `${label} could not be opened without following a link` };
   }
   try {
     const st = fstatSync(fd);
-    const no = (reason) => ({ ok: false, reason, mtimeMs: st.mtimeMs });
+    const no = (reason) => ({ ok: false, reason });
     if (!st.isFile()) return no(`${label} is not a plain file`);
     if (st.nlink !== 1) return no(`${label} has more than one link`);
-    if (st.uid !== uid) return no(`${label} is not owned by ${owner}`);
-    if (maxBytes === undefined) return { ok: true, text: readFileSync(fd, 'utf8'), mtimeMs: st.mtimeMs };
+    if (st.uid !== uid) return no(notOwned);
+    if (maxBytes === undefined) return { ok: true, text: readFileSync(fd, 'utf8') };
     if (st.size > maxBytes) return no(`${label} is too big`);
     // Read one byte past the cap, so a file that grew after the look is still refused.
     const buf = Buffer.alloc(maxBytes + 1);
     const n = readSync(fd, buf, 0, buf.length, 0);
     if (n > maxBytes) return no(`${label} is too big`);
-    return { ok: true, text: buf.subarray(0, n).toString('utf8'), mtimeMs: st.mtimeMs };
+    return { ok: true, text: buf.subarray(0, n).toString('utf8') };
   } finally { closeSync(fd); }
 }
 

@@ -4,7 +4,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { linkSync, mkdirSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { linkSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { SESSION_ID } from '../../shared/record-names.mjs';
@@ -48,8 +48,7 @@ test('the launch file the start writes is the one the intake reads, and only for
   assert.deepEqual(readLaunchFile(s), { ok: false, none: true, reason: 'no launch file' });
   writeFileSync(join(s.outbox, LAUNCH_FILE), launchFileText({ session: s.sessionId, product: 'p', head: HEAD }));
   const read = readLaunchFile(s);
-  assert.deepEqual([read.ok, read.head], [true, HEAD]);
-  assert.equal(read.mtimeMs, statSync(join(s.outbox, LAUNCH_FILE)).mtimeMs, 'when the start wrote it, so intake can stop looking after a day');
+  assert.deepEqual(read, { ok: true, head: HEAD }, 'the head only: when to stop looking is intake\'s, from its own checks (L1370 audit r2)');
   assert.equal(LAUNCH_FILE.startsWith('.'), true, 'a dot-name: never a hand-in, and the Lead\'s own tools may not write it');
   assert.match(readLaunchFile({ ...s, product: 'q' }).reason, /another product/);
   assert.match(readLaunchFile({ ...s, sessionId: 'ld-p-20261125090508' }).reason, /another session/);
@@ -76,7 +75,7 @@ test('the launch file is opened as an outbox file is: no link followed, one name
   writeFileSync(join(v.outbox, LAUNCH_FILE), `${text}${' '.repeat(5000)}`);
   assert.equal(readLaunchFile(v).reason, 'the launch file is too big');
   writeFileSync(join(v.outbox, LAUNCH_FILE), text);
-  assert.equal(readLaunchFile({ ...v, uid: v.uid + 1 }).reason, 'the launch file is not owned by the owner');
+  assert.equal(readLaunchFile({ ...v, uid: v.uid + 1 }).reason, 'the launch file is not the owner\'s');
 });
 
 // L1370 audit c2: the errors name the role as the owner reads it.
