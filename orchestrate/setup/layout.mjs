@@ -175,6 +175,8 @@ export const hostLockFolderPath = (cfg) => join(cfg.base, 'host-lock');
 export const hostLockCopyOf = (base) => join(base, 'host-lock', 'host.lock');
 /** The Do-plane git mirror; the owner's git is told to trust exactly this path (R-0b-05 done_when, safe.directory). */
 export const mirrorPath = (cfg) => join(cfg.base, 'mirror');
+/** The Lead's read-only copy of main (the Dispatcher config's leadMainRoot, L1370): <leadMainPath>/<product> is the export. */
+export const leadMainPath = (cfg) => join(cfg.base, 'lead-main');
 /** Where cleanup seals a copy's bundle it could not prove saved (the Dispatcher config's sealRoot, L739). */
 export const sealRootPath = (cfg) => join(cfg.base, 'seals');
 
@@ -335,7 +337,7 @@ export function folderTable(cfg) {
     [p('settings'), 'orchestrate', 0o755, 'role settings files'],
     [p('launcher'), 'orchestrate', 0o755, 'the launcher'],
     [p('frontdoor'), 'orchestrate', 0o755, 'the Front Door\'s start folder'],
-    [p('lead-main'), 'orchestrate', 0o755, 'the Lead\'s read-only copy of main'],
+    [leadMainPath(cfg), 'orchestrate', 0o755, 'the Lead\'s read-only copy of main: the Dispatcher writes <product> in it (0755 folders, 0644 files), the owner only reads'],
     [mirrorPath(cfg), 'orchestrate', 0o755, 'the Do-plane git mirror'],
     [ownerTapsPath(cfg), 'owner', 0o755, 'the owner\'s review-again taps (runner setting ownerTaps): the owner writes, others only read, no access list'],
     [ownerAnswerPath(cfg), 'owner', 0o755, 'the owner\'s answer for the Sensors (owner-answer.json, 0644, L727): the owner\'s job writes, orchestrate only reads, no access list'],

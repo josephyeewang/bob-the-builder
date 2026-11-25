@@ -1594,6 +1594,8 @@ test('Dispatcher config: every key the Dispatcher takes, from the layout and the
     product: 'alpha', recordRoot: at(`${BASE}/products/alpha/store`), ownerUid: uid('orchestrate'),
     // Check 12's rules snapshot (L1001): the product's rules folder (layout.mjs dispatcherRulesPath).
     rulesSnapshotFile: at(`${BASE}/products/alpha/rules/dispatcher-rules.json`),
+    // The Lead's copy of main (L1370): the folder users-folders makes (layout.mjs leadMainPath), one for every product.
+    leadMainRoot: at(`${BASE}/lead-main`),
     productsFile: at(GOOD_DISPATCHER.productsFile), rulesStateDir: at(GOOD_DISPATCHER.rulesStateDir), tokenFile: at(GOOD_DISPATCHER.tokenFile), approvalsStateDir: at(GOOD_DISPATCHER.approvalsStateDir),
     reviewRequestsDir: at(`${BASE}/review/requests`), reviewStatusFile: at(`${BASE}/review/status.json`), reviewUid: uid('review'),
     reviewRunnerLog: at(`${BASE}/logs/review-runner.err.log`), reviewInstallRoot: R,

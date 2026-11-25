@@ -111,8 +111,12 @@ const UID_KEYS = Object.freeze(['reviewUid', 'hostLockUid', 'workerUid']);
 // copier, taking it from this list.
 export const OPTIONAL_CONFIG_KEYS = Object.freeze(['hostLockStamp']);
 // rulesSnapshotFile: optional, the Dispatcher's alone (the robot job's list leaves it out).
+// leadMainRoot: optional too (L1370), the Lead's read-only copy folder (setup layout.mjs leadMainPath), which setup
+// writes. A config written before it was a key still starts: the Dispatcher's code is updated from main on its own, its
+// config only when setup is run again, so a required key would stop the live Dispatcher. Without it the lead-main step
+// fails, told daily (worker-ports.mjs leadMainPorts), and no one-shot Lead's launch is recorded.
 export const CONFIG_KEYS = Object.freeze(['installRoot', 'wiring', 'lockFile', 'runDeadlineMs', 'product', 'recordRoot', 'ownerUid', 'productsFile', 'rulesStateDir', 'tokenFile', 'approvalsStateDir',
-  'rulesSnapshotFile', ...REVIEW_CONFIG_KEYS, ...WORKER_CONFIG_KEYS]);
+  'rulesSnapshotFile', 'leadMainRoot', ...REVIEW_CONFIG_KEYS, ...WORKER_CONFIG_KEYS]);
 const PATHS = Object.freeze(['recordRoot', 'productsFile', 'rulesStateDir', 'tokenFile', 'approvalsStateDir', ...[...REVIEW_CONFIG_KEYS, ...WORKER_CONFIG_KEYS].filter((k) => !UID_KEYS.includes(k))]);
 
 // The ports PRs C and D wire (M11 README, "The tick's ports"), each named in the port file that will answer it. A port
@@ -130,7 +134,7 @@ export { notWiredText, refusing };
 // (L927): the stop step acts only on this Dispatcher's product's sessions, so it is the config's, never a default.
 const WIRED_HERE = Object.freeze(['alert', 'approvals']);
 export const TICK_PORTS = Object.freeze([...WIRED_HERE, 'cleanup', 'board', 'filesOf', 'frontDoorAlive', 'frontDoorHandoff', 'gateAlive', 'hasReviewer', 'healthy',
-  'hostLock', 'launch', 'launchOutcome', 'leads', 'mainSha', 'outboxRoot', 'outboxSessions', 'pauseLead', 'planReviewAnswer', 'planReviewsRunning', 'planRows', 'planView', 'probe', 'product', 'proposals', 'replyToLead', 'requestReview',
+  'hostLock', 'launch', 'launchOutcome', 'leadMain', 'leads', 'mainSha', 'outboxRoot', 'outboxSessions', 'pauseLead', 'planReviewAnswer', 'planReviewsRunning', 'planRows', 'planView', 'probe', 'product', 'proposals', 'replyToLead', 'requestReview',
   'restartFrontDoor', 'resume', 'reviewAlerts', 'reviewEnded', 'saveWork', 'sendFrontDoor', 'sessions', 'startMinibase', 'startPlanReview', 'startReadonly',
   'stopGroup', 'stopReview', 'stopSession', 'strayFrontDoor', 'wait']);
 
@@ -147,6 +151,7 @@ export function checkConfig(c, { keys = CONFIG_KEYS, paths = PATHS, optional = k
   for (const k of optional) if (k in c && (typeof c[k] !== 'string' || !isAbsolute(c[k]))) throw new Error(`config: ${k} must be an absolute path when given`);
   if (c.hostLockStamp !== undefined && c.hostLockStamp === c.hostLockPath) throw new Error('config: hostLockStamp must be the copier\'s stamp, not host.lock\'s copy itself (hostLockPath)');
   if (c.rulesSnapshotFile !== undefined && (typeof c.rulesSnapshotFile !== 'string' || !isAbsolute(c.rulesSnapshotFile))) throw new Error('config: rulesSnapshotFile must be an absolute path');
+  if (c.leadMainRoot !== undefined && (typeof c.leadMainRoot !== 'string' || !isAbsolute(c.leadMainRoot))) throw new Error('config: leadMainRoot must be an absolute path');
   if (!Number.isSafeInteger(c.ownerUid) || c.ownerUid < 0) throw new Error('config: ownerUid must be a Mac user id');
   // host.lock's owner, with the rest of the config: before wire() makes any folder or opens the Record (L805 m1). The
   // Dispatcher's own user is this process's; workerPorts checks it again with the start's selfUid.

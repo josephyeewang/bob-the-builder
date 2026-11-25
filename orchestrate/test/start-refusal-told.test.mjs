@@ -65,7 +65,7 @@ function mac(entries, { state = 'active', usage = GREEN, rules = {}, answers = a
     filesOf: () => [],
     sendFrontDoor: async () => ({ outcome: 'sent' }), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
     frontDoorAlive: () => null, frontDoorHandoff: () => null,
-    cleanup: { copiesRoot: dir, sealRoot: dir, mirrorFor: () => null },
+    leadMain: { product: 'p1', exportMain: async () => ({ head: 'c'.repeat(40), changed: false }) }, cleanup: { copiesRoot: dir, sealRoot: dir, mirrorFor: () => null },
   };
   const lockFile = join(dir, 'pass.lock');
   const r = rulesWith(rules, answers, { classify });

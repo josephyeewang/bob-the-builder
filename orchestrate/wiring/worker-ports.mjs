@@ -69,7 +69,7 @@
 import { frontDoorSessions } from '../modules/M1-front-door/sessions.mjs';
 import { leadSessions } from '../modules/M3-lead/sessions.mjs';
 import { closeSync, constants as FS, fstatSync, lstatSync, openSync, readSync, statSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { isRefusing, refusing } from './not-wired.mjs';
 import { privateFolder } from './private-folder.mjs';
@@ -82,6 +82,7 @@ import { PLAN_REVIEW_ROLE } from '../shared/review-roles.mjs';
 import { WORKER_REQUESTS_ACL, aclText } from '../setup/layout.mjs';
 import { READING_FUTURE_MS } from '../modules/M12-sensors/facts.mjs';
 import { HOST_COPY_FAIL } from '../modules/M11-dispatcher/pass.mjs';
+import { LEAD_MAIN_GIT, LEAD_MAIN_GIT_MS, NOT_CONFIGURED, exportMain } from '../modules/M11-dispatcher/lead-main.mjs';
 
 const RUNNER_LAUNCHES = RUNNER_FOLDERS.launches;
 
@@ -105,16 +106,27 @@ export function cleanupProblem(cleanup) {
 }
 
 /**
+ * Why `path` is not a plain folder (not a link) of `uid`'s that no one else can write, naming it `what`; or null. The
+ * one check the mirror (mirrorProblem) and the Lead's copy folder (leadMainRootProblem) share; `more(mode)` adds its own.
+ */
+function ownFolderProblem(path, uid, what, lstat, more = () => null) {
+  let st;
+  try { st = lstat(path); } catch (e) { return `${what} ${path} can't be read (${e?.code ?? e})`; }
+  if (st.isSymbolicLink() || !st.isDirectory()) return `${what} ${path} is not a plain folder`;
+  if (st.uid !== uid) return `${what} ${path} belongs to uid ${st.uid}, not to this job's uid ${uid}`;
+  const mode = st.mode & 0o777;
+  if (mode & 0o022) return `${what} ${path} can be written by others (mode ${mode.toString(8)})`;
+  return more(mode);
+}
+
+/**
  * The product's git mirror (config mirror): a plain folder, not a link, of this user's, that no one else can write
  * (setup makes it orchestrate's, 0755). Throws saying why. Checked at start and again on each use, so a mirror that goes
  * away later is told, never read as "no mirror". The one check: review-ports.mjs filesOf uses it too.
  */
 export function mirrorProblem(mirror, uid, { lstat = lstatSync, shape = checkMirror } = {}) {
-  let st;
-  try { st = lstat(mirror); } catch (e) { return `the product's mirror (mirror) ${mirror} can't be read (${e?.code ?? e})`; }
-  if (st.isSymbolicLink() || !st.isDirectory()) return `the product's mirror (mirror) ${mirror} is not a plain folder`;
-  if (st.uid !== uid) return `the product's mirror (mirror) ${mirror} belongs to uid ${st.uid}, not to this job's uid ${uid}`;
-  if (st.mode & 0o022) return `the product's mirror (mirror) ${mirror} can be written by others (mode ${(st.mode & 0o777).toString(8)})`;
+  const own = ownFolderProblem(mirror, uid, "the product's mirror (mirror)", lstat);
+  if (own) return own;
   // safe-git's own mirror check, as worker-copy and push run it: its config is the template, and nothing in it (grafts,
   // shallow, commit-graph, alternates, hooks) changes what a commit's parents or files are read as (r1 m2, L763).
   const m = shape(mirror);
@@ -137,6 +149,54 @@ function realFolder(path, what) {
   try { s = lstatSync(path); } catch (e) { throw new Error(`${what} ${path} can't be read (${e?.code ?? e})`); }
   if (s.isSymbolicLink() || !s.isDirectory()) throw new Error(`${what} ${path} is not a plain folder`);
   return path;
+}
+
+/**
+ * Why `root` can't hold the Lead's copy of main (lead-main.mjs), or null: a plain folder of this job's (`uid`), that
+ * others can read and enter but not write, so the owner's user reads the copy and changes none of it.
+ */
+export function leadMainRootProblem(root, uid, { lstat = lstatSync } = {}) {
+  const what = "the Lead's copy folder (leadMainRoot)";
+  return ownFolderProblem(root, uid, what, lstat, (mode) => ((mode & 0o005) === 0o005 ? null : `${what} ${root} can't be read by the owner (mode ${mode.toString(8)})`));
+}
+
+export const UNTAR_MS = 120_000;
+/** Unpacks a tar archive into `dir` with the system tar, not as the archive's owner or modes (-o); lead-main's `untar`. */
+export function untarInto(tar, dir, { bin = '/usr/bin/tar', timeoutMs = UNTAR_MS } = {}) {
+  return new Promise((done, fail) => {
+    let err = '';
+    const child = spawn(bin, ['-x', '-o', '-f', '-', '-C', dir], { env: { PATH: '/usr/bin:/bin' }, stdio: ['pipe', 'ignore', 'pipe'] });
+    const timer = setTimeout(() => { child.kill('SIGKILL'); fail(new Error(`tar did not end within ${timeoutMs} ms`)); }, timeoutMs);
+    child.stderr.on('data', (d) => { if (err.length < 2000) err += d; });
+    child.on('error', (e) => { clearTimeout(timer); fail(e); });
+    child.on('close', (code) => { clearTimeout(timer); if (code === 0) done(); else fail(new Error(`tar failed (${code}): ${err.trim().slice(0, 300)}`)); });
+    child.stdin.on('error', () => {});
+    child.stdin.end(tar);
+  });
+}
+
+/**
+ * The lead-main export's port (Track A step 8 G1, L1370; lead-main.mjs): `exportMain()` makes <leadMainRoot>/<product>
+ * main's files from this product's mirror. Its git runs only rev-parse and archive, only on the mirror, each time after
+ * the mirror's own check; the root is checked on each call too (a plain folder, this job's, others read but don't write).
+ * A config with no leadMainRoot (one written before it was a key) makes the step fail with NOT_CONFIGURED, told daily.
+ */
+export function leadMainPorts({ config: c, selfUid }, { run = safeGit, untar = untarInto } = {}) {
+  const git = (args) => {
+    if (!LEAD_MAIN_GIT.includes(args?.[0])) return Promise.resolve({ code: -1, stdout: Buffer.alloc(0), stderr: `lead-main git: refused: only ${LEAD_MAIN_GIT.join(' and ')} run on the mirror` });
+    const bad = mirrorProblem(c.mirror, selfUid);
+    if (bad) return Promise.resolve({ code: -1, stdout: Buffer.alloc(0), stderr: `lead-main git: refused: ${bad}` });
+    return run(args, { gitDir: c.mirror, purpose: 'lead-main-export', timeoutMs: LEAD_MAIN_GIT_MS });
+  };
+  return {
+    product: c.product,
+    exportMain: async () => {
+      if (c.leadMainRoot === undefined) throw new Error(NOT_CONFIGURED);
+      const bad = leadMainRootProblem(c.leadMainRoot, selfUid);
+      if (bad) throw new Error(bad);
+      return exportMain({ root: c.leadMainRoot, product: c.product, git, untar });
+    },
+  };
 }
 
 /** The cleanup group's wired ports for one product. `run` is safe-git's runner (a port for a test). */
@@ -539,6 +599,7 @@ export function workerPorts(ctx, io = {}) {
       ...(c.hostLockStamp !== undefined ? { stamp: c.hostLockStamp } : {}), ...(ctx.now ? { now: ctx.now } : {}) }),
     reviewEnded: reviewEndedPort({ root: c.reviewRoot, uid: c.reviewUid }),
     product: c.product,
+    leadMain: leadMainPorts(ctx),
     ...runnerSyncPorts({ config: c, rec: ctx.rec, ...(ctx.now ? { now: ctx.now } : {}) }, io),
     ...runnerAsyncPorts({ config: c, ...(ctx.now ? { now: ctx.now } : {}) }, io),
   };

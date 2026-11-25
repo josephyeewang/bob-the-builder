@@ -284,7 +284,7 @@ async function oneTick(w, { sessions = [], proposals = { products: [], ownerUid:
     stopGroup: async (x) => { stops.push(x); return { ok: true }; }, saveWork: async () => ({ ok: true }), hostLock: () => null, pauseLead: async () => {},
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => false, requestReview: () => ({ ok: true, requestId: 'Q-1' }), filesOf: filesOfCommits,
     sendFrontDoor: async () => ({ outcome: 'sent' }), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }), frontDoorAlive: () => null, frontDoorHandoff: () => null,
-    cleanup: { copiesRoot: dir, sealRoot: dir, mirrorFor: () => null }, approvals: () => [],
+    leadMain: { product: 'p1', exportMain: async () => ({ head: 'c'.repeat(40), changed: false }) }, cleanup: { copiesRoot: dir, sealRoot: dir, mirrorFor: () => null }, approvals: () => [],
   };
   w.env.clock.t = now;
   const r = await tick({ rec: w.rec, rules: w.rules, now, ports });

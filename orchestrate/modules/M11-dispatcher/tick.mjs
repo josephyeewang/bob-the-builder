@@ -18,6 +18,9 @@
 //                  once that session id is stopped (L72). Its own step (L1340): inside the outage step, a port
 //                  that failed there (board, healthy) held a claimed card forever. Not while an outage is open.
 //   2. intake    — outbox files, so the record is current before anything is decided on it (R-0b-56, 58).
+//                  A one-shot Lead's launch file is recorded only for a head the lead-main step noted (exportedHead, L1370).
+//      lead-main — the Lead's read-only copy of main, from the mirror: swapped in whole when main moved, its head noted
+//                  in the Record (lead-main.mjs, L1370). A config with no leadMainRoot fails it, told daily.
 //      proposals — the owner's proposals folders (proposals-intake.mjs), with the research handler only (L615 grant 3,
 //                  R-0b-162): a research report goes onto its research_copy card. Claim and heartbeat files have no
 //                  handler yet, so they wait, told once; a proposal is refused, since no docs check is passed in (the
@@ -54,6 +57,7 @@ import { KEYS, minutes, need, MissingKey, missingFor } from './keys.mjs';
 import { sensorsFact } from './sensor-facts.mjs';
 import { outageStep, OUTAGE_FACT } from './outage.mjs';
 import { intakePass } from './outbox-intake.mjs';
+import { exportedHead, leadMainStep } from './lead-main.mjs';
 import { leadRestartStep, leadInFlight, handoffVet, tellLeadSkipped, HANDOFF_NAME } from './lead-restart.mjs';
 import { adoptLate, lapseStop, dispatcherPass, stopPass, undoStarts, rulesMissingAlert, holdAlert, refusalReport, readHostLock, hostCopyReason, hostCopyAlertText, HOST_COPY_CAUSE, HELD_BANDS, HOLD_REPEAT_MS, TOLD_BANDS, DEAD_SESSION_WAIT, deadReruns, deadCapText } from './pass.mjs';
 import { startGate } from './gate.mjs';
@@ -75,7 +79,7 @@ import { proposalsPass } from './proposals-intake.mjs';
 import { isRefusing } from '../../wiring/not-wired.mjs';
 import { researchHandler, researchPass } from './research-intake.mjs';
 
-export const STEPS = Object.freeze(['stops', 'undo', 'undo-starts', 'outage', 'adopt', 'lapse', 'intake', 'proposals', 'research', 'leads', 'approvals', 'plan-go', 'pass', 'limits', 'merges', 'waits', 'lost-cards', 'stuck-cards', 'phone', 'cleanup']);
+export const STEPS = Object.freeze(['stops', 'undo', 'undo-starts', 'outage', 'adopt', 'lapse', 'intake', 'lead-main', 'proposals', 'research', 'leads', 'approvals', 'plan-go', 'pass', 'limits', 'merges', 'waits', 'lost-cards', 'stuck-cards', 'phone', 'cleanup']);
 // One product's Approvals pass gets this long (or the port `approvalsProductMs`); a hung one counts as failed and the
 // next product still runs (L221, lane 2's ask 2). The step's own deadline still bounds them all.
 export const APPROVALS_PRODUCT_MS = 30_000;
@@ -412,7 +416,10 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
   const startReadonly = gatedReadonly((x) => p.startReadonly(x));
   let intaken = [];
   await run('intake', async () => (intaken = await intakePass({ rec, now, sessions: p.outboxSessions(), wait: p.wait, alert, note: (text, id = 'intake-note') => note(rec, id, text, { now }),
-    startReadonly, replyToLead: p.replyToLead, vet: handoffVet(rules), reviewEnded: p.reviewEnded, failureLog: failed('intake'), ...(p.intakeFs ?? {}) })));
+    startReadonly, replyToLead: p.replyToLead, vet: handoffVet(rules), reviewEnded: p.reviewEnded, failureLog: failed('intake'),
+    exportedHead: (q) => exportedHead(rec, q), ...(p.intakeFs ?? {}) })));
+  // The Lead's read-only copy of main, swapped in whole when main moved, and its head noted (lead-main.mjs, L1370).
+  await run('lead-main', () => leadMainStep({ rec, now, leadMain: p.leadMain }));
   // Each its own step: a proposals folder that can't be read never keeps research cards from being settled. Both run
   // during an outage: neither starts a session.
   await run('proposals', async () => {
