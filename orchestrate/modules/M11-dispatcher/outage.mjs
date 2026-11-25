@@ -12,7 +12,8 @@
 // usage readable, or on Joe's "resume". Outside an outage, a dead session's card is restarted only
 // when `rerun_safe === true`; any other card becomes an ask (waiting on Joe), never a restart.
 // The Record has no rerun_safe field and no writer for one yet (L72 census, a (b) for the lead): until it does,
-// every dead session's card waits on Joe, the safe side. This file is the one outage rule (L72 (ii)): M9's
+// every running card whose session died waits on Joe, the safe side (L1367: a claimed card's dead session is left to
+// the lapse, claims.unlaunched_min). This file is the one outage rule (L72 (ii)): M9's
 // breakIfDead only breaks the claim it is given.
 // Counted once (L759, from lane 4's #324 r3 m3): a dead session the Record would not take off the board (its ask or
 // its claim's break refused) stays on it, dead, every pass. The deaths already counted are kept in the outage fact

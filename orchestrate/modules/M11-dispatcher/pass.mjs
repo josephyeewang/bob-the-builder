@@ -104,16 +104,21 @@ export const UNKNOWN_FACT = 'unknown-usage-alert';
 export const RESET_FACT = 'reset-usage-alert';
 export const RULES_MISSING_FACT = 'rules-missing-alert';
 // L1365: a card whose session ended without finishing waits with this `what` (tick.mjs actOnDead writes it, as
-// `dead_session: <why>`), and the waits step starts it again while its re-runs in DEAD_RERUN_WINDOW_MS are under the
+// `dead_session: <why>`), and the waits step puts it back in the queue while its re-runs in DEAD_RERUN_WINDOW_MS are under the
 // product's claims.dead_reruns_per_day. The re-runs are counted on DEAD_RERUN_FACT(card): { times: [iso, ...] }, the
 // times of those within the window, written before the card moves (a move that then fails is over-counted, never under).
 export const DEAD_SESSION_WAIT = 'dead_session';
 export const isDeadSessionWait = (what) => typeof what === 'string' && what.startsWith(`${DEAD_SESSION_WAIT}:`);
 export const DEAD_RERUN_FACT = (card) => `dead-rerun-${card}`;
+// L1367 audit m1: a refused move back to ready is told on its own cause (fact hold-dead-rerun-move-<card>), once a day,
+// so a count line told earlier the same day (cause dead-rerun-<card>) never hides it.
+export const DEAD_RERUN_MOVE_CAUSE = (card) => `dead-rerun-move-${card}`;
 export const DEAD_RERUN_WINDOW_MS = 24 * 60 * 60_000;
-export const deadRerunText = (card, n, cap) => `card ${card}: its session ended without finishing; started again (${n} of ${cap} in the last 24 hours)`;
+// L1367 item 2: the card is put back in the queue, not started: the start loop starts it, when the band and caps let it.
+export const deadRerunText = (card, n, cap) => `card ${card}: its session ended without finishing; put back in the queue (${n} of ${cap} in the last 24 hours)`;
 /** The tail of actOnDead's tell for a card at the cap (L1365 m4): it waits on Joe until the oldest re-run is 24 h old. */
-export const deadCapText = (n, oldest) => `; it was started again ${n} times in the last 24 hours, the most claims.dead_reruns_per_day allows, so it is not started again by itself ${oldest === null ? 'while its re-run times cannot be read' : `before ${new Date(oldest + DEAD_RERUN_WINDOW_MS).toISOString()}`}`;
+// `oldest` null: no kept time is a readable past one (deadReruns: one ahead of the clock or unreadable counts, undated).
+export const deadCapText = (n, oldest) => `; it was put back in the queue ${n} times in the last 24 hours, the most claims.dead_reruns_per_day allows, so it is not put back by itself ${oldest === null ? 'while its re-run times are in the future or cannot be read' : `before ${new Date(oldest + DEAD_RERUN_WINDOW_MS).toISOString()}`}`;
 /**
  * The re-runs that count against the cap (L1365 M1). It fails closed: a time that can't be read, or lies ahead of now
  * past the skew allowed (pastTime, I4: a clock stepped back), counts as inside the window and is kept, and a fact
@@ -234,7 +239,8 @@ export function holdAlert({ rec, cause, text, alert, now, every = HOLD_REPEAT_MS
   const f = factDoc(rec, HOLD_FACT(cause))?.doc;
   // Once per cause per day (L38), or per `every` (a paused product, weekly; L299): a changing detail in the text
   // does not make it a new cause. null, not false: already told today is not a refused alert (L130 m12). A told_at
-  // that can't be read, or more than 60 s ahead of now, is not told (shared dueToTell; #157 audit MAT-1).
+  // that can't be read, or more than 60 s ahead of now, counts as not told, so it is told again (shared dueToTell;
+  // #157 audit MAT-1).
   if (!dueToTell(f, now, every)) return null;
   // Marked told only once a copy is delivered (audit 0b-6 r5 MAT-2; L47).
   return tellThen(alert, text, { fact: HOLD_FACT(cause), fields: { text, told_at: iso(now) }, kind: 'hold_alert' });
@@ -749,16 +755,20 @@ export async function dispatcherPass({ rec, rules, now, clock = () => now, accou
       else askJoe(id, { what: 'limit_hit: the limit reset; Tier-1 work does not resume by itself', now, kind: 'limit_reset', alert,
         text: `card ${id}: the usage limit it waited on reset, but Tier-1 work does not resume by itself; it waits on you` });
     } else if (isDeadSessionWait(what)) {
-      // L1365: the bounded re-run. Every card not started again here (past the cap, no key, a count that can't be read
-      // or written) stays waiting on Joe; the missing key is told with the others, the rest by holdAlert, once a day.
+      // L1365: the bounded re-run. Every card not put back in the queue here (past the cap, no key, a count that can't be
+      // read or written, a move refused) stays waiting on Joe; the missing key is told with the others, the rest by
+      // tellDead (holdAlert), once a day. tellDead is the one teller of a refused move back to ready (L1367 item 3):
+      // resume_dead_session is not a refused-writes kind, so it is not told twice.
       // Open: L1365 — Joe has no command or answer to retry or cancel a card waiting on him; past the cap it waits.
       // Open: L1365 m3 — a wait whose return_to is not ready is left on Joe. The Record's release (writer.mjs) frees
-      // only a card still claimed, and claimed -> waiting is not a move the Record allows, so actOnDead's ask for a
-      // claimed card is itself refused and no such wait is made today.
+      // only a card still claimed, and actOnDead puts only a running card on Joe (L1367 item 1: a claimed card's dead
+      // session is the lapse's), so no such wait is made today.
       if (doc.wait?.return_to !== 'ready') continue;
-      const tellDead = (line) => {
+      // A refused move has its own cause (L1367 audit m1): it follows a counted re-run, so at the cap the next passes
+      // `continue` and it would never be told if a count line had used the card's cause earlier that day.
+      const tellDead = (line, cause = DEAD_RERUN_FACT(id)) => {
         failing(line);
-        try { holdAlert({ rec, cause: DEAD_RERUN_FACT(id), text: `${line}; it waits on you`, alert, now }); } catch (e) { failing(`card ${id}: ${e?.message ?? e}`); }
+        try { holdAlert({ rec, cause, text: `${line}; it waits on you`, alert, now }); } catch (e) { failing(`card ${id}: ${e?.message ?? e}`); }
       };
       let cap;
       try { cap = need(rules, KEYS.claimsDeadRerunsPerDay, { product: doc.product }); } catch (e) {
@@ -767,16 +777,16 @@ export async function dispatcherPass({ rec, rules, now, clock = () => now, accou
         continue;
       }
       const used = deadReruns(rec, id, now);
-      if (used.corrupt) { tellDead(`card ${id}: its dead-session re-runs can't be read (${used.corrupt}), so it is not started again`); continue; }
+      if (used.corrupt) { tellDead(`card ${id}: its dead-session re-runs can't be read (${used.corrupt}), so it is not put back in the queue`); continue; }
       if (used.times.length >= cap) continue;
       const counted = putFact(rec, DEAD_RERUN_FACT(id), { ...(used.doc ?? {}), times: [...used.times, iso(now)] }, 'dead_rerun_count', used.doc);
-      if (!counted?.ok) { tellDead(`card ${id}: its dead-session re-run could not be counted (${counted?.reason ?? 'no answer'}), so it is not started again`); continue; }
+      if (!counted?.ok) { tellDead(`card ${id}: its dead-session re-run could not be counted (${counted?.reason ?? 'no answer'}), so it is not put back in the queue`); continue; }
       const back = move(rec, 'card', id, { state: 'ready' }, { kind: 'resume_dead_session' });
       if (back.ok) {
         out.resumed.push(id);
         // A notice only: the card is back in the queue whatever the answer; a lost one is in the diary.
         if (alert(deadRerunText(id, used.times.length + 1, cap)) === false) failing(`card ${id}: its re-run notice could not be queued`);
-      } else tellDead(`card ${id}: its session ended and a re-run was counted, but it could not be put back in the queue (${back.reason ?? 'no answer'})`);
+      } else tellDead(`card ${id}: its session ended and a re-run was counted, but it could not be put back in the queue (${back.reason ?? 'no answer'})`, DEAD_RERUN_MOVE_CAUSE(id));
     } else if (what === PAUSED_WAIT_WHAT) {
       // A card parked for a paused product goes back to ready once the product is no longer paused.
       if (rec.read('product', doc.product)?.doc?.state !== 'paused' && move(rec, 'card', id, { state: 'ready' }, { kind: 'resume_paused' }).ok) out.resumed.push(id);

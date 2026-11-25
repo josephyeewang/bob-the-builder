@@ -313,6 +313,50 @@ test('L1340: a failed outage step does not hold a timed-out claim; the lapse sti
   }
 });
 
+// L1367 item 1: actOnDead acts on running cards only. A claimed card (its launch never answered, so no process) whose
+// session is dead on the board is not put on Joe (claimed -> waiting is not a move the Record allows, so the ask was
+// refused and told as "a card could not be put on you"). The whole tick on the real Record: no ask, no such alert, and
+// the lapse frees it at claims.unlaunched_min.
+test('L1367 item 1: a claimed card\'s dead session is left to the lapse: no ask, no "could not be put on you", and the lapse frees it', async () => {
+  const w = world();
+  readyCard(w.env, 'C-1');
+  w.refuseLaunch(() => ({ ok: false, reason: `it did not answer within ${LAUNCH_DEADLINE_MS} ms` }));
+  await w.pass();
+  const sid = w.rec.read('card', 'C-1').doc.claim.session_id;
+  assert.equal(w.rec.read('card', 'C-1').doc.state, 'claimed');
+  // actOnDead alone: a claimed card is skipped, with no alert.
+  const alert = fakeAlert();
+  assert.deepEqual(actOnDead({ rec: w.rec, rules: w.rules, now: w.env.clock.t, restart: [sid], asks: ['C-1'], cards: { [sid]: 'C-1' }, alert }), []);
+  assert.deepEqual(alert.texts, []);
+  // The whole tick: the session is dead on the board (gone, quiet past dead_quiet_min), first before the lapse is due
+  // and then after it.
+  const board = () => [{ id: sid, card: 'C-1', alive: false, ended: true, lastWriteAt: w.env.clock.t - 30 * MIN }];
+  const tickAt = async (stops) => {
+    const told = fakeAlert();
+    const ports = { product: PRODUCT, alert: told, board, stopSession: (id) => { stops.push(id); return true; } };
+    const r = await tick({ rec: w.rec, rules: w.rules, now: w.env.clock.t, ports });
+    return { r, told };
+  };
+  w.env.clock.t += 2 * MIN;   // within claims.unlaunched_min (M9's default, 5)
+  const stops = [];
+  let { r, told } = await tickAt(stops);
+  assert.equal(r.steps.outage.ok, true, r.steps.outage.error);
+  assert.deepEqual(r.steps.outage.result.acted, [], 'not put on Joe');
+  assert.equal(w.rec.read('card', 'C-1').doc.state, 'claimed', 'before claims.unlaunched_min the claim holds');
+  assert.deepEqual(stops, []);
+  assert.deepEqual(told.texts.filter((t) => /could not be put on you|C-1: its session stopped/.test(t)), [], told.texts.join(' | '));
+  w.env.clock.t += 10 * MIN;   // past it
+  ({ r, told } = await tickAt(stops));
+  assert.deepEqual(r.steps.outage.result.acted, []);
+  assert.equal(r.steps.lapse.ok, true, r.steps.lapse.error);
+  assert.deepEqual(r.steps.lapse.result.lapsed.map((x) => [x.card, x.to]), [['C-1', 'ready']]);
+  assert.deepEqual(stops, [sid], 'the lapse stops the session id first');
+  const c = w.rec.read('card', 'C-1').doc;
+  assert.deepEqual([c.state, c.claim, c.wait], ['ready', undefined, undefined]);
+  assert.equal(diaryKinds(w.rec, 'C-1').includes('dead_ask'), false, 'no ask was ever written');
+  assert.deepEqual(told.texts.filter((t) => /could not be put on you|C-1: its session stopped/.test(t)), [], told.texts.join(' | '));
+});
+
 test('L72 (5): a double claim for one card is refused', async () => {
   const w = world();
   readyCard(w.env, 'C-1');
