@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { PORT_DEADLINE_MS, SAVE_DEADLINE_MS } from '../modules/M11-dispatcher/pass.mjs';
+import { LAUNCH_DEADLINE_MS, PORT_DEADLINE_MS, SAVE_DEADLINE_MS } from '../modules/M11-dispatcher/pass.mjs';
 import { atSafePoint } from '../modules/M11-dispatcher/transcript.mjs';
 import { notWiredText } from './not-wired.mjs';
 import { CLEANUP_PORTS, NOT_WIRED_CLEANUP, NOT_WIRED_WORKER } from './worker-ports.mjs';
@@ -11,9 +11,9 @@ import { LAUNCH_DOC_FIELDS, OWNER_CLEANUP_PORTS, SESSION_RECORD_PUSH_FIELDS, OWN
 const code = (f) => readFileSync(new URL(`../modules/M11-dispatcher/${f}`, import.meta.url), 'utf8');
 
 test('L741, L925: the owner-side ports are the worker ports the runner answers; the sync ones are wired (B), the asks too (C, L963)', () => {
-  assert.deepEqual(Object.keys(OWNER_PORTS).sort(), ['board', 'launch', 'outboxSessions', 'pauseLead', 'probe', 'saveWork', 'sessions', 'stopGroup', 'stopSession']);
+  assert.deepEqual(Object.keys(OWNER_PORTS).sort(), ['board', 'launch', 'launchOutcome', 'outboxSessions', 'pauseLead', 'probe', 'saveWork', 'sessions', 'stopGroup', 'stopSession']);
   const wired = Object.keys(OWNER_PORTS).filter((k) => OWNER_PORTS[k].sync).sort();
-  assert.deepEqual(wired, ['board', 'outboxSessions', 'probe', 'sessions', 'stopSession']);
+  assert.deepEqual(wired, ['board', 'launchOutcome', 'outboxSessions', 'probe', 'sessions', 'stopSession']);
   assert.deepEqual(NOT_WIRED_WORKER, [], 'every owner port is wired, the asks through owner-asks.mjs (worker-ports.mjs runnerAsyncPorts)');
   // What stays orchestrate-side (L737's chunk for lane 3) is not here.
   for (const k of ['hostLock', 'reviewEnded']) assert.equal(OWNER_PORTS[k], undefined, k);
@@ -35,11 +35,12 @@ test('L741: every port says what goes in, what comes out, and how it fails; sync
     assert.equal(typeof s.in, 'string', k); assert.equal(typeof s.out, 'string', k);
     assert.equal(typeof (s.sync ? s.notKnown : s.fails), 'string', k);
     if (s.sync) assert.equal(s.deadlineMs, null, k);
-    if (!s.sync) assert.ok([PORT_DEADLINE_MS, SAVE_DEADLINE_MS].includes(s.deadlineMs), k);
+    if (!s.sync) assert.ok([LAUNCH_DEADLINE_MS, PORT_DEADLINE_MS, SAVE_DEADLINE_MS].includes(s.deadlineMs), k);
   }
   assert.equal(OWNER_PORTS.saveWork.deadlineMs, SAVE_DEADLINE_MS);
   assert.equal(OWNER_CLEANUP_PORTS.saveWork.deadlineMs, SAVE_DEADLINE_MS);
-  for (const k of ['launch', 'stopGroup', 'pauseLead']) assert.equal(OWNER_PORTS[k].deadlineMs, PORT_DEADLINE_MS, k);
+  for (const k of ['stopGroup', 'pauseLead']) assert.equal(OWNER_PORTS[k].deadlineMs, PORT_DEADLINE_MS, k);
+  assert.equal(OWNER_PORTS.launch.deadlineMs, LAUNCH_DEADLINE_MS, 'the launch has its own limit (L1361)');
   // The ports the tick calls without await must be sync (tick.mjs: p.sessions(), p.board(), stopSession inside lapseClaims).
   for (const k of ['sessions', 'probe', 'board', 'outboxSessions', 'stopSession']) assert.equal(OWNER_PORTS[k].sync, true, k);
   // lapseClaims gives the card back once stopSession answers true, so true must never mean "a launch request not seen yet"
@@ -55,14 +56,20 @@ test('L741: the launch answer names every field the pass reads from it (pass.mjs
   assert.ok(start > 0);
   const end = pass.indexOf('\n}\n', start); assert.ok(end > start);   // the starts loop's own function, not the rest of the file
   const body = pass.slice(start, end);
-  assert.deepEqual([...body.matchAll(/\bl\b(?!\??\.\w)/g)].map((m) => m.index), [body.search(/\bl = /)], 'the launch answer is read only as l.<field>, never handed on or destructured');
-  const read = new Set([...body.matchAll(/\bl\??\.(\w+)/g)].map((m) => m[1]));
+  // L1361: the loop hands the answer to settleLaunch alone (the one definition of what follows a launch, which the adopt
+  // step shares); everything else reads it only as l.<field>.
+  assert.deepEqual([...body.matchAll(/\bl\b(?!\??\.\w)/g)].map((m) => m.index), [body.search(/\bl = /), body.search(/\bl, id, sessionId/)], 'the launch answer is read only as l.<field>, or handed to settleLaunch');
+  const sStart = pass.indexOf('async function settleLaunch(');
+  assert.ok(sStart > 0);
+  const settle = pass.slice(sStart, pass.indexOf('\n}\n', sStart));
+  assert.deepEqual([...settle.matchAll(/\bl\b(?!\??\.\w)/g)].length, 1, 'settleLaunch reads the answer only as l.<field> (its one parameter aside)');
+  const read = new Set([...`${body}\n${settle}`.matchAll(/\bl\??\.(\w+)/g)].map((m) => m[1]));
   const said = new Set(OWNER_PORTS.launch.out.match(/\{([^}]*)\}/)[1].split(',').map((x) => x.trim().split(':')[0].trim()).concat(['reason', 'timedOut']));
   const unsaid = [...read].filter((f) => !said.has(f));
   assert.deepEqual(unsaid, [], `pass.mjs reads launch fields the interface does not name: ${unsaid}`);
   // A late launch is known only by guarded's own answer, so the port must never answer its own time-out (M2 of the self-review).
-  assert.match(body, /l\?\.reason === `it did not answer within \$\{portDeadlineMs\} ms`|l\?\.timedOut === true/);
-  assert.match(OWNER_PORTS.launch.fails, /the tick's limit answers and the card stays claimed/);
+  assert.match(body, /l\?\.reason === `it did not answer within \$\{launchDeadlineMs\} ms`|l\?\.timedOut === true/);
+  assert.match(OWNER_PORTS.launch.fails, /the tick's launch limit answers and the card stays claimed/);
   // The call itself: the inputs the interface names.
   // L976: an undo's launch adds the reversed commit, and only an undo's.
   assert.match(pass, /launch\(\{ card: id, kind, product, sessionId, \.\.\.\(kind === 'undo' \? \{ undoCommit: exact\.commit \} : \{\}\) \}\)/);

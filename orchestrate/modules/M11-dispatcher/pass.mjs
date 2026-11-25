@@ -28,7 +28,7 @@ import { atSafePoint } from './transcript.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { randomUUID, createHash } from 'node:crypto';
 import { hostname } from 'node:os';
-import { machineId } from '../M9-record/lock.mjs';
+import { machineId, onThisMachine, START_ISO } from '../M9-record/lock.mjs';
 import { move, waitOn, note } from './moves.mjs';
 import { waitOnJoe } from './joe-waits.mjs';
 import { sensorsFact } from './sensor-facts.mjs';
@@ -116,6 +116,12 @@ const iso = (ms) => new Date(ms).toISOString();
 // STEP_DEADLINE_MS (tick.mjs).
 export const PORT_DEADLINE_MS = 30_000;
 export const SAVE_DEADLINE_MS = 75_000;
+// L1361 (lead call): a launch gets its own, longer limit. The worker runner's start checks ran ~35 s on the Mini, past
+// PORT_DEADLINE_MS, so every start answered late. Only the launch call takes it; stops, saves and the rest keep theirs.
+// A launch that outruns even this is still taken over by the adopt step (adoptLate), the backstop.
+export const LAUNCH_DEADLINE_MS = 45_000;
+// What a launch leaves the step after it (L1361 audit m4): the settle steps and the rest of the pass.
+export const LAUNCH_MARGIN_MS = 10_000;
 // `f` gets an AbortSignal that is aborted when guarded gives up on it (L822, #372 m2), so a port that honours it (a
 // stop, say) does nothing more once its answer no longer counts. A port that ignores it is unchanged.
 export async function guarded(f, ms = PORT_DEADLINE_MS) {
@@ -581,7 +587,7 @@ export const HELD_BANDS = Object.freeze({ band: 'unknown', own_building: 'unknow
  * `stops` is the tick's own stopPass result; null when that step failed (then nothing new starts but
  * undo cards); left out, the pass runs stopPass itself.
  */
-export async function dispatcherPass({ rec, rules, now, clock = () => now, account, product, sessions, probe, launch, stopGroup, stopReview, outboxRoot, saveWork, hostLock = () => null, pauseLead = () => {}, filesOf, alert, failureLog = () => {}, startsOff = null, tellMissing = true, stops, portDeadlineMs = PORT_DEADLINE_MS, saveDeadlineMs = SAVE_DEADLINE_MS, host = hostname() }) {
+export async function dispatcherPass({ rec, rules, now, clock = () => now, account, product, sessions, probe, launch, stopGroup, stopReview, outboxRoot, saveWork, hostLock = () => null, pauseLead = () => {}, filesOf, alert, failureLog = () => {}, startsOff = null, tellMissing = true, stops, portDeadlineMs = PORT_DEADLINE_MS, launchDeadlineMs = LAUNCH_DEADLINE_MS, launchUntil = Infinity, saveDeadlineMs = SAVE_DEADLINE_MS, host = hostname() }) {
   const st = stops === undefined ? await stopPass({ rec, rules, now, clock, account, product, sessions, probe, stopGroup, stopReview, saveWork, alert, portDeadlineMs, saveDeadlineMs }) : stops;
   const out = { started: [], refused: [], stopping: st?.stopping ?? [], stopped: st?.stopped ?? [], resumed: [], notes: [...(st?.notes ?? [])] };
   const report = refusalReport({ rec, alert, now, lines: out.notes, failureLog });
@@ -732,7 +738,7 @@ export async function dispatcherPass({ rec, rules, now, clock = () => now, accou
   else {
     if (hostCopy !== null) out.notes.push(`nothing starts, undo cards too: ${hostCopyReason(hostCopy)}`);
     else if (startsOff) out.notes.push(`nothing but undo cards starts: ${startsOff}`);
-    await starts({ rec, rules, now, b, running, launch, stopGroup, outboxRoot, out, alert, report, failureLog, onlyUndo: !!startsOff, hostCopy, missing, filesOf, portDeadlineMs, host });
+    await starts({ rec, rules, now, b, running, launch, stopGroup, outboxRoot, out, alert, report, failureLog, onlyUndo: !!startsOff, hostCopy, missing, filesOf, portDeadlineMs, launchDeadlineMs, launchUntil, host });
   }
   // The tick tells Joe once for all its steps (`tellMissing` false); run alone, the pass tells him itself.
   out.missing = missing;
@@ -767,14 +773,14 @@ export async function dispatcherPass({ rec, rules, now, clock = () => now, accou
 // main pass cannot keep an undo from starting. The gate still checks each one (L40).
 // Under the owner's copier, a copy that can't be trusted holds them too (L1045): this step runs before the pass, so it
 // reads host.lock itself. Only the HOST_COPY_FAIL mark holds; a plain throw (no copier) changes nothing, as before.
-export async function undoStarts({ rec, rules, now, bands = HELD_BANDS, running = [], launch, stopGroup, outboxRoot, filesOf, alert, failureLog = () => {}, portDeadlineMs = PORT_DEADLINE_MS, host = hostname(), hostLock = () => null }) {
+export async function undoStarts({ rec, rules, now, bands = HELD_BANDS, running = [], launch, stopGroup, outboxRoot, filesOf, alert, failureLog = () => {}, portDeadlineMs = PORT_DEADLINE_MS, launchDeadlineMs = LAUNCH_DEADLINE_MS, launchUntil = Infinity, host = hostname(), hostLock = () => null }) {
   const out = { started: [], refused: [], notes: [] };
   const missing = [];
   if (factDoc(rec, OUTAGE_FACT)?.doc?.state === 'open') { out.notes.push('outage: nothing starts'); return { ...out, missing, running }; }
   const live = [...running];
   const hostCopy = readHostLock(hostLock).copyFail;
   if (hostCopy !== null) out.notes.push(`no undo card starts: ${hostCopyReason(hostCopy)}`);
-  await starts({ rec, rules, now, b: bands, running: live, launch, stopGroup, outboxRoot, out, alert, report: refusalReport({ rec, alert, now, lines: out.notes, failureLog }), failureLog, onlyUndo: true, hostCopy, missing, filesOf, portDeadlineMs, host });
+  await starts({ rec, rules, now, b: bands, running: live, launch, stopGroup, outboxRoot, out, alert, report: refusalReport({ rec, alert, now, lines: out.notes, failureLog }), failureLog, onlyUndo: true, hostCopy, missing, filesOf, portDeadlineMs, launchDeadlineMs, launchUntil, host });
   return { ...out, missing, running: live };
 }
 
@@ -897,7 +903,215 @@ export const causeOf = (reason) => FIXED_CAUSES.find(([, re]) => re.test(reason)
 /** Card kinds the start loop never hands to a session. */
 export const NEVER_STARTED = Object.freeze(['lead_daily_card', 'research_copy']);
 
-async function starts({ rec, rules, now, b, running, launch, stopGroup, outboxRoot, out, alert, report, failureLog, onlyUndo = false, hostCopy = null, missing = [], filesOf, portDeadlineMs = PORT_DEADLINE_MS, host = hostname() }) {
+// The late hold of a card whose launch answered after the tick's limit (L1361): told by the start loop, cleared once the
+// launch is settled, on time or taken over later.
+const LAUNCH_LATE_CAUSE = (card) => `launch-late-${card}`;
+
+/**
+ * Everything after a launch answered (L1361: one definition, so a start taken over late runs exactly the steps of an
+ * on-time one): a refusal gives the claim back; an answer naming another session holds; a wrong outbox is stopped and
+ * given back; otherwise claimed -> running with the process, the launch record and the session record, and the late
+ * hold cleared. `l` is the launch port's answer (owner-asks.mjs). -> { started: true } | { refused: reason } | { held }.
+ */
+async function settleLaunch({ rec, now, l, id, sessionId, kind, product, outboxRoot, stopGroup, portDeadlineMs, alert, report, failureLog, out, running, host, adopted = false }) {
+  const clearLate = () => clearHold(rec, HOLD_FACT(LAUNCH_LATE_CAUSE(id)), now, report);
+  // A refused launch started nothing: the claim's holder gives it back (M9 release), and the refusal is in the diary.
+  if (!l?.ok) {
+    const back = rec.release({ card: id, session_id: sessionId, reason: `launcher: ${l?.reason ?? 'no answer'}` });
+    if (!back?.ok) holdAlert({ rec, cause: `release-${id}`, text: `card ${id}: the launcher refused (${l?.reason ?? 'no answer'}) and its claim could not be given back (${back?.reason ?? 'no answer'}); it lapses at claims.unlaunched_min`, alert, now });
+    clearLate();
+    return { refused: l?.reason ?? 'no answer' };
+  }
+  // The launcher must start the session it was given: a different id is a session the claim doesn't name.
+  if (l.sessionId !== undefined && l.sessionId !== sessionId) {
+    out.refused.push([id, 'launcher: it started a session the claim does not name']);
+    holdAlert({ rec, cause: `launch-other-${id}`, text: `card ${id}: the launcher answered with session ${l.sessionId}, not the claimed ${sessionId}; the card stays claimed`, alert, now });
+    return { held: 'another session' };
+  }
+  // A worker with the wrong outbox, or none, can hand in nothing that is its own, so it does not run (#219 audit M-1,
+  // m-1): the session is stopped, and only then is the claim given back, since a session that may still be running
+  // must keep its card claimed or a second one would start.
+  // The outbox must be the card's own product's folder (L836: <root>/<product>/<role>/<id>, shared/product-paths.mjs),
+  // under the role the session runs (L767: a script card's outbox is <root>/<product>/script/<id>); a product with no such folder
+  // has none. `outboxRoot` is that root, not the product's folder: the product's own folder sits under it (#378 r1 m2).
+  // The product is the one this pass launched, never one the launch answer names (#403 r1 A10).
+  const outboxWrong = outboxProblemFor(l.outbox, sessionId, { outboxRoot, product, role: startRole(kind) });
+  if (outboxWrong) {
+    const stopped = await guarded((signal) => stopGroup({ id: sessionId, product, kind, card: id, pgid: l.pgid, signin: l.signin ?? null, config_dir: l.configDir ?? null }, { signal }), portDeadlineMs);
+    const back = stopped?.ok ? rec.release({ card: id, session_id: sessionId, reason: `launcher: its outbox ${outboxWrong}` }) : null;
+    const then = !stopped?.ok ? `it could not be stopped (${stopped?.reason ?? 'no answer'}), so the card stays claimed and cannot start twice; a later pass tries the stop again (adoptLate)`
+      : !back?.ok ? `it was stopped, but its claim could not be given back (${back?.reason ?? 'no answer'}); a later pass gives it back (adoptLate)`
+        : 'it was stopped and the card went back to ready';
+    out.refused.push([id, `launcher: its outbox ${outboxWrong}`]);
+    holdAlert({ rec, cause: SESSION_OUTBOX_CAUSE(id), text: `card ${id}: session ${sessionId} was refused: the outbox its launcher named ${outboxWrong}; ${then}`, alert, now });
+    clearLate();
+    return { held: 'outbox' };
+  }
+  clearHold(rec, HOLD_FACT(SESSION_OUTBOX_CAUSE(id)), now, report);
+  clearLate();
+  // claimed -> running adds the process (pid and its start time) to the claim, and nothing else. A card already running
+  // under this session's own process is settled already (L1361 audit m4: a start the step's limit left running on while
+  // a later pass took it over): its records are kept below, and nothing is told.
+  const now0 = rec.read('card', id);
+  const settledAlready = now0?.doc?.state === 'running' && now0.doc.claim?.session_id === sessionId && now0.doc.claim?.pid === l.pid;
+  const started = settledAlready ? { ok: true, rev: now0.rev } : move(rec, 'card', id, { state: 'running', claim: { ...now0?.doc?.claim, pid: l.pid, pid_start: l.pidStart } }, { kind: 'started' });
+  if (!started.ok) holdAlert({ rec, cause: `started-${id}`, text: `card ${id}: session ${sessionId} started but the card could not be marked running (${started.reason})`, alert, now });
+  // The launch record (R-0b-55, D12): the Merge Gate merges only a head made by a session it names
+  // (refusal 5). `head` is the commit the copy started from; `base` the commit the launcher chose to start it on (L825-2:
+  // a Tier 1 card's main_commit, else the mirror's main; null when the launch port does not say); `rev` the card's rev once running; `signin` and
+  // `config_dir` the sign-in folder the session started in (R-1-89; null when the launch port does not say); `copy` the
+  // worker's copy folder, which cleanup checks it deletes (null when the port does not say).
+  // role 'worker' for script cards too (L759): they change files, and the Merge Gate's workerLaunches reads 'worker'.
+  // A start taken over again after a pass that marked it running failed (adoptLate) already has its records: kept.
+  const lr = rec.read('launch', sessionId)?.doc?.card === id ? { ok: true } : writeLaunch(rec, { sessionId, role: 'worker', kind, card: id, head: l.head, base: l.base, rev: started.rev, product, signin: l.signin, configDir: l.configDir, copy: l.copy, now });
+  // A notice only: the merge refusal catches it later; a lost one is in the pass's notes (L130 m4).
+  if (!lr.ok && alert(`card ${id}: session ${sessionId} started but its launch was not recorded (${lr.reason}); its merge will be refused`) === false) { out.notes.push(`card ${id}: the launch-not-recorded alert could not be queued`); failureLog(`card ${id}: the launch-not-recorded alert could not be queued`); }
+  // The session record (L204-a). M4's push script takes its inputs from it alone (product, card, branch, outbox,
+  // attempt), M9's claim break reads its process, and M2 its state. The Dispatcher makes it in preparing (M9: only
+  // the Dispatcher makes one, and the workshop moves it on). `attempt` counts this card's sessions, so each start's
+  // push has its own record line. With no record the work can never be pushed: the owner is told.
+  const attempt = `a${rec.list('session').filter((s) => s.doc?.card === id).length + 1}`;
+  const sr = rec.read('session', sessionId)?.doc?.card === id ? { ok: true } : rec.write({ actor: 'dispatcher', entity: 'session', id: sessionId, expectRev: 0, kind: 'session',
+    doc: { state: 'preparing', role: 'worker', product: product ?? null, card: id, branch: cardBranch(id), outbox: l.outbox, attempt, host, pid: l.pid ?? null, pid_start: l.pidStart ?? null,
+      // A start taken over late was launched when its process started (the runner's answer), not when it was taken over.
+      launched_at: adopted && typeof l.pidStart === 'string' && START_ISO.test(l.pidStart) ? l.pidStart : iso(now) } });
+  if (sr.ok) clearHold(rec, HOLD_FACT(SESSION_RECORD_CAUSE(id)), now, report);
+  else holdAlert({ rec, cause: SESSION_RECORD_CAUSE(id), text: `card ${id}: session ${sessionId} started, but its session record was not written (${sr.reason}), so its work cannot be pushed`, alert, now });
+  if (!running.some((x) => x.id === sessionId)) running.push({ id: sessionId, product, kind, card: id, pgid: l.pgid, signin: l.signin ?? null, config_dir: l.configDir ?? null });
+  // Whether or not the hold was told: an alert still queued for it leaves unsent (audit 0b-6 r8 MAT-1).
+  clearCause(rec, UNDO_HELD_FACT(id), () => {
+    const held = factDoc(rec, UNDO_HELD_FACT(id))?.doc;
+    if (held?.reason) putFact(rec, UNDO_HELD_FACT(id), { reason: null, at: iso(now) }, 'undo_started', held, ['reason', ...TOLD]);
+  }, report, { hold: false });
+  out.started.push(id);
+  return { started: true };
+}
+
+/**
+ * L1361: a launch the start loop gave up on (late: the runner's checks outran portDeadlineMs) may still start its
+ * session. Each pass, every card still `claimed` under a session claim of this Mac with no process yet is looked up in
+ * the launcher's answers (`launchOutcome`, wiring/owner-asks.mjs: one read of the runner's status, no request, no wait):
+ *   - started, and its session still runs: taken over with exactly the on-time steps (settleLaunch): the session id, the
+ *     outbox check (and its stop), claimed -> running, the launch and session records, the late hold cleared;
+ *   - refused: the claim is given back with the runner's reason, as an on-time refusal;
+ *   - started, but its session has since ended (stopped, or ended on its own) before it was taken over: the claim is given
+ *     back saying so, never as "never launched" (the work it did stays in its copy, which cleanup tells about);
+ *   - no answer yet, or one its status does not bear out: the claim waits here; the lapse (lapseStop) stops it at
+ *     claims.unlaunched_min as before L1361, and refuses only a claim this step would take over.
+ * Stateless: it reads the Record and the runner's status afresh, so a Dispatcher run that is a new process each tick, or
+ * a runner that restarted from its kept memory, is read the same. A card whose answer can't be read is skipped and the
+ * step fails at the end, so it is told (the lapse can't free it either: the same status read fails there).
+ * -> { started, refused, released, pending, notes }
+ */
+export async function adoptLate({ rec, now, launchOutcome, stopGroup, outboxRoot, alert, failureLog = () => {}, portDeadlineMs = PORT_DEADLINE_MS, host = hostname(), machine = machineId(), running = [] }) {
+  const out = { started: [], refused: [], released: [], pending: [], notes: [] };
+  const report = refusalReport({ rec, alert, now, lines: out.notes, failureLog });
+  const failed = [];
+  for (const { id, doc } of rec.list('card')) {
+    const claim = doc?.claim;
+    if (doc?.state !== 'claimed' || claim?.kind !== 'session' || Number.isInteger(claim.pid) || typeof claim.session_id !== 'string') continue;
+    // Only this Mac's runner started it (the same either-matches rule as the Record's claims, M9 lock.mjs onThisMachine).
+    if (!onThisMachine(claim, { host, machine })) continue;
+    const sessionId = claim.session_id;
+    const kind = kindOf(doc);
+    const product = doc.product;
+    let o;
+    try { o = launchOutcome({ card: id, kind, product, sessionId }); } catch (e) { failed.push(`card ${id}: ${String(e?.message ?? e).slice(0, 200)}`); continue; }
+    if (o?.pending === true) { out.pending.push(id); continue; }
+    if (o?.ok === true && o.live !== true) {
+      // Its own cause when it has one (L1361 audit m5): a session refused for its outbox and stopped, whose claim could
+      // not be given back then, is given back now naming the outbox, never as a late start that ended on its own.
+      const outboxWrong = outboxProblemFor(o.outbox, sessionId, { outboxRoot, product, role: startRole(kind) });
+      const reason = outboxWrong ? `its outbox ${outboxWrong}; its session was stopped`
+        : 'its session started after the launch limit and ended before it was taken over; anything it did stays in its copy';
+      const back = rec.release({ card: id, session_id: sessionId, reason: `launcher: ${reason}` });
+      if (!back?.ok) { holdAlert({ rec, cause: `release-${id}`, text: `card ${id}: ${reason}, and its claim could not be given back (${back?.reason ?? 'no answer'}); a later pass tries again`, alert, now }); continue; }
+      clearHold(rec, HOLD_FACT(LAUNCH_LATE_CAUSE(id)), now, report);
+      holdAlert({ rec, cause: `start-${id}-${causeOf(`launcher: ${reason}`)}`, text: `card ${id} can't start: launcher: ${reason}; the card went back to ready`, alert, now });
+      out.released.push([id, reason]);
+      continue;
+    }
+    if (o?.ok !== true && typeof o?.reason !== 'string') { failed.push(`card ${id}: the launcher's answer is not one it gives`); continue; }
+    const { live: _, ...l } = o;
+    const settled = await settleLaunch({ rec, now, l, id, sessionId, kind, product, outboxRoot, stopGroup, portDeadlineMs, alert, report, failureLog, out, running, host, adopted: true });
+    // A late refusal is told as an on-time one is (refuseStart: an undo's own alert, or a card's start alert); a fold
+    // has no pass here to tell it, so the next full pass, which refuses the card again, folds it.
+    if (settled.refused) refuseStart({ rec, now, alert, out, b: null, running, tier1Waiting: new Map(), groups: new Map(), since: readySince(rec) }, { id, doc, product }, `launcher: ${settled.refused}`);
+  }
+  if (failed.length) throw new Error(`a late launch could not be read: ${failed.join('; ')}`);
+  return out;
+}
+
+/**
+ * L1361 audit M1: the stop the Record's lapse is given (M9 lapseClaims). A claim whose launch the adopt step would take
+ * over (launchOutcome answers ok: the same answer and the same checks, owner-asks.mjs launchSettled) did launch, so its
+ * lapse is refused, named, and the claim stays for adoptLate. Any other claim gets the plain stop: one with no answer
+ * yet, one refused, one whose answer its status does not bear out (adopt would wait on it for ever, so the lapse stops
+ * it, as before L1361), and another Mac's (adopt reads only this Mac's runner). A status that can't be read throws, as
+ * the stop itself would, and the claim stays. With no launchOutcome port the plain stop alone, as before L1361.
+ */
+export function lapseStop({ rec, launchOutcome, stopSession, host = hostname(), machine = machineId() }) {
+  if (typeof stopSession !== 'function') return stopSession;
+  return (sessionId) => {
+    if (typeof launchOutcome === 'function') {
+      const c = rec.list('card').find(({ doc }) => doc?.state === 'claimed' && doc.claim?.kind === 'session' && !Number.isInteger(doc.claim.pid)
+        && doc.claim.session_id === sessionId && onThisMachine(doc.claim, { host, machine }));
+      if (c && launchOutcome({ card: c.id, kind: kindOf(c.doc), product: c.doc.product, sessionId })?.ok === true) {
+        throw new Error(`session ${sessionId} did launch (the worker runner's answer is ok and its status bears it out), so its claim is taken over or given back by the Dispatcher's adopt step, never lapsed as never launched`);
+      }
+    }
+    return stopSession(sessionId);
+  };
+}
+
+// When a card came into its state, by the Record's clock ('' when not known): the start order and the fold's clock.
+const readySince = (rec) => (c) => String(rec.meta?.('card', c.id)?.stateSince ?? '');
+
+/**
+ * A start that can't go ahead (one definition, L1361: the start loop and adoptLate's late refusals both take it).
+ * `ctx` = { rec, now, alert, out, b, running, tier1Waiting, groups, since }; `groups` is the pass's folds, told by
+ * tellWaits on a full pass. adoptLate hands a fold of its own it never tells: the card is back in ready, so the next
+ * full pass refuses it again and folds it there if it still holds.
+ * An undo that cannot start is the way out of a bad change: Joe is told why, once per reason and again each day (audit
+ * 0b-6 r3 MAT-5). The reason counts with its numbers out, so "runs 2 workers" and "runs 3 workers" are one cause (audit
+ * 0b-6 r4). `toldElsewhere`: a missing or unreadable rules value, which the missing-values alert tells once for the tick.
+ */
+function refuseStart({ rec, now, alert, out, b, running, tier1Waiting, groups, since }, { id, doc, product }, reason, toldElsewhere = false) {
+  out.refused.push([id, reason]);
+  if (!isUndo(doc)) {
+    if (toldElsewhere) return;
+    const cls = waitClass(reason, product, b?.band);
+    if (cls === null) {
+      holdAlert({ rec, cause: `start-${id}-${causeOf(reason)}`, text: `card ${id} can't start: ${reason}`, alert, now });
+      return;
+    }
+    // Folded per product and cause; the clock is the oldest ready time, the Record's, so nothing is written per pass.
+    // A ready time that can't be read, or more than 60 s ahead of now, counts as a day old: told, never held in
+    // silence (shared pastTime; #157 audit MAT-1). A paused card counts from the later of the pause and its ready
+    // time (#157 audit m3): a pause over cards long in ready is told a day after the pause, not at once.
+    const key = `${product}-${cls}`;
+    const g = groups.get(key) ?? { product, cls, why: new Map(), cards: [], by: [], oldest: Infinity };
+    let t = pastTime(since({ id }), now) ?? -Infinity;
+    if (cls === 'paused') {
+      const paused = rec.meta?.('product', product)?.stateSince;
+      t = Math.max(t, pastTime(paused, now) ?? -Infinity);
+      if (typeof paused === 'string') g.pausedSince = paused;
+    }
+    g.oldest = Math.min(g.oldest, t);
+    g.cards.push(id);
+    g.why.set(reason, [...(g.why.get(reason) ?? []), id]);
+    if (QUEUES.some(([c]) => c === cls)) g.by.push(...holders(reason, product, running, tier1Waiting));
+    groups.set(key, g);
+    return;
+  }
+  const held = factDoc(rec, UNDO_HELD_FACT(id))?.doc;
+  const cause = reason.replace(/\d+/g, 'N');
+  if (held?.told_cause !== cause || dueToTell(held, now, HOLD_REPEAT_MS)) {
+    tellThen(alert, `your undo (card ${id}) is waiting: ${reason}`, { fact: UNDO_HELD_FACT(id), fields: { reason, told_cause: cause, told_at: iso(now) }, kind: 'undo_held' });
+  }
+}
+
+async function starts({ rec, rules, now, b, running, launch, stopGroup, outboxRoot, out, alert, report, failureLog, onlyUndo = false, hostCopy = null, missing = [], filesOf, portDeadlineMs = PORT_DEADLINE_MS, launchDeadlineMs = LAUNCH_DEADLINE_MS, launchUntil = Infinity, host = hostname() }) {
   const amberish = b.band !== 'green' || b.own_building !== 'open';
   // Undo cards first, then (in amber) Tier 1 before Tier 2, then the longest in ready, by the Record's clock.
   // The Record's own ready rule (rec.ready: unclaimed, dependencies merged, a go where one is needed; L72).
@@ -905,54 +1119,18 @@ async function starts({ rec, rules, now, b, running, launch, stopGroup, outboxRo
   // card stays a draft until the Lead plans it, so rec.ready never holds it. A research_copy card is never a worker's
   // either: its commit is the owner's file, copied mechanically (M4 push.mjs pushResearch, L286).
   const ready = rec.ready().filter((c) => !NEVER_STARTED.includes(c.doc.kind));
-  const since = (c) => String(rec.meta?.('card', c.id)?.stateSince ?? '');
+  const since = readySince(rec);
   ready.sort((x, y) => isUndo(y.doc) - isUndo(x.doc)
     || (amberish ? tierOf(x.doc) - tierOf(y.doc) : 0)
     || since(x).localeCompare(since(y)) || x.id.localeCompare(y.id));
   const tier1Waiting = new Map();
   const groups = new Map();
+  let launches = 0;
   for (const { id, rev, doc } of ready) {
     const card = { id, ...doc };
     const product = doc.product;
     if (onlyUndo && !isUndo(doc)) continue;
-    // An undo that cannot start is the way out of a bad change: Joe is told why, once per reason and again
-    // each day (audit 0b-6 r3 MAT-5). The reason counts with its numbers out, so "runs 2 workers" and
-    // "runs 3 workers" are one cause (audit 0b-6 r4).
-    // `toldElsewhere`: a missing or unreadable rules value, which the missing-values alert tells once for the tick.
-    const refuse = (reason, toldElsewhere = false) => {
-      out.refused.push([id, reason]);
-      if (!isUndo(doc)) {
-        if (toldElsewhere) return;
-        const cls = waitClass(reason, product, b?.band);
-        if (cls === null) {
-          holdAlert({ rec, cause: `start-${id}-${causeOf(reason)}`, text: `card ${id} can't start: ${reason}`, alert, now });
-          return;
-        }
-        // Folded per product and cause; the clock is the oldest ready time, the Record's, so nothing is written per pass.
-        // A ready time that can't be read, or more than 60 s ahead of now, counts as a day old: told, never held in
-        // silence (shared pastTime; #157 audit MAT-1). A paused card counts from the later of the pause and its ready
-        // time (#157 audit m3): a pause over cards long in ready is told a day after the pause, not at once.
-        const key = `${product}-${cls}`;
-        const g = groups.get(key) ?? { product, cls, why: new Map(), cards: [], by: [], oldest: Infinity };
-        let t = pastTime(since({ id }), now) ?? -Infinity;
-        if (cls === 'paused') {
-          const paused = rec.meta?.('product', product)?.stateSince;
-          t = Math.max(t, pastTime(paused, now) ?? -Infinity);
-          if (typeof paused === 'string') g.pausedSince = paused;
-        }
-        g.oldest = Math.min(g.oldest, t);
-        g.cards.push(id);
-        g.why.set(reason, [...(g.why.get(reason) ?? []), id]);
-        if (QUEUES.some(([c]) => c === cls)) g.by.push(...holders(reason, product, running, tier1Waiting));
-        groups.set(key, g);
-        return;
-      }
-      const held = factDoc(rec, UNDO_HELD_FACT(id))?.doc;
-      const cause = reason.replace(/\d+/g, 'N');
-      if (held?.told_cause !== cause || dueToTell(held, now, HOLD_REPEAT_MS)) {
-        tellThen(alert, `your undo (card ${id}) is waiting: ${reason}`, { fact: UNDO_HELD_FACT(id), fields: { reason, told_cause: cause, told_at: iso(now) }, kind: 'undo_held' });
-      }
-    };
+    const refuse = (reason, toldElsewhere = false) => refuseStart({ rec, now, alert, out, b, running, tier1Waiting, groups, since }, { id, doc, product }, reason, toldElsewhere);
     // L1045: a copy of host.lock that can't be trusted holds every start, undo cards too; the undo's own alert names it at once.
     if (hostCopy !== null) { await refuse(hostCopyReason(hostCopy)); continue; }
     let may;
@@ -973,6 +1151,10 @@ async function starts({ rec, rules, now, b, running, launch, stopGroup, outboxRo
     if (!g.ok) { if (amberish && tierOf(doc) === 1 && capRefusal(g.reason)) tier1Waiting.set(product, [...(tier1Waiting.get(product) ?? []), id]); await refuse(g.reason, !!g.missing); continue; }
     // The claim names the session before it starts (L72): the launcher starts claude with this id, so a second start
     // can't take the card. The Record stamps claimed_at; rules_rev is the rules the claim was made under.
+    // L1361 audit m4: launches run one after another inside the tick step's limit; after the first, one that could not
+    // finish inside what is left of it is not begun. The card stays ready, untouched, and the next pass starts it (noted,
+    // not told). The first always runs: the step began with its whole limit (120 s, past one launch's 45 s and margin).
+    if (launches > 0 && Date.now() + launchDeadlineMs + LAUNCH_MARGIN_MS > launchUntil) { out.notes.push(`card ${id}: left for the next pass: the step's time left is under one launch limit`); continue; }
     const sessionId = randomUUID();
     const rulesRev = may.rev ?? rules.rev;
     const claimDoc = { kind: 'session', session_id: sessionId, host, ...(machineId() == null ? {} : { machine: machineId() }), ...(rulesRev != null ? { rules_rev: rulesRev } : {}) };
@@ -983,73 +1165,17 @@ async function starts({ rec, rules, now, b, running, launch, stopGroup, outboxRo
     // second start would make two sessions for one card); Joe is told, once a day.
     // An undo's launch carries the reversed commit exactReverse found from the card's source (L976), never a card field.
     // `card` goes as its id (L1332): the runner takes a name, never the Record document.
-    const l = await guarded(() => launch({ card: id, kind, product, sessionId, ...(kind === 'undo' ? { undoCommit: exact.commit } : {}) }), portDeadlineMs);
+    // The launch alone takes LAUNCH_DEADLINE_MS (L1361); the stop settleLaunch may make keeps portDeadlineMs.
+    launches += 1;
+    const l = await guarded(() => launch({ card: id, kind, product, sessionId, ...(kind === 'undo' ? { undoCommit: exact.commit } : {}) }), launchDeadlineMs);
     // Late is any answer marked timed out (guarded's own, or a port's), not only guarded's exact words (L744 1).
-    if (!l?.ok && (l?.timedOut === true || l?.reason === `it did not answer within ${portDeadlineMs} ms`)) {
+    if (!l?.ok && (l?.timedOut === true || l?.reason === `it did not answer within ${launchDeadlineMs} ms`)) {
       out.refused.push([id, `launcher: ${l.reason}`]);
-      holdAlert({ rec, cause: `launch-late-${id}`, text: `card ${id}: the launcher ${l.reason}; the card stays claimed so it cannot start twice (it lapses at claims.unlaunched_min once its session is stopped)`, alert, now });
+      holdAlert({ rec, cause: LAUNCH_LATE_CAUSE(id), text: `card ${id}: the launcher did not answer within its ${launchDeadlineMs / 1000} s launch limit (${l.reason}); the card stays claimed so it cannot start twice, and a later pass takes the start over once the launcher answers (adoptLate)`, alert, now });
       continue;
     }
-    // A refused launch started nothing: the claim's holder gives it back (M9 release), and the refusal is in the diary.
-    if (!l?.ok) {
-      const back = rec.release({ card: id, session_id: sessionId, reason: `launcher: ${l?.reason ?? 'no answer'}` });
-      if (!back?.ok) holdAlert({ rec, cause: `release-${id}`, text: `card ${id}: the launcher refused (${l?.reason ?? 'no answer'}) and its claim could not be given back (${back?.reason ?? 'no answer'}); it lapses at claims.unlaunched_min`, alert, now });
-      await refuse(`launcher: ${l?.reason ?? 'no answer'}`);
-      continue;
-    }
-    // The launcher must start the session it was given: a different id is a session the claim doesn't name.
-    if (l.sessionId !== undefined && l.sessionId !== sessionId) {
-      out.refused.push([id, 'launcher: it started a session the claim does not name']);
-      holdAlert({ rec, cause: `launch-other-${id}`, text: `card ${id}: the launcher answered with session ${l.sessionId}, not the claimed ${sessionId}; the card stays claimed`, alert, now });
-      continue;
-    }
-    // A worker with the wrong outbox, or none, can hand in nothing that is its own, so it does not run (#219 audit M-1,
-    // m-1): the session is stopped, and only then is the claim given back, since a session that may still be running
-    // must keep its card claimed or a second one would start.
-    // The outbox must be the card's own product's folder (L836: <root>/<product>/<role>/<id>, shared/product-paths.mjs),
-    // under the role the session runs (L767: a script card's outbox is <root>/<product>/script/<id>); a product with no such folder
-    // has none. `outboxRoot` is that root, not the product's folder: the product's own folder sits under it (#378 r1 m2).
-    // The product is the one this pass launched, never one the launch answer names (#403 r1 A10).
-    const outboxWrong = outboxProblemFor(l.outbox, sessionId, { outboxRoot, product, role: startRole(kind) });
-    if (outboxWrong) {
-      const stopped = await guarded((signal) => stopGroup({ id: sessionId, product, kind, card: id, pgid: l.pgid, signin: l.signin ?? null, config_dir: l.configDir ?? null }, { signal }), portDeadlineMs);
-      const back = stopped?.ok ? rec.release({ card: id, session_id: sessionId, reason: `launcher: its outbox ${outboxWrong}` }) : null;
-      const then = !stopped?.ok ? `it could not be stopped (${stopped?.reason ?? 'no answer'}), so the card stays claimed and cannot start twice; it lapses at claims.unlaunched_min once its session is stopped`
-        : !back?.ok ? `it was stopped, but its claim could not be given back (${back?.reason ?? 'no answer'}); it lapses at claims.unlaunched_min`
-          : 'it was stopped and the card went back to ready';
-      out.refused.push([id, `launcher: its outbox ${outboxWrong}`]);
-      holdAlert({ rec, cause: SESSION_OUTBOX_CAUSE(id), text: `card ${id}: session ${sessionId} was refused: the outbox its launcher named ${outboxWrong}; ${then}`, alert, now });
-      continue;
-    }
-    clearHold(rec, HOLD_FACT(SESSION_OUTBOX_CAUSE(id)), now, report);
-    // claimed -> running adds the process (pid and its start time) to the claim, and nothing else.
-    const started = move(rec, 'card', id, { state: 'running', claim: { ...rec.read('card', id)?.doc?.claim, pid: l.pid, pid_start: l.pidStart } }, { kind: 'started' });
-    if (!started.ok) holdAlert({ rec, cause: `started-${id}`, text: `card ${id}: session ${sessionId} started but the card could not be marked running (${started.reason})`, alert, now });
-    // The launch record (R-0b-55, D12): the Merge Gate merges only a head made by a session it names
-    // (refusal 5). `head` is the commit the copy started from; `base` the commit the launcher chose to start it on (L825-2:
-    // a Tier 1 card's main_commit, else the mirror's main; null when the launch port does not say); `rev` the card's rev once running; `signin` and
-    // `config_dir` the sign-in folder the session started in (R-1-89; null when the launch port does not say); `copy` the
-    // worker's copy folder, which cleanup checks it deletes (null when the port does not say).
-    // role 'worker' for script cards too (L759): they change files, and the Merge Gate's workerLaunches reads 'worker'.
-    const lr = writeLaunch(rec, { sessionId, role: 'worker', kind, card: id, head: l.head, base: l.base, rev: started.rev, product, signin: l.signin, configDir: l.configDir, copy: l.copy, now });
-    // A notice only: the merge refusal catches it later; a lost one is in the pass's notes (L130 m4).
-    if (!lr.ok && alert(`card ${id}: session ${sessionId} started but its launch was not recorded (${lr.reason}); its merge will be refused`) === false) { out.notes.push(`card ${id}: the launch-not-recorded alert could not be queued`); failureLog(`card ${id}: the launch-not-recorded alert could not be queued`); }
-    // The session record (L204-a). M4's push script takes its inputs from it alone (product, card, branch, outbox,
-    // attempt), M9's claim break reads its process, and M2 its state. The Dispatcher makes it in preparing (M9: only
-    // the Dispatcher makes one, and the workshop moves it on). `attempt` counts this card's sessions, so each start's
-    // push has its own record line. With no record the work can never be pushed: the owner is told.
-    const attempt = `a${rec.list('session').filter((s) => s.doc?.card === id).length + 1}`;
-    const sr = rec.write({ actor: 'dispatcher', entity: 'session', id: sessionId, expectRev: 0, kind: 'session',
-      doc: { state: 'preparing', role: 'worker', product: product ?? null, card: id, branch: cardBranch(id), outbox: l.outbox, attempt, host, pid: l.pid ?? null, pid_start: l.pidStart ?? null, launched_at: iso(now) } });
-    if (sr.ok) clearHold(rec, HOLD_FACT(SESSION_RECORD_CAUSE(id)), now, report);
-    else holdAlert({ rec, cause: SESSION_RECORD_CAUSE(id), text: `card ${id}: session ${sessionId} started, but its session record was not written (${sr.reason}), so its work cannot be pushed`, alert, now });
-    running.push({ id: sessionId, product, kind, card: id, pgid: l.pgid, signin: l.signin ?? null, config_dir: l.configDir ?? null });
-    // Whether or not the hold was told: an alert still queued for it leaves unsent (audit 0b-6 r8 MAT-1).
-    clearCause(rec, UNDO_HELD_FACT(id), () => {
-      const held = factDoc(rec, UNDO_HELD_FACT(id))?.doc;
-      if (held?.reason) putFact(rec, UNDO_HELD_FACT(id), { reason: null, at: iso(now) }, 'undo_started', held, ['reason', ...TOLD]);
-    }, report, { hold: false });
-    out.started.push(id);
+    const settled = await settleLaunch({ rec, now, l, id, sessionId, kind, product, outboxRoot, stopGroup, portDeadlineMs, alert, report, failureLog, out, running, host });
+    if (settled.refused) await refuse(`launcher: ${settled.refused}`);
   }
   if (!onlyUndo) tellWaits({ rec, groups, alert, now, report });
 }

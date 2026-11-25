@@ -51,12 +51,12 @@ const CLEANUP_WIRED = Object.freeze(['copiesRoot', 'git', 'leftoverMoves', 'mirr
 // and reviewEnded (L739): worker-ports.test.mjs plants each. The worker runner's sync ports (L925: sessions, board,
 // outboxSessions, probe, stopSession) and the product value (L927): worker-ports.test.mjs plants those too. stopReview (L946): the review runner's stop file. The worker
 // runner's four asks (L963: launch, stopGroup, saveWork, pauseLead): worker-ports.test.mjs runs each end to end.
-const PORTS_WIRED = Object.freeze(['approvals', 'board', 'filesOf', 'hasReviewer', 'hostLock', 'launch', 'mainSha', 'outboxRoot', 'outboxSessions', 'pauseLead', 'planReviewAnswer', 'planReviewsRunning', 'planRows', 'planView', 'probe', 'product',
+const PORTS_WIRED = Object.freeze(['approvals', 'board', 'filesOf', 'hasReviewer', 'hostLock', 'launch', 'launchOutcome', 'mainSha', 'outboxRoot', 'outboxSessions', 'pauseLead', 'planReviewAnswer', 'planReviewsRunning', 'planRows', 'planView', 'probe', 'product',
   'requestReview', 'reviewAlerts', 'reviewEnded', 'saveWork', 'sessions', 'startPlanReview', 'stopGroup', 'stopReview', 'stopSession', 'wait']);
 const APPROVALS_GH = Object.freeze(['get', 'patch', 'post', 'put']);
 const APPROVALS_COPIES = Object.freeze(['done', 'pending', 'sync', 'told']);
 // What else the tick reads from its ports object: the alert port, the cleanup group, and options with defaults.
-const NOT_PORTS = Object.freeze(['alert', 'alertSendMs', 'approvalsProductMs', 'cleanup', 'intakeFs', 'proposalsFs', 'portDeadlineMs', 'saveDeadlineMs', 'stepDeadlineMs']);
+const NOT_PORTS = Object.freeze(['alert', 'alertSendMs', 'approvalsProductMs', 'cleanup', 'intakeFs', 'proposalsFs', 'portDeadlineMs', 'launchDeadlineMs', 'saveDeadlineMs', 'stepDeadlineMs']);
 // One full pass with the ports above refusing: each step's outcome, and for a failed step the port its error names.
 const NW = (port) => notWiredText(port);
 // LEAD-RULED (L652, re-ruled by L674 for the separate-process boots): the boot's review user is another user (this one's
@@ -67,7 +67,7 @@ const NOT_REVIEW_USERS = "no review was asked for: the review runner's folder is
 // status is never trusted, and every step that reads it fails with exactly that (L925: "not known", never a list).
 const NOT_THE_RUNNERS = "the worker runner's folder is not owned by the worker runner's user (workerUid)";
 const EXPECTED_STEPS = Object.freeze({
-  stops: NOT_THE_RUNNERS, undo: 'ok', 'undo-starts': NOT_THE_RUNNERS, outage: NOT_THE_RUNNERS, lapse: 'ok', intake: NOT_THE_RUNNERS, proposals: NW('proposals'), research: 'ok', leads: NW('leads'), approvals: 'ok', 'plan-go': 'ok',
+  stops: NOT_THE_RUNNERS, undo: 'ok', 'undo-starts': NOT_THE_RUNNERS, outage: NOT_THE_RUNNERS, adopt: 'ok', lapse: 'ok', intake: NOT_THE_RUNNERS, proposals: NW('proposals'), research: 'ok', leads: NW('leads'), approvals: 'ok', 'plan-go': 'ok',
   pass: NOT_THE_RUNNERS, limits: NOT_REVIEW_USERS, merges: 'ok', waits: 'ok', 'lost-cards': 'ok', 'stuck-cards': 'ok', phone: 'ok', cleanup: NW(`cleanup.${NOT_WIRED_CLEANUP[0]}`),
 });
 
@@ -290,7 +290,7 @@ test('the seam: each port has one home; a port file gets ctx and fills its ports
   assert.deepEqual(Object.keys(reviewPorts({ gh: { get: () => null }, entry: ENTRY, rec: { read: () => null }, config, now: Date.now, selfUid: process.getuid() + 2 })).sort(),
     ['filesOf', 'hasReviewer', 'mainSha', 'planReviewAnswer', 'planReviewsRunning', 'planRows', 'planView', 'requestReview', 'reviewAlerts', 'startPlanReview', 'stopReview', 'wait']);
   const w = world();
-  assert.deepEqual(Object.keys(workerPorts({ config: w.config, selfUid: process.getuid() })), ['cleanup', 'outboxRoot', 'hostLock', 'reviewEnded', 'product', 'sessions', 'board', 'outboxSessions', 'probe', 'stopSession', 'launch', 'stopGroup', 'saveWork', 'pauseLead']);
+  assert.deepEqual(Object.keys(workerPorts({ config: w.config, selfUid: process.getuid() })), ['cleanup', 'outboxRoot', 'hostLock', 'reviewEnded', 'product', 'sessions', 'board', 'outboxSessions', 'probe', 'stopSession', 'launch', 'launchOutcome', 'stopGroup', 'saveWork', 'pauseLead']);
 
   const seen = [];
   const opts = { fetchFn: fakeGitHubFetch(w.fake), log: () => {} };

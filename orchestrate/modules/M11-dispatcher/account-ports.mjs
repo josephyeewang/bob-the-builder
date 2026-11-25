@@ -89,6 +89,11 @@ export function acrossAccounts({ home, listIn, idOf = (s) => s?.id, what = 'sess
  * true when that folder has stopped the session or never ran it. Yes only when every set-up folder says true at once;
  * any other answer (false, null, undefined, a promise, an error) from any folder is a no, never read as "not there"
  * (L63): after a switch the old account is still asked. The Record calls this synchronously, so it must answer at once.
+ * Open: L1361. A launch that answered late and did start is kept from the lapse before this is asked (M11 pass.mjs
+ * lapseStop, which throws with its own reason, so nothing here turns that reason into false). lapseStop and adoptLate
+ * read the worker runner's launchOutcome, which is runner-wide, not per folder: accountPorts does not answer it, so the
+ * wiring's own launchOutcome (wiring/worker-ports.mjs) stays under the spread. Whether a launch answer read through one
+ * runner covers both sign-in folders is for whoever wires this file (L943 c3).
  */
 export function stopEverywhere({ home, stopIn }) {
   return (sessionId) => {

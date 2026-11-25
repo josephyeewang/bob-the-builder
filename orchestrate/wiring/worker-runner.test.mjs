@@ -7,6 +7,7 @@ import { ownerAsyncPorts } from './owner-asks.mjs';
 import { RUNNER_DRAIN_HELD_MS, RUNNER_NOTE_EVERY_MS, RUNNER_PORT_MS, requestKey, saveKey, workerRunnerPass } from './worker-runner.mjs';
 import { DRAIN_CAUSES } from '../modules/M11-dispatcher/drain-alerts.mjs';
 import { FUTURE_SKEW_MS } from '../shared/still-waiting.mjs';
+import { lapseStop } from '../modules/M11-dispatcher/pass.mjs';
 
 const OWNER = 501; const ROOT = '/outboxes'; const COPIES = '/copies'; const FILE = '/runner/status.json';
 const T0 = Date.parse('2026-11-09T12:00:00Z'); const MIN = 60_000; const CLAIM = 10 * MIN;
@@ -964,9 +965,12 @@ test('L1357: the restart race, then a lapsed claim: the late start runs and ends
   await w.pass([launchReq('S-3', { card: 'C-1' }, w.now)]);
   assert.deepEqual(seen.map((s) => s[0]), ['S-1'], 'held while the start is on and while its session runs');
   // claude ends on its own; the Dispatcher's lapse asks stopSession, which now answers true, and the claim lapses.
+  // L1361: the adopt step, which runs first, reads its outcome as launched and ended, and gives the claim back itself.
   w.gone.add(4001); w.now += 30_000; await w.pass();
   assert.equal(w.read().requests['S-1'].state, 'stopped');
   assert.equal(w.sync().stopSession('S-1'), true, 'the lapse goes through');
+  const ended = w.asks().launchOutcome({ card: 'C-1', kind: 'editing', product: 'p1', sessionId: 'S-1' });
+  assert.equal(ended.ok, true); assert.equal(ended.live, false, 'launched and ended: the adopt step gives its claim back');
   // The card is claimed again: the start is told nothing of the runner's may still use the copy.
   w.now += 4 * MIN; await w.pass([launchReq('S-4', { card: 'C-1' }, w.now)]);
   assert.deepEqual(seen.at(-1), ['S-4', null]);
@@ -1092,4 +1096,50 @@ test('L1357 audit m5: with movesHeld (no memory file at start) the copy is held,
   assert.equal(ask(), 'the runner started with no memory file, so no leftover copy is moved until its first full pass has checked the sessions');
   await w.pass([launchReq('S-2')]);
   assert.equal(ask(), null);
+});
+
+// L1361: a start the Dispatcher stopped waiting for (its launch limit ran out) that the runner then started. The
+// Dispatcher's lapse (M11 pass.mjs lapseStop over these real ports) refuses it by name and writes no stop: the session
+// did launch, so it is never killed as "never launched". launchOutcome reads it as the launch ask would have, so the
+// adopt step takes it over.
+const claimed = (card, sessionId) => ({ list: (e) => (e === 'card' ? [{ id: card, doc: { state: 'claimed', product: 'p1', claim: { kind: 'session', session_id: sessionId, host: 'mini' } } }] : []) });
+const lapseOf = (w, card, sessionId) => lapseStop({ rec: claimed(card, sessionId), launchOutcome: w.asks().launchOutcome, stopSession: w.sync().stopSession, host: 'mini', machine: null });
+test('L1361: a launched live session is never stopped by the lapse; launchOutcome reads it as the ask would have', async () => {
+  const w = world();
+  await w.pass([launchReq('S-1')]);
+  assert.equal(w.read().requests['S-1'].state, 'started');
+  const asks = w.asks();
+  // Pending before any answer is there, for a session the runner never saw.
+  assert.equal(asks.launchOutcome({ card: 'C-9', kind: 'editing', product: 'p1', sessionId: 'S-9' }).pending, true);
+  const o = asks.launchOutcome({ card: 'C-1', kind: 'editing', product: 'p1', sessionId: 'S-1' });
+  assert.equal(o.ok, true, o.reason); assert.equal(o.live, true); assert.equal(o.sessionId, 'S-1'); assert.equal(o.outbox, `${ROOT}/p1/worker/S-1`);
+  // Names that are not the ones the start was asked with are never borne out.
+  assert.equal(asks.launchOutcome({ card: 'C-2', kind: 'editing', product: 'p1', sessionId: 'S-1' }).pending, true);
+  assert.throws(() => asks.launchOutcome({ card: 'C-1', kind: 'editing', product: 'p1', sessionId: '../x' }));
+  const before = w.asked.length;
+  assert.throws(() => lapseOf(w, 'C-1', 'S-1')('S-1'), /did launch .*never lapsed as never launched/);
+  assert.equal(w.asked.length, before, 'no stop request written');
+  assert.deepEqual(w.sync().sessions().map((x) => x.id), ['S-1'], 'still running');
+  // A refused start reads as refused: nothing started, so the claim goes back.
+  await w.pass([launchReq('S-5', { product: 'Bad Name' })]);
+  const no = asks.launchOutcome({ card: 'C-5', kind: 'editing', product: 'p1', sessionId: 'S-5' });
+  assert.equal(no.ok, false); assert.equal(typeof no.reason, 'string');
+  assert.equal(lapseOf(w, 'C-5', 'S-5')('S-5'), true, 'never launched: the lapse goes through');
+});
+
+// L1361 audit M1: an answer that is ok but that the rest of the status does not bear out is one adopt would wait on for
+// ever, so the lapse must not refuse it: it gets the plain stop, as before L1361 (one rule, launchSettled, for both).
+test('L1361 audit M1: an ok answer the status disagrees with is stopped by the lapse, never held for ever', async () => {
+  for (const how of ['the claim names another card', 'the status lists another process group']) {
+    const w = world();
+    await w.pass([launchReq('S-1')]);
+    assert.equal(w.read().answers['launch-S-1'].ok, true);
+    let card = 'C-1';
+    if (how === 'the claim names another card') card = 'C-2';
+    else w.status = { ...w.status, sessions: w.status.sessions.map((x) => (x.id === 'S-1' ? { ...x, pgid: x.pgid + 1 } : x)) };
+    assert.equal(w.asks().launchOutcome({ card, kind: 'editing', product: 'p1', sessionId: 'S-1' }).pending, true, how);
+    const before = w.asked.length;
+    assert.equal(lapseOf(w, card, 'S-1')('S-1'), false, `${how}: the plain stop, which asks the runner to stop it`);
+    assert.deepEqual(w.asked.slice(before).map((x) => x.name), ['stop-S-1.json'], how);
+  }
 });

@@ -87,7 +87,7 @@ test('MAT-1: one tick runs every step once, in the fixed order, and records the 
   const w = world([account(), usage()]);
   const r = await w.pass();
   assert.deepEqual(Object.keys(r.steps), STEPS);
-  assert.deepEqual(STEPS, ['stops', 'undo', 'undo-starts', 'outage', 'lapse', 'intake', 'proposals', 'research', 'leads', 'approvals', 'plan-go', 'pass', 'limits', 'merges', 'waits', 'lost-cards', 'stuck-cards', 'phone', 'cleanup']);
+  assert.deepEqual(STEPS, ['stops', 'undo', 'undo-starts', 'outage', 'adopt', 'lapse', 'intake', 'proposals', 'research', 'leads', 'approvals', 'plan-go', 'pass', 'limits', 'merges', 'waits', 'lost-cards', 'stuck-cards', 'phone', 'cleanup']);
   for (const s of STEPS) assert.equal(r.steps[s].ok, true, `${s}: ${r.steps[s].error}`);
   const last = w.rec.read('fact', LAST_PASS_FACT).doc;
   assert.equal(last.at, iso(T0));
@@ -379,7 +379,9 @@ test('L1340: claims lapse in their own step, so a failed outage step does not ho
   assert.equal(r.steps.outage.ok, false);
   assert.equal(r.steps.lapse.ok, true, r.steps.lapse.error);
   assert.deepEqual(r.steps.lapse.result.lapsed, [{ card: 'C-1', to: 'ready' }]);
-  assert.deepEqual(seen.map((x) => [x.now, x.stopSession]), [[T0, stopSession]]);
+  // L1361 audit M1: the stop port goes through lapseStop, which hands a claim adopt would not take over to it unchanged.
+  assert.deepEqual(seen.map((x) => x.now), [T0]);
+  assert.equal(seen[0].stopSession('S-none'), true, 'no such claim: the plain stop port answers');
   // An outage open in the Record holds the lapse, whether or not the outage step ran.
   for (const healthy of [() => true, () => { throw new Error('not wired yet: healthy'); }]) {
     const o = world([account(), usage(), ['fact', OUTAGE_FACT, { state: 'open', opened_at: iso(T0 - MIN) }]], { over: { healthy } });
@@ -2236,4 +2238,63 @@ test('L759: a refused save of an outage pass is told to Joe', async () => {
   assert.equal(r.steps.outage.result.passRefused, 'planted refusal');
   assert.equal(r.steps.outage.result.outage, true, 'the second wave keeps the outage open');
   assert.equal(w.calls.alerts.filter((a) => /this outage pass could not be saved \(planted refusal\)/.test(a)).length, 1, w.calls.alerts.join(' | '));
+});
+
+// L1361, the Mini on 24 Nov: a start that answered after the launch limit, taken over by the adopt step on a later
+// tick, before the lapse step reads the claim, so the lapse never stops a session that launched.
+test('L1361: a late start is taken over by the adopt step on a later tick: running, with its launch record', async () => {
+  let late = true;
+  const w = world([account(), usage(), ['card', 'C-1', { state: 'ready', module: 'M-test', product: 'p1', tier: 2, files: ['src/C-1.js'], changed_at: new Date(T0 - 10 * MIN).toISOString() }]], { over: {
+    launchOutcome: () => ({ pending: true, reason: 'no answer yet' }),
+  } });
+  const realLaunch = w.ports.launch;
+  w.ports.launch = async (x) => (late ? { ok: false, timedOut: true, reason: 'did not answer within 30000 ms' } : realLaunch(x));
+  const r0 = await w.pass(0);
+  assert.equal(r0.steps.adopt.ok, true, r0.steps.adopt.error);
+  assert.equal(w.rec.read('card', 'C-1').doc.state, 'claimed');
+  const sid = w.rec.read('card', 'C-1').doc.claim.session_id;
+  late = false;
+  // Still pending a minute on: the claim stays.
+  await w.pass(1);
+  assert.equal(w.rec.read('card', 'C-1').doc.state, 'claimed');
+  // Past claims.unlaunched_min, the runner has answered: the adopt step runs first and the card goes running.
+  const asked = [];
+  const r = await w.pass(6, { ports: { launchOutcome: (x) => { asked.push(x.sessionId); return { ok: true, sessionId: sid, pid: 4242, pidStart: 'Mon Nov 24 12:00:00 2026', pgid: 777, head: HEAD, outbox: `/outbox-root/p1/worker/${sid}`, live: true }; } } });
+  assert.equal(r.steps.adopt.ok, true, r.steps.adopt.error);
+  assert.deepEqual(asked, [sid]);
+  const c = w.rec.read('card', 'C-1').doc;
+  assert.equal(c.state, 'running'); assert.equal(c.claim.pid, 4242);
+  assert.equal(w.rec.read('launch', sid).doc.card, 'C-1');
+});
+
+test('L1361: an adopt step whose outcome can\'t be read fails alone and is told; the other steps still run', async () => {
+  const w = world([account(), usage(), ['card', 'C-1', { state: 'ready', module: 'M-test', product: 'p1', tier: 2, files: ['src/C-1.js'], changed_at: new Date(T0 - 10 * MIN).toISOString() }]], { over: {
+    launch: async () => ({ ok: false, timedOut: true, reason: 'did not answer within 30000 ms' }),
+    launchOutcome: () => { throw new Error('the status is not known'); },
+  } });
+  await w.pass(0);
+  const r = await w.pass(1);
+  assert.equal(r.steps.adopt.ok, false);
+  assert.match(r.steps.adopt.error, /a late launch could not be read: card C-1: the status is not known/);
+  assert.equal(r.steps.lapse.ok, true);
+  assert.equal(w.rec.read('card', 'C-1').doc.state, 'claimed');
+});
+
+// The stand-in Record's lapse is a no-op, so the order is shown with a spy: when the lapse step reads the claims, the
+// adopt step has already moved the late start to running (a running card is never one the lapse looks at, M9
+// lapseClaims). The lapse refusing a launched session (lapseStop over the real ports) is shown in worker-runner.test.mjs
+// (L1361) and M9's claims.test.mjs (a stopSession that throws keeps the claim).
+test('L1361: the adopt step runs before the lapse, so the lapse finds the late start already running', async () => {
+  const w = world([account(), usage(), ['card', 'C-1', { state: 'ready', module: 'M-test', product: 'p1', tier: 2, files: ['src/C-1.js'], changed_at: new Date(T0 - 10 * MIN).toISOString() }]], { over: {
+    launch: async () => ({ ok: false, timedOut: true, reason: 'did not answer within 30000 ms' }),
+    launchOutcome: () => ({ pending: true, reason: 'no answer yet' }),
+  } });
+  await w.pass(0);
+  const sid = w.rec.read('card', 'C-1').doc.claim.session_id;
+  const seen = [];
+  const rec = { ...w.rec, lapseClaims: () => { seen.push(w.rec.read('card', 'C-1').doc.state); return { ok: true, lapsed: [] }; } };
+  const ports = { ...w.ports, launchOutcome: () => ({ ok: true, sessionId: sid, pid: 4242, pidStart: 'Mon Nov 24 12:00:00 2026', pgid: 777, head: HEAD, outbox: `/outbox-root/p1/worker/${sid}`, live: true }) };
+  const r = await tick({ rec, rules: rulesWith({}, allow), now: T0 + 6 * MIN, ports });
+  assert.equal(r.steps.adopt.ok, true, r.steps.adopt.error);
+  assert.deepEqual(seen, ['running']);
 });

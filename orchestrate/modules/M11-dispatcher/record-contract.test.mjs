@@ -9,7 +9,7 @@ import { dispatcherPass } from './pass.mjs';
 import { actOnDead, tick } from './tick.mjs';
 import { KEYS } from './keys.mjs';
 import { timeLimits, requestMerges, MERGE_REQUEST, ASK_REFUSED_FACT } from './merges.mjs';
-import { LIMIT_NO_ACCOUNT } from './pass.mjs';
+import { LIMIT_NO_ACCOUNT, LAUNCH_DEADLINE_MS } from './pass.mjs';
 import { settleMerge } from '../M6-merge-gate/merge-outcome.mjs';
 import { waitOn } from './moves.mjs';
 import { outageStep, OUTAGE_FACT } from './outage.mjs';
@@ -267,7 +267,7 @@ test('L72 (5): a claim with no process past claims.unlaunched_min lapses (once i
   const w = world();
   readyCard(w.env, 'C-1');
   // The launcher never answers in time: the card stays claimed (no process), so it can't start twice.
-  w.refuseLaunch(() => ({ ok: false, reason: 'it did not answer within 30000 ms' }));
+  w.refuseLaunch(() => ({ ok: false, reason: `it did not answer within ${LAUNCH_DEADLINE_MS} ms` }));
   await w.pass();
   const c = w.rec.read('card', 'C-1').doc;
   assert.deepEqual([c.state, c.claim.pid], ['claimed', undefined]);
@@ -286,7 +286,7 @@ test('L1340: a failed outage step does not hold a timed-out claim; the lapse sti
   for (const stops of [true, false]) {
     const w = world();
     readyCard(w.env, 'C-1');
-    w.refuseLaunch(() => ({ ok: false, reason: 'it did not answer within 30000 ms' }));
+    w.refuseLaunch(() => ({ ok: false, reason: `it did not answer within ${LAUNCH_DEADLINE_MS} ms` }));
     await w.pass();
     const sid = w.rec.read('card', 'C-1').doc.claim.session_id;
     w.env.clock.t += 60 * MIN;
@@ -315,7 +315,7 @@ test('L72 (5): a double claim for one card is refused', async () => {
   readyCard(w.env, 'C-1');
   const before = w.rec.read('card', 'C-1');
   // The pass claims it and its launch is late: the card stays claimed, its claim naming the pass's session.
-  w.refuseLaunch(() => ({ ok: false, reason: 'it did not answer within 30000 ms' }));
+  w.refuseLaunch(() => ({ ok: false, reason: `it did not answer within ${LAUNCH_DEADLINE_MS} ms` }));
   await w.pass();
   const mine = w.rec.read('card', 'C-1').doc.claim.session_id;
   const other = { kind: 'session', session_id: 'S-other', host: HOST };
