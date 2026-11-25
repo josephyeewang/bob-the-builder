@@ -974,24 +974,41 @@ export const NEVER_STARTED = Object.freeze(['lead_daily_card', 'research_copy'])
 // L1368 (#673 r2 m-a): a card the serial-launch cap leaves for the next pass (LAUNCH_MARGIN_MS) is noted, not told; one
 // left on pass after pass was held back with nothing said. Each skip is counted on the card's hold fact (`passes`, the
 // Dispatcher's hold- family), once per pass time (the undo-only run and the full pass of one tick share it); at
-// LAUNCH_SKIP_TELL passes in a row Joe is told, once a day (holdAlert), and the count and the hold are cleared when the
-// card is claimed for its start.
+// LAUNCH_SKIP_TELL passes in a row Joe is told, once a day (holdAlert). The count and the hold are cleared once the card
+// has started (settleLaunch's `started`). A count last added to over a day ago starts again at 1 (#678 m3): a card that
+// left ready another way (done, removed, adopted late) and came back is not told on its old skips.
+// Neither step may stop the start loop (#678 m1): a throw or a refused write is reported (L449), never thrown.
 export const LAUNCH_SKIP_TELL = 3;
 export const LAUNCH_SKIP_CAUSE = (card) => `launch-skipped-${card}`;
 export const LAUNCH_SKIP_FACT = (card) => HOLD_FACT(LAUNCH_SKIP_CAUSE(card));
-export const launchSkipText = (card, n) => `card ${card} has not been started for ${n} passes because the starts before it used the step's time; it stays ready and is started on a pass with time to spare`;
-function countLaunchSkip({ rec, id, now, alert }) {
-  const was = factDoc(rec, LAUNCH_SKIP_FACT(id))?.doc;
-  const base = typeof was === 'object' && was !== null ? was : undefined;
-  const prior = Number.isInteger(base?.passes) && base.passes > 0 ? base.passes : 0;
-  const passes = base?.at === iso(now) ? Math.max(prior, 1) : prior + 1;
-  if (passes !== prior || base?.at !== iso(now)) putFact(rec, LAUNCH_SKIP_FACT(id), { ...base, passes, at: iso(now) }, 'launch_skip', base);
-  if (passes >= LAUNCH_SKIP_TELL) holdAlert({ rec, cause: LAUNCH_SKIP_CAUSE(id), text: launchSkipText(id, passes), alert, now });
+export const launchSkipText = (card, n) => `card ${card} has not been started for ${n} passes because the starts before it used the step's time; it stays ready, nothing to do unless it keeps happening`;
+const skipReport = (report, id, what, why) => report(`card ${id}: the launch-cap skip count could not be ${what} (${why})`, `launch-skip-${id}`);
+function countLaunchSkip({ rec, id, now, alert, report }) {
+  try {
+    const was = factDoc(rec, LAUNCH_SKIP_FACT(id))?.doc;
+    const base = typeof was === 'object' && was !== null ? was : undefined;
+    const last = typeof base?.at === 'string' ? Date.parse(base.at) : NaN;
+    const fresh = Number.isFinite(last) && now - last < HOLD_REPEAT_MS;
+    const prior = fresh && Number.isInteger(base.passes) && base.passes > 0 ? base.passes : 0;
+    const passes = base?.at === iso(now) ? Math.max(prior, 1) : prior + 1;
+    if (passes !== base?.passes || base?.at !== iso(now)) {
+      const w = putFact(rec, LAUNCH_SKIP_FACT(id), { ...base, passes, at: iso(now) }, 'launch_skip', base);
+      if (w?.ok === false) { skipReport(report, id, 'written', w.reason); return; }
+    }
+    if (passes >= LAUNCH_SKIP_TELL) holdAlert({ rec, cause: LAUNCH_SKIP_CAUSE(id), text: launchSkipText(id, passes), alert, now });
+  } catch (e) { skipReport(report, id, 'written', e?.message ?? e); }
 }
 function clearLaunchSkip({ rec, id, now, report }) {
-  const was = factDoc(rec, LAUNCH_SKIP_FACT(id))?.doc;
-  if (typeof was === 'object' && was !== null && was.passes) putFact(rec, LAUNCH_SKIP_FACT(id), { ...was, passes: 0, at: iso(now) }, 'launch_skip_cleared', was);
-  if (was != null) clearHold(rec, LAUNCH_SKIP_FACT(id), now, report);
+  try {
+    const was = factDoc(rec, LAUNCH_SKIP_FACT(id))?.doc;
+    if (was == null) return;
+    if (typeof was === 'object' && was.passes) {
+      const w = putFact(rec, LAUNCH_SKIP_FACT(id), { ...was, passes: 0, at: iso(now) }, 'launch_skip_cleared', was);
+      // Refused: the hold's told mark stays too, so the count and the mark never disagree; the next start clears both.
+      if (w?.ok === false) { skipReport(report, id, 'cleared', w.reason); return; }
+    }
+    clearHold(rec, LAUNCH_SKIP_FACT(id), now, report);
+  } catch (e) { skipReport(report, id, 'cleared', e?.message ?? e); }
 }
 
 // The late hold of a card whose launch answered after the tick's limit (L1361): told by the start loop, cleared once the
@@ -1248,7 +1265,7 @@ async function starts({ rec, rules, now, b, running, launch, stopGroup, outboxRo
     // L1368: told once it has been left LAUNCH_SKIP_TELL passes in a row (countLaunchSkip).
     if (launches > 0 && Date.now() + launchDeadlineMs + LAUNCH_MARGIN_MS > launchUntil) {
       out.notes.push(`card ${id}: left for the next pass: the step's time left is under one launch limit`);
-      countLaunchSkip({ rec, id, now, alert });
+      countLaunchSkip({ rec, id, now, alert, report });
       continue;
     }
     const sessionId = randomUUID();
@@ -1256,7 +1273,6 @@ async function starts({ rec, rules, now, b, running, launch, stopGroup, outboxRo
     const claimDoc = { kind: 'session', session_id: sessionId, host, ...(machineId() == null ? {} : { machine: machineId() }), ...(rulesRev != null ? { rules_rev: rulesRev } : {}) };
     const claim = rec.write({ actor: 'dispatcher', entity: 'card', id, expectRev: rev, doc: { ...doc, state: 'claimed', claim: claimDoc }, kind: 'claim' });
     if (!claim.ok) { await refuse(`not claimed: ${claim.reason}`); continue; }
-    clearLaunchSkip({ rec, id, now, report });   // L1368: claimed for its start, so no longer left behind
     // A launch has its own time limit (audit 0b-6 r5 m1): one that never answers holds no other start.
     // It may still start a session after the limit, so the card stays claimed, never back to ready (a
     // second start would make two sessions for one card); Joe is told, once a day.
@@ -1273,6 +1289,7 @@ async function starts({ rec, rules, now, b, running, launch, stopGroup, outboxRo
     }
     const settled = await settleLaunch({ rec, now, l, id, sessionId, kind, product, outboxRoot, stopGroup, portDeadlineMs, alert, report, failureLog, out, running, host });
     if (settled.refused) await refuse(`launcher: ${settled.refused}`);
+    if (settled.started) clearLaunchSkip({ rec, id, now, report });   // L1368: started, so no longer left behind
   }
   if (!onlyUndo) tellWaits({ rec, groups, alert, now, report });
 }
