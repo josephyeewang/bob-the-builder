@@ -67,7 +67,7 @@ test('L741: the launch answer names every field the pass reads from it (pass.mjs
   const unsaid = [...read].filter((f) => !said.has(f));
   assert.deepEqual(unsaid, [], `pass.mjs reads launch fields the interface does not name: ${unsaid}`);
   // A late launch is known only by guarded's own answer, so the port must never answer its own time-out (M2 of the self-review).
-  assert.match(body, /l\?\.reason === `it did not answer within \$\{portDeadlineMs\} ms`|l\?\.timedOut === true/);
+  assert.match(body, /l\?\.reason === `it did not answer within \$\{launchDeadlineMs\} ms`|l\?\.timedOut === true/);
   assert.match(OWNER_PORTS.launch.fails, /the tick's limit answers and the card stays claimed/);
   // The call itself: the inputs the interface names.
   // L976: an undo's launch adds the reversed commit, and only an undo's.

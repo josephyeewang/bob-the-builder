@@ -56,7 +56,7 @@ const PORTS_WIRED = Object.freeze(['approvals', 'board', 'filesOf', 'hasReviewer
 const APPROVALS_GH = Object.freeze(['get', 'patch', 'post', 'put']);
 const APPROVALS_COPIES = Object.freeze(['done', 'pending', 'sync', 'told']);
 // What else the tick reads from its ports object: the alert port, the cleanup group, and options with defaults.
-const NOT_PORTS = Object.freeze(['alert', 'alertSendMs', 'approvalsProductMs', 'cleanup', 'intakeFs', 'proposalsFs', 'portDeadlineMs', 'saveDeadlineMs', 'stepDeadlineMs']);
+const NOT_PORTS = Object.freeze(['alert', 'alertSendMs', 'approvalsProductMs', 'cleanup', 'intakeFs', 'proposalsFs', 'portDeadlineMs', 'launchDeadlineMs', 'saveDeadlineMs', 'stepDeadlineMs']);
 // One full pass with the ports above refusing: each step's outcome, and for a failed step the port its error names.
 const NW = (port) => notWiredText(port);
 // LEAD-RULED (L652, re-ruled by L674 for the separate-process boots): the boot's review user is another user (this one's

@@ -260,7 +260,7 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
   let running = [];
   const deadline = p.stepDeadlineMs ?? STEP_DEADLINE_MS;
   // A time limit on each stop, save and Lead hand-off call; the defaults are pass.mjs's.
-  const portDeadlines = Object.fromEntries([['portDeadlineMs', p.portDeadlineMs], ['saveDeadlineMs', p.saveDeadlineMs]].filter(([, v]) => v !== undefined));
+  const portDeadlines = Object.fromEntries([['portDeadlineMs', p.portDeadlineMs], ['launchDeadlineMs', p.launchDeadlineMs], ['saveDeadlineMs', p.saveDeadlineMs]].filter(([, v]) => v !== undefined));
   const run = async (step, f) => {
     now = Math.max(now, clock());
     let timer;

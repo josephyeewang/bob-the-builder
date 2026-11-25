@@ -116,6 +116,10 @@ const iso = (ms) => new Date(ms).toISOString();
 // STEP_DEADLINE_MS (tick.mjs).
 export const PORT_DEADLINE_MS = 30_000;
 export const SAVE_DEADLINE_MS = 75_000;
+// L1361 (lead call): a launch gets its own, longer limit. The worker runner's start checks ran ~35 s on the Mini, past
+// PORT_DEADLINE_MS, so every start answered late. Only the launch call takes it; stops, saves and the rest keep theirs.
+// A launch that outruns even this is still taken over by the adopt step (adoptLate), the backstop.
+export const LAUNCH_DEADLINE_MS = 45_000;
 // `f` gets an AbortSignal that is aborted when guarded gives up on it (L822, #372 m2), so a port that honours it (a
 // stop, say) does nothing more once its answer no longer counts. A port that ignores it is unchanged.
 export async function guarded(f, ms = PORT_DEADLINE_MS) {
@@ -581,7 +585,7 @@ export const HELD_BANDS = Object.freeze({ band: 'unknown', own_building: 'unknow
  * `stops` is the tick's own stopPass result; null when that step failed (then nothing new starts but
  * undo cards); left out, the pass runs stopPass itself.
  */
-export async function dispatcherPass({ rec, rules, now, clock = () => now, account, product, sessions, probe, launch, stopGroup, stopReview, outboxRoot, saveWork, hostLock = () => null, pauseLead = () => {}, filesOf, alert, failureLog = () => {}, startsOff = null, tellMissing = true, stops, portDeadlineMs = PORT_DEADLINE_MS, saveDeadlineMs = SAVE_DEADLINE_MS, host = hostname() }) {
+export async function dispatcherPass({ rec, rules, now, clock = () => now, account, product, sessions, probe, launch, stopGroup, stopReview, outboxRoot, saveWork, hostLock = () => null, pauseLead = () => {}, filesOf, alert, failureLog = () => {}, startsOff = null, tellMissing = true, stops, portDeadlineMs = PORT_DEADLINE_MS, launchDeadlineMs = LAUNCH_DEADLINE_MS, saveDeadlineMs = SAVE_DEADLINE_MS, host = hostname() }) {
   const st = stops === undefined ? await stopPass({ rec, rules, now, clock, account, product, sessions, probe, stopGroup, stopReview, saveWork, alert, portDeadlineMs, saveDeadlineMs }) : stops;
   const out = { started: [], refused: [], stopping: st?.stopping ?? [], stopped: st?.stopped ?? [], resumed: [], notes: [...(st?.notes ?? [])] };
   const report = refusalReport({ rec, alert, now, lines: out.notes, failureLog });
@@ -732,7 +736,7 @@ export async function dispatcherPass({ rec, rules, now, clock = () => now, accou
   else {
     if (hostCopy !== null) out.notes.push(`nothing starts, undo cards too: ${hostCopyReason(hostCopy)}`);
     else if (startsOff) out.notes.push(`nothing but undo cards starts: ${startsOff}`);
-    await starts({ rec, rules, now, b, running, launch, stopGroup, outboxRoot, out, alert, report, failureLog, onlyUndo: !!startsOff, hostCopy, missing, filesOf, portDeadlineMs, host });
+    await starts({ rec, rules, now, b, running, launch, stopGroup, outboxRoot, out, alert, report, failureLog, onlyUndo: !!startsOff, hostCopy, missing, filesOf, portDeadlineMs, launchDeadlineMs, host });
   }
   // The tick tells Joe once for all its steps (`tellMissing` false); run alone, the pass tells him itself.
   out.missing = missing;
@@ -767,14 +771,14 @@ export async function dispatcherPass({ rec, rules, now, clock = () => now, accou
 // main pass cannot keep an undo from starting. The gate still checks each one (L40).
 // Under the owner's copier, a copy that can't be trusted holds them too (L1045): this step runs before the pass, so it
 // reads host.lock itself. Only the HOST_COPY_FAIL mark holds; a plain throw (no copier) changes nothing, as before.
-export async function undoStarts({ rec, rules, now, bands = HELD_BANDS, running = [], launch, stopGroup, outboxRoot, filesOf, alert, failureLog = () => {}, portDeadlineMs = PORT_DEADLINE_MS, host = hostname(), hostLock = () => null }) {
+export async function undoStarts({ rec, rules, now, bands = HELD_BANDS, running = [], launch, stopGroup, outboxRoot, filesOf, alert, failureLog = () => {}, portDeadlineMs = PORT_DEADLINE_MS, launchDeadlineMs = LAUNCH_DEADLINE_MS, host = hostname(), hostLock = () => null }) {
   const out = { started: [], refused: [], notes: [] };
   const missing = [];
   if (factDoc(rec, OUTAGE_FACT)?.doc?.state === 'open') { out.notes.push('outage: nothing starts'); return { ...out, missing, running }; }
   const live = [...running];
   const hostCopy = readHostLock(hostLock).copyFail;
   if (hostCopy !== null) out.notes.push(`no undo card starts: ${hostCopyReason(hostCopy)}`);
-  await starts({ rec, rules, now, b: bands, running: live, launch, stopGroup, outboxRoot, out, alert, report: refusalReport({ rec, alert, now, lines: out.notes, failureLog }), failureLog, onlyUndo: true, hostCopy, missing, filesOf, portDeadlineMs, host });
+  await starts({ rec, rules, now, b: bands, running: live, launch, stopGroup, outboxRoot, out, alert, report: refusalReport({ rec, alert, now, lines: out.notes, failureLog }), failureLog, onlyUndo: true, hostCopy, missing, filesOf, portDeadlineMs, launchDeadlineMs, host });
   return { ...out, missing, running: live };
 }
 
@@ -1027,7 +1031,7 @@ export async function adoptLate({ rec, now, launchOutcome, stopGroup, outboxRoot
   return out;
 }
 
-async function starts({ rec, rules, now, b, running, launch, stopGroup, outboxRoot, out, alert, report, failureLog, onlyUndo = false, hostCopy = null, missing = [], filesOf, portDeadlineMs = PORT_DEADLINE_MS, host = hostname() }) {
+async function starts({ rec, rules, now, b, running, launch, stopGroup, outboxRoot, out, alert, report, failureLog, onlyUndo = false, hostCopy = null, missing = [], filesOf, portDeadlineMs = PORT_DEADLINE_MS, launchDeadlineMs = LAUNCH_DEADLINE_MS, host = hostname() }) {
   const amberish = b.band !== 'green' || b.own_building !== 'open';
   // Undo cards first, then (in amber) Tier 1 before Tier 2, then the longest in ready, by the Record's clock.
   // The Record's own ready rule (rec.ready: unclaimed, dependencies merged, a go where one is needed; L72).
@@ -1113,11 +1117,12 @@ async function starts({ rec, rules, now, b, running, launch, stopGroup, outboxRo
     // second start would make two sessions for one card); Joe is told, once a day.
     // An undo's launch carries the reversed commit exactReverse found from the card's source (L976), never a card field.
     // `card` goes as its id (L1332): the runner takes a name, never the Record document.
-    const l = await guarded(() => launch({ card: id, kind, product, sessionId, ...(kind === 'undo' ? { undoCommit: exact.commit } : {}) }), portDeadlineMs);
+    // The launch alone takes LAUNCH_DEADLINE_MS (L1361); the stop settleLaunch may make keeps portDeadlineMs.
+    const l = await guarded(() => launch({ card: id, kind, product, sessionId, ...(kind === 'undo' ? { undoCommit: exact.commit } : {}) }), launchDeadlineMs);
     // Late is any answer marked timed out (guarded's own, or a port's), not only guarded's exact words (L744 1).
-    if (!l?.ok && (l?.timedOut === true || l?.reason === `it did not answer within ${portDeadlineMs} ms`)) {
+    if (!l?.ok && (l?.timedOut === true || l?.reason === `it did not answer within ${launchDeadlineMs} ms`)) {
       out.refused.push([id, `launcher: ${l.reason}`]);
-      holdAlert({ rec, cause: LAUNCH_LATE_CAUSE(id), text: `card ${id}: the launcher ${l.reason}; the card stays claimed so it cannot start twice, and a later pass takes the start over once the launcher answers (adoptLate)`, alert, now });
+      holdAlert({ rec, cause: LAUNCH_LATE_CAUSE(id), text: `card ${id}: the launcher did not answer within its ${launchDeadlineMs / 1000} s launch limit (${l.reason}); the card stays claimed so it cannot start twice, and a later pass takes the start over once the launcher answers (adoptLate)`, alert, now });
       continue;
     }
     const settled = await settleLaunch({ rec, now, l, id, sessionId, kind, product, outboxRoot, stopGroup, portDeadlineMs, alert, report, failureLog, out, running, host });

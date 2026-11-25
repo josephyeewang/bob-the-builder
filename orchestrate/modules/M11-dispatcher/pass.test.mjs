@@ -7,7 +7,7 @@ import { tempDir } from '../../shared/test-tmp.mjs';
 import { launchInputProblem } from '../../wiring/owner-asks.mjs';
 import { STATES, FINAL_STATES } from '../../shared/record.mjs';
 import { STOP_QUIET_REASONS } from '../M4-workshop/launcher/review-runner.mjs';
-import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts as undoStarts0, stopProcessGroup, guarded, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, RESET_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RUN, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, LIMIT_H5_MS, resetEndsLimit, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0, UNKNOWN_FACT, REVIEW_STOP_FACT, REVIEW_STOP_RUNNER_REASON, REVIEW_STOP_AGAIN_MS, REVIEW_STOP_TELL_FACT, REVIEW_STOP_MAX_ASKS, HOST_COPY_FAIL, HOST_COPY_CAUSE, HOLD_FACT, adoptLate as adoptLate0 } from './pass.mjs';
+import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts as undoStarts0, stopProcessGroup, guarded, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, RESET_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RUN, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, LIMIT_H5_MS, resetEndsLimit, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0, UNKNOWN_FACT, REVIEW_STOP_FACT, REVIEW_STOP_RUNNER_REASON, REVIEW_STOP_AGAIN_MS, REVIEW_STOP_TELL_FACT, REVIEW_STOP_MAX_ASKS, HOST_COPY_FAIL, HOST_COPY_CAUSE, HOLD_FACT, adoptLate as adoptLate0, LAUNCH_DEADLINE_MS, PORT_DEADLINE_MS } from './pass.mjs';
 import { USAGE_FACT, BAND_FACT } from './usage.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { retellWaits, WAIT_TELL_FACT } from './joe-waits.mjs';
@@ -1414,7 +1414,7 @@ test('#117 m2: an undo launch that times out leaves its card claimed; a second u
   const launched = [];
   const r = await undoStarts({ rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), now: T0,
     bands: { band: 'green', own_building: 'open', prodBlocked: false }, running: [],
-    launch: (x) => { launched.push(x.card); return new Promise(() => {}); }, filesOf: filesOfCommits, alert: fakeAlert(), portDeadlineMs: 50 });
+    launch: (x) => { launched.push(x.card); return new Promise(() => {}); }, filesOf: filesOfCommits, alert: fakeAlert(), portDeadlineMs: 50, launchDeadlineMs: 50 });
   assert.deepEqual(launched, ['U-1']);
   assert.deepEqual(r.started, []);
   assert.equal(rec.read('card', 'U-1').doc.state, 'claimed');
@@ -1444,11 +1444,11 @@ test('r5 m1: a launch that never answers holds no other start; its card stays cl
   const w = world([card('C-A'), card('C-B', { product: 'p2', files: ['src/b.js'] })]);
   const run = (min) => dispatcherPass({ product: 'p1', rec: w.rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), now: T0 + min * MIN, account: ACCT, sessions: [], probe: () => idle,
     launch: (x) => (x.card === 'C-A' ? new Promise(() => {}) : { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/${x.product}/worker/${x.sessionId}`, pid: 9, pidStart: 's9', pgid: 9, head: 'h'.repeat(40) }),
-    stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, alert: (t) => w.calls.alerts.push(t), portDeadlineMs: 50 });
+    stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, alert: (t) => w.calls.alerts.push(t), portDeadlineMs: 50, launchDeadlineMs: 50 });
   const r = await run(0);
   assert.deepEqual(r.started.map((x) => (Array.isArray(x) ? x[0] : x)), ['C-B'], JSON.stringify(r));
   assert.equal(w.rec.read('card', 'C-A').doc.state, 'claimed');
-  assert.equal(w.calls.alerts.filter((a) => /card C-A: the launcher it did not answer within 50 ms/.test(a)).length, 1, w.calls.alerts.join(' | '));
+  assert.equal(w.calls.alerts.filter((a) => /card C-A: the launcher did not answer within its 0\.05 s launch limit \(it did not answer within 50 ms\)/.test(a)).length, 1, w.calls.alerts.join(' | '));
 });
 
 // Audit 0b-6 r5 MAT-2 and m4: the pass's own alert sites with the alert failing first, and a Lead hand-off
@@ -1462,7 +1462,7 @@ test('r5 MAT-2: usage unknown and a failed Lead hand-off, with the first alert f
     let down = true;
     let n = 0;
     const at = (min) => dispatcherPass({ product: 'p1', rec: w.rec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, sessions: [], probe: () => idle, launch: async () => ({ ok: false }),
-      stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, portDeadlineMs: 50,
+      stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, portDeadlineMs: 50, launchDeadlineMs: 50,
       pauseLead: () => { throw new Error(`Lead not reachable (pid ${++n})`); }, alert: (t) => (down ? bad(t) : sent.push(t)) });
     await at(0);
     await at(24 * 60 + 1);
@@ -2239,11 +2239,11 @@ test('L744 1: a launch that answers timed out in its own words keeps the card cl
   const alert = fakeAlert();
   const r = await dispatcherPass({ product: 'p1', rec: w.rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), now: T0, account: ACCT, sessions: [], probe: () => idle,
     launch: async () => ({ ok: false, timedOut: true, reason: 'the launcher gave up waiting for claude' }),
-    stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, alert, portDeadlineMs: 5_000 });
+    stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, alert, portDeadlineMs: 5_000, launchDeadlineMs: 5_000 });
   assert.equal(w.rec.read('card', 'C-A').doc.state, 'claimed');
   assert.equal(w.rec.diary().filter((l) => l.kind === 'claim_release' && l.id === 'C-A').length, 0, 'not given back');
   assert.ok(r.refused.some(([id, why]) => id === 'C-A' && /launcher: the launcher gave up waiting/.test(why)), JSON.stringify(r.refused));
-  assert.equal(alert.texts.filter((a) => /card C-A: the launcher the launcher gave up waiting for claude; the card stays claimed/.test(a)).length, 1, alert.texts.join(' | '));
+  assert.equal(alert.texts.filter((a) => /card C-A: the launcher did not answer within its 5 s launch limit \(the launcher gave up waiting for claude\); the card stays claimed/.test(a)).length, 1, alert.texts.join(' | '));
 });
 
 // L744 2: what pauseLead answers is read: ok:false is a failure, told once like a throw, and not counted as asked.
@@ -2791,4 +2791,24 @@ test('L1361: a claim made on another Mac is never asked about', async () => {
   await adopt({ pending: true }, { more: { host: 'other-mac', machine: 'other-machine-id' } });
   assert.deepEqual(asked, []);
   assert.equal(w.rec.read('card', 'C-1').doc.state, 'claimed');
+});
+
+test('L1361 lead call: the launch alone gets LAUNCH_DEADLINE_MS (45 s); other port calls keep PORT_DEADLINE_MS (30 s), and the late hold names the launch limit', async () => {
+  assert.equal(LAUNCH_DEADLINE_MS, 45_000);
+  assert.equal(PORT_DEADLINE_MS, 30_000);
+  const slow = (ms) => () => new Promise((r) => setTimeout(() => r({ ok: true }), ms));
+  const go = (w, more) => dispatcherPass({ product: 'p1', rec: w.rec, rules: rulesWith({}, startAnswer(w.rec)), now: T0, account: ACCT, sessions: [], probe: () => idle,
+    stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, alert: (t) => w.calls.alerts.push(t), ...more });
+  // A launch slower than the port limit but within the launch limit starts on time.
+  const a = world([card('C-1')]);
+  const launchOf = (w, ms) => async (x) => { await slow(ms)(); return { ok: true, sessionId: x.sessionId, pid: 4242, pidStart: 's', pgid: 7, head: 'h'.repeat(40), outbox: `/outbox-root/${x.product}/worker/${x.sessionId}` }; };
+  const r = await go(a, { launch: launchOf(a, 60), portDeadlineMs: 20, launchDeadlineMs: 500 });
+  assert.deepEqual(r.started, ['C-1']);
+  assert.equal(a.rec.read('card', 'C-1').doc.state, 'running');
+  // One slower than the launch limit is late: claimed, and the hold names the limit the launch used.
+  const b = world([card('C-1')]);
+  const r2 = await go(b, { launch: launchOf(b, 300), portDeadlineMs: 5_000, launchDeadlineMs: 40 });
+  assert.deepEqual(r2.started, []);
+  assert.equal(b.rec.read('card', 'C-1').doc.state, 'claimed');
+  assert.ok(b.calls.alerts.some((t) => /card C-1: the launcher did not answer within its 0\.04 s launch limit \(it did not answer within 40 ms\); the card stays claimed/.test(t)), b.calls.alerts.join(' | '));
 });
