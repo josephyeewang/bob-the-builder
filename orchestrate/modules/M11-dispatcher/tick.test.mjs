@@ -507,12 +507,13 @@ test('L1365 m4: at the re-run cap the dead-session tell says until when the card
     return alert.texts.filter((t) => /card C-1: its session stopped/.test(t));
   };
   // At the cap: the oldest re-run (3 h ago) is 24 h old at T0 + 21 h.
-  assert.deepEqual(told([fact([iso(T0 - 3 * 60 * MIN), iso(T0 - 60 * MIN)])]), [`card C-1: its session stopped and the card is not marked safe to re-run, so it waits on you; it was started again 2 times in the last 24 hours, the most claims.dead_reruns_per_day allows, so it is not started again by itself before ${iso(T0 + 21 * 60 * MIN)}`]);
-  // Under the cap, or with no re-runs: the plain tell (the waits step starts it again).
+  assert.deepEqual(told([fact([iso(T0 - 3 * 60 * MIN), iso(T0 - 60 * MIN)])]), [`card C-1: its session stopped and the card is not marked safe to re-run, so it waits on you; it was put back in the queue 2 times in the last 24 hours, the most claims.dead_reruns_per_day allows, so it is not put back by itself before ${iso(T0 + 21 * 60 * MIN)}`]);
+  // Under the cap, or with no re-runs: the plain tell (the waits step puts it back in the queue).
   assert.deepEqual(told([fact([iso(T0 - 60 * MIN)])]), ['card C-1: its session stopped and the card is not marked safe to re-run, so it waits on you']);
   assert.deepEqual(told([]), ['card C-1: its session stopped and the card is not marked safe to re-run, so it waits on you']);
-  // Only unreadable times at the cap: no date to give.
-  assert.match(told([fact(['x', 'y'])])[0], /not started again by itself while its re-run times cannot be read$/);
+  // Only unreadable or future times at the cap: no date to give (L1367 item 4).
+  assert.match(told([fact(['x', 'y'])])[0], /not put back by itself while its re-run times are in the future or cannot be read$/);
+  assert.match(told([fact([iso(T0 + 3 * 60 * MIN), 'y'])])[0], /not put back by itself while its re-run times are in the future or cannot be read$/);
 });
 
 test('L1364 M1: with healthy not wired, three deaths on a board of six open no outage; each card waits on Joe, told once each', async () => {

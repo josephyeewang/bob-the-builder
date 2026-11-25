@@ -69,6 +69,19 @@ for (const [how, lost] of [['was not queued', () => false], ['threw', () => { th
   assert.equal(alerts.length, 1, 'told once');
 });
 
+// L1367 item 4: outageStep itself, with canEnd left out (its default, false: the healthy and resume ports not both
+// wired). Three deaths on a board of four would trip an outage; none opens, and each card is decided on its own.
+test('L1367 item 4: with canEnd left out (false) a board that would trip opens no outage; each dead card is an ask', () => {
+  const rec = recWith(cards());
+  const board = [gone('S1', 'C-1'), gone('S2', 'C-2'), gone('S3', 'C-3'), live('S4', 'C-4')];
+  const r = outageStep0({ rec, rules: R, board, now: T0, healthy: true, alert: fakeAlert() });
+  assert.equal(r.outage, false);
+  assert.deepEqual(r.asks, ['C-1', 'C-2', 'C-3']);
+  assert.notEqual(rec.read('fact', OUTAGE_FACT)?.doc?.state, 'open', 'no outage written');
+  // The same board with canEnd true trips one (the wrapper the other tests use).
+  assert.equal(outageStep({ rec: recWith(cards()), rules: R, board, now: T0, healthy: true, alert: fakeAlert() }).outage, true);
+});
+
 test('M9: a board of 4 with 1 killed decides that one on its own (an ask: no card is marked safe)', () => {
   const rec = recWith(cards());
   const r = outageStep({ rec, rules: R, board: [gone('S1', 'C-1'), live('S2', 'C-2'), live('S3', 'C-3'), live('S4', 'C-4')], now: T0, healthy: true, alert: () => assert.fail('no alert') });

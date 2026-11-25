@@ -7,9 +7,10 @@
 //                  failure (an unreadable file, a bad rule) can skip them. An undo starts only as the
 //                  exact reverse of a merge in the record (L40).
 //   1. outage    — first, so a pass during an outage starts nothing and restarts nothing (R-0b-56).
-//                  Outside an outage its answer is acted on here: a dead session's card that is safe to
-//                  re-run has its claim broken by the Record (breakIfDead: back to `ready`, the starts below
-//                  pick it up); any other waits on Joe.
+//                  Outside an outage its answer is acted on here, for running cards only (L1367): a dead
+//                  session's card that is safe to re-run has its claim broken by the Record (breakIfDead: back
+//                  to `ready`, the starts below pick it up); any other running card waits on Joe (and the waits
+//                  step re-queues it under the daily cap, L1365). A claimed card's dead session is left to the lapse.
 //      adopt     — a launch that answered after its limit (the runner's start checks ran long) is taken over: the card
 //                  goes running with the same steps as an on-time start, or back to ready if the runner refused it
 //                  (adoptLate, L1361). Before the lapse, which never stops a session that did launch.
@@ -206,13 +207,17 @@ function atCapText(rec, rules, cardId, product, now) {
  * provably dead (breakIfDead: pid and pid_start, the session, no recent activity; L72), and goes back to ready; any
  * other card waits on Joe. Each card moved gets its own alert (L43(a), L38: no silent move); a card that already moved
  * on is left alone, with no alert. A break the Record refuses is listed with its reason, never forced.
+ * Only a `running` card is acted on (L1367 item 1). A `claimed` card has no process yet, and claimed -> waiting is not a
+ * move the Record allows, so its ask was refused and told as "a card could not be put on you" when nothing was wrong:
+ * its dead session is the lapse's (M9 lapseClaims at claims.unlaunched_min, which stops that session id first and puts
+ * the card back to ready; tick.mjs's lapse step), with no alert here.
  */
 export function actOnDead({ rec, rules, now, restart, asks, cards = {}, alert = () => {}, missing = [] }) {
   const done = [];
   for (const sid of restart) {
     const cardId = cards[sid];
     const cur = cardId ? rec.read('card', cardId) : null;
-    if (!cur || !['running', 'claimed'].includes(cur.doc.state)) continue;
+    if (cur?.doc?.state !== 'running') continue;
     // No claim is broken without claims.stuck_min (M9 refuses too). It is a per-product key, read for the card's own
     // product (L110 m-2); the missing value is told with the others.
     try { need(rules, KEYS.claimsStuckMin, { product: cur.doc.product }); } catch (e) {
@@ -231,9 +236,9 @@ export function actOnDead({ rec, rules, now, restart, asks, cards = {}, alert = 
   }
   for (const cardId of asks) {
     const cur = rec.read('card', cardId);
-    if (!cur || !['running', 'claimed'].includes(cur.doc.state)) continue;
+    if (cur?.doc?.state !== 'running') continue;
     // Told until delivered (L130 M1): waitOnJoe records the tell, and retellWaits asks again while it is not delivered.
-    // At the re-run cap (L1365 m4) the tell says until when it waits; under it, the waits step starts it again.
+    // At the re-run cap (L1365 m4) the tell says until when it waits; under it, the waits step puts it back in the queue.
     const text = `card ${cardId}: its session stopped and the card is not marked safe to re-run, so it waits on you${atCapText(rec, rules, cardId, cur.doc.product, now)}`;
     const w = waitOnJoe(rec, cardId, { what: `${DEAD_SESSION_WAIT}: its session stopped and the card is not marked safe to re-run`, now, link: `card ${cardId}`, kind: 'dead_ask',
       alert, text });
