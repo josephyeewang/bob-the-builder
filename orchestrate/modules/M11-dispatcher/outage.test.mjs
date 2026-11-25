@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import { writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
-import { outageStep, isDead, OUTAGE_FACT, OUTAGE_MIN_DEAD, OUTAGE_MIN_SHARE } from './outage.mjs';
+import { outageStep as outageStep0, isDead, OUTAGE_FACT, OUTAGE_MIN_DEAD, OUTAGE_MIN_SHARE } from './outage.mjs';
+// L1364 r2: canEnd defaults to false; these tests are of an outage step whose healthy and resume ports are wired.
+const outageStep = (a) => outageStep0({ canEnd: true, ...a });
 import { takePassLock, pidDead } from './pass-lock.mjs';
 import { KEYS as K } from './keys.mjs';
 import { rulesWith, recWith, T0, MIN, withAlerts } from './fixtures.test-helper.mjs';

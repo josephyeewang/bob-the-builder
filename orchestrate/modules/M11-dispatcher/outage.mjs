@@ -58,10 +58,14 @@ export function isDead(s, { now, quietMs }) {
  * `countedRefused`, `endRefused` or `passRefused` (the reason) when that write was refused; writes the outage fact and raises at most
  * one alert per outage.
  */
-// L1364 amended (#674 review M1): `canEnd` false (no health reading can be had: the healthy port is not wired) opens no
-// new outage, since one opened then could never end (healthy and resume both refuse) and would hold every start for ever.
-// Those deaths are decided one card at a time, as outside an outage. An outage already open is handled as before.
-export function outageStep({ rec, rules, board, now, healthy, resume = false, alert, canEnd = true }) {
+// L1364 amended (#674 review M1, round 2): `canEnd` is true only when both ways out are wired (the healthy and the resume
+// port); false, the default, opens no new outage, since one opened then might never end and would hold every start
+// for ever. Those deaths are decided one card at a time, as outside an outage. An outage already open is handled as before.
+// Open: L1364 — an outage already open while healthy or resume is unwired has no way out in code: it ends only once
+// both are wired (three healthy passes, or Joe's resume). There is no owner command to end it; the one manual way is
+// to stop the Dispatcher and have its own actor write the `outage` fact to state 'ended' (ended_by 'joe'), which no
+// tool does today.
+export function outageStep({ rec, rules, board, now, healthy, resume = false, alert, canEnd = false }) {
   const quietMs = minutes(rules, KEYS.deadQuietMin);
   const minDead = need(rules, KEYS.outageMinDead);
   const share = need(rules, KEYS.outageShare);

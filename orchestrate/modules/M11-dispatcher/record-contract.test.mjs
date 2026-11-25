@@ -12,7 +12,9 @@ import { timeLimits, requestMerges, MERGE_REQUEST, ASK_REFUSED_FACT } from './me
 import { LIMIT_NO_ACCOUNT, LAUNCH_DEADLINE_MS } from './pass.mjs';
 import { settleMerge } from '../M6-merge-gate/merge-outcome.mjs';
 import { waitOn } from './moves.mjs';
-import { outageStep, OUTAGE_FACT } from './outage.mjs';
+import { outageStep as outageStep0, OUTAGE_FACT } from './outage.mjs';
+// L1364 r2: canEnd defaults to false; these tests are of an outage step whose healthy and resume ports are wired.
+const outageStep = (a) => outageStep0({ canEnd: true, ...a });
 import { USAGE_FACT } from './usage.mjs';
 import { recWith, rulesWith, usageFact, withAlerts } from './fixtures.test-helper.mjs';
 import { makeRules } from '../../shared/rules.mjs';
