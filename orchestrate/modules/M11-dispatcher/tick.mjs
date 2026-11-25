@@ -71,6 +71,7 @@ import { dueToTell, pastTime } from '../../shared/still-waiting.mjs';
 import { schedulePass } from '../M2-approvals/schedule.mjs';
 import { planGoPass, plansAwaitingAnswer, PLAN_REVIEW_LEAD } from './plan-go.mjs';
 import { proposalsPass } from './proposals-intake.mjs';
+import { isRefusing } from '../../wiring/not-wired.mjs';
 import { researchHandler, researchPass } from './research-intake.mjs';
 
 export const STEPS = Object.freeze(['stops', 'undo', 'undo-starts', 'outage', 'adopt', 'lapse', 'intake', 'proposals', 'research', 'leads', 'approvals', 'plan-go', 'pass', 'limits', 'merges', 'waits', 'lost-cards', 'stuck-cards', 'phone', 'cleanup']);
@@ -334,7 +335,10 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
     // a running card whose session had died was never handed to actOnDead. An open outage still asks them, so a port
     // that throws there fails the step as before (nothing restarts, the outage holds).
     const openNow = outageInRecord();
-    const o = outageStep({ rec, rules, board, now, healthy: openNow ? p.healthy() : false, resume: openNow ? (p.resume?.() ?? false) : false, alert });
+    // L1364 amended (#674 review M1): with no health reading to be had (the healthy port missing, or still the wiring's
+    // refusing port, R-0b-162), no outage is opened, since nothing could end it.
+    const canEnd = typeof p.healthy === 'function' && !isRefusing(p.healthy);
+    const o = outageStep({ rec, rules, board, now, healthy: openNow ? p.healthy() : false, resume: openNow ? (p.resume?.() ?? false) : false, alert, canEnd });
     outageOpen = o.outage;
     // L761: a refused write of the deaths already counted means they may be counted again (a false outage), or that
     // the Record is failing. Told through the refused-save path (refusalReport, holdAlert): once, then daily.

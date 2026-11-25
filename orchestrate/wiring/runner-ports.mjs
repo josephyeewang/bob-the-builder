@@ -275,27 +275,34 @@ export const groupThere = (g, signal = (x, s) => process.kill(x, s)) => { try { 
 // L1364 (seen live: R-S1-2's sessions ended some 20 s in and nothing said why): claude's stdout and stderr go to a file
 // of the runner's own, `<sessionId>.out.jsonl` beside the session's settings (the runner's settings folder, inside the
 // folder runnerWallDirs denies every session: dirname of the status file), made new, 0o600, never through a link. When
-// claude ends, while the runner still runs, one line is logged: its exit code and signal and, from the last
-// `{"type":"result"}` line, only fields that are numbers, booleans or one short fixed word (never the result's own text).
+// claude ends, while the runner still runs, and only when it was spawned (#674 review c1), one line is logged: its exit
+// code and signal and, from the last `{"type":"result"}` line, only allow-listed words and bounded counts (#674 review m3),
+// never the result's own text.
+// Open: L1364 m2 — a session's output file grows with the session and nothing caps it, so a full disk can end the
+// session (and others). Accepted with the pruning below (SESSION_OUT_KEEP); a size cap is not built.
 export const sessionOutName = (id) => `${id}.out.jsonl`;
+const OUT_SUFFIX = '.out.jsonl';
 /** How much of the file's end is read for the last result line. */
 export const SESSION_OUT_TAIL = 256 * 1024;
-const WORD = /^[a-z][a-z0-9_]{0,39}$/;
-// The API's own error types (its error.type), the only words taken from a failed result's text: never the text itself.
+// #674 review m3: the only words logged for subtype and stop_reason; any other is logged as `other`.
+export const RESULT_SUBTYPES = Object.freeze(['success', 'error_max_turns', 'error_during_execution', 'error_max_budget_usd']);
+export const STOP_REASONS = Object.freeze(['end_turn', 'max_tokens', 'tool_use', 'stop_sequence', 'refusal', 'pause_turn']);
+// The API's own error types (its error.type): the only words taken for api_error besides a status.
 export const API_ERROR_WORDS = Object.freeze(['rate_limit_error', 'authentication_error', 'overloaded_error', 'permission_error', 'billing_error',
   'invalid_request_error', 'not_found_error', 'request_too_large', 'api_error']);
-const word = (v) => (typeof v === 'string' && WORD.test(v) ? v : undefined);
-const count = (v) => (Number.isFinite(v) ? v : undefined);
-/** The API error of a failed result as one fixed word: its status as `status_<n>`, else a known error type it names. */
+const listed = (v, list) => (v === undefined || v === null ? undefined : list.includes(v) ? v : 'other');
+// A count logged must be a non-negative integer under 1e9; any other is left out.
+const count = (v) => (Number.isInteger(v) && v >= 0 && v < 1e9 ? v : undefined);
+/**
+ * The API error of a failed result as one fixed word, from structured fields only (#674 review c2), never from the
+ * result's text: its status (api_error_status) as `status_<n>`, else an error type field (error.type or error_type)
+ * that is one of API_ERROR_WORDS. Which of these fields claude writes is read, not yet proved live.
+ */
 export function apiErrorWord(r) {
   if (r?.is_error !== true) return undefined;
   const st = r.api_error_status;
   if (Number.isInteger(st) && st >= 100 && st <= 599) return `status_${st}`;
-  const text = typeof r.result === 'string' ? r.result : '';
-  const typed = API_ERROR_WORDS.find((w) => new RegExp(`\\b${w}\\b`).test(text));
-  if (typed) return typed;
-  const m = text.match(/\bAPI Error: ([1-5]\d\d)\b/);
-  return m ? `status_${m[1]}` : undefined;
+  return [r.error?.type, r.error_type].find((t) => typeof t === 'string' && API_ERROR_WORDS.includes(t));
 }
 /** The last `{"type":"result"}` line of stream-json text, parsed, or null. */
 export function lastResult(text) {
@@ -312,10 +319,28 @@ export function lastResult(text) {
 export function sessionEndText({ sessionId, card, code, signal, result }) {
   const said = `session ${sessionId}${card ? ` (card ${card})` : ''}: claude ended, exit code ${code ?? 'none'}, signal ${signal ?? 'none'}`;
   if (!result) return `${said}; no result line in its output`;
-  const f = { subtype: word(result.subtype), is_error: typeof result.is_error === 'boolean' ? result.is_error : undefined, num_turns: count(result.num_turns),
-    stop_reason: word(result.stop_reason), api_error: apiErrorWord(result), duration_ms: count(result.duration_ms) };
+  const f = { subtype: listed(result.subtype, RESULT_SUBTYPES), is_error: typeof result.is_error === 'boolean' ? result.is_error : undefined, num_turns: count(result.num_turns),
+    stop_reason: listed(result.stop_reason, STOP_REASONS), api_error: apiErrorWord(result), duration_ms: count(result.duration_ms) };
   return `${said}; result ${Object.entries(f).filter(([, v]) => v !== undefined).map(([k, v]) => `${k}=${v}`).join(' ')}`;
 }
+// #674 review m1: the runner's settings folder keeps only the newest SESSION_OUT_KEEP output files; an older one goes
+// only when its session is ended (not in `live`, the ids the runner still counts as running or starting).
+export const SESSION_OUT_KEEP = 20;
+/** Removes the older output files in `dir` (newest first by change time) -> { removed: [names], problems: [text] }. */
+export function pruneSessionOut(dir, live, { keep = SESSION_OUT_KEEP, list = (d) => readdirSync(d), lstat = lstatSync, rm = rmSync } = {}) {
+  const removed = []; const problems = [];
+  if (!(live instanceof Set)) return { removed, problems: ['no list of running sessions, so no output file is removed'] };
+  let names; try { names = list(dir).filter((n) => n.endsWith(OUT_SUFFIX) && n.length > OUT_SUFFIX.length); } catch (e) { return { removed, problems: [`the settings folder can't be listed (${e?.code ?? e?.message})`] }; }
+  const files = [];
+  for (const n of names) { let st; try { st = lstat(join(dir, n)); } catch { continue; } if (st.isFile()) files.push({ n, t: st.mtimeMs }); }
+  files.sort((a, b) => b.t - a.t || (a.n < b.n ? 1 : -1));
+  for (const { n } of files.slice(keep)) {
+    if (live.has(n.slice(0, -OUT_SUFFIX.length))) continue;
+    try { rm(join(dir, n), { force: true }); removed.push(n); } catch (e) { problems.push(`${n} could not be removed (${e?.code ?? e?.message})`); }
+  }
+  return { removed, problems };
+}
+
 /** The end of a file, read without following a link; '' when it can't be read. */
 export function readTail(file, max = SESSION_OUT_TAIL) {
   let fd;
@@ -342,9 +367,15 @@ export async function spawnLeader({ spawn = childSpawn, bin, args, cwd, env, pid
     }
   }
   let s;
+  // #674 review c1: onExit is called only for a claude that was spawned. An exit that comes before the spawn's answer
+  // is held until it, and dropped when the spawn failed.
+  let spawned = false; let early = null;
+  const exited = typeof onExit === 'function' ? (x) => { if (spawned) onExit(x); else early = x; } : undefined;
   // The parent's copy of the descriptor is closed once claude has its own (or never started).
-  try { s = await spawnClaude(spawn, bin, args, { cwd, env, ...(out !== undefined ? { out } : {}), ...(typeof onExit === 'function' ? { onExit } : {}) }); } finally { if (out !== undefined) try { closeSync(out); } catch { /* closed */ } }
+  try { s = await spawnClaude(spawn, bin, args, { cwd, env, ...(out !== undefined ? { out } : {}), ...(exited ? { onExit: exited } : {}) }); } finally { if (out !== undefined) try { closeSync(out); } catch { /* closed */ } }
   if (!s.ok) { if (out !== undefined) try { rmSync(outFile, { force: true }); } catch { /* left */ } return s; }
+  spawned = true;
+  if (early) { try { onExit(early); } catch { /* the caller's */ } }
   let at = null;
   try { at = pidStartOf(s.pid); } catch { at = null; }
   if (typeof at !== 'string' || !at) {

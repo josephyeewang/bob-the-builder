@@ -3,7 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, fstatSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, fstatSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { workerPrompt } from '../modules/M5-review-audit/worker-prompt.mjs';
@@ -11,7 +11,7 @@ import { tempDir } from '../shared/test-tmp.mjs';
 import { SETTINGS as S } from '../modules/M4-workshop/launcher/settings-names.mjs';
 import { gitOk, initMirror } from '../modules/M4-workshop/git/safe-git.mjs';
 import { launch } from '../modules/M4-workshop/launcher/launch.mjs';
-import { apiErrorWord, lastResult, readTail, sessionEndText, sessionOutName, INTAKE_DONE, LEFTOVER_FOLDER, copyAskHeld, chmodTree, removeAll, cardStartCommit, undoCommitProblem, drainedPort, groupThere, pauseLeadPort, liveWallProblem, productWallGap, projectFolderName, folderNameAsGiven, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath, workerAccount, workerPromptText, TRANSCRIPT_PLACE_CHECKED_AGAINST } from './runner-ports.mjs';
+import { apiErrorWord, lastResult, pruneSessionOut, readTail, sessionEndText, sessionOutName, SESSION_OUT_KEEP, INTAKE_DONE, LEFTOVER_FOLDER, copyAskHeld, chmodTree, removeAll, cardStartCommit, undoCommitProblem, drainedPort, groupThere, pauseLeadPort, liveWallProblem, productWallGap, projectFolderName, folderNameAsGiven, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath, workerAccount, workerPromptText, TRANSCRIPT_PLACE_CHECKED_AGAINST } from './runner-ports.mjs';
 import { roleEnv } from '../modules/M4-workshop/launcher/env-check.mjs';
 import { walledLaunchSettings } from './runner-launch.mjs';
 import { leaderStart } from './runner-loop.mjs';
@@ -319,7 +319,8 @@ test('L1364: spawnLeader writes claude\'s output to a new 0600 file, and its end
   const text = readFileSync(outFile, 'utf8');
   assert.match(text, /oops/, 'stderr is kept too');
   const line = sessionEndText({ sessionId: 'S-1', card: 'C-1', ...end, result: lastResult(readTail(outFile)) });
-  assert.equal(line, 'session S-1 (card C-1): claude ended, exit code 3, signal none; result subtype=success is_error=true num_turns=2 stop_reason=end_turn api_error=rate_limit_error duration_ms=21000');
+  // #674 review c2: the error type named only in the result's text is not taken.
+  assert.equal(line, 'session S-1 (card C-1): claude ended, exit code 3, signal none; result subtype=success is_error=true num_turns=2 stop_reason=end_turn duration_ms=21000');
   assert.doesNotMatch(line, /secret|message/, 'no free text from the result');
   // Made new only: a second start on the same file is refused, and nothing ran.
   const b = await spawnLeader({ spawn, bin: '/bin/sh', args: ['-c', 'exit 0'], cwd: '/', env: { PATH: '/usr/bin:/bin' }, outFile });
@@ -330,10 +331,57 @@ test('L1364: spawnLeader writes claude\'s output to a new 0600 file, and its end
   assert.equal(c.ok, false); assert.equal(existsSync(gone), false);
   // No result line, a signal, and words that are not plain are left out.
   assert.equal(sessionEndText({ sessionId: 'S-3', code: null, signal: 'SIGKILL', result: null }), 'session S-3: claude ended, exit code none, signal SIGKILL; no result line in its output');
-  assert.equal(sessionEndText({ sessionId: 'S-4', code: 0, signal: null, result: { type: 'result', subtype: 'Weird Text!', is_error: false, num_turns: 'x' } }), 'session S-4: claude ended, exit code 0, signal none; result is_error=false');
+  // #674 review m3: a word off the allow-lists is `other`; a count that is not a non-negative integer under 1e9 is left out.
+  assert.equal(sessionEndText({ sessionId: 'S-4', code: 0, signal: null, result: { type: 'result', subtype: 'Weird Text!', is_error: false, num_turns: 'x' } }), 'session S-4: claude ended, exit code 0, signal none; result subtype=other is_error=false');
+  assert.equal(sessionEndText({ sessionId: 'S-5', code: 1, signal: null, result: { type: 'result', subtype: 'error_max_budget_usd', stop_reason: 'some_new_reason', num_turns: -1, duration_ms: 1e9 } }),
+    'session S-5: claude ended, exit code 1, signal none; result subtype=error_max_budget_usd stop_reason=other');
+  assert.equal(sessionEndText({ sessionId: 'S-6', code: 0, signal: null, result: { type: 'result', subtype: 'success', stop_reason: 'pause_turn', num_turns: 2.5, duration_ms: 999_999_999 } }),
+    'session S-6: claude ended, exit code 0, signal none; result subtype=success stop_reason=pause_turn duration_ms=999999999');
+  // #674 review c2: api_error from structured fields only.
   assert.equal(apiErrorWord({ is_error: true, api_error_status: 529, result: 'overloaded_error' }), 'status_529');
-  assert.equal(apiErrorWord({ is_error: true, result: 'API Error: 500 internal' }), 'status_500');
-  assert.equal(apiErrorWord({ is_error: false, result: 'rate_limit_error' }), undefined);
+  assert.equal(apiErrorWord({ is_error: true, result: 'API Error: 500 internal rate_limit_error' }), undefined, 'never from the text');
+  assert.equal(apiErrorWord({ is_error: true, error: { type: 'overloaded_error' } }), 'overloaded_error');
+  assert.equal(apiErrorWord({ is_error: true, error_type: 'rate_limit_error' }), 'rate_limit_error');
+  assert.equal(apiErrorWord({ is_error: true, error: { type: 'Some free text' } }), undefined);
+  assert.equal(apiErrorWord({ is_error: false, api_error_status: 429 }), undefined);
+});
+
+test('#674 review c1: the end is told only for a claude that was spawned, an exit before the spawn\'s answer held until it', async () => {
+  const fake = ({ pid, events }) => () => {
+    const ls = {};
+    const child = { pid: undefined, once: (e, f) => { ls[e] = f; }, unref: () => {} };
+    queueMicrotask(() => { for (const [e, ...a] of events) ls[e]?.(...a); if (pid) { child.pid = pid; ls.spawn?.(); } });
+    return child;
+  };
+  const told = [];
+  const bad = await spawnLeader({ spawn: fake({ events: [['error', new Error('ENOENT')], ['exit', -2, null]] }), bin: '/x', args: [], cwd: '/', env: {}, onExit: (x) => told.push(x) });
+  assert.equal(bad.ok, false);
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(told, [], 'a spawn that failed is never told as an end');
+  // A claude that ends before its spawn is answered is told once, after it.
+  const early = await spawnLeader({ spawn: fake({ pid: 999_999_9, events: [['exit', 1, null]] }), bin: '/x', args: [], cwd: '/', env: {}, onExit: (x) => told.push(x), pidStartOf: () => 'Mon Jan  1 00:00:00 2024' });
+  assert.equal(early.ok, true, early.reason);
+  assert.deepEqual(told, [{ code: 1, signal: null }]);
+});
+
+test('#674 review m1: only the newest SESSION_OUT_KEEP output files are kept, and an older one only while its session is not ended', () => {
+  const d = realpathSync(tempDir('orch-rports-prune-'));
+  const n = SESSION_OUT_KEEP + 3;
+  for (let i = 0; i < n; i += 1) {
+    const f = join(d, sessionOutName(`S-${i}`));
+    writeFileSync(f, 'x');
+    utimesSync(f, new Date(1_700_000_000_000 + i * 1000), new Date(1_700_000_000_000 + i * 1000));
+  }
+  writeFileSync(join(d, 'S-0.json'), '{}');
+  // S-1 is the oldest but one, and still running: it stays.
+  const r = pruneSessionOut(d, new Set(['S-1']));
+  assert.deepEqual(r.problems, []);
+  assert.deepEqual(r.removed.sort(), [sessionOutName('S-0'), sessionOutName('S-2')].sort());
+  assert.ok(existsSync(join(d, sessionOutName('S-1'))));
+  assert.ok(existsSync(join(d, 'S-0.json')), 'only output files are touched');
+  assert.equal(readdirSync(d).filter((x) => x.endsWith('.out.jsonl')).length, SESSION_OUT_KEEP + 1);
+  // No list of running sessions: nothing goes.
+  assert.deepEqual(pruneSessionOut(d, null).removed, []);
 });
 
 // The start's world: real folders, fakes for the Record, the copy and the launch.

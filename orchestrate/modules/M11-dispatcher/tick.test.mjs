@@ -19,6 +19,7 @@ import { main, WATCHDOG_MARGIN_MS, RUN_DEADLINE_MS } from './main.mjs';
 import { PR_FACT } from './merges.mjs';
 import { PLAN_REVIEW_FACT, PLAN_START_HOLD_MS } from './plan-go.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
+import { refusing } from '../../wiring/not-wired.mjs';
 import { USAGE_FACT } from './usage.mjs';
 import { KEYS as K, minutes } from './keys.mjs';
 import { rulesWith, recWith, seed, change, setClock, usageFact, undoEntries, filesOfCommits, T0, MIN, iso } from './fixtures.test-helper.mjs';
@@ -494,6 +495,40 @@ test('L1364: with healthy and resume not wired, a dead running card still waits 
   assert.equal(o.rec.read('card', 'C-3').doc.state, 'running');
   assert.equal(o.rec.read('fact', OUTAGE_FACT).doc.state, 'open');
   assert.deepEqual(o.calls.launched, []);
+});
+// L1364 amended (#674 review M1): an outage opened while healthy is not wired could never end (healthy and resume both
+// refuse), so every start would be held for ever. None opens: each dead card is decided on its own.
+test('L1364 M1: with healthy not wired, three deaths on a board of six open no outage; each card waits on Joe, told once each', async () => {
+  const quiet = minutes(rulesWith({}, allow), K.deadQuietMin) / MIN;
+  const gone = (id, c) => ({ id, card: c, alive: false, ended: true, lastWriteAt: T0 - (quiet + 1) * MIN });
+  const up = (id, c) => ({ id, card: c, alive: true, ended: false, lastWriteAt: T0 });
+  const dead = ['C-1', 'C-2', 'C-3'];
+  const board = [...dead.map((c, i) => gone(`S-${i + 1}`, c)), up('S-4', 'C-4'), up('S-5', 'C-5'), up('S-6', 'C-6')];
+  const cards = ['C-1', 'C-2', 'C-3', 'C-4', 'C-5', 'C-6'].map((c) => card(c, { state: 'running' }));
+  // The same board with healthy wired does open one: the cut is the port, not the count.
+  const wired = world([account(), usage(), ...cards], { over: { board: () => board } });
+  await wired.pass();
+  assert.equal(wired.rec.read('fact', OUTAGE_FACT)?.doc?.state, 'open');
+  const w = world([account(), usage(), ...cards], { over: { board: () => board, healthy: refusing('healthy'), resume: refusing('resume') } });
+  const r = await w.pass();
+  assert.equal(r.steps.outage.ok, true, r.steps.outage.error);
+  assert.notEqual(w.rec.read('fact', OUTAGE_FACT)?.doc?.state, 'open', 'no outage opens');
+  assert.deepEqual(r.steps.outage.result.acted, dead.map((c) => [c, 'waiting on Joe']));
+  for (const c of dead) {
+    const d = w.rec.read('card', c).doc;
+    assert.deepEqual([d.state, d.wait.who], ['waiting', 'joe']);
+    assert.match(d.wait.what, /^dead_session/);
+    assert.equal(w.calls.alerts.filter((a) => new RegExp(`card ${c}: its session stopped .* waits on you`).test(a)).length, 1, w.calls.alerts.join(' | '));
+  }
+  assert.equal(w.calls.alerts.filter((a) => /running sessions stopped at once/.test(a)).length, 0);
+  // An outage already open in the Record keeps today's fail-safe: the refusing port fails the step and the outage holds.
+  const o = world([account(), usage(), ...cards, ['fact', OUTAGE_FACT, { id: 'o-1', state: 'open', started_at: iso(T0 - MIN), dead: [], board: 6, healthy_passes: 0 }]],
+    { over: { board: () => board, healthy: refusing('healthy'), resume: refusing('resume') } });
+  const ro = await o.pass();
+  assert.equal(ro.steps.outage.ok, false);
+  assert.match(ro.steps.outage.error, /not wired yet: healthy/);
+  assert.equal(o.rec.read('fact', OUTAGE_FACT).doc.state, 'open');
+  assert.deepEqual(dead.map((c) => o.rec.read('card', c).doc.state), ['running', 'running', 'running']);
 });
 test.todo('M10: a dead card marked safe to re-run goes back to ready and starts in the same tick (needs M9 rerun_safe; a (b) for the lead)');
 

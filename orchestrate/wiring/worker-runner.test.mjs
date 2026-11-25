@@ -100,6 +100,20 @@ test('L1364: a session that ends with no stop asked is noted once; one stopped o
   assert.deepEqual(ended(z), [], 'a stop asked for is no surprise');
 });
 
+test('#674 review m1: once a session is seen ended, the output files are pruned, keeping every session still running', async () => {
+  const w = world();
+  const asked = [];
+  w.ports.pruneOutputs = (kept) => { asked.push([...kept].sort()); return { removed: [], problems: ['S-0.out.jsonl could not be removed (EPERM)'] }; };
+  await w.pass([launchReq('S-1'), launchReq('S-2')]);
+  w.now += MIN; await w.pass();
+  assert.deepEqual(asked, [], 'nothing ended yet: no prune');
+  w.gone.add(4001); w.now += MIN; await w.pass();
+  assert.deepEqual(asked, [['S-2']], 'the ended S-1 is not kept; the running S-2 is');
+  assert.ok(w.notes.includes('session output: S-0.out.jsonl could not be removed (EPERM)'), w.notes.join(' | '));
+  w.now += MIN; await w.pass();
+  assert.equal(asked.length, 1, 'once per end seen');
+});
+
 test('L764 c1: a stop that times out answers ok: false with the flag set; the session then dies, and no dead row is ever shown', async () => {
   const w = world({ stopAnswer: () => new Promise(() => {}) });
   await w.pass([launchReq('S-1')]);

@@ -58,7 +58,10 @@ export function isDead(s, { now, quietMs }) {
  * `countedRefused`, `endRefused` or `passRefused` (the reason) when that write was refused; writes the outage fact and raises at most
  * one alert per outage.
  */
-export function outageStep({ rec, rules, board, now, healthy, resume = false, alert }) {
+// L1364 amended (#674 review M1): `canEnd` false (no health reading can be had: the healthy port is not wired) opens no
+// new outage, since one opened then could never end (healthy and resume both refuse) and would hold every start for ever.
+// Those deaths are decided one card at a time, as outside an outage. An outage already open is handled as before.
+export function outageStep({ rec, rules, board, now, healthy, resume = false, alert, canEnd = true }) {
   const quietMs = minutes(rules, KEYS.deadQuietMin);
   const minDead = need(rules, KEYS.outageMinDead);
   const share = need(rules, KEYS.outageShare);
@@ -96,7 +99,7 @@ export function outageStep({ rec, rules, board, now, healthy, resume = false, al
   const fresh = dead.filter((s) => !counted.has(deathKey(s)));
   // The board less the deaths already counted: those were not running at the previous pass (review of L759).
   const running = board.length - (dead.length - fresh.length);
-  if (tripped(fresh.length, running, minDead, share)) {
+  if (canEnd && tripped(fresh.length, running, minDead, share)) {
     const id = `outage-${new Date(now).toISOString()}`;
     const text = `${fresh.length} of ${running} running sessions stopped at once (${id}). Nothing will be restarted until the network, sign-in and usage are back, or you say resume.`;
     const w = write({ id, state: 'open', started_at: new Date(now).toISOString(), dead: dead.map((s) => ({ id: s.id, card: s.card ?? null })), board: board.length, running, healthy_passes: 0, alert_text: text }, 'outage_start');

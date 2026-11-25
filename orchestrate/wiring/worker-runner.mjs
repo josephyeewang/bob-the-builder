@@ -72,7 +72,7 @@
 import { CARD_ID } from '../modules/M9-record/outbox.mjs';
 import { PRODUCT } from '../shared/product-paths.mjs';
 import { REQUEST_ID } from '../modules/M4-workshop/launcher/review-runner.mjs';
-import { CLOCK_SKEW_MS, RUNNER_KEEP_MOVED, RUNNER_KEEP_MOVED_MS, RUNNER_KEEP_USED_UP_MS, RUNNER_KINDS, RUNNER_ROLE_OF, RUNNER_STATUS_EVERY_MS, UNDO_COMMIT, USED_UP, checkSession, live, movedOk } from './owner-status.mjs';
+import { CLOCK_SKEW_MS, RUNNER_KEEP_MOVED, RUNNER_KEEP_MOVED_MS, RUNNER_KEEP_USED_UP_MS, RUNNER_KINDS, RUNNER_ROLE_OF, RUNNER_STATUS_EVERY_MS, UNDO_COMMIT, USED_UP, checkSession, keptOutputIds, live, movedOk } from './owner-status.mjs';
 import { launchAnswerWrong } from './owner-asks.mjs';
 import { DRAIN_CAUSES, drainHeldOk } from '../modules/M11-dispatcher/drain-alerts.mjs';
 import { heldOk } from '../modules/M4-workshop/send-safe/hook-store.mjs';
@@ -261,11 +261,12 @@ export async function workerRunnerPass(ctx) {
     if (s.drain_held?.cause !== cause) s.drain_held = { cause, since: new Date(now).toISOString() };
   }
   // 1. The sessions as they are now. Ended is final (M1).
+  let endedNow = false;
   async function check(s) {
     if (s.ended === true) { s.alive = false; return; }
     const g = await wait(() => ports.groupGone(s));
     if (g === true) {
-      s.alive = false; s.ended = true; s.ended_at ??= now;
+      s.alive = false; s.ended = true; s.ended_at ??= now; endedNow = true;
       // L1364: told once (an ended session is never checked again, above). The start port logs claude's exit line when
       // this runner is the one that started it.
       if (s.stop_requested !== true) note(`session ${s.id}${s.card ? ` (card ${s.card})` : ''} ended with no stop asked for; its exit line, if this runner started it, is in this log`);
@@ -283,6 +284,10 @@ export async function workerRunnerPass(ctx) {
       if (d === true) { s.outbox_open = false; delete s.undrained_since; delete s.drain_held; } else heldOpen(s, d);
     }
     flush();
+  }
+  // #674 review m1: once a session is seen ended, the older output files of ended sessions go (pruneSessionOut).
+  if (endedNow && typeof ports.pruneOutputs === 'function') {
+    try { for (const x of ports.pruneOutputs(keptOutputIds(state.sessions.filter(isLive), state.requests))?.problems ?? []) note(`session output: ${x}`); } catch (e) { note(`session output files were not pruned (${e?.message ?? e})`); }
   }
   // A session leaves only once no kept answer names it (#328 r1 m1): an ok is never read with its session gone.
   const named = new Set(Object.keys(state.answers).map((key) => requestKey(`${key}.json`)?.id).filter(Boolean));
