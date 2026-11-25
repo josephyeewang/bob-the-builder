@@ -159,8 +159,10 @@ test('#317 audit r1 m1, m2, m4: the rules that guard the caps, the outage count,
   // m1: atSafePoint reads a missing state as safe, so a state that can't be told must be a throw.
   assert.equal(atSafePoint({ role: 'lead', size: { turnEnded: true, openTools: [] }, activity: {} }), true, 'why the probe must throw');
   assert.match(OWNER_PORTS.probe.notKnown, /a state the tracker can't tell is a throw, never a missing or null state/);
-  // m2: readOutboxFile compares the file's numeric owner.
-  assert.match(readFileSync(new URL('../modules/M4-workshop/launcher/outbox.mjs', import.meta.url), 'utf8'), /if \(st\.uid !== uid\) return refuse/);
+  // m2: readOutboxFile compares the file's numeric owner (in its one safe open, readOwnedFile; L1370 audit m3).
+  const m4Outbox = readFileSync(new URL('../modules/M4-workshop/launcher/outbox.mjs', import.meta.url), 'utf8');
+  assert.match(m4Outbox, /if \(st\.uid !== uid\) return no\(/);
+  assert.match(m4Outbox, /const f = readOwnedFile\(join\(outbox, name\), \{ uid, /, 'readOutboxFile opens through readOwnedFile');
   assert.match(OWNER_PORTS.outboxSessions.out, /uid is the numeric Mac user id \(not a name\)/);
   // m4: sessions is never a partial list (the start caps count from it); board is never false (the outage count).
   assert.match(OWNER_PORTS.sessions.notKnown, /if any one source can't be read: never the sources it could read/);

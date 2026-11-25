@@ -1,8 +1,8 @@
 import { test as nodeTest } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, symlinkSync, mkdirSync, rmSync, existsSync, lstatSync } from 'node:fs';
+import { writeFileSync, symlinkSync, mkdirSync, rmSync, existsSync, lstatSync, utimesSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { intakePass, kindsFor, sha256, INTAKE_PORT_MS, INTAKE_START_MS, INTAKE_PASS_MS, LEFT_OUT_TELL_MS } from './outbox-intake.mjs';
+import { intakePass, kindsFor, sha256, INTAKE_PORT_MS, INTAKE_START_MS, INTAKE_PASS_MS, LEFT_OUT_TELL_MS, LEAD_LAUNCH_CHECKS_PER_PASS } from './outbox-intake.mjs';
 import { STEP_DEADLINE_MS } from './tick.mjs';
 import { note } from './moves.mjs';
 import { recordLeadLaunch } from './lead-restart.mjs';
@@ -1881,7 +1881,7 @@ test('L1370: a launch file that is not this start\'s is never used, and the expo
   // Another user's file is refused (the reader is given the session's uid).
   const q = oneShotWorld();
   q.launchFile({ session: ONE_SHOT, product: PRODUCT, head: HEAD });
-  assert.match(readLaunchFile({ sessionId: ONE_SHOT, outbox: q.ob, uid: UID + 1, product: PRODUCT }).reason, /not the owner's/);
+  assert.match(readLaunchFile({ sessionId: ONE_SHOT, outbox: q.ob, uid: UID + 1, product: PRODUCT }).reason, /not owned by the owner/);
   // No file at all: nothing told, nothing asked (a Lead the runner started has none), and the plan waits as before.
   const n = oneShotWorld();
   n.hand([planCard('C-1')]);
@@ -1902,4 +1902,116 @@ test('L1370: a Lead that already has a launch record (one the runner started) ne
   assert.deepEqual(p.asked, []);
   assert.deepEqual(out, []);
   assert.equal(p.launches().length, 1);
+});
+
+// L1370 audit m2: one Lead's launch step that throws is reported, never rejects the pass; the next Lead still gets its
+// launch, and the plan-no-launch hold is wrapped the same way.
+test('L1370 audit m2: a launch step that throws for one Lead is reported, and the other Lead is still recorded', async () => {
+  const p = oneShotWorld();
+  const TWO = 'ld-orchestrate-test-20261125090001';
+  const ob2 = mk(join(dirname(p.ob), TWO));
+  writeFileSync(join(ob2, '.launch.json'), JSON.stringify({ session: TWO, product: PRODUCT, head: HEAD }));
+  p.launchFile({ session: ONE_SHOT, product: PRODUCT, head: HEAD });
+  const real = p.rec;
+  const rec = Object.create(real, { write: { value: (x) => {
+    if (x.entity === 'launch' && x.doc?.session_id === ONE_SHOT) throw new Error('the disk went away');
+    return real.write(x);
+  } } });
+  const logged = [];
+  const sessions = [
+    { sessionId: ONE_SHOT, role: 'lead', outbox: p.ob, uid: UID, card: null, product: PRODUCT },
+    { sessionId: TWO, role: 'lead', outbox: ob2, uid: UID, card: null, product: PRODUCT },
+  ];
+  const w = world();
+  const out = await intakePass({ rec, sessions, ...w.ports, alert: fakeAlert(), now: p.E.clock.t, replyToLead: async () => ({ ok: true }),
+    exportedHead: () => ({ ok: true }), failureLog: (t) => logged.push(t) });
+  assert.deepEqual(out.map((r) => [r.session, r.launch]), [[ONE_SHOT, 'failed'], [TWO, 'recorded']]);
+  assert.match(out[0].reason, /the disk went away/);
+  assert.ok(logged.some((t) => t.includes(`the launch step for the Lead ${ONE_SHOT} failed`)), logged.join('\n'));
+  assert.deepEqual(real.list('launch').map((l) => l.doc.session_id), [TWO]);
+});
+
+test('L1370 audit m2: the plan-no-launch hold that throws is reported, and the pass still answers', async () => {
+  const n = oneShotWorld();
+  n.hand([planCard('C-1')]);
+  const logged = [];
+  const w = world();
+  const out = await intakePass({ rec: n.rec, sessions: [{ sessionId: ONE_SHOT, role: 'lead', outbox: n.ob, uid: UID, card: null, product: PRODUCT }],
+    ...w.ports, alert: () => { throw new Error('the alert port broke'); }, now: n.E.clock.t, replyToLead: async () => ({ ok: true }), failureLog: (t) => logged.push(t) });
+  assert.match(out[0].waiting, /no launch record/);
+  assert.ok(logged.some((t) => /no launch record.*could not be told \(the alert port broke\)/.test(t)), logged.join('\n'));
+});
+
+// L1370 audit m4: the daily alerts end.
+test('L1370 audit m4: a held Lead with a plan is told once a day, not twice; the launch alert is the one', async () => {
+  const p = oneShotWorld();
+  p.launchFile({ session: ONE_SHOT, product: PRODUCT, head: HEAD });
+  p.hand([planCard('C-1')]);
+  const out = await p.run({ exportedHead: () => ({ ok: false, reason: 'not an export' }) });
+  assert.equal(out[0].launch, 'held');
+  assert.match(out[1].waiting, /no launch record/, 'the plan still waits');
+  assert.equal(p.owner.length, 1, p.owner.join('\n'));
+  assert.match(p.owner[0], /could not be shown to be a commit the lead-main export gave \(not an export\)/);
+  assert.equal(p.rec.read('fact', `hold-plan-no-launch-${ONE_SHOT}`), null);
+  // Most of a day on (the file is still inside its day), the same: one more.
+  p.E.clock.t += 24 * 3600_000 - 60_000;
+  await p.run({ exportedHead: () => ({ ok: false, reason: 'not an export' }) });
+  assert.equal(p.owner.length, 1, 'not yet a day since the tell');
+  p.E.clock.t += 60_000;
+  await p.run({ exportedHead: () => ({ ok: false, reason: 'not an export' }) });
+  assert.equal(p.owner.length, 2, p.owner.join('\n'));
+});
+
+test('L1370 audit m4: once the launch is recorded its hold marks are cleared, so a later hold is told at once', async () => {
+  const p = oneShotWorld();
+  p.launchFile({ session: ONE_SHOT, product: PRODUCT, head: HEAD });
+  await p.run({ exportedHead: () => ({ ok: false, reason: 'not an export' }) });
+  const fact = `hold-lead-launch-export-${ONE_SHOT}`;
+  assert.equal(typeof p.rec.read('fact', fact).doc.told_at, 'string');
+  p.E.clock.t += 60_000;
+  const out = await p.run({ exportedHead: p.exported() });
+  assert.equal(out[0].launch, 'recorded');
+  assert.equal(p.rec.read('fact', fact).doc.told_at, null);
+  assert.equal(typeof p.rec.read('fact', fact).doc.cleared_at, 'string');
+});
+
+test('L1370 audit m4: a launch file older than a day with no record is told once, then never read or told again', async () => {
+  const p = oneShotWorld();
+  p.launchFile({ session: ONE_SHOT, product: PRODUCT, head: HEAD });
+  p.hand([planCard('C-1')]);
+  const old = new Date(p.E.clock.t - 25 * 3600_000);
+  utimesSync(join(p.ob, '.launch.json'), old, old);
+  const out = await p.run({ exportedHead: p.exported() });
+  assert.deepEqual(out[0], { session: ONE_SHOT, launch: 'stale' });
+  assert.deepEqual(p.asked, [], 'a start past its day is not put to the export check');
+  assert.equal(p.owner.length, 1, p.owner.join('\n'));
+  assert.match(p.owner[0], /started more than a day ago and its launch was never recorded/);
+  for (let day = 1; day <= 3; day += 1) {
+    p.E.clock.t += 24 * 3600_000;
+    let reads = 0;
+    const later = await p.run({ exportedHead: p.exported(), readLaunch: () => { reads += 1; return { ok: false, reason: 'x' }; } });
+    assert.deepEqual(later[0], { session: ONE_SHOT, launch: 'ignored' });
+    assert.equal(reads, 0, 'not read again');
+  }
+  assert.equal(p.owner.length, 1, p.owner.join('\n'));
+  assert.equal(p.launches().length, 0);
+});
+
+test('L1370 audit m4: at most LEAD_LAUNCH_CHECKS_PER_PASS Leads are put to the export check in one pass', async () => {
+  const p = oneShotWorld();
+  const root = dirname(p.ob);
+  const sessions = [];
+  for (let i = 0; i < 7; i += 1) {
+    const sid = `ld-orchestrate-test-2026112509${String(i).padStart(4, '0')}`;
+    const ob = mk(join(root, sid));
+    writeFileSync(join(ob, '.launch.json'), JSON.stringify({ session: sid, product: PRODUCT, head: HEAD }));
+    sessions.push({ sessionId: sid, role: 'lead', outbox: ob, uid: UID, card: null, product: PRODUCT });
+  }
+  const asked = [];
+  const w = world();
+  const out = await intakePass({ rec: p.rec, sessions, ...w.ports, alert: fakeAlert(), now: p.E.clock.t, replyToLead: async () => ({ ok: true }),
+    exportedHead: (x) => { asked.push(x.session); return { ok: false, reason: 'not an export' }; } });
+  assert.equal(LEAD_LAUNCH_CHECKS_PER_PASS, 5);
+  assert.deepEqual(asked, sessions.slice(0, 5).map((s) => s.sessionId));
+  assert.deepEqual(out.map((r) => r.launch), ['held', 'held', 'held', 'held', 'held', 'later', 'later']);
 });

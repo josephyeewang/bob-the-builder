@@ -11,7 +11,7 @@
 // <kind><id>.(md|json|txt) for one of the role's kinds. The kind is read as M9 reads it, the longest listed prefix of the
 // name (shared outboxKindOf, L82 M-1), so `report-compact-x` is report-compact-, not report-.
 
-import { lstatSync, readdirSync, rmSync, openSync, fstatSync, readFileSync, closeSync, constants as C } from 'node:fs';
+import { lstatSync, readdirSync, rmSync, openSync, fstatSync, readFileSync, readSync, closeSync, constants as C } from 'node:fs';
 import { join } from 'node:path';
 import { outboxKindOf } from '../../../shared/record-names.mjs';
 
@@ -39,18 +39,39 @@ export function emptyOutbox(outbox, { busy, alert = () => {} }) {
   return { ok: true, removed: odd };
 }
 
+/**
+ * Reads the file at `path` through a handle opened without following a link. The open file must be a plain file with one
+ * link, owned by `uid`, and, when `maxBytes` is given, no bigger than that. The one safe open for an outbox file
+ * (readOutboxFile) and a one-shot Lead's launch file (M3 sessions.mjs readLaunchFile; L1370 audit m3).
+ * `label` names the file in a refusal and `owner` names `uid`'s user. Answers { ok: true, text, mtimeMs } or
+ * { ok: false, reason, missing?, code?, mtimeMs? }: `missing` when there is no file, `mtimeMs` once the file was seen.
+ */
+export function readOwnedFile(path, { uid, label, owner = 'the role\'s user', maxBytes, open = openSync }) {
+  let fd;
+  try { fd = open(path, C.O_RDONLY | C.O_NOFOLLOW | (C.O_NONBLOCK ?? 0)); } catch (e) {
+    return { ok: false, missing: e?.code === 'ENOENT', code: e?.code ?? 'error', reason: `${label} could not be opened without following a link` };
+  }
+  try {
+    const st = fstatSync(fd);
+    const no = (reason) => ({ ok: false, reason, mtimeMs: st.mtimeMs });
+    if (!st.isFile()) return no(`${label} is not a plain file`);
+    if (st.nlink !== 1) return no(`${label} has more than one link`);
+    if (st.uid !== uid) return no(`${label} is not owned by ${owner}`);
+    if (maxBytes === undefined) return { ok: true, text: readFileSync(fd, 'utf8'), mtimeMs: st.mtimeMs };
+    if (st.size > maxBytes) return no(`${label} is too big`);
+    // Read one byte past the cap, so a file that grew after the look is still refused.
+    const buf = Buffer.alloc(maxBytes + 1);
+    const n = readSync(fd, buf, 0, buf.length, 0);
+    if (n > maxBytes) return no(`${label} is too big`);
+    return { ok: true, text: buf.subarray(0, n).toString('utf8'), mtimeMs: st.mtimeMs };
+  } finally { closeSync(fd); }
+}
+
 /** Reads one outbox file for intake. `uid` is the role's user id. */
 export function readOutboxFile(outbox, name, { kinds, uid }) {
   if (!OUTBOX_NAME.test(name) || name.includes('/')) return refuse(`"${name}" is not an outbox file name`);
   const kind = outboxKindOf(name);
   if (!kind || !kinds.includes(kind)) return refuse(`"${name}" is not a kind this role may hand in`);
-  let fd;
-  try { fd = openSync(join(outbox, name), C.O_RDONLY | C.O_NOFOLLOW | (C.O_NONBLOCK ?? 0)); } catch { return refuse(`"${name}" could not be opened without following a link`); }
-  try {
-    const st = fstatSync(fd);
-    if (!st.isFile()) return refuse(`"${name}" is not a plain file`);
-    if (st.nlink !== 1) return refuse(`"${name}" has more than one link`);
-    if (st.uid !== uid) return refuse(`"${name}" is not owned by the role's user`);
-    return { ok: true, kind, text: readFileSync(fd, 'utf8') };
-  } finally { closeSync(fd); }
+  const f = readOwnedFile(join(outbox, name), { uid, label: `"${name}"` });
+  return f.ok ? { ok: true, kind, text: f.text } : refuse(f.reason);
 }

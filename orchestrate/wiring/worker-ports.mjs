@@ -41,7 +41,8 @@
 //   board()              → this product's worker sessions only, by the product the status names (L927); a dead one's
 //                          claim is read from this Record (recordHolds).
 //   outboxSessions()     → this product's open worker and script outboxes: another product's are its own Dispatcher's;
-//                          then this product's Front Door sessions (M1 sessions.mjs frontDoorSessions), the owner's files.
+//                          then this product's Front Door sessions (M1 sessions.mjs frontDoorSessions) and one-shot
+//                          Leads (M3 sessions.mjs leadSessions, L1370), the owner's files.
 //   probe(session)       → the worker runner's, for the kinds it starts (RUNNER_KINDS). Every other kind throws: the
 //                          review runner reports no size or activity, and no runner here starts the rest (L925 rule 2).
 //   stopSession(id)      → the worker runner's: true once the launch request is used up, else a stop request in its
