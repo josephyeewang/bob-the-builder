@@ -28,7 +28,7 @@ import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.m
 import { uidsProblem } from '../modules/M4-workshop/launcher/review-user.mjs';
 import { reviewUserProblem } from '../modules/M9-record/outbox.mjs';
 import { PLAN_REVIEW_ROLE, RUNNER_ROLES } from '../shared/review-roles.mjs';
-import { COPY_CLAUDE_CODE as CLAUDE_CODE, COPY_HOOKS as HOOKS, managedGuardDir, parseConfig, scannerDir, wallDir, wallStatusDir, workerRulesDir } from './layout.mjs';
+import { COPY_CLAUDE_CODE as CLAUDE_CODE, COPY_HOOKS as HOOKS, MANAGED_GUARD_FILES, managedGuardDir, parseConfig, scannerDir, wallDir, wallStatusDir, workerRulesDir } from './layout.mjs';
 import { parseRobot } from './robot-setup.mjs';
 import { WORKER_RUNNER_CONFIG, parseWorkerRunner } from './worker-runner-setup.mjs';
 import { DISPATCHER_CONFIG, dispatcherConfigFor, dispatcherConfigText, dispatcherSourcePath, parseDispatcher } from './dispatcher-setup.mjs';
@@ -424,5 +424,28 @@ export function checkInstall(io, cfg, { main = null, watchOnly = false } = {}) {
     const why = hooksProblem(io.at(join(P.installRoot, HOOKS)), io.at(join(P.installRoot, HOOK_MODULE)));
     item(why === null, `the copy's ${HOOKS}/ is its own ${HOOK_MODULE}, byte for byte`, `${why}: the next update makes them again, or run add-to-install`);
   }
+  const behind = managedGuardBehind(io, cfg);
+  if (behind) out.push(behind);
   return out;
+}
+
+/**
+ * L1355: the machine-wide guard (managed-settings' copy, outside `install`) against the installed guard. Each update and
+ * add-to-install bring new guard code into the copy's hooks, but the live machine-wide guard stays as it was until
+ * managed-settings runs again, and nothing said so. Not refreshed by the updater on purpose: a bad machine-wide guard
+ * blocks every Claude call on the Mac, and managed-settings test-runs it first. So a WARNING row (the jobs still load),
+ * naming the files that differ and the command. null when there is no machine-wide guard here (managed-settings never
+ * ran). Only reads: the guard's folder is root's 0755 and its files 0644.
+ */
+export function managedGuardBehind(io, cfg) {
+  const dir = managedGuardDir(cfg);
+  const hooks = join(installPaths(cfg).installRoot, HOOKS);
+  const read = (p) => { try { return io.readText(p); } catch (e) { return e?.code === 'ENOENT' ? null : undefined; } };
+  const live = MANAGED_GUARD_FILES.map((n) => [n, read(join(dir, n))]);
+  if (live.every(([, t]) => t === null)) return null;
+  const off = live.filter(([n, t]) => t == null || t !== read(join(hooks, n))).map(([n]) => n);
+  const what = `the machine-wide guard in ${dir} is the installed guard (${hooks})`;
+  return off.length
+    ? { ok: true, warn: true, what, why: `${off.join(', ')} ${off.length === 1 ? 'differs' : 'differ'} from the installed guard (or can't be read), so every session on this Mac still runs the older guard: run  sudo /usr/local/bin/node setup.mjs managed-settings  (--dry-run first) to bring it up to date` }
+    : { ok: true, what };
 }

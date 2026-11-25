@@ -294,6 +294,33 @@ test('install: the real updater accepts the layout; every item passes; the work 
   assert.equal(failed(main40).length, 0);
 });
 
+test('check-install: a machine-wide guard behind the installed guard is a WARNING naming managed-settings (L1355)', async () => {
+  const w = await installed();
+  const row = () => checkInstall(w.mac, w.cfg).find((x) => /machine-wide guard in .* is the installed guard/.test(x.what));
+  // No machine-wide guard here (managed-settings never ran): no row at all.
+  assert.equal(row(), undefined);
+  const dir = w.mac.at(`${BASE}/machine-wide-guard`); mkdirSync(dir, { recursive: true });
+  const hooks = join(copyOf(w), 'hooks');
+  const names = ['production-write-guard.mjs', 'lib.mjs', 'snapshot.mjs'];
+  // This test copy's hooks are a stand-in module; give it the three guard files, as a real copy has.
+  // (in the module and its hooks alike, so the L1354 row still passes).
+  for (const n of names) { for (const d of [hooks, join(copyOf(w), HOOK_MODULE)]) writeFileSync(join(d, n), `// ${n} v1\n`); writeFileSync(join(dir, n), readFileSync(join(hooks, n))); }
+  // The same bytes: a plain PASS row, no WARNING.
+  assert.deepEqual(row(), { ok: true, what: row().what });
+  // The installed guard is newer (an update brought new code): a WARNING, the jobs still load (ok stays true).
+  writeFileSync(join(dir, 'lib.mjs'), `${readFileSync(join(hooks, 'lib.mjs'), 'utf8')}// older\n`);
+  const r = row();
+  assert.equal(r.ok, true); assert.equal(r.warn, true);
+  assert.match(r.why, /^lib\.mjs differs from the installed guard .*run {2}sudo \/usr\/local\/bin\/node setup\.mjs managed-settings {2}\(--dry-run first\)/);
+  assert.equal(failed(checkInstall(w.mac, w.cfg)).length, 0, 'a WARNING is not a FAIL');
+  // A guard file gone from the folder counts too, by name.
+  rmSync(join(dir, 'snapshot.mjs'));
+  assert.match(row().why, /^lib\.mjs, snapshot\.mjs differ from the installed guard/);
+  // The command prints it as a WARNING line.
+  const out = w.run(['check-install']);
+  assert.match(out.text, /WARNING {2}the machine-wide guard in .* — lib\.mjs, snapshot\.mjs differ/);
+});
+
 test('check after a correct install does not call the install folders strangers (r3 n4); PLANT without the carry it does', async () => {
   const w = await installed();
   const strangers = (rs) => rs.filter((r) => !r.ok && /did not make/.test(r.why ?? ''));

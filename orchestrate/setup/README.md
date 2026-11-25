@@ -189,7 +189,9 @@ stops them all, this one included, and Claude can't undo it. To switch it off:
 installed copy, so removing `<base>/install` (Part 6's reinstall) leaves it running unchanged, with the rules it was last given: every
 session stays guarded through the reinstall and nothing is locked out. After `add-to-install`, run `managed-settings` again only if the
 rules or the guard's code changed; `managed-settings --dry-run` says whether it is needed, and the after-check names each guard file that
-differs from the installed one (#487 r2 m3). If the guard's folder is ever removed by
+differs from the installed one (#487 r2 m3). `check-install` says so too, as a WARNING naming `managed-settings`, whenever the
+machine-wide guard's files differ from the installed guard's (L1355); nothing refreshes it by itself, as a bad guard blocks every
+Claude call on the Mac and `managed-settings` test-runs it first. If the guard's folder is ever removed by
 hand, every Claude session is blocked with the way out above.
 
 **The Dispatcher's lines: check-dispatcher (L748).** The config's `hostLockPath` is the full path of the owner's `host.lock`,

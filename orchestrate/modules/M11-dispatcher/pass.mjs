@@ -971,6 +971,29 @@ export const causeOf = (reason) => FIXED_CAUSES.find(([, re]) => re.test(reason)
 /** Card kinds the start loop never hands to a session. */
 export const NEVER_STARTED = Object.freeze(['lead_daily_card', 'research_copy']);
 
+// L1368 (#673 r2 m-a): a card the serial-launch cap leaves for the next pass (LAUNCH_MARGIN_MS) is noted, not told; one
+// left on pass after pass was held back with nothing said. Each skip is counted on the card's hold fact (`passes`, the
+// Dispatcher's hold- family), once per pass time (the undo-only run and the full pass of one tick share it); at
+// LAUNCH_SKIP_TELL passes in a row Joe is told, once a day (holdAlert), and the count and the hold are cleared when the
+// card is claimed for its start.
+export const LAUNCH_SKIP_TELL = 3;
+export const LAUNCH_SKIP_CAUSE = (card) => `launch-skipped-${card}`;
+export const LAUNCH_SKIP_FACT = (card) => HOLD_FACT(LAUNCH_SKIP_CAUSE(card));
+export const launchSkipText = (card, n) => `card ${card} has not been started for ${n} passes because the starts before it used the step's time; it stays ready and is started on a pass with time to spare`;
+function countLaunchSkip({ rec, id, now, alert }) {
+  const was = factDoc(rec, LAUNCH_SKIP_FACT(id))?.doc;
+  const base = typeof was === 'object' && was !== null ? was : undefined;
+  const prior = Number.isInteger(base?.passes) && base.passes > 0 ? base.passes : 0;
+  const passes = base?.at === iso(now) ? Math.max(prior, 1) : prior + 1;
+  if (passes !== prior || base?.at !== iso(now)) putFact(rec, LAUNCH_SKIP_FACT(id), { ...base, passes, at: iso(now) }, 'launch_skip', base);
+  if (passes >= LAUNCH_SKIP_TELL) holdAlert({ rec, cause: LAUNCH_SKIP_CAUSE(id), text: launchSkipText(id, passes), alert, now });
+}
+function clearLaunchSkip({ rec, id, now, report }) {
+  const was = factDoc(rec, LAUNCH_SKIP_FACT(id))?.doc;
+  if (typeof was === 'object' && was !== null && was.passes) putFact(rec, LAUNCH_SKIP_FACT(id), { ...was, passes: 0, at: iso(now) }, 'launch_skip_cleared', was);
+  if (was != null) clearHold(rec, LAUNCH_SKIP_FACT(id), now, report);
+}
+
 // The late hold of a card whose launch answered after the tick's limit (L1361): told by the start loop, cleared once the
 // launch is settled, on time or taken over later.
 const LAUNCH_LATE_CAUSE = (card) => `launch-late-${card}`;
@@ -1222,12 +1245,18 @@ async function starts({ rec, rules, now, b, running, launch, stopGroup, outboxRo
     // L1361 audit m4: launches run one after another inside the tick step's limit; after the first, one that could not
     // finish inside what is left of it is not begun. The card stays ready, untouched, and the next pass starts it (noted,
     // not told). The first always runs: the step began with its whole limit (120 s, past one launch's 45 s and margin).
-    if (launches > 0 && Date.now() + launchDeadlineMs + LAUNCH_MARGIN_MS > launchUntil) { out.notes.push(`card ${id}: left for the next pass: the step's time left is under one launch limit`); continue; }
+    // L1368: told once it has been left LAUNCH_SKIP_TELL passes in a row (countLaunchSkip).
+    if (launches > 0 && Date.now() + launchDeadlineMs + LAUNCH_MARGIN_MS > launchUntil) {
+      out.notes.push(`card ${id}: left for the next pass: the step's time left is under one launch limit`);
+      countLaunchSkip({ rec, id, now, alert });
+      continue;
+    }
     const sessionId = randomUUID();
     const rulesRev = may.rev ?? rules.rev;
     const claimDoc = { kind: 'session', session_id: sessionId, host, ...(machineId() == null ? {} : { machine: machineId() }), ...(rulesRev != null ? { rules_rev: rulesRev } : {}) };
     const claim = rec.write({ actor: 'dispatcher', entity: 'card', id, expectRev: rev, doc: { ...doc, state: 'claimed', claim: claimDoc }, kind: 'claim' });
     if (!claim.ok) { await refuse(`not claimed: ${claim.reason}`); continue; }
+    clearLaunchSkip({ rec, id, now, report });   // L1368: claimed for its start, so no longer left behind
     // A launch has its own time limit (audit 0b-6 r5 m1): one that never answers holds no other start.
     // It may still start a session after the limit, so the card stays claimed, never back to ready (a
     // second start would make two sessions for one card); Joe is told, once a day.
