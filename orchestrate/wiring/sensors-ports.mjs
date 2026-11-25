@@ -111,7 +111,11 @@ const ROW = /^(weekly_all|weekly_scoped:[A-Za-z0-9._-]{1,40})$/;
 export const RESET_MIN_DROP = 10;
 export const RESET_FLOOR = 5;
 export const isReset = (from, to) => to <= RESET_FLOOR || from - to >= RESET_MIN_DROP;
-export const resetNote = ({ slot, row, from, to }) => `usage for ${row} went from ${from}% to ${to}% ${slot === 'session' ? 'in this 5-hour window' : 'this week'}; taken as a reset`;
+// L1363 m-A: `week` is given for a weekly row whose reset left the week's own figure where it was (a row that is not the
+// week's top): the note names that row and says the week, and so any weekly limit wait, is not reset by it.
+export const resetNote = ({ slot, row, from, to }, week = null) => (week
+  ? `usage for ${row} went from ${from}% to ${to}% this week; taken as a reset of that row only: the week's figure (${week.row}, ${week.pct}%) did not fall with it, so no weekly limit wait ends on it`
+  : `usage for ${row} went from ${from}% to ${to}% ${slot === 'session' ? 'in this 5-hour window' : 'this week'}; taken as a reset`);
 
 export function shapeProblem(a) {
   if (!a || typeof a !== 'object' || Array.isArray(a)) return 'the answer is not an object';
@@ -368,7 +372,13 @@ export function sensorsPorts({ file, ownerUid, now = () => new Date(), staleMs =
       // it; M11 tells Joe once and ends a limit wait on it). It is not this read's reason: lastReason() stays what was wrong.
       // `reset_windows` says which windows reset ('h5', 'week'), so M11 ends only a limit wait of the same window (m3).
       const downs = checks.flatMap((c) => c?.down ?? []);
-      const resets = downs.map(resetNote);
+      // L1363 m-A: a weekly reset ends a weekly limit wait only when the week's figure itself (the top row, the one M11
+      // reads and the limit was hit on) fell by a reset's size, judged against the week's last top mark. A reset on
+      // another row is still said, on its own row, but is no 'week' reset. Read before commit() moves the marks.
+      const lastTop = from && downs.some((d) => d.slot === 'week') ? marksOf(account, 'week').find((m) => m.top) : null;
+      const weekFell = Boolean(lastTop && pct(weekIn?.used_pct) && isReset(lastTop.pct, weekIn.used_pct));
+      const rowOnly = (d) => d.slot === 'week' && !weekFell;
+      const resets = downs.map((d) => resetNote(d, rowOnly(d) ? { row: from, pct: weekIn?.used_pct } : null));
       const h5 = anchored(account, 'session', h5in); const week = from ? anchored(account, 'week', weekIn) : weekIn;
       if (rows && from) rows[from] = week; // the top row's entry is the week, its first reset time kept
       commit(account, 'session', h5, 'session');
@@ -382,7 +392,7 @@ export function sensorsPorts({ file, ownerUid, now = () => new Date(), staleMs =
       const note = resets.length ? resets.join('; ') : null;
       return { source: from ? `${SOURCE} | week from ${from}` : SOURCE, h5, week, week_from: from, observed_at: a.observed_at,
         ...(rows ? { week_rows: rows } : {}), ...(none ? { h5_none: true } : {}),
-        ...(note ? { reset_note: note, reset_windows: [...new Set(downs.map((d) => (d.slot === 'session' ? 'h5' : 'week')))] } : {}) };
+        ...(note ? { reset_note: note, reset_windows: [...new Set(downs.filter((d) => !rowOnly(d)).map((d) => (d.slot === 'session' ? 'h5' : 'week')))] } : {}) };
     },
     lastReason: () => why,
   };

@@ -17,6 +17,7 @@ import { sensorsPass } from '../modules/M12-sensors/loop.mjs';
 import { makeFactWriter } from '../modules/M12-sensors/facts.mjs';
 import { memoryRecord } from '../shared/record.mjs';
 import { currentBands, mayStart, USAGE_FACT } from '../modules/M11-dispatcher/usage.mjs';
+import { resetEndsLimit } from '../modules/M11-dispatcher/pass.mjs';
 import { rulesWith } from '../modules/M11-dispatcher/fixtures.test-helper.mjs';
 
 const T0 = Date.parse('2026-11-24T21:43:20.703Z');
@@ -179,12 +180,19 @@ test('L1358 r2: with week_rows, the stored row missing from the report is refuse
     w.put(withRows({ 'weekly_scoped:Fable': 80, weekly_all: 20 }), 120_000); out = await w.pass(120_000);
     assert.deepEqual([out.problems.filter((p) => /usage/.test(p)), w.fact().week.used_pct, Object.keys(w.fact().week_rows).sort()], [[], 80, ['weekly_all', 'weekly_scoped:Fable']]);
     // weekly_all (not the top) reset on its own: the week stays 80%, and the drop is said on its row (compared row by row).
+    // L1363 m-A: it is said as that row's reset only, and is no 'week' reset, so it ends no weekly limit wait.
     w.put(withRows({ 'weekly_scoped:Fable': 80, weekly_all: 0 }), 180_000); out = await w.pass(180_000);
+    const rowOnly = "usage for weekly_all went from 20% to 0% this week; taken as a reset of that row only: the week's figure (weekly_scoped:Fable, 80%) did not fall with it, so no weekly limit wait ends on it";
     assert.deepEqual([out.problems.filter((p) => /usage/.test(p)), out.notes, w.fact().week.used_pct],
-      [[], ['usage-a: usage for weekly_all went from 20% to 0% this week; taken as a reset'], 80]);
+      [[], [`usage-a: ${rowOnly}`], 80]);
+    assert.deepEqual([w.fact().last_reset.note, w.fact().last_reset.windows], [rowOnly, []]);
+    const hit = { resets_at: '2026-11-26T12:00:00.000Z' }; // a weekly hit (its reset more than LIMIT_H5_MS after it)
+    assert.equal(resetEndsLimit(w.fact().last_reset, hit, T0, T0 + 200_000), false, 'a weekly limit wait is not ended by another row');
     // The top row dropping by a reset's size is a reset whatever else the report says.
     w.put(withRows({ 'weekly_scoped:Fable': 30, weekly_all: 0 }), 240_000); out = await w.pass(240_000);
     assert.deepEqual([out.notes, w.fact().week.used_pct], [['usage-a: usage for weekly_scoped:Fable went from 80% to 30% this week; taken as a reset'], 30]);
+    assert.deepEqual(w.fact().last_reset.windows, ['week'], 'the week\'s own figure fell: a weekly reset');
+    assert.equal(resetEndsLimit(w.fact().last_reset, hit, T0, T0 + 260_000), true, 'and it ends a weekly limit wait');
   } finally { w.done(); }
 });
 
