@@ -12,7 +12,8 @@
 // With no record a Lead's plans are refused and the owner is told (M9 applyPlan), so a bad or missing file holds plans,
 // never lets one through.
 //
-// STILL OWED: the start command that makes the folder and writes this file (step 8 PR 3), and the export check (PR 2).
+// The start command that makes the folder and writes this file is setup/lead.mjs (step 8 PR 3); the export check is M11
+// lead-main.mjs's (PR 2). STILL OWED: starting it by itself for each confirmed idea (PR 4).
 
 import { join } from 'node:path';
 import { ownerSessionId, isOwnerSession, ownerSessions } from '../../shared/owner-sessions.mjs';
