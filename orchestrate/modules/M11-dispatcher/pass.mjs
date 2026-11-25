@@ -110,6 +110,9 @@ export const RULES_MISSING_FACT = 'rules-missing-alert';
 export const DEAD_SESSION_WAIT = 'dead_session';
 export const isDeadSessionWait = (what) => typeof what === 'string' && what.startsWith(`${DEAD_SESSION_WAIT}:`);
 export const DEAD_RERUN_FACT = (card) => `dead-rerun-${card}`;
+// L1367 audit m1: a refused move back to ready is told on its own cause (fact hold-dead-rerun-move-<card>), once a day,
+// so a count line told earlier the same day (cause dead-rerun-<card>) never hides it.
+export const DEAD_RERUN_MOVE_CAUSE = (card) => `dead-rerun-move-${card}`;
 export const DEAD_RERUN_WINDOW_MS = 24 * 60 * 60_000;
 // L1367 item 2: the card is put back in the queue, not started: the start loop starts it, when the band and caps let it.
 export const deadRerunText = (card, n, cap) => `card ${card}: its session ended without finishing; put back in the queue (${n} of ${cap} in the last 24 hours)`;
@@ -236,7 +239,8 @@ export function holdAlert({ rec, cause, text, alert, now, every = HOLD_REPEAT_MS
   const f = factDoc(rec, HOLD_FACT(cause))?.doc;
   // Once per cause per day (L38), or per `every` (a paused product, weekly; L299): a changing detail in the text
   // does not make it a new cause. null, not false: already told today is not a refused alert (L130 m12). A told_at
-  // that can't be read, or more than 60 s ahead of now, is not told (shared dueToTell; #157 audit MAT-1).
+  // that can't be read, or more than 60 s ahead of now, counts as not told, so it is told again (shared dueToTell;
+  // #157 audit MAT-1).
   if (!dueToTell(f, now, every)) return null;
   // Marked told only once a copy is delivered (audit 0b-6 r5 MAT-2; L47).
   return tellThen(alert, text, { fact: HOLD_FACT(cause), fields: { text, told_at: iso(now) }, kind: 'hold_alert' });
@@ -760,9 +764,11 @@ export async function dispatcherPass({ rec, rules, now, clock = () => now, accou
       // only a card still claimed, and actOnDead puts only a running card on Joe (L1367 item 1: a claimed card's dead
       // session is the lapse's), so no such wait is made today.
       if (doc.wait?.return_to !== 'ready') continue;
-      const tellDead = (line) => {
+      // A refused move has its own cause (L1367 audit m1): it follows a counted re-run, so at the cap the next passes
+      // `continue` and it would never be told if a count line had used the card's cause earlier that day.
+      const tellDead = (line, cause = DEAD_RERUN_FACT(id)) => {
         failing(line);
-        try { holdAlert({ rec, cause: DEAD_RERUN_FACT(id), text: `${line}; it waits on you`, alert, now }); } catch (e) { failing(`card ${id}: ${e?.message ?? e}`); }
+        try { holdAlert({ rec, cause, text: `${line}; it waits on you`, alert, now }); } catch (e) { failing(`card ${id}: ${e?.message ?? e}`); }
       };
       let cap;
       try { cap = need(rules, KEYS.claimsDeadRerunsPerDay, { product: doc.product }); } catch (e) {
@@ -780,7 +786,7 @@ export async function dispatcherPass({ rec, rules, now, clock = () => now, accou
         out.resumed.push(id);
         // A notice only: the card is back in the queue whatever the answer; a lost one is in the diary.
         if (alert(deadRerunText(id, used.times.length + 1, cap)) === false) failing(`card ${id}: its re-run notice could not be queued`);
-      } else tellDead(`card ${id}: its session ended and a re-run was counted, but it could not be put back in the queue (${back.reason ?? 'no answer'})`);
+      } else tellDead(`card ${id}: its session ended and a re-run was counted, but it could not be put back in the queue (${back.reason ?? 'no answer'})`, DEAD_RERUN_MOVE_CAUSE(id));
     } else if (what === PAUSED_WAIT_WHAT) {
       // A card parked for a paused product goes back to ready once the product is no longer paused.
       if (rec.read('product', doc.product)?.doc?.state !== 'paused' && move(rec, 'card', id, { state: 'ready' }, { kind: 'resume_paused' }).ok) out.resumed.push(id);

@@ -7,9 +7,10 @@
 //                  failure (an unreadable file, a bad rule) can skip them. An undo starts only as the
 //                  exact reverse of a merge in the record (L40).
 //   1. outage    — first, so a pass during an outage starts nothing and restarts nothing (R-0b-56).
-//                  Outside an outage its answer is acted on here: a dead session's card that is safe to
-//                  re-run has its claim broken by the Record (breakIfDead: back to `ready`, the starts below
-//                  pick it up); any other waits on Joe.
+//                  Outside an outage its answer is acted on here, for running cards only (L1367): a dead
+//                  session's card that is safe to re-run has its claim broken by the Record (breakIfDead: back
+//                  to `ready`, the starts below pick it up); any other running card waits on Joe (and the waits
+//                  step re-queues it under the daily cap, L1365). A claimed card's dead session is left to the lapse.
 //      adopt     — a launch that answered after its limit (the runner's start checks ran long) is taken over: the card
 //                  goes running with the same steps as an on-time start, or back to ready if the runner refused it
 //                  (adoptLate, L1361). Before the lapse, which never stops a session that did launch.

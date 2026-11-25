@@ -7,7 +7,7 @@ import { tempDir } from '../../shared/test-tmp.mjs';
 import { launchInputProblem } from '../../wiring/owner-asks.mjs';
 import { STATES, FINAL_STATES } from '../../shared/record.mjs';
 import { STOP_QUIET_REASONS } from '../M4-workshop/launcher/review-runner.mjs';
-import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts as undoStarts0, stopProcessGroup, guarded, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, RESET_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RUN, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, LIMIT_H5_MS, resetEndsLimit, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0, UNKNOWN_FACT, REVIEW_STOP_FACT, REVIEW_STOP_RUNNER_REASON, REVIEW_STOP_AGAIN_MS, REVIEW_STOP_TELL_FACT, REVIEW_STOP_MAX_ASKS, HOST_COPY_FAIL, HOST_COPY_CAUSE, HOLD_FACT, adoptLate as adoptLate0, lapseStop, LAUNCH_DEADLINE_MS, PORT_DEADLINE_MS, DEAD_RERUN_FACT, DEAD_SESSION_WAIT, deadRerunText, missingText } from './pass.mjs';
+import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts as undoStarts0, stopProcessGroup, guarded, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, RESET_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RUN, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, LIMIT_H5_MS, resetEndsLimit, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0, UNKNOWN_FACT, REVIEW_STOP_FACT, REVIEW_STOP_RUNNER_REASON, REVIEW_STOP_AGAIN_MS, REVIEW_STOP_TELL_FACT, REVIEW_STOP_MAX_ASKS, HOST_COPY_FAIL, HOST_COPY_CAUSE, HOLD_FACT, adoptLate as adoptLate0, lapseStop, LAUNCH_DEADLINE_MS, PORT_DEADLINE_MS, DEAD_RERUN_FACT, DEAD_RERUN_MOVE_CAUSE, DEAD_SESSION_WAIT, deadRerunText, missingText } from './pass.mjs';
 import { USAGE_FACT, BAND_FACT } from './usage.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { retellWaits, WAIT_TELL_FACT } from './joe-waits.mjs';
@@ -992,7 +992,7 @@ test('L1365 M1: the count fails closed: a clock stepped back, an unreadable time
   const keep = world([['fact', DEAD_RERUN_FACT('C-1'), { times: ['not a time'] }], deadWait('C-1')], caps);
   assert.deepEqual((await keep.pass(0)).resumed, ['C-1']);
   assert.deepEqual(keep.rec.read('fact', DEAD_RERUN_FACT('C-1')).doc.times, ['not a time', iso(T0)]);
-  // times not a list: corrupt. Not started again, told once, the fact left as it is.
+  // times not a list: corrupt. Not put back in the queue, told once, the fact left as it is.
   const bad = world([['fact', DEAD_RERUN_FACT('C-1'), { times: 'yesterday' }], deadWait('C-1')], caps);
   const r = await bad.pass(0);
   assert.deepEqual(r.resumed, []);
@@ -1010,6 +1010,27 @@ test('L1365 m1: a refused move back to ready is told to Joe, and the card stays 
   assert.deepEqual(r.resumed, []);
   assert.equal(w.rec.read('card', 'C-1').doc.state, 'waiting');
   assert.ok(w.calls.alerts.some((a) => /card C-1: its session ended and a re-run was counted, but it could not be put back in the queue \(refused for the test\); it waits on you/.test(a)), w.calls.alerts.join(' | '));
+});
+
+// L1367 audit m1: the count line and the refused move are told on two causes, so a count line told earlier the same day
+// never hides the refused move (after which, at the cap, the step would never tell it).
+test('L1367 audit m1: a refused count, then a refused move on the next pass, sends two alerts on two causes', async () => {
+  const w = world([deadWait('C-1')], { over: { [K.claimsDeadRerunsPerDay]: 1 } });
+  const refuse = (kind) => ({ ...w.rec, write: (a) => (a?.kind === kind ? { ok: false, reason: 'refused for the test' } : w.rec.write(a)) });
+  await w.pass(0, { rec: refuse('dead_rerun_count') });
+  await w.pass(1, { rec: refuse('resume_dead_session') });
+  const told = w.calls.alerts.filter((a) => /card C-1: .*(could not be counted|could not be put back in the queue)/.test(a));
+  assert.deepEqual(told, [
+    'card C-1: its dead-session re-run could not be counted (refused for the test), so it is not put back in the queue; it waits on you',
+    'card C-1: its session ended and a re-run was counted, but it could not be put back in the queue (refused for the test); it waits on you',
+  ], w.calls.alerts.join(' | '));
+  assert.ok(w.rec.read('fact', HOLD_FACT(DEAD_RERUN_FACT('C-1')))?.doc?.told_at, 'the count line on dead-rerun-C-1');
+  assert.ok(w.rec.read('fact', HOLD_FACT(DEAD_RERUN_MOVE_CAUSE('C-1')))?.doc?.told_at, 'the refused move on its own cause');
+  assert.equal(DEAD_RERUN_MOVE_CAUSE('C-1'), 'dead-rerun-move-C-1');
+  // At the cap now: the next pass leaves it waiting and tells nothing more; the refused move was told above.
+  await w.pass(2);
+  assert.equal(w.calls.alerts.filter((a) => /card C-1: .*(could not be counted|could not be put back in the queue)/.test(a)).length, 2);
+  assert.equal(w.rec.read('card', 'C-1').doc.state, 'waiting');
 });
 
 // L1367 item 3: a refused move back to ready is told once, by tellDead. Through the tick's watched Record (as tick.mjs

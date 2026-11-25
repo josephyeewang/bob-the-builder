@@ -42,7 +42,7 @@ export const REFUSED_CAUSES = Object.freeze({
     kinds: ['wait_tell', 'dead_ask', 'usage_unknown', 'limit_no_account', 'limit_no_run', 'limit_no_hit', 'limit_no_reset', 'limit_reset', 'no_reviewer_ask', 'merge_repeat_ask'] },
   review_count: { what: "a card's failed review requests could not be counted, so it would never reach you", steps: ['limits'], kinds: ['review_request'] },
   // Not resume_dead_session (L1367 item 3): a refused move back to ready for a dead session's card is told by its own
-  // teller (pass.mjs tellDead, daily on hold-dead-rerun-<card>, naming the re-run it counted), so it is told once.
+  // teller (pass.mjs tellDead, daily on its own hold-dead-rerun-move-<card>, naming the re-run it counted), so it is told once.
   resume: { what: 'a parked card could not be put back in the queue', steps: ['pass'], kinds: ['resume_usage_band', 'resume_limit_hit', 'resume_paused'] },
   // The text names what was refused (L352 c1): a session's end, its card's failing, or both.
   timeout: { what: (items) => {
