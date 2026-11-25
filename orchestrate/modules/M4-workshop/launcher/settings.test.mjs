@@ -183,6 +183,13 @@ test('the Lead, Front Door and thinking room refuse every Claude setup and skill
   assert.match(checkSettings(s, { profile: DESIGN_PROFILES.lead }).reason, /setup-file refusal/);
 });
 
+test('L1370: the Lead\'s own tools may not write a dot-name in its outbox, so its launch file is the start\'s, never the Lead\'s', () => {
+  const deny = render('lead').settings[S.permissions][S.deny];
+  // Edit(...) covers every file-writing tool on the pinned claude; Write(...) is kept for a later one (render-settings.mjs).
+  for (const r of ['Edit(//w/outbox/.*)', 'Edit(//w/outbox/**/.*)', 'Write(//w/outbox/.*)', 'Write(//w/outbox/**/.*)']) assert.ok(deny.includes(r), r);
+  assert.equal(DESIGN_PROFILES.lead.tools.some((t) => /^(Bash|NotebookEdit|MultiEdit)$/.test(t)), false, 'no other way to write a file');
+});
+
 test('an off-list host is refused, not asked; a role with no shell gets no network', () => {
   assert.match(render('worker', { product: { ...PRODUCT, hosts: ['github.com'] } }).reason, /not on the rules' allowed list/);
   assert.match(render('worker', { product: { ...PRODUCT, hosts: ['*.example.com'] }, rulesHosts: ['*.example.com'] }).reason, /plain host name/);

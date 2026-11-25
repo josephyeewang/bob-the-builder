@@ -13,50 +13,22 @@
 // A session folder stays after its tab is closed, so a file written just before the close is still taken. Ended
 // folders are left; clearing them is a later step's (STILL OWED: the folders build up, one per start).
 
-import { lstatSync, readdirSync } from 'node:fs';
+// The listing itself is shared with the Lead's (shared/owner-sessions.mjs; L1370): these are its Front Door names.
+
 import { join } from 'node:path';
+import { ownerSessionId, isOwnerSession, ownerSessions } from '../../shared/owner-sessions.mjs';
 
 export const FRONT_DOOR_ROLE = 'front_door';
 export const FRONT_DOOR_PREFIX = 'fd';
-const STAMP = /^\d{14}$/;
-const PRODUCT = /^[a-z0-9][a-z0-9-]*$/;
 
-const two = (n) => String(n).padStart(2, '0');
 /** The session id (and its outbox folder's name) of a start at `date`, in the Mac's own time zone. */
-export function frontDoorSessionId(product, date = new Date()) {
-  if (typeof product !== 'string' || !PRODUCT.test(product)) throw new Error(`not a product name: ${String(product).slice(0, 80)}`);
-  const d = date;
-  const stamp = `${d.getFullYear()}${two(d.getMonth() + 1)}${two(d.getDate())}${two(d.getHours())}${two(d.getMinutes())}${two(d.getSeconds())}`;
-  return `${FRONT_DOOR_PREFIX}-${product}-${stamp}`;
-}
+export const frontDoorSessionId = (product, date = new Date()) => ownerSessionId(FRONT_DOOR_PREFIX, product, date);
 
 /** Whether `name` is a Front Door session of `product`: fd-<product>-<14 digits>, so product a's never matches a-b's. */
-export function isFrontDoorSession(name, product) {
-  const head = `${FRONT_DOOR_PREFIX}-${product}-`;
-  return typeof name === 'string' && name.startsWith(head) && STAMP.test(name.slice(head.length));
-}
+export const isFrontDoorSession = (name, product) => isOwnerSession(FRONT_DOOR_PREFIX, name, product);
 
 /** The Front Door folder: every session's outbox is directly inside it. */
 export const frontDoorFolder = (outboxRoot) => join(outboxRoot, FRONT_DOOR_ROLE);
 
-/**
- * This product's Front Door sessions, as intake's session list has them (wiring/owner-ports.mjs outboxSessions):
- * [{ sessionId, role, outbox, uid, card: null, product }]. Only plain folders count (a link is left out; the Record
- * refuses one anyway). No Front Door folder yet (none was set up) is none; any other failure to list throws.
- */
-export function frontDoorSessions({ outboxRoot, product, uid, list = (d) => readdirSync(d), lstat = (p) => lstatSync(p) }) {
-  if (typeof outboxRoot !== 'string' || !outboxRoot.startsWith('/')) throw new Error('the Front Door sessions need the outbox root');
-  if (!Number.isSafeInteger(uid) || uid < 0) throw new Error('the Front Door sessions need the owner\'s Mac user id');
-  const dir = frontDoorFolder(outboxRoot);
-  let names;
-  try { names = list(dir); } catch (e) { if (e?.code === 'ENOENT') return []; throw e; }
-  const out = [];
-  for (const name of [...names].sort()) {
-    if (!isFrontDoorSession(name, product)) continue;
-    const outbox = join(dir, name);
-    let st; try { st = lstat(outbox); } catch { continue; }
-    if (!st.isDirectory() || st.isSymbolicLink()) continue;
-    out.push({ sessionId: name, role: FRONT_DOOR_ROLE, outbox, uid, card: null, product });
-  }
-  return out;
-}
+/** This product's Front Door sessions (shared/owner-sessions.mjs ownerSessions, role front_door). */
+export const frontDoorSessions = (o) => ownerSessions({ ...o, role: FRONT_DOOR_ROLE, prefix: FRONT_DOOR_PREFIX, label: 'Front Door' });

@@ -3,7 +3,7 @@
 // on the real Record.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { HEAD, PRODUCT, iso, must, outboxFile, passingVerdict, product, put, readyCard, seed, setup } from './fixtures.test-helper.mjs';
+import { HEAD, PRODUCT, iso, must, outboxFile, passingVerdict, planFile, product, put, readyCard, seed, setup } from './fixtures.test-helper.mjs';
 import { heartbeatLimit } from './writer.mjs';
 import { fakeRules } from '../../shared/rules.mjs';
 import { MOVES } from './moves.mjs';
@@ -81,6 +81,22 @@ test('L123 m-2: only the dispatcher brings a waiting card back to approved', () 
   assert.match(viaOutbox.reason, /may not move card waiting → approved/);
   assert.equal(env.record.read('card', 'C-1').doc.state, 'waiting', 'lead outbox');
   must(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'approved' }), 'the dispatcher may');
+});
+
+test('L1370: a Lead\'s roadmap- file can\'t move a draft card to ready; only the Dispatcher can', () => {
+  const env = setup({ prefix: 'm9-l1370-' });
+  product(env);
+  planFile(env, [{ id: 'C-1', tier: 2, module: 'M1', depends_on: [], brief: { goal: 'a goal', done_when: 'tests pass', files: ['src/a.mjs'] } }]);
+  assert.equal(env.record.read('card', 'C-1').doc.state, 'draft');
+  const rev = env.record.read('card', 'C-1').rev;
+  for (const sid of ['L-1', 'ld-orchestrate-test-20261125090000']) {
+    const move = `${JSON.stringify({ entity: 'card', id: 'C-1', expectRev: rev, from_state: 'draft', to_state: 'ready' })}\n`;
+    const r = env.record.applyOutbox({ role: 'lead', sessionId: sid }, outboxFile(env, 'lead', sid, 'roadmap-C-1.md', move));
+    assert.equal(r.ok, false, `${sid}: ${r.reason}`);
+    assert.match(r.reason, /may not move card draft → ready/, sid);
+    assert.equal(env.record.read('card', 'C-1').doc.state, 'draft', sid);
+    assert.equal(env.record.read('card', 'C-1').rev, rev, sid);
+  }
 });
 
 test('L123 m-3: an approved card waits only with resume continue, back to approved (probe A refused)', () => {

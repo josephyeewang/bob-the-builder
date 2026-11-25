@@ -20,8 +20,9 @@ import { outboxKindOf } from '../../shared/record-names.mjs';
 import { DESIGN_PROFILES } from '../M4-workshop/launcher/role-profiles.mjs';
 import { checkPlan } from '../M3-lead/lead-wording.mjs';
 import { plain, tellThen, dropCause, isQueued, clearCause, queuedMarks, writeFrom } from './alerts.mjs';
-import { HOLD_FACT, HOLD_REPEAT_MS, causeOf, guarded, holdAlert, refusalReport } from './pass.mjs';
-import { RESTART_FACT } from './lead-restart.mjs';
+import { HOLD_FACT, HOLD_REPEAT_MS, causeOf, clearHold, guarded, holdAlert, refusalReport } from './pass.mjs';
+import { RESTART_FACT, recordLeadLaunch } from './lead-restart.mjs';
+import { readLaunchFile } from '../M3-lead/sessions.mjs';
 import { stillWaiting, STILL_WAITING_MS, pastTime } from '../../shared/still-waiting.mjs';
 import { OUTBOX_KINDS, leadLaunchHead } from '../../shared/record.mjs';
 import { PRODUCT_OUTBOX_ROLES } from '../../shared/product-paths.mjs';
@@ -203,6 +204,82 @@ function noteLeftOut({ rec, alert, report, now }, count) {
 
 const statOf = (p) => { try { const s = lstatSync(p); return `${s.size}:${s.mtimeMs}`; } catch { return null; } };
 
+/** What the export check answers until the lead-main export is wired (Track A step 8 PR 2): every head is held. */
+export const EXPORT_NOT_WIRED = 'not wired: nothing checks yet that a head came from the lead-main export';
+
+/** How long a one-shot Lead's launch is looked at with no launch record, from its first check (L1370 audit m4, r2
+ * MAT-1): after this it is told once and left alone. A start is recorded within a pass or two of its first check, so a
+ * day of checks is a start that will never be. Counted from intake's own checks, never the file's time, so a file
+ * dated ahead, or a Dispatcher off for a day, neither keeps a Lead looked at for ever nor drops one never checked. */
+export const LEAD_LAUNCH_LOOK_MS = 24 * 60 * 60 * 1000;
+/** At most this many one-shot Leads have their head put to the export check in one pass (L1370 audit m4); the rest are
+ * looked at on the next pass, the least lately checked first (r2 MAT-1). */
+export const LEAD_LAUNCH_CHECKS_PER_PASS = 5;
+/** The fact of a one-shot Lead's launch checks (L1370 audit r2 MAT-1): { first_checked_at, last_checked_at }, in the
+ * Dispatcher's hold- family (M9 permissions.mjs) beside the Lead's launch holds. */
+export const LAUNCH_LOOK_FACT = (sid) => HOLD_FACT(`lead-launch-look-${sid}`);
+// The causes a one-shot Lead's launch holds on. All but the stale one are cleared once its launch is recorded.
+const LAUNCH_CAUSES = (sid) => ({ file: `lead-launch-file-${sid}`, export: `lead-launch-export-${sid}`, plan: `plan-no-launch-${sid}`, stale: `lead-launch-stale-${sid}` });
+const lookOf = (rec, sid) => { const d = rec.read('fact', LAUNCH_LOOK_FACT(sid))?.doc; return d && typeof d === 'object' && !Array.isArray(d) ? d : undefined; };
+
+/** When session `s`'s launch was last checked, for the order of a pass's checks: never checked (or unreadable) first. */
+export function launchLastChecked(rec, s, now) {
+  try { return s?.role === 'lead' ? (pastTime(lookOf(rec, s.sessionId)?.last_checked_at, now) ?? -Infinity) : -Infinity; } catch { return -Infinity; }
+}
+
+/**
+ * A one-shot Lead's launch (Track A step 8, L1370): a lead session with no launch record yet has its launch file read
+ * (M3 sessions.mjs readLaunchFile), and the launch is recorded (lead-restart.mjs recordLeadLaunch) only when
+ * `exportedHead({ head, product, session })` answers { ok: true }: the head is one the lead-main export gave. Anything
+ * else records nothing, so the Lead's plans stay refused (M9 applyPlan), and the owner is told why, once a day. No file
+ * at all is not told (a Lead the runner started has none; its launch is recorded at its start). Returns null when
+ * there was nothing to do, else what happened.
+ * Each look at a file that is there is a check, its time kept on LAUNCH_LOOK_FACT. A Lead first checked more than
+ * LEAD_LAUNCH_LOOK_MS ago with no record is told once ('stale') and then left alone ('ignored'), never read again,
+ * whether its file is bad, cannot be opened, or names a head the export check refuses (L1370 audit m4, r2 MAT-1, m3).
+ * `checks` ({ left }) bounds the export checks in a pass: with none left the Lead waits for the next pass ('later'),
+ * unchecked, so it goes first then. Once the launch is recorded its hold marks are cleared; a clear that fails is
+ * reported as such, the launch staying recorded (r2 m4; `report` also hears a clear the Record refused).
+ */
+export async function launchFromFile({ rec, now, alert, s, readLaunch = readLaunchFile, exportedHead, portMs = INTAKE_PORT_MS,
+  checks = { left: LEAD_LAUNCH_CHECKS_PER_PASS }, report = () => {} }) {
+  if (s?.role !== 'lead' || leadLaunchHead(rec, s.sessionId)) return null;
+  const cause = LAUNCH_CAUSES(s.sessionId);
+  if (typeof rec.read('fact', HOLD_FACT(cause.stale))?.doc?.told_at === 'string') return { session: s.sessionId, launch: 'ignored' };
+  let f;
+  try { f = readLaunch(s); } catch (e) { f = { ok: false, reason: `the launch file could not be read (${String(e?.code ?? e?.message ?? e).slice(0, 100)})` }; }
+  if (f?.none) return null;
+  const look = lookOf(rec, s.sessionId);
+  const first = pastTime(look?.first_checked_at, now);
+  if (first !== null && now - first > LEAD_LAUNCH_LOOK_MS) {
+    holdAlert({ rec, cause: cause.stale, now, alert, text: `the Lead ${s.sessionId} was first checked more than a day ago and its launch was never recorded, so its plans will not be taken; it is no longer looked at. Start a new Lead for the idea` });
+    return { session: s.sessionId, launch: 'stale' };
+  }
+  if (f?.ok && checks.left <= 0) return { session: s.sessionId, launch: 'later', reason: 'the export checks for this pass are used up' };
+  const at = new Date(now).toISOString();
+  const m = writeFrom(rec, LAUNCH_LOOK_FACT(s.sessionId), look, { ...look, first_checked_at: first !== null ? look.first_checked_at : at, last_checked_at: at }, 'lead_launch_checked');
+  if (!m?.ok) report(`the Lead ${s.sessionId}'s launch check could not be noted (${plain(m?.reason ?? 'no answer', 200)}), so it is not counted towards its day`, `lead-launch-look-${s.sessionId}`);
+  if (!f?.ok) {
+    const reason = plain(f?.reason ?? 'no answer', 300);
+    holdAlert({ rec, cause: cause.file, now, alert, text: `the Lead ${s.sessionId}'s launch file was not used, so its plans wait: ${reason}` });
+    return { session: s.sessionId, launch: 'held', reason };
+  }
+  checks.left -= 1;
+  const x = await guarded(() => exportedHead({ head: f.head, product: s.product, session: s.sessionId }), portMs);
+  if (x?.ok !== true) {
+    const why = plain(x?.reason ?? 'no answer', 300);
+    holdAlert({ rec, cause: cause.export, now, alert, text: `the Lead ${s.sessionId} started on ${f.head.slice(0, 12)}, which could not be shown to be a commit the lead-main export gave (${why}), so its plans wait` });
+    return { session: s.sessionId, launch: 'held', reason: why };
+  }
+  const w = recordLeadLaunch({ rec, now, alert, sessionId: s.sessionId, head: f.head, product: s.product });
+  if (!w.ok) return { session: s.sessionId, launch: 'held', reason: w.reason };
+  for (const c of [cause.file, cause.export, cause.plan]) {
+    try { clearHold(rec, HOLD_FACT(c), now, report); }
+    catch (e) { report(`the Lead ${s.sessionId}'s launch was recorded; a hold mark could not be cleared (${plain(e?.message ?? e, 200)})`, `lead-launch-clear-${s.sessionId}`); }
+  }
+  return { session: s.sessionId, launch: 'recorded', head: f.head };
+}
+
 /** The kinds a session may hand in (name prefixes, L82 M-1): its role's, except a read-only request session hands back report-. */
 export function kindsFor(entry) {
   if (entry.request) return ['report-'];
@@ -224,12 +301,14 @@ export function kindsFor(entry) {
  * is not marked as used, so the session can write it again under the same name (an oversize handoff).
  * `reviewEnded(session)` answers from the runner's own ended record (M9 `runnerEnded`), now or as a promise: { ok, ended }
  * | { ok: false, none?, reason }. Left out, its stand-in answers "not ended" with a reason, noted every pass. A session's
- * `head` comes from the runner's launch record.
+ * `head` comes from the runner's launch record. `readLaunch` and `exportedHead` are launchFromFile's (a one-shot Lead's
+ * launch file, L1370); `exportedHead` left out answers EXPORT_NOT_WIRED, so such a Lead's plans wait.
  * Returns what happened to each file.
  */
 export async function intakePass({ rec, sessions, wait, alert, note, startReadonly, replyToLead: replyPort, now = Date.now(),
   list = (d) => readdirSync(d), look = statOf, read = readOutboxFile, vet = () => null,
-  reviewEnded = () => ({ ok: false, reason: 'nothing can read the ended records' }), failureLog, portMs = INTAKE_PORT_MS, startMs = INTAKE_START_MS, passMs = INTAKE_PASS_MS }) {
+  reviewEnded = () => ({ ok: false, reason: 'nothing can read the ended records' }), failureLog,
+  readLaunch = readLaunchFile, exportedHead = () => ({ ok: false, reason: EXPORT_NOT_WIRED }), portMs = INTAKE_PORT_MS, startMs = INTAKE_START_MS, passMs = INTAKE_PASS_MS }) {
   const out = [];
   const ends = Date.now() + passMs;
   const outOfTime = () => Date.now() >= ends;
@@ -255,6 +334,23 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
     if (typeof f.doc?.lead_note !== 'string' || f.id !== appliedId(f.doc.session, f.doc.name)) continue;
     if (outOfTime()) { leftOut += 1; continue; }
     await deliverNote(notes, f.id);
+  }
+  // A one-shot Lead's launch is recorded before its files are taken, so a plan handed in with the start is not refused.
+  // Each Lead's step is its own: one that throws is reported and the pass goes on (L1370 audit m2). A Lead whose launch
+  // file was held, is past its day, or waits for a check is told about from there, so its plans' own hold says nothing
+  // (m4: one tell; r2 c1). The checks go least lately checked first, never checked before all, so the cap turns over
+  // every Lead (r2 MAT-1); a tie keeps the sessions' order.
+  const checks = { left: LEAD_LAUNCH_CHECKS_PER_PASS };
+  const launchTold = new Set();
+  const byCheck = sessions.map((s, i) => [launchLastChecked(rec, s, now), i, s]).sort((a, b) => (a[0] === b[0] ? a[1] - b[1] : a[0] - b[0])).map((x) => x[2]);
+  for (const s of byCheck) {
+    if (outOfTime()) break;
+    let l;
+    try { l = await launchFromFile({ rec, now, alert, s, readLaunch, exportedHead, portMs, checks, report }); }
+    catch (e) { l = { session: s?.sessionId, launch: 'failed', reason: plain(e?.message ?? e, 300) }; report(`the launch step for the Lead ${plain(s?.sessionId ?? 'with no session id', 80)} failed, so its plans wait: ${l.reason}`, `lead-launch-step-${shortHash(String(s?.sessionId))}`); }
+    if (!l) continue;
+    out.push(l);
+    if (['held', 'stale', 'ignored', 'later'].includes(l.launch)) launchTold.add(s.sessionId);
   }
   for (const s of sessions) {
     let names;
@@ -436,7 +532,10 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
       }
       if (!leadLaunchHead(rec, s.sessionId)) {
         const why = `Lead ${s.sessionId} has no launch record, so its plan ${name} can't say which main commit it was made on and is held`;
-        holdAlert({ rec, cause: `plan-no-launch-${s.sessionId}`, text: why, alert, now });
+        if (!launchTold.has(s.sessionId)) {
+          try { holdAlert({ rec, cause: `plan-no-launch-${s.sessionId}`, text: why, alert, now }); }
+          catch (e) { report(`${why}, and that could not be told (${plain(e?.message ?? e, 200)})`, `plan-no-launch-${s.sessionId}`); }
+        }
         if (prev?.doc?.state !== 'waiting' || prev.doc.sha256 !== hash) put({ state: 'waiting', reason: why }, 'outbox_waiting');
         r.waiting = why;
         continue;

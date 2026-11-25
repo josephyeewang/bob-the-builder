@@ -34,8 +34,9 @@ const iso = (ms) => new Date(ms).toISOString();
 /**
  * The Lead's launch record (R-0b-170, L460), written at every Lead start: the main commit it started on, read before the
  * start. A plan takes its main_commit from here, so a Lead with no record can't plan, and the owner is told why.
- * `head` is a sha, or null when it could not be read. Only a restart calls this today: nothing starts a Lead for the
- * first time yet, and until that is wired (on the cutover list) a first-started Lead has no record and its plans are held.
+ * `head` is a sha, or null when it could not be read. A restart calls this, and intake does for a one-shot Lead from its
+ * launch file once the export check accepts the head (outbox-intake.mjs launchFromFile, L1370). That check is not wired
+ * yet (Track A step 8 PR 2), so until it is a one-shot Lead has no record and its plans are held.
  */
 export function recordLeadLaunch({ rec, now, alert, sessionId, head, product = null }) {
   const named = namesSession(sessionId);

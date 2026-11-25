@@ -41,7 +41,8 @@
 //   board()              → this product's worker sessions only, by the product the status names (L927); a dead one's
 //                          claim is read from this Record (recordHolds).
 //   outboxSessions()     → this product's open worker and script outboxes: another product's are its own Dispatcher's;
-//                          then this product's Front Door sessions (M1 sessions.mjs frontDoorSessions), the owner's files.
+//                          then this product's Front Door sessions (M1 sessions.mjs frontDoorSessions) and one-shot
+//                          Leads (M3 sessions.mjs leadSessions, L1370), the owner's files.
 //   probe(session)       → the worker runner's, for the kinds it starts (RUNNER_KINDS). Every other kind throws: the
 //                          review runner reports no size or activity, and no runner here starts the rest (L925 rule 2).
 //   stopSession(id)      → the worker runner's: true once the launch request is used up, else a stop request in its
@@ -67,6 +68,7 @@
 // The mirror and the seal folder are checked when the wiring starts, so a wrong path stops the start.
 
 import { frontDoorSessions } from '../modules/M1-front-door/sessions.mjs';
+import { leadSessions } from '../modules/M3-lead/sessions.mjs';
 import { closeSync, constants as FS, fstatSync, lstatSync, openSync, readSync, statSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
@@ -475,16 +477,19 @@ export function runnerSyncPorts({ config: c, rec, now = Date.now }, io = {}) {
   return {
     sessions: () => sessionsNow(c, rec, { now, io }),
     board: () => sync.board(),
-    // The runner's sessions, then this product's Front Door tabs (M1 sessions.mjs, Track A step 6): each start's outbox
-    // folder, named for the product, whose files must be the owner's (hostLockUid).
-    // A Front Door folder that can't be read loses only the Front Door's hand-ins this pass, never the runner's: it is
-    // written to the Dispatcher's log and the runner's sessions are still given (#657 audit m2).
+    // The runner's sessions, then this product's Front Door tabs (M1 sessions.mjs, Track A step 6) and one-shot Leads
+    // (M3 sessions.mjs, step 8, L1370): each start's outbox folder, named for the product, whose files must be the
+    // owner's (hostLockUid). Both go through the one listing (shared/owner-sessions.mjs).
+    // A role's folder that can't be read loses only that role's hand-ins this pass, never the runner's or the other
+    // role's: it is written to the Dispatcher's log and the rest are still given (#657 audit m2).
     outboxSessions: () => {
       const runner = sync.outboxSessions().filter((x) => x.product === c.product);
-      let tabs = [];
-      try { tabs = frontDoorSessions({ outboxRoot: c.outboxRoot, product: c.product, uid: c.hostLockUid, ...(io.frontDoorList ? { list: io.frontDoorList } : {}) }); }
-      catch (e) { (io.log ?? ((t) => process.stderr.write(`${t}\n`)))(`the Front Door's tabs could not be read this pass, so their files wait for the next one: ${String(e?.message ?? e).slice(0, 300)}`); }
-      return [...runner, ...tabs];
+      const log = io.log ?? ((t) => process.stderr.write(`${t}\n`));
+      const owned = (list, listIo, what) => {
+        try { return list({ outboxRoot: c.outboxRoot, product: c.product, uid: c.hostLockUid, ...(listIo ? { list: listIo } : {}) }); }
+        catch (e) { log(`${what} could not be read this pass, so their files wait for the next one: ${String(e?.message ?? e).slice(0, 300)}`); return []; }
+      };
+      return [...runner, ...owned(frontDoorSessions, io.frontDoorList, 'the Front Door\'s tabs'), ...owned(leadSessions, io.leadList, 'the one-shot Leads\' folders')];
     },
     probe: (session) => {
       if (RUNNER_KINDS.includes(session?.kind)) return sync.probe(session);
