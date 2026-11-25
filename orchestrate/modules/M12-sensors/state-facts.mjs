@@ -9,7 +9,10 @@
 // The fact ids are M11's own (imported, not copied), and every fact passes the allow-list in fact-shapes.mjs.
 //
 // Ports (each may be async):
-//   readUsage(account)  → { h5: { used_pct, resets_at }, week: { used_pct, resets_at }, source, observed_at?, h5_none? } | null
+//   readUsage(account)  → { h5: { used_pct, resets_at }, week: { used_pct, resets_at }, source, observed_at?, h5_none?, reset_note? } | null
+//                         reset_note: a drop taken as a reset (L1358, sensors-ports.mjs), stored as written on that write,
+//                         and as `last_reset: { note, at }`, which every later write carries on (M11 tells Joe once per
+//                         `at`, and ends a limit wait that a reset after the hit has ended).
 //                         h5_none: true = the plan's report listed no 5-hour row at all (L1331), so M11 judges the band
 //                         by the week alone. The fact always stores h5_none: true only when the reading says so, else false.
 //   whoIsSignedIn()     → the account name, or { account, signed_in?, reason?, observed_at? }, or null when it can't be read
@@ -54,8 +57,8 @@ const known = (w) => Number.isFinite(w?.used_pct) && timeOrNull(w?.resets_at) !=
  * The usage fact. Never unknown over known (L757, audit #283 r3 M-1): while a stored window is still open (its reset time
  * not passed), a reading that has nothing for that window (no reading at all, the loop's own unknown when the read failed
  * or ran late, no row, or no reset time) hands on the stored window instead, and the fact keeps the earlier of the two
- * times. So the marks the owner's-answer check compares against (sensors-ports.mjs) are never wiped by a gap, and a forged
- * low reading after one is still refused; the handed-on reading ages as before, and M11 then reads usage as not known.
+ * times. So the marks the owner's-answer check compares against (sensors-ports.mjs) are never wiped by a gap: a reset time moved
+ * while the window is open is still refused after one, and a drop is still said against the marks (L1358); the handed-on reading ages as before, and M11 then reads usage as not known.
  * Once the stored window's reset time passes, an unknown is written as unknown. A write that hands a window on says which
  * (`handedOn: ['h5' | 'week']`), so the pass summary shows it as kept, not as newly known (L771).
  */
@@ -100,10 +103,29 @@ export async function writeUsageFact(writer, readUsage, account, { now = () => n
   if (r.h5?.used_pct != null || (r.week?.used_pct != null && !known(r.week))) hold = Math.max(hold, at + H5_HOLD_MS);
   doc.h5_hold_until = hold > at ? new Date(hold).toISOString() : null;
   doc.h5_none = r.h5_none === true && r.h5?.used_pct == null && known(r.week) && !handedOn.length && !(hold > at);
+  // L1358: a drop the reader took as a reset, in plain words, on the write where it was seen, so the diary keeps it; never
+  // carried to the next write. `last_reset` is carried on (from the stored fact) so M11 can tell Joe once, by its `at`,
+  // whichever pass reads it, and can end a limit wait that the reset ended. A stored one that can't be read is dropped.
+  // None is { note: null, at: null }, so every field M11 reads is always stored (READ_FACTS).
+  // `windows` says which windows reset ('h5', 'week'; #671 audit r2 m3), so M11 ends only a limit wait of the same window.
+  const windowsOf = (x) => (Array.isArray(x) ? [...new Set(x.filter((k) => k === 'h5' || k === 'week'))] : []);
+  if (typeof r.reset_note === 'string' && r.reset_note) {
+    doc.reset_note = r.reset_note.slice(0, 300);
+    doc.last_reset = { note: doc.reset_note, at: observed_at, windows: windowsOf(r.reset_windows) };
+  } else {
+    const lr = stored?.last_reset;
+    doc.last_reset = lr && typeof lr.note === 'string' && lr.note && timeOrNull(lr.at) ? { note: lr.note.slice(0, 300), at: lr.at, windows: windowsOf(lr.windows) } : { note: null, at: null, windows: [] };
+  }
+  // L1358 r2 (MAT-1): every weekly row the reading had, by name, so the next read judges a drop on the row seen last. It
+  // goes with the week: a reading without it (an older answer) stores none, and a handed-on week keeps the stored rows.
+  const rowsOf = (x) => (x && typeof x === 'object' && !Array.isArray(x) ? Object.fromEntries(Object.entries(x).map(([n, w]) => [n, win(w)])) : null);
+  doc.week_rows = rowsOf(r.week_rows);
   for (const k of handedOn) doc[k] = win(stored[k]);
   if (handedOn.length) {
     doc.observed_at = relayed(observed_at, stored.observed_at);
-    if (handedOn.length === 2) doc.source = stored.source ?? null;
+    // The source names the row the stored week came from ("week from <row>"), which sensors-ports holds a drop to (L1358):
+    // when the week is handed on, its source goes with it.
+    if (handedOn.includes('week')) { doc.source = stored.source ?? null; doc.week_rows = rowsOf(stored.week_rows); }
   }
   const w = writer.put(USAGE_FACT(account), doc);
   // Which windows were handed on, so the pass summary says "kept", never "known", for them (L771).

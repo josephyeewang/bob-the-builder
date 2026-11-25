@@ -20,7 +20,7 @@
 // RUN AS A SCRIPT: `node loop.mjs <config.json>` with { "installRoot": "/abs", "wiring": "/abs/path/wiring.mjs" }, the
 // same shape as M11's main.mjs, read through the one checked reader (shared/job-config.mjs, L253): the config, the
 // wiring and this script must be files of the installed copy at installRoot, root's or the job's own user's alone. The wiring exports `async function wire(config)` returning
-//   { rec, ports: { whoIsSignedIn, readUsage?, probes: { network, reachable, minibase }, github?: { gh, owner, repo } } }
+//   { rec, ports: { whoIsSignedIn, readUsage?, usageReason?, probes: { network, reachable, minibase }, github?: { gh, owner, repo } } }
 // (`rec` the real record; the probes from ./probes/, built from the wiring's own config, so no machine, product or
 // account name lives here; `github` the robot's client M6 uses). Exit 0 when the pass ran, 1 when the config or wiring
 // could not be loaded, 2 when the wiring and the pass together ran past RUN_DEADLINE_MS (the script then ends outright so the
@@ -65,13 +65,16 @@ export async function timed(fn, ms, what) {
 }
 
 /**
- * One pass. `rec` is the record; `ports` as above; `now()` → Date. → { wrote: {id: {ok, unknown, reason, kept?, not_known?}}, problems: [...] }.
+ * One pass. `rec` is the record; `ports` as above; `now()` → Date. → { wrote: {id: {ok, unknown, reason, kept?, not_known?, reset?}}, problems: [...], notes: [...] }.
+ * `notes` are things worth saying that are not problems: a usage drop taken as a reset (L1358). When the wiring gives
+ * `ports.usageReason()` (the owner's-answer reader's lastReason), a usage read that was refused, handed on a stored
+ * reading or had a gap says why in the problems (L1358 m1), so a refusal is never only "band unknown".
  * `kept` names usage windows handed on from the stored reading; `not_known` names PR fields read as not known.
  * A problem is a read that failed or a write the record refused; the rest of the pass still runs.
  */
 export async function sensorsPass({ rec, ports, now = () => new Date(), deadlineMs = PROBE_DEADLINE_MS, loop = LOOP }) {
   const writer = makeFactWriter(rec, { actor: 'sensors', now });
-  const wrote = {}; const problems = [];
+  const wrote = {}; const problems = []; const notes = [];
   // A port with a time limit: a failure is noted and answers `fallback` (unknown).
   const port = (fn, what, fallback = null) => async (...a) => {
     if (typeof fn !== 'function') return fallback;
@@ -95,7 +98,8 @@ export async function sensorsPass({ rec, ports, now = () => new Date(), deadline
       note('signed-in-account', r, who === null);
     },
     'usage-': async () => {
-      if (!who) { problems.push('usage: no signed-in account, so no usage reading was written'); return; }
+      // With the cause the signed-in reading stored (L1358 m1: a refused answer says why, not only "unknown").
+      if (!who) { const why = valueOf('signed-in-account')?.reason; problems.push(`usage: no signed-in account${typeof why === 'string' && why ? ` (${why.slice(0, 200)})` : ''}, so no usage reading was written`); return; }
       if (typeof ports.readUsage !== 'function') problems.push('usage: no usage source yet (R-0b-66); written as unknown');
       const read = port(ports.readUsage, 'the usage read', NO_USAGE);
       const r = await run('usage-', async (a) => { const v = await read(a); return v && typeof v === 'object' ? v : NO_USAGE; }, { account: who });
@@ -104,6 +108,11 @@ export async function sensorsPass({ rec, ports, now = () => new Date(), deadline
       note(`usage-${who}`, r, u?.h5?.used_pct == null && !(u?.h5_none === true && u?.week?.used_pct != null && u?.week?.resets_at != null));
       // A window handed on from the stored reading (no new figure for it) is kept, not known (L771).
       if (r?.ok === true && r.handedOn?.length) wrote[`usage-${who}`].kept = [...r.handedOn];
+      // L1358 m1: why the read was refused, handed on or partial, from the reader itself.
+      const why = typeof ports.usageReason === 'function' ? ports.usageReason() : null;
+      if (typeof why === 'string' && why) problems.push(`usage-${who}: ${why.slice(0, 300)}`);
+      // L1358: a drop taken as a reset is said in the pass's notes (logged), as well as kept in the fact.
+      if (r?.ok === true && typeof u?.reset_note === 'string' && u.reset_note) { wrote[`usage-${who}`].reset = u.reset_note; notes.push(`usage-${who}: ${u.reset_note}`); }
     },
     'pr-': async () => {
       const g = ports.github;
@@ -146,7 +155,7 @@ export async function sensorsPass({ rec, ports, now = () => new Date(), deadline
   for (const f of polled) if (!feed[f]) problems.push(`${f}: the loop names it but has no feed for it`);
   if (polled.includes('signed-in-account')) await feed['signed-in-account']();
   await Promise.all(polled.filter((f) => f !== 'signed-in-account' && feed[f]).map((f) => feed[f]()));
-  return { wrote, problems };
+  return { wrote, problems, notes };
 }
 
 /** The job's config, through the checked reader (L253); `opts.self` is this script, checked as a code file of the copy. */
@@ -177,6 +186,7 @@ export async function main(argv, { now = () => new Date(), log = (s) => process.
     const r = await Promise.race([sensorsPass({ ...wired, now }), late]);
     if (r.late) { log(`sensors: the pass did not finish within ${runDeadlineMs} ms; exiting so the next start can run`); return 2; }
     for (const p of r.problems) log(`sensors: ${p}`);
+    for (const n of r.notes ?? []) log(`sensors: ${n}`);
     return 0;
   } finally { clearTimeout(timer); }
 }

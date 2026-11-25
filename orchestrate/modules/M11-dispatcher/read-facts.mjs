@@ -14,8 +14,9 @@
 export const READ_FACTS = Object.freeze([
   { family: 'pr-', readers: ['merges.mjs', 'cleanup.mjs'],
     fields: ['state', 'merged', 'merge_commit_sha', 'head_sha', 'observed_at'] },
-  { family: 'usage-', readers: ['usage.mjs'],
-    fields: ['account', 'observed_at', 'week.used_pct', 'week.resets_at', 'h5.used_pct', 'h5.resets_at', 'h5_none'] },
+  // last_reset (L1358): a usage drop the Sensors took as a reset; pass.mjs tells Joe once and ends a limit wait on it.
+  { family: 'usage-', readers: ['usage.mjs', 'pass.mjs'],
+    fields: ['account', 'observed_at', 'week.used_pct', 'week.resets_at', 'h5.used_pct', 'h5.resets_at', 'h5_none', 'last_reset.note', 'last_reset.at', 'last_reset.windows'] },
   { family: 'signed-in-account', readers: ['tick.mjs', 'usage.mjs'], fields: ['account', 'signed_in', 'reason', 'observed_at'] },
   // The account is in the id (`limit-hit-<account>`), not a field M11 reads.
   { family: 'limit-hit-', readers: ['pass.mjs'], fields: ['resets_at', 'observed_at'] },

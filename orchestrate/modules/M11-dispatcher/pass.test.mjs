@@ -7,7 +7,7 @@ import { tempDir } from '../../shared/test-tmp.mjs';
 import { launchInputProblem } from '../../wiring/owner-asks.mjs';
 import { STATES, FINAL_STATES } from '../../shared/record.mjs';
 import { STOP_QUIET_REASONS } from '../M4-workshop/launcher/review-runner.mjs';
-import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts as undoStarts0, stopProcessGroup, guarded, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RUN, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0, UNKNOWN_FACT, REVIEW_STOP_FACT, REVIEW_STOP_RUNNER_REASON, REVIEW_STOP_AGAIN_MS, REVIEW_STOP_TELL_FACT, REVIEW_STOP_MAX_ASKS, HOST_COPY_FAIL, HOST_COPY_CAUSE, HOLD_FACT } from './pass.mjs';
+import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts as undoStarts0, stopProcessGroup, guarded, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, RESET_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RUN, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, LIMIT_H5_MS, resetEndsLimit, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0, UNKNOWN_FACT, REVIEW_STOP_FACT, REVIEW_STOP_RUNNER_REASON, REVIEW_STOP_AGAIN_MS, REVIEW_STOP_TELL_FACT, REVIEW_STOP_MAX_ASKS, HOST_COPY_FAIL, HOST_COPY_CAUSE, HOLD_FACT } from './pass.mjs';
 import { USAGE_FACT, BAND_FACT } from './usage.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { retellWaits, WAIT_TELL_FACT } from './joe-waits.mjs';
@@ -2600,4 +2600,80 @@ test('L1332: the owner runner\'s input check refuses a Record document as the ca
   const x = { kind: 'editing', product: 'p', sessionId: '00000000-0000-4000-8000-000000000000' };
   assert.equal(launchInputProblem({ ...x, card: { id: 'C-1', product: 'p' } }), 'the launch names no card or product');
   assert.equal(launchInputProblem({ ...x, card: 'C-1' }), null);
+});
+
+// L1358 m4/m5 (#671 audit): a usage drop the Sensors took as a reset (the usage fact's last_reset) is told to Joe once per
+// reset, and ends a limit wait when the reset came after the hit.
+const withReset = (u, at, resetAt, note = 'usage for weekly_all went from 100% to 0% this week; taken as a reset', windows = ['week']) =>
+  ({ ...usageFact({ ...u, account: ACCT, now: at }), last_reset: { note, at: iso(resetAt), ...(windows ? { windows } : {}) } });
+const setReset = (w, at, resetAt, note, windows) => { const cur = w.rec.read('fact', USAGE_FACT(ACCT));
+  w.rec.write({ actor: 'sensors', entity: 'fact', id: USAGE_FACT(ACCT), expectRev: cur?.rev ?? 0, doc: withReset(GREEN, at, resetAt, note, windows) }); };
+
+test('L1358 m4: a usage reset is told to Joe once, plainly; a later reset is told again', async () => {
+  const w = world();
+  const told = () => w.calls.alerts.filter((t) => /taken as a reset/.test(t));
+  await w.pass(1);
+  assert.deepEqual(told(), [], 'no reset, nothing told');
+  setReset(w, T0 + 2 * MIN, T0 + 2 * MIN);
+  await w.pass(3);
+  assert.deepEqual(told(), ['account acct-a: usage for weekly_all went from 100% to 0% this week; taken as a reset']);
+  assert.equal(w.rec.read('fact', RESET_FACT)?.doc?.at, iso(T0 + 2 * MIN), 'the told mark carries the reset it told');
+  setReset(w, T0 + 4 * MIN, T0 + 2 * MIN);   // the next Sensors write carries the same last reset on
+  await w.pass(5); await w.pass(6);
+  assert.equal(told().length, 1, 'the same reset is not told again');
+  setReset(w, T0 + 7 * MIN, T0 + 7 * MIN, 'usage for weekly_all went from 40% to 0% this week; taken as a reset');
+  await w.pass(8);
+  assert.deepEqual(told().slice(1), ['account acct-a: usage for weekly_all went from 40% to 0% this week; taken as a reset']);
+});
+
+test('L1358 m5: a usage reset after the limit hit ends the wait (Tier 2 ready, Tier 1 asks Joe); one before the hit or ahead does not', async () => {
+  // Hit at T0+1 min, resetting at T0+30 min.
+  const w = world([['fact', LIMIT_FACT(ACCT), { resets_at: iso(T0 + 30 * MIN), observed_at: iso(T0 + MIN) }]]);
+  parkOnLimit(w.rec, 'T2', { account: ACCT, card: { files: ['src/t2.js'] } });
+  parkOnLimit(w.rec, 'T1', { account: ACCT, card: { tier: 1 } });
+  const H5 = 'usage for session went from 100% to 0% in this 5-hour window; taken as a reset';
+  setReset(w, T0 + 5 * MIN, T0 + MIN - 1000, H5, ['h5']);    // a reset before the hit is no end to it
+  await w.pass(6);
+  assert.deepEqual([w.rec.read('card', 'T2').doc.state, w.rec.read('card', 'T1').doc.wait.who], ['waiting', 'usage']);
+  setReset(w, T0 + 7 * MIN, T0 + 60 * MIN, H5, ['h5']);      // a reset time ahead of now is not read (pastTime)
+  await w.pass(8);
+  assert.equal(w.rec.read('card', 'T2').doc.state, 'waiting');
+  setReset(w, T0 + 9 * MIN, T0 + 9 * MIN, H5, ['h5']);       // reset after the hit, well before the hit's reset time
+  await w.pass(10);
+  assert.ok(['ready', 'running'].includes(w.rec.read('card', 'T2').doc.state), 'Tier 2 resumes');
+  const t1 = w.rec.read('card', 'T1').doc;
+  assert.deepEqual([t1.state, t1.wait.who], ['waiting', 'joe'], 'Tier 1 waits on Joe, as after a reset time passing');
+});
+
+// #671 audit r2 m3: a reset ends only a limit wait of its own window. A hit whose reset time is more than LIMIT_H5_MS
+// after it is the week's; one within it is the 5-hour window's.
+test('L1358 r2 m3: a weekly reset ends a weekly limit wait, a 5-hour reset a 5-hour one; never the other, nor a reset that names no window', async () => {
+  const WEEK_NOTE = 'usage for weekly_all went from 100% to 0% this week; taken as a reset';
+  const H5_NOTE = 'usage for session went from 100% to 0% in this 5-hour window; taken as a reset';
+  for (const [name, hitResets, windows, note, ends] of [
+    ['weekly hit, 5-hour reset', T0 + 3 * 24 * H, ['h5'], H5_NOTE, false],
+    ['weekly hit, weekly reset', T0 + 3 * 24 * H, ['week'], WEEK_NOTE, true],
+    ['5-hour hit, weekly reset', T0 + 4 * H, ['week'], WEEK_NOTE, false],
+    ['5-hour hit, 5-hour reset', T0 + 4 * H, ['h5'], H5_NOTE, true],
+    ['weekly hit, both reset', T0 + 3 * 24 * H, ['h5', 'week'], `${H5_NOTE}; ${WEEK_NOTE}`, true],
+    ['weekly hit, a reset from before windows were said', T0 + 3 * 24 * H, null, WEEK_NOTE, false],
+  ]) {
+    const w = world([['fact', LIMIT_FACT(ACCT), { resets_at: iso(hitResets), observed_at: iso(T0 + MIN) }]]);
+    parkOnLimit(w.rec, 'T2', { account: ACCT, card: { files: ['src/t2.js'] } });
+    setReset(w, T0 + 9 * MIN, T0 + 9 * MIN, note, windows);
+    await w.pass(10);
+    assert.equal(['ready', 'running'].includes(w.rec.read('card', 'T2').doc.state), ends, name);
+  }
+});
+
+test('L1358 r2 m3: resetEndsLimit reads the hit\'s window by how far its reset lies after it', () => {
+  const seen = T0; const now = T0 + H;
+  const lr = (windows, at = T0 + MIN) => ({ note: 'x', at: iso(at), windows });
+  assert.equal(resetEndsLimit(lr(['h5']), { resets_at: iso(seen + LIMIT_H5_MS) }, seen, now), true, 'up to LIMIT_H5_MS is the 5-hour window');
+  assert.equal(resetEndsLimit(lr(['h5']), { resets_at: iso(seen + LIMIT_H5_MS + 1000) }, seen, now), false, 'past it is the week');
+  assert.equal(resetEndsLimit(lr(['week']), { resets_at: iso(seen + LIMIT_H5_MS + 1000) }, seen, now), true);
+  assert.equal(resetEndsLimit(lr(['week'], seen), { resets_at: iso(seen + 24 * H) }, seen, now), false, 'a reset at the hit\'s own time is not after it');
+  assert.equal(resetEndsLimit(lr(['week'], now + 2 * MIN), { resets_at: iso(seen + 24 * H) }, seen, now), false, 'a reset ahead is not read');
+  assert.equal(resetEndsLimit({ note: null, at: null, windows: [] }, { resets_at: iso(seen + 24 * H) }, seen, now), false);
+  assert.equal(resetEndsLimit(undefined, { resets_at: iso(seen + 24 * H) }, seen, now), false);
 });

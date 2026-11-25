@@ -107,6 +107,11 @@
    "why": "not a wait (L1157 d): a time meant to lie ahead (a reset or next check), so pastTime would refuse it"
   },
   {
+   "file": "modules/M11-dispatcher/pass.mjs",
+   "line": "const win = Date.parse(hit?.resets_at ?? '') - seen > LIMIT_H5_MS ? 'week' : 'h5';",
+   "why": "not a wait (L1157 d): a time meant to lie ahead (a reset or next check), so pastTime would refuse it; only its distance from the hit tells the hit's window, and the wait itself is judged by pastTime"
+  },
+  {
    "file": "modules/M11-dispatcher/phone-link.mjs",
    "line": "const seen = Date.parse(d?.observed_at ?? '');",
    "why": "a wait with its own check for a time ahead (L1157 d): READING_FUTURE_MS ahead is unknown"
@@ -708,11 +713,6 @@
   },
   {
    "file": "wiring/sensors-ports.mjs",
-   "line": "const r = Date.parse(sw?.resets_at ?? '');",
-   "why": "not a wait (L1157 d): a time meant to lie ahead (a reset or next check), so pastTime would refuse it"
-  },
-  {
-   "file": "wiring/sensors-ports.mjs",
    "line": "const r = Date.parse(w?.resets_at ?? '');",
    "why": "not a wait (L1157 d): a time meant to lie ahead (a reset or next check), so pastTime would refuse it"
   },
@@ -723,7 +723,27 @@
   },
   {
    "file": "wiring/sensors-ports.mjs",
-   "line": "const r = Date.parse(w?.resets_at ?? '');",
+   "line": "if (x.resets_at !== null && Date.parse(x.resets_at) - Date.parse(a.observed_at) > WINDOW_MS.week + SAME_WINDOW_MS) return `the ${n} row's reset time is further out than one weekly window from the reading`;",
+   "why": "not a wait (L1157 d): a time meant to lie ahead (a reset or next check), so pastTime would refuse it"
+  },
+  {
+   "file": "wiring/sensors-ports.mjs",
+   "line": "if (x.resets_at !== null && Date.parse(x.resets_at) - Date.parse(a.observed_at) > WINDOW_MS.week + SAME_WINDOW_MS) return `the ${n} row's reset time is further out than one weekly window from the reading`;",
+   "why": "not a wait (L1157 d): a time meant to lie ahead (a reset or next check), so pastTime would refuse it"
+  },
+  {
+   "file": "wiring/sensors-ports.mjs",
+   "line": "const mark = (row, x, top) => { const r = Date.parse(x?.resets_at ?? ''); return Number.isFinite(r) && Number.isFinite(x?.used_pct) ? { resets: r, pct: x.used_pct, row, top } : null; };",
+   "why": "not a wait (L1157 d): a time meant to lie ahead (a reset or next check), so pastTime would refuse it"
+  },
+  {
+   "file": "wiring/sensors-ports.mjs",
+   "line": "if (x && Number.isFinite(Date.parse(x.resets_at ?? ''))) { cw = x; cn = m.row; own = true; }",
+   "why": "not a wait (L1157 d): a time meant to lie ahead (a reset or next check), so pastTime would refuse it"
+  },
+  {
+   "file": "wiring/sensors-ports.mjs",
+   "line": "const cr = Date.parse(cw.resets_at);",
    "why": "not a wait (L1157 d): a time meant to lie ahead (a reset or next check), so pastTime would refuse it"
   },
   {

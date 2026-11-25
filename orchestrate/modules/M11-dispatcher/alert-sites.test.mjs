@@ -122,6 +122,7 @@ test('L47 sweep, control: a direct send, a port handed to a step, or an alert ma
 export const LATE_MARK_OK = Object.freeze({
   HOLD_FACT: 'once per cause per day by design: a late copy is still a tell within that day',
   UNKNOWN_FACT: 'the mark carries the stretch it was for (`since`), and a new stretch is told again',
+  RESET_FACT: 'the mark carries the reset it told (`at`, L1358); a reset does not clear, and a later one has a new time and is told again',
   factId: 'told keys count only while still in the last recorded set, so a key that left is told again',
   RESTART_FACT: 'one Lead session\'s holds, told daily while each lasts (stillWaiting, L1157), and a session id is never reused: a late copy is still a tell within the day; the hard line\'s mark, cleared when the Lead goes back under it, is marked again by a late copy, which only moves the next tell to its daily time',
   REVIEW_ALERT_FACT: 'one fact per review runner alert (its id and time), so a late mark is on an alert that has been told',
