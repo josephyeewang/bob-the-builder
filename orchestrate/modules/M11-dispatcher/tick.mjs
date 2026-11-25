@@ -54,7 +54,7 @@ import { sensorsFact } from './sensor-facts.mjs';
 import { outageStep, OUTAGE_FACT } from './outage.mjs';
 import { intakePass } from './outbox-intake.mjs';
 import { leadRestartStep, leadInFlight, handoffVet, tellLeadSkipped, HANDOFF_NAME } from './lead-restart.mjs';
-import { adoptLate, lapseStop, dispatcherPass, stopPass, undoStarts, rulesMissingAlert, holdAlert, refusalReport, readHostLock, hostCopyReason, hostCopyAlertText, HOST_COPY_CAUSE, HELD_BANDS, HOLD_REPEAT_MS, TOLD_BANDS } from './pass.mjs';
+import { adoptLate, lapseStop, dispatcherPass, stopPass, undoStarts, rulesMissingAlert, holdAlert, refusalReport, readHostLock, hostCopyReason, hostCopyAlertText, HOST_COPY_CAUSE, HELD_BANDS, HOLD_REPEAT_MS, TOLD_BANDS, DEAD_SESSION_WAIT } from './pass.mjs';
 import { startGate } from './gate.mjs';
 import { currentBands, ACCOUNT_FACT } from './usage.mjs';
 import { timeLimits, requestMerges } from './merges.mjs';
@@ -224,7 +224,7 @@ export function actOnDead({ rec, rules, now, restart, asks, cards = {}, alert = 
     const cur = rec.read('card', cardId);
     if (!cur || !['running', 'claimed'].includes(cur.doc.state)) continue;
     // Told until delivered (L130 M1): waitOnJoe records the tell, and retellWaits asks again while it is not delivered.
-    const w = waitOnJoe(rec, cardId, { what: 'dead_session: its session stopped and the card is not marked safe to re-run', now, link: `card ${cardId}`, kind: 'dead_ask',
+    const w = waitOnJoe(rec, cardId, { what: `${DEAD_SESSION_WAIT}: its session stopped and the card is not marked safe to re-run`, now, link: `card ${cardId}`, kind: 'dead_ask',
       alert, text: `card ${cardId}: its session stopped and the card is not marked safe to re-run, so it waits on you` });
     if (w.ok) done.push([cardId, w.tell_refused ? `waiting on Joe; ${w.tell_refused}` : 'waiting on Joe']);
   }

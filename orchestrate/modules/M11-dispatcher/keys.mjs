@@ -47,6 +47,9 @@ export const KEYS = Object.freeze({
   // claims (L72): the quiet time before a dead owner's claim is broken (M9 breakIfDead reads it; read here so a missing
   // value is told). A claim whose session never started lapses at M9's claims.unlaunched_min, which has a default.
   claimsStuckMin: 'claims.stuck_min',
+  // L1365: how many times in 24 h a card whose session ended without finishing is started again by itself (pass.mjs
+  // waits step); missing, none is (the card waits on Joe). 0 turns the re-run off.
+  claimsDeadRerunsPerDay: 'claims.dead_reruns_per_day',
   // outage (review M9)
   outageMinDead: 'outage.min_dead',
   outageShare: 'outage.share',
@@ -65,7 +68,7 @@ export const NEW_KEYS = Object.freeze([
   KEYS.paceMinShare, KEYS.shakedown, KEYS.amberEditingPerProduct, KEYS.amberEditingPerMac,
   KEYS.cancelGraceMin, KEYS.parkWaitMin, KEYS.deadQuietMin, KEYS.checkingMaxMin, KEYS.mergingOpenMaxMin,
   KEYS.reportingMaxMin, KEYS.inReviewNoReviewerMin, KEYS.frontDoorStuckMin, KEYS.usageUnknownMaxMin, KEYS.outageMinDead, KEYS.outageShare,
-  KEYS.proposalsOutbox,
+  KEYS.proposalsOutbox, KEYS.claimsDeadRerunsPerDay,
 ]);
 
 // The only defaults: the lead's L13 pace floor (one day of seven), and shakedown on until the

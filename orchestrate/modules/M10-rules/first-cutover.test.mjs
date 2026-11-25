@@ -60,6 +60,7 @@ test('the sample as it stands is refused, for each first-cutover reason', () => 
     // timeouts.merging_open_max_min is the fixture's own line (#97); claims.stuck_min is M11's since #68 (tick.mjs).
     ...M11_NEW_KEYS.filter((k) => /^timeouts\./.test(k) && !SAMPLE.includes(`  ${k.split('.')[1]}:`)).map((k) => `${k} is missing (M11 reads it)`),
     'claims.stuck_min is missing (M11 reads it)',
+    'claims.dead_reruns_per_day is missing (M11 reads it)',   // L1365
     ...M11_NEW_KEYS.filter((k) => /^outage\./.test(k)).map((k) => `${k} is missing (M11 reads it)`),
     'context.lead.soft is missing (M11 reads it)',
     'context.lead.hard is missing (M11 reads it)',

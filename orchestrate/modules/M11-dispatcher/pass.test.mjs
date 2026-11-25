@@ -7,7 +7,7 @@ import { tempDir } from '../../shared/test-tmp.mjs';
 import { launchInputProblem } from '../../wiring/owner-asks.mjs';
 import { STATES, FINAL_STATES } from '../../shared/record.mjs';
 import { STOP_QUIET_REASONS } from '../M4-workshop/launcher/review-runner.mjs';
-import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts as undoStarts0, stopProcessGroup, guarded, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, RESET_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RUN, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, LIMIT_H5_MS, resetEndsLimit, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0, UNKNOWN_FACT, REVIEW_STOP_FACT, REVIEW_STOP_RUNNER_REASON, REVIEW_STOP_AGAIN_MS, REVIEW_STOP_TELL_FACT, REVIEW_STOP_MAX_ASKS, HOST_COPY_FAIL, HOST_COPY_CAUSE, HOLD_FACT, adoptLate as adoptLate0, lapseStop, LAUNCH_DEADLINE_MS, PORT_DEADLINE_MS } from './pass.mjs';
+import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts as undoStarts0, stopProcessGroup, guarded, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, RESET_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RUN, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, LIMIT_H5_MS, resetEndsLimit, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0, UNKNOWN_FACT, REVIEW_STOP_FACT, REVIEW_STOP_RUNNER_REASON, REVIEW_STOP_AGAIN_MS, REVIEW_STOP_TELL_FACT, REVIEW_STOP_MAX_ASKS, HOST_COPY_FAIL, HOST_COPY_CAUSE, HOLD_FACT, adoptLate as adoptLate0, lapseStop, LAUNCH_DEADLINE_MS, PORT_DEADLINE_MS, DEAD_RERUN_FACT, DEAD_SESSION_WAIT, deadRerunText } from './pass.mjs';
 import { USAGE_FACT, BAND_FACT } from './usage.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { retellWaits, WAIT_TELL_FACT } from './joe-waits.mjs';
@@ -917,6 +917,66 @@ test('audit MIN-20 (P13): parked work does not resume while the Dispatcher\'s ow
   assert.equal(w.rec.read('card', 'C-1').doc.state, 'waiting');
   w.setUsage({ week: 30, h5: 20 });
   assert.deepEqual((await w.pass(2)).resumed, ['C-1']);
+});
+
+// L1365: a dead_session wait (tick.mjs actOnDead) is started again by itself while the card's re-runs in the last 24 h
+// are under claims.dead_reruns_per_day; at the cap, or with no key, it stays on Joe.
+const deadWait = (id, over = {}) => card(id, { state: 'waiting', wait: { who: 'joe', what: `${DEAD_SESSION_WAIT}: its session stopped and the card is not marked safe to re-run`,
+  since: iso(T0 - 30 * MIN), next_check: iso(T0), resume: 'retry', return_to: 'ready', link: `card ${id}` }, ...over });
+const reruns = (times) => ['fact', DEAD_RERUN_FACT('C-1'), { times: times.map(iso) }];
+const resumedDead = (w, id) => w.rec.diary({}).filter((l) => l.entity === 'card' && l.id === id && l.kind === 'resume_dead_session').length;
+test('L1365: a dead_session wait under the cap goes back to ready once, is counted, told, and starts in the same pass', async () => {
+  const w = world([deadWait('C-1')], { over: { [K.claimsDeadRerunsPerDay]: 2 } });
+  const r = await w.pass(0);
+  assert.deepEqual(r.resumed, ['C-1']);
+  assert.equal(resumedDead(w, 'C-1'), 1, 'exactly one move back to ready in the pass');
+  assert.deepEqual(w.calls.launched, ['C-1'], 'started again in the same pass');
+  assert.deepEqual(w.rec.read('fact', DEAD_RERUN_FACT('C-1')).doc.times, [iso(T0)]);
+  assert.deepEqual(w.calls.alerts.filter((a) => /ended without finishing/.test(a)), ['card C-1: its session ended without finishing; started again (1 of 2 today)']);
+  assert.equal(deadRerunText('C-9', 2, 3), 'card C-9: its session ended without finishing; started again (2 of 3 today)');
+  // A second pass has nothing more to move: the card is no longer waiting.
+  await w.pass(1);
+  assert.equal(resumedDead(w, 'C-1'), 1);
+  assert.equal(w.rec.read('fact', DEAD_RERUN_FACT('C-1')).doc.times.length, 1);
+});
+
+test('L1365: at the cap a dead_session wait stays on Joe; re-runs older than 24 h no longer count', async () => {
+  const capped = world([reruns([T0 - H, T0 - 2 * H]), deadWait('C-1')], { over: { [K.claimsDeadRerunsPerDay]: 2 } });
+  const r = await capped.pass(0);
+  assert.deepEqual(r.resumed, []);
+  assert.equal(capped.rec.read('card', 'C-1').doc.state, 'waiting');
+  assert.deepEqual(capped.calls.launched, []);
+  assert.deepEqual(capped.calls.alerts.filter((a) => /ended without finishing/.test(a)), []);
+  // A cap of 0 turns the re-run off.
+  const off = world([deadWait('C-1')], { over: { [K.claimsDeadRerunsPerDay]: 0 } });
+  assert.deepEqual((await off.pass(0)).resumed, []);
+  // The window: one re-run 25 h ago and one exactly 24 h ago are out of it; the one an hour ago counts.
+  const day = 24 * H;
+  const w = world([reruns([T0 - day - H, T0 - day, T0 - H]), deadWait('C-1')], { over: { [K.claimsDeadRerunsPerDay]: 2 } });
+  assert.deepEqual((await w.pass(0)).resumed, ['C-1']);
+  assert.deepEqual(w.rec.read('fact', DEAD_RERUN_FACT('C-1')).doc.times, [iso(T0 - H), iso(T0)], 'only the window\'s times are kept');
+  assert.deepEqual(w.calls.alerts.filter((a) => /ended without finishing/.test(a)), ['card C-1: its session ended without finishing; started again (2 of 2 today)']);
+});
+
+test('L1365: with no claims.dead_reruns_per_day a dead_session wait stays on Joe and the key is told', async () => {
+  const w = world([deadWait('C-1')]);
+  const r = await w.pass(0);
+  assert.deepEqual(r.resumed, []);
+  assert.equal(w.rec.read('card', 'C-1').doc.state, 'waiting');
+  assert.ok(r.missing.some((m) => /claims\.dead_reruns_per_day/.test(m)), r.missing.join(' | '));
+  assert.ok(w.calls.alerts.some((a) => /claims\.dead_reruns_per_day/.test(a)), w.calls.alerts.join(' | '));
+});
+
+test('L1365: other waits are left as they were: another joe wait, and one whose what only looks like dead_session', async () => {
+  const w = world([
+    card('C-2', { state: 'waiting', wait: { who: 'joe', what: 'merge refused twice', since: iso(T0 - 30 * MIN), next_check: iso(T0), resume: 'retry', return_to: 'ready' } }),
+    card('C-3', { state: 'waiting', wait: { who: 'joe', what: `${DEAD_SESSION_WAIT}x: not this one`, since: iso(T0 - 30 * MIN), next_check: iso(T0), resume: 'retry', return_to: 'ready' } }),
+  ], { over: { [K.claimsDeadRerunsPerDay]: 2 } });
+  const r = await w.pass(0);
+  assert.deepEqual(r.resumed, []);
+  assert.deepEqual(['C-2', 'C-3'].map((id) => w.rec.read('card', id).doc.state), ['waiting', 'waiting']);
+  assert.equal(w.rec.read('fact', DEAD_RERUN_FACT('C-2')), null);
+  assert.equal(w.rec.read('fact', DEAD_RERUN_FACT('C-3')), null);
 });
 
 test('audit MIN-20 (P30): in red a review session with a card is never parked; an editing one is', async () => {
