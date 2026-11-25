@@ -86,12 +86,21 @@ export function sessionArgs({ profile, settingsFile, sessionId, prompt, earlier 
   return args;
 }
 
-/** Spawns the session's claude, detached -> { ok, pid } (claude's own, L66) or { ok: false, reason }. */
-export async function spawnClaude(spawn, bin, args, { cwd, env }) {
+/**
+ * Spawns the session's claude, detached -> { ok, pid } (claude's own, L66) or { ok: false, reason }.
+ * L1364: `out`, an open file descriptor, takes claude's stdout and stderr (else both are thrown away, as before); the
+ * caller opened it and closes its own copy once this answers. `onExit({ code, signal })` is called once, when claude
+ * ends, if this process is still running then. A throw from it is the caller's and is swallowed here.
+ * Open: L1364 — the review runner (review-wiring.mjs) passes neither yet: it has no log port and no place named for the
+ * file, so its sessions still end untold.
+ */
+export async function spawnClaude(spawn, bin, args, { cwd, env, out, onExit }) {
   let child;
+  const stdio = Number.isInteger(out) ? ['ignore', out, out] : 'ignore';
   try {
-    child = spawn(bin, args, { cwd, env, detached: true, stdio: 'ignore' });
+    child = spawn(bin, args, { cwd, env, detached: true, stdio });
   } catch (e) { return refuse(`claude could not be spawned (${e?.code ?? e?.message})`); }
+  if (typeof onExit === 'function') child?.once?.('exit', (code, signal) => { try { onExit({ code, signal }); } catch { /* the caller's */ } });
   const pid = await new Promise((res) => {
     if (Number.isInteger(child?.pid)) { res(child.pid); return; }
     child?.once?.('spawn', () => res(child.pid));

@@ -3,15 +3,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { chmodSync, existsSync, fstatSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { workerPrompt } from '../modules/M5-review-audit/worker-prompt.mjs';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { SETTINGS as S } from '../modules/M4-workshop/launcher/settings-names.mjs';
 import { gitOk, initMirror } from '../modules/M4-workshop/git/safe-git.mjs';
 import { launch } from '../modules/M4-workshop/launcher/launch.mjs';
-import { INTAKE_DONE, LEFTOVER_FOLDER, copyAskHeld, chmodTree, removeAll, cardStartCommit, undoCommitProblem, drainedPort, groupThere, pauseLeadPort, liveWallProblem, productWallGap, projectFolderName, folderNameAsGiven, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath, workerAccount, workerPromptText, TRANSCRIPT_PLACE_CHECKED_AGAINST } from './runner-ports.mjs';
+import { apiErrorWord, lastResult, readTail, sessionEndText, sessionOutName, INTAKE_DONE, LEFTOVER_FOLDER, copyAskHeld, chmodTree, removeAll, cardStartCommit, undoCommitProblem, drainedPort, groupThere, pauseLeadPort, liveWallProblem, productWallGap, projectFolderName, folderNameAsGiven, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath, workerAccount, workerPromptText, TRANSCRIPT_PLACE_CHECKED_AGAINST } from './runner-ports.mjs';
 import { roleEnv } from '../modules/M4-workshop/launcher/env-check.mjs';
 import { walledLaunchSettings } from './runner-launch.mjs';
 import { leaderStart } from './runner-loop.mjs';
@@ -304,6 +304,38 @@ test('step 5: spawnLeader starts its own process group with a start time; one wh
   assert.equal(c.ok, false);
 });
 
+test('L1364: spawnLeader writes claude\'s output to a new 0600 file, and its end is told with the last result line\'s fields only', async () => {
+  const d = realpathSync(tempDir('orch-rports-out-'));
+  const outFile = join(d, sessionOutName('S-1'));
+  const result = { type: 'result', subtype: 'success', is_error: true, num_turns: 2, duration_ms: 21000, stop_reason: 'end_turn',
+    result: 'API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"a secret-ish free text"}}' };
+  const script = `echo '{"type":"system"}'; echo '${JSON.stringify({ ...result, subtype: 'error_during_execution' })}'; echo '${JSON.stringify(result)}'; echo oops >&2; exit 3`;
+  let ended; const done = new Promise((res) => { ended = res; });
+  const a = await spawnLeader({ spawn, bin: '/bin/sh', args: ['-c', script], cwd: '/', env: { PATH: '/usr/bin:/bin' }, outFile, onExit: ended });
+  assert.equal(a.ok, true, a.reason);
+  const end = await done;
+  assert.deepEqual(end, { code: 3, signal: null });
+  assert.equal(lstatSync(outFile).mode & 0o777, 0o600);
+  const text = readFileSync(outFile, 'utf8');
+  assert.match(text, /oops/, 'stderr is kept too');
+  const line = sessionEndText({ sessionId: 'S-1', card: 'C-1', ...end, result: lastResult(readTail(outFile)) });
+  assert.equal(line, 'session S-1 (card C-1): claude ended, exit code 3, signal none; result subtype=success is_error=true num_turns=2 stop_reason=end_turn api_error=rate_limit_error duration_ms=21000');
+  assert.doesNotMatch(line, /secret|message/, 'no free text from the result');
+  // Made new only: a second start on the same file is refused, and nothing ran.
+  const b = await spawnLeader({ spawn, bin: '/bin/sh', args: ['-c', 'exit 0'], cwd: '/', env: { PATH: '/usr/bin:/bin' }, outFile });
+  assert.equal(b.ok, false); assert.match(b.reason, /output file can't be made \(EEXIST\)/);
+  // A spawn that fails leaves no file behind.
+  const gone = join(d, sessionOutName('S-2'));
+  const c = await spawnLeader({ spawn, bin: '/nonexistent/claude', args: [], cwd: '/', env: {}, outFile: gone });
+  assert.equal(c.ok, false); assert.equal(existsSync(gone), false);
+  // No result line, a signal, and words that are not plain are left out.
+  assert.equal(sessionEndText({ sessionId: 'S-3', code: null, signal: 'SIGKILL', result: null }), 'session S-3: claude ended, exit code none, signal SIGKILL; no result line in its output');
+  assert.equal(sessionEndText({ sessionId: 'S-4', code: 0, signal: null, result: { type: 'result', subtype: 'Weird Text!', is_error: false, num_turns: 'x' } }), 'session S-4: claude ended, exit code 0, signal none; result is_error=false');
+  assert.equal(apiErrorWord({ is_error: true, api_error_status: 529, result: 'overloaded_error' }), 'status_529');
+  assert.equal(apiErrorWord({ is_error: true, result: 'API Error: 500 internal' }), 'status_500');
+  assert.equal(apiErrorWord({ is_error: false, result: 'rate_limit_error' }), undefined);
+});
+
 // The start's world: real folders, fakes for the Record, the copy and the launch.
 function world(over = {}) {
   // Real path: the wall check refuses a session folder reached through a link, and the temp folder is under /var (the link card).
@@ -326,8 +358,9 @@ function world(over = {}) {
     account: () => ({ account: 'a', dir: join(d, 'home', '.claude'), env: {} }),
     walled: (x) => { w.calls.push(['walled', x]); return { ok: true, role: 'worker', settings: { s: 1 } }; },
     launchFn: async (x) => { w.calls.push(['launch', x]); return { ok: true, started: await x.start() }; },
-    spawn: (bin, args, o) => { w.calls.push(['spawn', bin, args, o]); return { pid: 4242, once: (ev, fn) => { if (ev === 'spawn') fn(); }, unref: () => {} }; },
+    spawn: (bin, args, o) => { w.calls.push(['spawn', bin, args, o]); return { pid: 4242, once: (ev, fn) => { if (ev === 'spawn') fn(); if (ev === 'exit') w.exit = fn; }, unref: () => {} }; },
     pidStartOf: () => 'Tue Nov 10 12:00:00 2026',
+    log: (t) => w.calls.push(['log', t]),
     askHeld: () => null,   // the Record holds no delete-copy ask (L1357 audit M1); copyAskHeld is tested on its own
     ...over,
   };
@@ -363,6 +396,16 @@ test('step 5: a start makes the copy, the outbox and the walled settings, and an
     assert.equal(sp[1], '/bin/sleep'); assert.equal(sp[3].cwd, join(w.mine.copies, 'C-1')); assert.equal(sp[3].detached, true);
     assert.ok(sp[2].includes(f) && sp[2].includes(SID) && sp[2].at(-1) === 'do the card');
     assert.equal(sp[3].env.HOME, w.c.home); assert.equal(sp[3].env.PATH, '/usr/bin:/bin');
+    // L1364: claude's stdout and stderr go to <settingsDir>/<id>.out.jsonl, made new and 0600 in the runner's own walled
+    // folder; the parent's descriptor is closed; its end is logged with the last result line's fields.
+    const out = join(w.settingsDir, sessionOutName(SID));
+    assert.equal(statSync(out).mode & 0o777, 0o600);
+    assert.equal(sp[3].stdio[0], 'ignore'); assert.ok(Number.isInteger(sp[3].stdio[1]) && sp[3].stdio[1] === sp[3].stdio[2]);
+    assert.throws(() => fstatSync(sp[3].stdio[1]), /EBADF/, 'the parent\'s copy is closed');
+    assert.equal(join(w.settingsDir, '..'), dirname(w.c.workerRunner.statusFile), 'the folder runnerWallDirs denies every session');
+    writeFileSync(out, `${JSON.stringify({ type: 'result', subtype: 'success', is_error: false, num_turns: 1, duration_ms: 9, stop_reason: 'end_turn', result: 'text' })}\n`);
+    w.exit(0, null);
+    assert.deepEqual(w.calls.filter((c) => c[0] === 'log').map((c) => c[1]), [`session ${SID} (card C-1): claude ended, exit code 0, signal none; result subtype=success is_error=false num_turns=1 stop_reason=end_turn duration_ms=9`]);
     // Launch check 0 is given the very flags claude is started with (#364 self-review m5).
     const ln = w.calls.find((c) => c[0] === 'launch')[1];
     assert.deepEqual(ln.names.flags, sp[2].filter((x) => x.startsWith('--')));
@@ -1099,6 +1142,7 @@ test('#378 r1 M1: product B added while a product A session runs: B\'s start is 
     assert.equal(b0.ok, true, b0.reason);
     // 3. Once A has ended (no longer live), B starts; a live session of B's own product is not asked.
     rmSync(join(w.copiesRoot, 'p2', 'C-3'), { recursive: true }); rmSync(join(w.outboxRoot, 'p2', 'worker', SB), { recursive: true }); rmSync(join(w.settingsDir, `${SB}.json`)); rmSync(join(w.settingsDir, `${SB}.save.json`));
+    rmSync(join(w.settingsDir, sessionOutName(SB))); // L1364: the session's output file, made new by each start
     const b = await startB([{ id: SID.replace('0f', '4f'), product: 'p2' }]);
     assert.equal(b.ok, true, b.reason);
     // A p1 session started with p2 in the config denies p2 whole, so a later p2 start goes ahead while it runs.
@@ -1108,6 +1152,7 @@ test('#378 r1 M1: product B added while a product A session runs: B\'s start is 
     assert.equal(a2.ok, true, a2.reason);
     assert.equal(productWallGap(got.settings, { copies: join(w.copiesRoot, 'p2'), outboxes: join(w.outboxRoot, 'p2') }), null);
     rmSync(join(w.copiesRoot, 'p2', 'C-3'), { recursive: true }); rmSync(join(w.outboxRoot, 'p2', 'worker', SB), { recursive: true }); rmSync(join(w.settingsDir, `${SB}.json`)); rmSync(join(w.settingsDir, `${SB}.save.json`));
+    rmSync(join(w.settingsDir, sessionOutName(SB)));
     const b2 = await startB([{ id: SA2, product: 'p1' }]);
     assert.equal(b2.ok, true, b2.reason);
   } finally { rmSync(w.d, { recursive: true, force: true }); rmSync(d0, { recursive: true, force: true }); }

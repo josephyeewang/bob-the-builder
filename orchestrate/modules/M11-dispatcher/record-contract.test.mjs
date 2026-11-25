@@ -292,11 +292,12 @@ test('L1340: a failed outage step does not hold a timed-out claim; the lapse sti
     w.env.clock.t += 60 * MIN;
     const asked = [];
     const ports = {
-      product: PRODUCT, alert: fakeAlert(), board: () => [], healthy: () => { throw new Error('not wired yet: healthy (R-0b-162)'); },
+      // L1364: an unwired health port no longer fails the step outside an outage, so a board that can't be read fails it.
+      product: PRODUCT, alert: fakeAlert(), board: () => { throw new Error('board unreadable'); }, healthy: () => { throw new Error('not wired yet: healthy (R-0b-162)'); },
       stopSession: (id) => { asked.push(id); return stops; },
     };
     const r = await tick({ rec: w.rec, rules: w.rules, now: w.env.clock.t, ports });
-    assert.equal(r.steps.outage.ok, false, 'the outage step fails, as it did live');
+    assert.equal(r.steps.outage.ok, false, 'the outage step fails');
     assert.equal(r.steps.lapse.ok, true, r.steps.lapse.error);
     assert.deepEqual(asked, [sid], 'the session the claim names is stopped first');
     const c = w.rec.read('card', 'C-1').doc;

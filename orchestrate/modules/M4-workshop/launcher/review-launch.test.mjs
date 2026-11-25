@@ -387,3 +387,18 @@ test('R-0b-163: spawnClaude hands back claude\'s own pid, detached, or says it n
   assert.deepEqual(await spawnClaude(fake({ fail: true }), '/i/claude', [], {}), { ok: false, reason: 'claude could not be spawned' });
   assert.match((await spawnClaude(() => { throw Object.assign(new Error('x'), { code: 'EACCES' }); }, '/i/claude', [], {})).reason, /\(EACCES\)/);
 });
+
+test('L1364: spawnClaude hands claude an output descriptor for stdout and stderr, and tells its end once', async () => {
+  const calls = [];
+  const fake = (bin, args, opts) => { const child = new EventEmitter(); child.unref = () => {}; calls.push({ opts, child }); setImmediate(() => { child.pid = 77; child.emit('spawn'); }); return child; };
+  const ends = [];
+  assert.deepEqual(await spawnClaude(fake, '/i/claude', [], { out: 9, onExit: (e) => ends.push(e) }), { ok: true, pid: 77 });
+  assert.deepEqual(calls[0].opts.stdio, ['ignore', 9, 9]);
+  calls[0].child.emit('exit', 3, null);
+  calls[0].child.emit('exit', 4, null);
+  assert.deepEqual(ends, [{ code: 3, signal: null }], 'told once');
+  // No descriptor: thrown away, as before; a throwing onExit is swallowed.
+  await spawnClaude(fake, '/i/claude', [], { onExit: () => { throw new Error('x'); } });
+  assert.equal(calls[1].opts.stdio, 'ignore');
+  assert.doesNotThrow(() => calls[1].child.emit('exit', null, 'SIGTERM'));
+});

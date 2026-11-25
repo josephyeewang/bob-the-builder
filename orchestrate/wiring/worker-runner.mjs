@@ -264,7 +264,12 @@ export async function workerRunnerPass(ctx) {
   async function check(s) {
     if (s.ended === true) { s.alive = false; return; }
     const g = await wait(() => ports.groupGone(s));
-    if (g === true) { s.alive = false; s.ended = true; s.ended_at ??= now; } else if (g === false) { s.alive = true; } else delete s.alive;
+    if (g === true) {
+      s.alive = false; s.ended = true; s.ended_at ??= now;
+      // L1364: told once (an ended session is never checked again, above). The start port logs claude's exit line when
+      // this runner is the one that started it.
+      if (s.stop_requested !== true) note(`session ${s.id}${s.card ? ` (card ${s.card})` : ''} ended with no stop asked for; its exit line, if this runner started it, is in this log`);
+    } else if (g === false) { s.alive = true; } else delete s.alive;
     if (!isLive(s) && state.requests[s.id]?.state === 'started') state.requests[s.id] = { state: 'stopped', at: now };
   }
   for (const s of state.sessions) {

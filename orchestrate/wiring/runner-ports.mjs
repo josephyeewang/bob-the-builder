@@ -40,7 +40,8 @@
 //        the prompt from `promptFor` (by default workerPromptText, M5 worker-prompt.mjs; it is asked once the copy
 //        and the outbox exist, with the copy's head and the outbox, L970; its reason is told when it gives none). Its start time is read at once
 //        (runner-loop.mjs leaderStart, in UTC, the one reader the stop checks against); one that can't be read gets the group killed and the start refused, since the runner tells its own
-//        group from a reused number only by that time (step-4 review M3).
+//        group from a reused number only by that time (step-4 review M3). Its stdout and stderr go to
+//        <settingsDir>/<sessionId>.out.jsonl, and one line is logged when it ends (L1364, spawnLeader);
 //     A refusal once the copy is made removes the copy, the outbox and the settings file this start made (claude never ran in
 //     them as a session), so the card's next start is not refused for a copy left over.
 //     A copy already there when a start comes (L1357: a start that ended after its claim lapsed, one refused once claude
@@ -73,7 +74,7 @@
 // allow-list (env-check.mjs ROLE_ENV_ALLOWED, R-0b-156) keeps that name out of every session. Read (checked: claude-code 2.1.316), not yet proved live
 // (L1139). transcript.mjs's line shapes are a separate note.
 
-import { fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeSync, closeSync, constants } from 'node:fs';
+import { fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, rmSync, writeSync, closeSync, constants } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { execFileSync, spawn as childSpawn } from 'node:child_process';
 import { dirname, join } from 'node:path';
@@ -271,10 +272,79 @@ export const pauseLeadPort = () => async () => notWired('the Lead\'s wrap-up nee
 export const SPAWN_KILL_WAIT_MS = 2_000;
 /** Is process group g there? Signal 0; only ESRCH shows it gone (EPERM: there, but not ours to signal). */
 export const groupThere = (g, signal = (x, s) => process.kill(x, s)) => { try { signal(-g, 0); return true; } catch (e) { return e?.code !== 'ESRCH'; } };
+// L1364 (seen live: R-S1-2's sessions ended some 20 s in and nothing said why): claude's stdout and stderr go to a file
+// of the runner's own, `<sessionId>.out.jsonl` beside the session's settings (the runner's settings folder, inside the
+// folder runnerWallDirs denies every session: dirname of the status file), made new, 0o600, never through a link. When
+// claude ends, while the runner still runs, one line is logged: its exit code and signal and, from the last
+// `{"type":"result"}` line, only fields that are numbers, booleans or one short fixed word (never the result's own text).
+export const sessionOutName = (id) => `${id}.out.jsonl`;
+/** How much of the file's end is read for the last result line. */
+export const SESSION_OUT_TAIL = 256 * 1024;
+const WORD = /^[a-z][a-z0-9_]{0,39}$/;
+// The API's own error types (its error.type), the only words taken from a failed result's text: never the text itself.
+export const API_ERROR_WORDS = Object.freeze(['rate_limit_error', 'authentication_error', 'overloaded_error', 'permission_error', 'billing_error',
+  'invalid_request_error', 'not_found_error', 'request_too_large', 'api_error']);
+const word = (v) => (typeof v === 'string' && WORD.test(v) ? v : undefined);
+const count = (v) => (Number.isFinite(v) ? v : undefined);
+/** The API error of a failed result as one fixed word: its status as `status_<n>`, else a known error type it names. */
+export function apiErrorWord(r) {
+  if (r?.is_error !== true) return undefined;
+  const st = r.api_error_status;
+  if (Number.isInteger(st) && st >= 100 && st <= 599) return `status_${st}`;
+  const text = typeof r.result === 'string' ? r.result : '';
+  const typed = API_ERROR_WORDS.find((w) => new RegExp(`\\b${w}\\b`).test(text));
+  if (typed) return typed;
+  const m = text.match(/\bAPI Error: ([1-5]\d\d)\b/);
+  return m ? `status_${m[1]}` : undefined;
+}
+/** The last `{"type":"result"}` line of stream-json text, parsed, or null. */
+export function lastResult(text) {
+  const lines = String(text ?? '').split('\n');
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const l = lines[i].trim();
+    if (!l.startsWith('{') || !l.includes('"result"')) continue;
+    let o; try { o = JSON.parse(l); } catch { continue; }
+    if (o && o.type === 'result') return o;
+  }
+  return null;
+}
+/** The one line logged when a session's claude ends (L1364). */
+export function sessionEndText({ sessionId, card, code, signal, result }) {
+  const said = `session ${sessionId}${card ? ` (card ${card})` : ''}: claude ended, exit code ${code ?? 'none'}, signal ${signal ?? 'none'}`;
+  if (!result) return `${said}; no result line in its output`;
+  const f = { subtype: word(result.subtype), is_error: typeof result.is_error === 'boolean' ? result.is_error : undefined, num_turns: count(result.num_turns),
+    stop_reason: word(result.stop_reason), api_error: apiErrorWord(result), duration_ms: count(result.duration_ms) };
+  return `${said}; result ${Object.entries(f).filter(([, v]) => v !== undefined).map(([k, v]) => `${k}=${v}`).join(' ')}`;
+}
+/** The end of a file, read without following a link; '' when it can't be read. */
+export function readTail(file, max = SESSION_OUT_TAIL) {
+  let fd;
+  try {
+    fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const st = fstatSync(fd);
+    if (!st.isFile()) return '';
+    const n = Math.min(st.size, max);
+    const b = Buffer.alloc(n);
+    let got = 0;
+    while (got < n) { const r = readSync(fd, b, got, n - got, st.size - n + got); if (r <= 0) break; got += r; }
+    return b.subarray(0, got).toString('utf8');
+  } catch { return ''; } finally { if (fd !== undefined) try { closeSync(fd); } catch { /* closed */ } }
+}
+
 export async function spawnLeader({ spawn = childSpawn, bin, args, cwd, env, pidStartOf = leaderStart, kill = (g, sig) => process.kill(-g, sig),
-  there = groupThere, killWaitMs = SPAWN_KILL_WAIT_MS }) {
-  const s = await spawnClaude(spawn, bin, args, { cwd, env });
-  if (!s.ok) return s;
+  there = groupThere, killWaitMs = SPAWN_KILL_WAIT_MS, outFile, onExit }) {
+  // L1364: the output file is made before claude starts; one that can't be made refuses the start (nothing ran).
+  let out;
+  if (typeof outFile === 'string') {
+    try { out = openSync(outFile, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW | constants.O_APPEND, 0o600); fchmodSync(out, 0o600); } catch (e) {
+      if (out !== undefined) { try { closeSync(out); } catch { /* closed */ } try { rmSync(outFile, { force: true }); } catch { /* left */ } }
+      return refuse(`the session's output file can't be made (${e?.code ?? e?.message})`);
+    }
+  }
+  let s;
+  // The parent's copy of the descriptor is closed once claude has its own (or never started).
+  try { s = await spawnClaude(spawn, bin, args, { cwd, env, ...(out !== undefined ? { out } : {}), ...(typeof onExit === 'function' ? { onExit } : {}) }); } finally { if (out !== undefined) try { closeSync(out); } catch { /* closed */ } }
+  if (!s.ok) { if (out !== undefined) try { rmSync(outFile, { force: true }); } catch { /* left */ } return s; }
   let at = null;
   try { at = pidStartOf(s.pid); } catch { at = null; }
   if (typeof at !== 'string' || !at) {
@@ -569,6 +639,7 @@ export function startPort(c, deps = {}) {
     const wall = liveWallProblem(live, product, { ...mine, mirror: p.mirror }, readSettings);
     if (wall) return refuse(wall);
     const settingsFile = join(c.settingsDir, `${sessionId}.json`);
+    const outFile = join(c.settingsDir, sessionOutName(sessionId));
     // Setup makes each product's folders (setup/layout.mjs, L836); the start never does, so one missing is refused here.
     for (const f of [mine.copies, dirname(outbox)]) { let st; try { st = fs.lstat(f); } catch { st = null; } if (!st?.isDirectory()) return refuse(`setup has made no folder ${f} for product ${product}`); }
     // The main the copy's setup files are restored from (#369 r1 m3): read before and after the copy is made, so checks 2
@@ -693,7 +764,9 @@ export function startPort(c, deps = {}) {
             // The check's own reason is kept (#369 r2 m3): every check compares with mainAt, so main moving is only told beside it.
             if (p) return refuse(`a check failed again just before claude was to start, so it was not started: ${p}${(await sameMain()) ? '' : ' (main also moved during launch, or can\'t be read)'}`);
           }
-          return stopped() ? refuse('the worker runner is stopping, so claude was not started') : spawnLeader({ spawn, bin: c.claudeBin, args, cwd: copy, env, pidStartOf, ...(kill ? { kill } : {}), ...(there ? { there } : {}) });
+          return stopped() ? refuse('the worker runner is stopping, so claude was not started') : spawnLeader({ spawn, bin: c.claudeBin, args, cwd: copy, env, pidStartOf, ...(kill ? { kill } : {}), ...(there ? { there } : {}),
+            // L1364: the session's output, and one line logged when it ends.
+            outFile, onExit: ({ code, signal }) => log(sessionEndText({ sessionId, card, code, signal, result: lastResult(readTail(outFile)) })) });
         } });
     } catch (e) { return undo(`the launch failed (${e?.message ?? e})`); }
     // A claude that may still run keeps its copy, outbox and settings (#364 r1 m3); the runner keeps the request waiting.

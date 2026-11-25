@@ -73,6 +73,8 @@ export async function start(x) {
   const { env } = built;
   const li = x.launchInputs ?? {};
   let r;
+  // Open: L1364 — the worker runner keeps each session's output and logs why it ended (runner-ports.mjs spawnLeader);
+  // a reviewer's claude is still spawned with neither (spawnClaude's `out` and `onExit`), as this runner has no log port.
   try {
     r = await launchReview({ ...li, role: x.role, profile, sessionId: x.sessionId, card: x.card, head: x.head, copy: x.copy, outbox: x.outbox,
       env, claudeBin: x.claudeBin, spawn: x.spawn, settings: s, smokeRunOf },

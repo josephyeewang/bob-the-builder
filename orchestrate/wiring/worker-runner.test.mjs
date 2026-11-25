@@ -85,6 +85,21 @@ test('step 3: stopGroup writes stop_requested before it acts, answers ok only on
   assert.equal(other.ok, false); assert.match(other.reason, /did not start/);
 });
 
+test('L1364: a session that ends with no stop asked is noted once; one stopped on request is not', async () => {
+  const ended = (w) => w.notes.filter((t) => /ended with no stop asked for/.test(t));
+  const w = world();
+  await w.pass([launchReq('S-1')]);
+  w.gone.add(4001); w.now += MIN; await w.pass();
+  assert.deepEqual(ended(w), ['session S-1 (card C-1) ended with no stop asked for; its exit line, if this runner started it, is in this log']);
+  w.now += MIN; await w.pass(); w.now += MIN; await w.pass();
+  assert.equal(ended(w).length, 1, 'not repeated');
+  const z = world();
+  await z.pass([launchReq('S-1')]);
+  await z.asks().stopGroup({ id: 'S-1', pgid: 4001, kind: 'editing' });
+  z.now += MIN; await z.pass();
+  assert.deepEqual(ended(z), [], 'a stop asked for is no surprise');
+});
+
 test('L764 c1: a stop that times out answers ok: false with the flag set; the session then dies, and no dead row is ever shown', async () => {
   const w = world({ stopAnswer: () => new Promise(() => {}) });
   await w.pass([launchReq('S-1')]);

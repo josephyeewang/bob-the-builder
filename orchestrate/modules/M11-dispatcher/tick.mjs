@@ -329,7 +329,12 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
   let outageOpen = outageInRecord();
   await run('outage', async () => {
     const board = p.board();
-    const o = outageStep({ rec, rules, board, now, healthy: p.healthy(), resume: p.resume?.() ?? false, alert });
+    // L1364: healthy and resume are read only while the Record holds an outage open; outageStep reads them nowhere
+    // else. Seen live: neither port is wired yet (R-0b-162), so asking them every pass failed this step every pass and
+    // a running card whose session had died was never handed to actOnDead. An open outage still asks them, so a port
+    // that throws there fails the step as before (nothing restarts, the outage holds).
+    const openNow = outageInRecord();
+    const o = outageStep({ rec, rules, board, now, healthy: openNow ? p.healthy() : false, resume: openNow ? (p.resume?.() ?? false) : false, alert });
     outageOpen = o.outage;
     // L761: a refused write of the deaths already counted means they may be counted again (a false outage), or that
     // the Record is failing. Told through the refused-save path (refusalReport, holdAlert): once, then daily.
