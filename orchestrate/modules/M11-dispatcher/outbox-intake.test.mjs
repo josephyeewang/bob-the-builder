@@ -2,7 +2,7 @@ import { test as nodeTest } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync, symlinkSync, mkdirSync, rmSync, existsSync, lstatSync, utimesSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { intakePass, kindsFor, sha256, INTAKE_PORT_MS, INTAKE_START_MS, INTAKE_PASS_MS, LEFT_OUT_TELL_MS, LEAD_LAUNCH_CHECKS_PER_PASS } from './outbox-intake.mjs';
+import { intakePass, kindsFor, sha256, INTAKE_PORT_MS, INTAKE_START_MS, INTAKE_PASS_MS, LEFT_OUT_TELL_MS, LEAD_LAUNCH_CHECKS_PER_PASS, LEAD_LAUNCH_LOOK_MS, LAUNCH_LOOK_FACT } from './outbox-intake.mjs';
 import { STEP_DEADLINE_MS } from './tick.mjs';
 import { note } from './moves.mjs';
 import { recordLeadLaunch } from './lead-restart.mjs';
@@ -1881,7 +1881,7 @@ test('L1370: a launch file that is not this start\'s is never used, and the expo
   // Another user's file is refused (the reader is given the session's uid).
   const q = oneShotWorld();
   q.launchFile({ session: ONE_SHOT, product: PRODUCT, head: HEAD });
-  assert.match(readLaunchFile({ sessionId: ONE_SHOT, outbox: q.ob, uid: UID + 1, product: PRODUCT }).reason, /not owned by the owner/);
+  assert.match(readLaunchFile({ sessionId: ONE_SHOT, outbox: q.ob, uid: UID + 1, product: PRODUCT }).reason, /is not the owner's/);
   // No file at all: nothing told, nothing asked (a Lead the runner started has none), and the plan waits as before.
   const n = oneShotWorld();
   n.hand([planCard('C-1')]);
@@ -1975,17 +1975,36 @@ test('L1370 audit m4: once the launch is recorded its hold marks are cleared, so
   assert.equal(typeof p.rec.read('fact', fact).doc.cleared_at, 'string');
 });
 
-test('L1370 audit m4: a launch file older than a day with no record is told once, then never read or told again', async () => {
+// L1370 audit r2 MAT-1, m2, m3: a Lead's day runs from intake's own first check, never the file's time. A file dated a
+// day back (a Dispatcher off for a day) or a year ahead is checked like any other, and every Lead, a bad file too, is
+// told once when its first check is a day old, then left alone.
+test('L1370 audit r2 MAT-1: a Lead is past its day a day after its first check, whatever the file\'s time; told once, then never read', async () => {
   const p = oneShotWorld();
   p.launchFile({ session: ONE_SHOT, product: PRODUCT, head: HEAD });
   p.hand([planCard('C-1')]);
   const old = new Date(p.E.clock.t - 25 * 3600_000);
   utimesSync(join(p.ob, '.launch.json'), old, old);
-  const out = await p.run({ exportedHead: p.exported() });
-  assert.deepEqual(out[0], { session: ONE_SHOT, launch: 'stale' });
-  assert.deepEqual(p.asked, [], 'a start past its day is not put to the export check');
-  assert.equal(p.owner.length, 1, p.owner.join('\n'));
-  assert.match(p.owner[0], /started more than a day ago and its launch was never recorded/);
+  const refuse = () => ({ ok: false, reason: 'not an export' });
+  const first = p.E.clock.t;
+  const out = await p.run({ exportedHead: (x) => { p.asked.push(x); return refuse(); } });
+  assert.equal(out[0].launch, 'held', 'a file written a day before the Dispatcher first saw it is still checked');
+  assert.equal(p.asked.length, 1);
+  assert.deepEqual(p.rec.read('fact', LAUNCH_LOOK_FACT(ONE_SHOT)).doc, { first_checked_at: new Date(first).toISOString(), last_checked_at: new Date(first).toISOString() });
+  // The file dated a year ahead changes nothing: a day of checks still ends it.
+  const ahead = new Date(p.E.clock.t + 365 * 24 * 3600_000);
+  utimesSync(join(p.ob, '.launch.json'), ahead, ahead);
+  p.E.clock.t = first + LEAD_LAUNCH_LOOK_MS;
+  const inDay = await p.run({ exportedHead: (x) => { p.asked.push(x); return refuse(); } });
+  assert.equal(inDay[0].launch, 'held', 'a day to the minute is still inside it');
+  assert.equal(p.rec.read('fact', LAUNCH_LOOK_FACT(ONE_SHOT)).doc.first_checked_at, new Date(first).toISOString(), 'the first check stays the first');
+  assert.equal(p.rec.read('fact', LAUNCH_LOOK_FACT(ONE_SHOT)).doc.last_checked_at, new Date(p.E.clock.t).toISOString());
+  const told = p.owner.length;
+  p.E.clock.t += 60_000;
+  const past = await p.run({ exportedHead: (x) => { p.asked.push(x); return { ok: true }; } });
+  assert.deepEqual(past[0], { session: ONE_SHOT, launch: 'stale' });
+  assert.equal(p.asked.length, 2, 'a Lead past its day is not put to the export check');
+  assert.equal(p.owner.length, told + 1, p.owner.join('\n'));
+  assert.match(p.owner.at(-1), /first checked more than a day ago and its launch was never recorded/);
   for (let day = 1; day <= 3; day += 1) {
     p.E.clock.t += 24 * 3600_000;
     let reads = 0;
@@ -1993,11 +2012,55 @@ test('L1370 audit m4: a launch file older than a day with no record is told once
     assert.deepEqual(later[0], { session: ONE_SHOT, launch: 'ignored' });
     assert.equal(reads, 0, 'not read again');
   }
-  assert.equal(p.owner.length, 1, p.owner.join('\n'));
+  assert.equal(p.owner.length, told + 1, p.owner.join('\n'));
   assert.equal(p.launches().length, 0);
 });
 
-test('L1370 audit m4: at most LEAD_LAUNCH_CHECKS_PER_PASS Leads are put to the export check in one pass', async () => {
+test('L1370 audit r2 m3: a launch file that cannot be opened, or is bad, is past its day a day after its first check', async () => {
+  for (const readLaunch of [() => ({ ok: false, reason: 'the launch file could not be opened without following a link (EACCES)' }), () => { throw new Error('EIO'); }]) {
+    const p = oneShotWorld();
+    const first = p.E.clock.t;
+    const out = await p.run({ readLaunch, exportedHead: p.exported() });
+    assert.equal(out[0].launch, 'held');
+    assert.equal(p.rec.read('fact', LAUNCH_LOOK_FACT(ONE_SHOT)).doc.first_checked_at, new Date(first).toISOString());
+    p.E.clock.t = first + LEAD_LAUNCH_LOOK_MS + 60_000;
+    const past = await p.run({ readLaunch, exportedHead: p.exported() });
+    assert.deepEqual(past[0], { session: ONE_SHOT, launch: 'stale' });
+    p.E.clock.t += 24 * 3600_000;
+    assert.deepEqual((await p.run({ readLaunch, exportedHead: p.exported() }))[0], { session: ONE_SHOT, launch: 'ignored' });
+    assert.deepEqual(p.asked, [], 'a file never read well is never put to the export check');
+    assert.equal(p.owner.filter((t) => /first checked more than a day ago/.test(t)).length, 1, p.owner.join('\n'));
+  }
+});
+
+// The audit's probe (L1370 audit r2 MAT-1): five Leads listed first whose heads the export refuses, and their files
+// dated a year ahead, used to take every check of every pass, so a sixth Lead with a good head was 'later' until its
+// file was a day old, then dropped, never checked.
+test('L1370 audit r2 MAT-1: the export checks turn over every Lead, the least lately checked first, so a sixth Lead is recorded', async () => {
+  const p = oneShotWorld();
+  const root = dirname(p.ob);
+  const sessions = [];
+  for (let i = 0; i < 6; i += 1) {
+    const sid = `ld-orchestrate-test-2026112510${String(i).padStart(4, '0')}`;
+    const ob = mk(join(root, sid));
+    writeFileSync(join(ob, '.launch.json'), JSON.stringify({ session: sid, product: PRODUCT, head: HEAD }));
+    const ahead = new Date(p.E.clock.t + 365 * 24 * 3600_000);
+    if (i < 5) utimesSync(join(ob, '.launch.json'), ahead, ahead);
+    sessions.push({ sessionId: sid, role: 'lead', outbox: ob, uid: UID, card: null, product: PRODUCT });
+  }
+  const good = sessions[5].sessionId;
+  const w = world();
+  const outcomes = [];
+  for (let pass = 0; pass < 3; pass += 1, p.E.clock.t += 60_000) {
+    const out = await intakePass({ rec: p.rec, sessions, ...w.ports, alert: fakeAlert(), now: p.E.clock.t, replyToLead: async () => ({ ok: true }),
+      exportedHead: (x) => (x.session === good ? { ok: true } : { ok: false, reason: 'not an export' }) });
+    outcomes.push(out.find((r) => r.session === good)?.launch ?? null);
+  }
+  assert.deepEqual(outcomes, ['later', 'recorded', null], 'checked on the second pass, never checked before, so first');
+  assert.deepEqual(p.rec.list('launch').filter((l) => l.doc.session_id === good).map((l) => l.doc.head), [HEAD]);
+});
+
+test('L1370 audit m4, r2 MAT-1: at most LEAD_LAUNCH_CHECKS_PER_PASS Leads are put to the export check in a pass, the least lately checked first', async () => {
   const p = oneShotWorld();
   const root = dirname(p.ob);
   const sessions = [];
@@ -2007,11 +2070,48 @@ test('L1370 audit m4: at most LEAD_LAUNCH_CHECKS_PER_PASS Leads are put to the e
     writeFileSync(join(ob, '.launch.json'), JSON.stringify({ session: sid, product: PRODUCT, head: HEAD }));
     sessions.push({ sessionId: sid, role: 'lead', outbox: ob, uid: UID, card: null, product: PRODUCT });
   }
-  const asked = [];
+  // The last Lead has a plan waiting: while it waits for a check it is told about from there, not as a plan with no
+  // launch record (r2 c1).
+  writeFileSync(join(sessions[6].outbox, 'plan-a.json'), JSON.stringify({ cards: [planCard('C-7')] }));
+  const ids = sessions.map((s) => s.sessionId);
   const w = world();
-  const out = await intakePass({ rec: p.rec, sessions, ...w.ports, alert: fakeAlert(), now: p.E.clock.t, replyToLead: async () => ({ ok: true }),
-    exportedHead: (x) => { asked.push(x.session); return { ok: false, reason: 'not an export' }; } });
+  const owner = [];
+  const pass = async () => {
+    const asked = [];
+    const out = await withAlerts(p.rec, p.E.clock.t, (t) => { owner.push(typeof t === 'string' ? t : t.text); return true; },
+      (alert) => intakePass({ rec: p.rec, sessions, ...w.ports, alert, now: p.E.clock.t, replyToLead: async () => ({ ok: true }),
+        exportedHead: (x) => { asked.push(x.session); return { ok: false, reason: 'not an export' }; } }));
+    p.E.clock.t += 60_000;
+    return { asked, out };
+  };
   assert.equal(LEAD_LAUNCH_CHECKS_PER_PASS, 5);
-  assert.deepEqual(asked, sessions.slice(0, 5).map((s) => s.sessionId));
-  assert.deepEqual(out.map((r) => r.launch), ['held', 'held', 'held', 'held', 'held', 'later', 'later']);
+  const one = await pass();
+  assert.deepEqual(one.asked, ids.slice(0, 5));
+  assert.deepEqual(one.out.filter((r) => r.launch).map((r) => [r.session, r.launch]), [...ids.slice(0, 5).map((x) => [x, 'held']), [ids[5], 'later'], [ids[6], 'later']]);
+  assert.match(one.out.find((r) => r.session === ids[6] && r.waiting)?.waiting ?? '', /no launch record/, 'the plan still waits');
+  assert.equal(p.rec.read('fact', `hold-plan-no-launch-${ids[6]}`), null, 'a Lead waiting for a check is not told as a plan with no launch record');
+  assert.equal(owner.some((t) => t.includes(ids[6])), false, owner.join('\n'));
+  const two = await pass();
+  assert.deepEqual(two.asked, [ids[5], ids[6], ids[0], ids[1], ids[2]], 'never checked first, then the least lately checked');
+  const three = await pass();
+  assert.deepEqual(three.asked, [ids[3], ids[4], ids[0], ids[1], ids[2]], 'the two checked on the first pass, then the second pass\'s in the sessions\' order');
+});
+
+test('L1370 audit r2 m4: a hold mark that cannot be cleared after the launch is recorded is reported as that, not as a failed launch', async () => {
+  const p = oneShotWorld();
+  p.launchFile({ session: ONE_SHOT, product: PRODUCT, head: HEAD });
+  const real = p.rec;
+  const bad = `hold-lead-launch-export-${ONE_SHOT}`;
+  const rec = Object.create(real, { read: { value: (k, id) => {
+    if (k === 'fact' && id === bad) throw new Error('the fact could not be read');
+    return real.read(k, id);
+  } } });
+  const logged = [];
+  const w = world();
+  const out = await intakePass({ rec, sessions: [{ sessionId: ONE_SHOT, role: 'lead', outbox: p.ob, uid: UID, card: null, product: PRODUCT }],
+    ...w.ports, alert: fakeAlert(), now: p.E.clock.t, replyToLead: async () => ({ ok: true }), exportedHead: () => ({ ok: true }), failureLog: (t) => logged.push(t) });
+  assert.deepEqual(out[0], { session: ONE_SHOT, launch: 'recorded', head: HEAD });
+  assert.equal(p.launches().length, 1);
+  assert.ok(logged.some((t) => t.includes(`the Lead ${ONE_SHOT}'s launch was recorded; a hold mark could not be cleared (the fact could not be read)`)), logged.join('\n'));
+  assert.equal(logged.some((t) => /failed, so its plans wait/.test(t)), false, logged.join('\n'));
 });
