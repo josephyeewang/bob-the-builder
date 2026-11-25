@@ -19,8 +19,9 @@ import { main, WATCHDOG_MARGIN_MS, RUN_DEADLINE_MS } from './main.mjs';
 import { PR_FACT } from './merges.mjs';
 import { PLAN_REVIEW_FACT, PLAN_START_HOLD_MS } from './plan-go.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
+import { refusing } from '../../wiring/not-wired.mjs';
 import { USAGE_FACT } from './usage.mjs';
-import { KEYS as K } from './keys.mjs';
+import { KEYS as K, minutes } from './keys.mjs';
 import { rulesWith, recWith, seed, change, setClock, usageFact, undoEntries, filesOfCommits, T0, MIN, iso } from './fixtures.test-helper.mjs';
 import { writeLog, queueFor, assertDropFirst, lateMark, handoffNote } from './fixtures.test-helper.mjs';
 import { FACTS, FD_RESTART_FACT, LINK_FACT } from './phone-link.mjs';
@@ -371,9 +372,10 @@ test('L1340: claims lapse in their own step, so a failed outage step does not ho
     const rec = { ...w.rec, lapseClaims: (now, opts) => { seen.push({ now, stopSession: opts?.stopSession }); return answer; } };
     return { seen, pass: () => tick({ rec, rules: rulesWith({}, allow), now: T0, ports: w.ports }) };
   };
-  // The outage step fails (its health port is not wired): the lapse still runs, at the pass's time, with the stop port.
+  // The outage step fails (its board can't be read; since L1364 an unwired health port no longer fails it outside an
+  // outage): the lapse still runs, at the pass's time, with the stop port.
   const stopSession = () => true;
-  const w = world([account(), usage()], { over: { healthy: () => { throw new Error('not wired yet: healthy'); }, stopSession } });
+  const w = world([account(), usage()], { over: { board: () => { throw new Error('board unreadable'); }, stopSession } });
   const { seen, pass } = spy(w, { ok: true, lapsed: [{ card: 'C-1', to: 'ready' }] });
   const r = await pass();
   assert.equal(r.steps.outage.ok, false);
@@ -462,6 +464,71 @@ test('M9: a session held through an outage is decided at the outage\'s end even 
   assert.equal(w.rec.read('fact', OUTAGE_FACT).doc.state, 'ended');
   assert.deepEqual(w.calls.launched, []);
   assert.deepEqual(['C-1', 'C-2', 'C-3'].map((c) => w.rec.read('card', c).doc.state), ['waiting', 'waiting', 'waiting']);
+});
+// L1364 (seen live: R-S1-2 running for over half an hour after its session ended): healthy and resume are not wired
+// yet (R-0b-162) and were asked every pass, so the outage step failed every pass and actOnDead never ran. They are
+// asked only while an outage is open now.
+test('L1364: with healthy and resume not wired, a dead running card still waits on Joe; an open outage still fails the step', async () => {
+  const notWired = (n) => () => { throw new Error(`not wired yet: ${n} (R-0b-162)`); };
+  const asked = [];
+  const ports = { healthy: () => { asked.push('healthy'); return notWired('healthy')(); }, resume: () => { asked.push('resume'); return notWired('resume')(); } };
+  const quiet = minutes(rulesWith({}, allow), K.deadQuietMin) / MIN;
+  const gone = (id, c, ago) => ({ id, card: c, alive: false, ended: true, lastWriteAt: T0 - ago });
+  const w = world([account(), usage(), card('C-1', { state: 'running' }), card('C-2', { state: 'running' })],
+    { over: { ...ports, board: () => [gone('S-1', 'C-1', (quiet + 1) * MIN), gone('S-2', 'C-2', Math.max(0, quiet - 1) * MIN)] } });
+  const r = await w.pass();
+  assert.equal(r.steps.outage.ok, true, r.steps.outage.error);
+  assert.deepEqual(asked, [], 'no outage open: neither port is asked');
+  assert.deepEqual(r.steps.outage.result.acted, [['C-1', 'waiting on Joe']]);
+  const c1 = w.rec.read('card', 'C-1').doc;
+  assert.deepEqual([c1.state, c1.wait.who, c1.wait.resume, c1.wait.return_to], ['waiting', 'joe', 'retry', 'ready']);
+  assert.match(c1.wait.what, /^dead_session/);
+  assert.equal(w.rec.read('card', 'C-2').doc.state, 'running', 'quiet for less than dead_quiet_min: not dead yet');
+  assert.equal(w.calls.alerts.filter((a) => /card C-1: its session stopped .* waits on you/.test(a)).length, 1, w.calls.alerts.join(' | '));
+  assert.deepEqual(w.calls.launched, [], 'a dead card is never restarted without Joe');
+  // An open outage asks them: a port that throws fails the step, nothing is decided, and the outage holds.
+  const o = world([account(), usage(), card('C-3', { state: 'running' }), ['fact', OUTAGE_FACT, { id: 'o-1', state: 'open', started_at: iso(T0 - MIN), dead: [], board: 3, healthy_passes: 0 }]],
+    { over: { ...ports, board: () => [gone('S-3', 'C-3', (quiet + 1) * MIN)] } });
+  const ro = await o.pass();
+  assert.equal(ro.steps.outage.ok, false);
+  assert.match(ro.steps.outage.error, /not wired yet: healthy/);
+  assert.equal(o.rec.read('card', 'C-3').doc.state, 'running');
+  assert.equal(o.rec.read('fact', OUTAGE_FACT).doc.state, 'open');
+  assert.deepEqual(o.calls.launched, []);
+});
+// L1364 amended (#674 review M1): an outage opened while healthy is not wired could never end (healthy and resume both
+// refuse), so every start would be held for ever. None opens: each dead card is decided on its own.
+test('L1364 M1: with healthy not wired, three deaths on a board of six open no outage; each card waits on Joe, told once each', async () => {
+  const quiet = minutes(rulesWith({}, allow), K.deadQuietMin) / MIN;
+  const gone = (id, c) => ({ id, card: c, alive: false, ended: true, lastWriteAt: T0 - (quiet + 1) * MIN });
+  const up = (id, c) => ({ id, card: c, alive: true, ended: false, lastWriteAt: T0 });
+  const dead = ['C-1', 'C-2', 'C-3'];
+  const board = [...dead.map((c, i) => gone(`S-${i + 1}`, c)), up('S-4', 'C-4'), up('S-5', 'C-5'), up('S-6', 'C-6')];
+  const cards = ['C-1', 'C-2', 'C-3', 'C-4', 'C-5', 'C-6'].map((c) => card(c, { state: 'running' }));
+  // The same board with healthy wired does open one: the cut is the port, not the count.
+  const wired = world([account(), usage(), ...cards], { over: { board: () => board } });
+  await wired.pass();
+  assert.equal(wired.rec.read('fact', OUTAGE_FACT)?.doc?.state, 'open');
+  const w = world([account(), usage(), ...cards], { over: { board: () => board, healthy: refusing('healthy'), resume: refusing('resume') } });
+  const r = await w.pass();
+  assert.equal(r.steps.outage.ok, true, r.steps.outage.error);
+  assert.notEqual(w.rec.read('fact', OUTAGE_FACT)?.doc?.state, 'open', 'no outage opens');
+  assert.deepEqual(r.steps.outage.result.acted, dead.map((c) => [c, 'waiting on Joe']));
+  for (const c of dead) {
+    const d = w.rec.read('card', c).doc;
+    assert.deepEqual([d.state, d.wait.who], ['waiting', 'joe']);
+    assert.match(d.wait.what, /^dead_session/);
+    assert.equal(w.calls.alerts.filter((a) => new RegExp(`card ${c}: its session stopped .* waits on you`).test(a)).length, 1, w.calls.alerts.join(' | '));
+  }
+  assert.equal(w.calls.alerts.filter((a) => /running sessions stopped at once/.test(a)).length, 0);
+  // An outage already open in the Record keeps today's fail-safe: the refusing port fails the step and the outage holds.
+  const o = world([account(), usage(), ...cards, ['fact', OUTAGE_FACT, { id: 'o-1', state: 'open', started_at: iso(T0 - MIN), dead: [], board: 6, healthy_passes: 0 }]],
+    { over: { board: () => board, healthy: refusing('healthy'), resume: refusing('resume') } });
+  const ro = await o.pass();
+  assert.equal(ro.steps.outage.ok, false);
+  assert.match(ro.steps.outage.error, /not wired yet: healthy/);
+  assert.equal(o.rec.read('fact', OUTAGE_FACT).doc.state, 'open');
+  assert.deepEqual(dead.map((c) => o.rec.read('card', c).doc.state), ['running', 'running', 'running']);
 });
 test.todo('M10: a dead card marked safe to re-run goes back to ready and starts in the same tick (needs M9 rerun_safe; a (b) for the lead)');
 

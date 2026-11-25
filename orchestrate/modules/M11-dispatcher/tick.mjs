@@ -71,6 +71,7 @@ import { dueToTell, pastTime } from '../../shared/still-waiting.mjs';
 import { schedulePass } from '../M2-approvals/schedule.mjs';
 import { planGoPass, plansAwaitingAnswer, PLAN_REVIEW_LEAD } from './plan-go.mjs';
 import { proposalsPass } from './proposals-intake.mjs';
+import { isRefusing } from '../../wiring/not-wired.mjs';
 import { researchHandler, researchPass } from './research-intake.mjs';
 
 export const STEPS = Object.freeze(['stops', 'undo', 'undo-starts', 'outage', 'adopt', 'lapse', 'intake', 'proposals', 'research', 'leads', 'approvals', 'plan-go', 'pass', 'limits', 'merges', 'waits', 'lost-cards', 'stuck-cards', 'phone', 'cleanup']);
@@ -329,7 +330,15 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
   let outageOpen = outageInRecord();
   await run('outage', async () => {
     const board = p.board();
-    const o = outageStep({ rec, rules, board, now, healthy: p.healthy(), resume: p.resume?.() ?? false, alert });
+    // L1364: healthy and resume are read only while the Record holds an outage open; outageStep reads them nowhere
+    // else. Seen live: neither port is wired yet (R-0b-162), so asking them every pass failed this step every pass and
+    // a running card whose session had died was never handed to actOnDead. An open outage still asks them, so a port
+    // that throws there fails the step as before (nothing restarts, the outage holds).
+    const openNow = outageInRecord();
+    // L1364 amended (#674 review M1): with no health reading to be had (the healthy port missing, or still the wiring's
+    // refusing port, R-0b-162), no outage is opened, since nothing could end it.
+    const canEnd = typeof p.healthy === 'function' && !isRefusing(p.healthy);
+    const o = outageStep({ rec, rules, board, now, healthy: openNow ? p.healthy() : false, resume: openNow ? (p.resume?.() ?? false) : false, alert, canEnd });
     outageOpen = o.outage;
     // L761: a refused write of the deaths already counted means they may be counted again (a false outage), or that
     // the Record is failing. Told through the refused-save path (refusalReport, holdAlert): once, then daily.

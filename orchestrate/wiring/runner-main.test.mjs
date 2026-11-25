@@ -9,7 +9,7 @@ import { spawn } from 'node:child_process';
 import { makeLock } from '../modules/M9-record/lock.mjs';
 import { loginJobPlist } from '../modules/M11-dispatcher/login-job.mjs';
 import { statusOf, statusText } from '../setup/builder-wall.mjs';
-import { DENY_KEYS, personUserProblem, carriedOverProblem, checkRunnerConfig, realRenderPaths, updateRestart, hookStoreOf, launchInputs, lockedOf, lockedWiring, productCommands, readRunnerConfig, startDeps, listenStop, main, readRootFile, realRunnerPorts, testProductHeld, testProductProblem, workerCheckInputs } from './runner-main.mjs';
+import { DENY_KEYS, personUserProblem, carriedOverProblem, memoryLive, checkRunnerConfig, realRenderPaths, updateRestart, hookStoreOf, launchInputs, lockedOf, lockedWiring, productCommands, readRunnerConfig, startDeps, listenStop, main, readRootFile, realRunnerPorts, testProductHeld, testProductProblem, workerCheckInputs } from './runner-main.mjs';
 import { SIGNIN_TOKEN_VAR, checkRoleEnv } from '../modules/M4-workshop/launcher/env-check.mjs';
 import { workerSnapshotProblem } from './runner-checks.mjs';
 import { rulesText } from '../setup/worker-rules.mjs';
@@ -832,4 +832,16 @@ test('L1261: the sign-in reaches the lock-down runner and each start through che
     assert.equal(logs.filter((l) => /the builder sign-in file: read/.test(l)).length, 1, logs.join('\n'));
     assert.ok(!logs.join('\n').includes(V.slice(0, 20)));
   } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test('#674 review m1: the start keeps the output of every session its memory shows live and every request not stopped', async () => {
+  const { keptOutputIds } = await import('./owner-status.mjs');
+  const m = { sessions: [{ id: 'S-1', product: 'p1', alive: true }, { id: 'S-2', product: 'p1', ended: true }, { id: 'S-3', product: 'p1', pgid: 9 }],
+    requests: { 'S-4': { state: 'waiting' }, 'S-2': { state: 'stopped' } } };
+  // S-3's group can't be told about: it counts as live.
+  const ml = memoryLive(m, (s) => { if (s.id === 'S-3') throw new Error('cannot tell'); return false; });
+  assert.equal(ml.bad, null);
+  assert.deepEqual([...keptOutputIds(ml.live, m.requests)].sort(), ['S-1', 'S-3', 'S-4']);
+  assert.match(memoryLive({ sessions: [null] }, () => false).bad, /not what the runner writes/);
+  assert.ok(realRunnerPorts.toString().includes('pruneOutputs'));
 });

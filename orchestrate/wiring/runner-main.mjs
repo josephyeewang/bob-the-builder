@@ -52,14 +52,14 @@ import { makeLock } from '../modules/M9-record/lock.mjs';
 import { PRODUCT, runnerPlaces } from '../shared/product-paths.mjs';
 import { foldKey } from '../shared/plan-fingerprint.mjs';
 import { listRequests, loadMemory, processGroupPorts, runRunner } from './runner-loop.mjs';
-import { drainedPort, liveWallProblem, pauseLeadPort, productWallGap, saveSettingsName, saveWorkPort, sessionEnv, sessionSettingsOf, sizePort, startPort, workerAccount } from './runner-ports.mjs';
+import { drainedPort, liveWallProblem, pauseLeadPort, productWallGap, pruneSessionOut, saveSettingsName, saveWorkPort, sessionEnv, sessionSettingsOf, sizePort, startPort, workerAccount } from './runner-ports.mjs';
 import { workerChecks, workerSnapshotProblem } from './runner-checks.mjs';
 import { withoutAge } from '../modules/M4-workshop/hooks/snapshot.mjs';
 import { NO_BUDGET_PORTS, budgetShapeOk, holdersOf, readFactFile, readSessionFile } from '../modules/M4-workshop/launcher/review-runner-main.mjs';
 import { spawn as childSpawn } from 'node:child_process';
 import { RUNNER_JOB_USER as BUILDER, fullPath } from './runner-job.mjs';
 import { userInfo } from 'node:os';
-import { live as isLiveSession, productRoleClash } from './owner-status.mjs';
+import { keptOutputIds, live as isLiveSession, productRoleClash } from './owner-status.mjs';
 import { CLAUDE_FILE, MANAGED_SOURCES_CHECKED_ON } from '../modules/M4-workshop/launcher/env-check.mjs';
 import { LOCKED_MS, lockedRunner } from './runner-locked.mjs';
 import { apart } from '../modules/M4-workshop/launcher/render-settings.mjs';
@@ -279,6 +279,24 @@ export const startDeps = (c, { stopped = () => false, log, productHeld, runLocke
   } });
 
 /**
+ * The sessions a memory lists as live whose group is not shown gone -> { live: [{ id, product }], bad: why or null }.
+ * One home for carriedOverProblem and the start's output pruning (#674 review m1). groupGone(s) is the process-group
+ * port; a group it can't tell about counts as live.
+ */
+export function memoryLive(memory, groupGone) {
+  const live = [];
+  for (const s of Array.isArray(memory?.sessions) ? memory.sessions : []) {
+    // An entry that is not an object (null, "abc", 42) refuses the start (#528 r2 m3, I1): skipped, a damaged memory
+    // would read as "none live".
+    if (!s || typeof s !== 'object' || Array.isArray(s)) return { live, bad: `its memory lists a session that is not what the runner writes (${String(JSON.stringify(s)).slice(0, 40)}), so it is not known that none is live` };
+    if (!isLiveSession(s)) continue;   // the one live-session rule (owner-status.mjs, #528 r1 m4)
+    let gone = false; try { gone = groupGone(s) === true; } catch { gone = false; }
+    if (!gone) live.push({ id: s.id, product: s.product });
+  }
+  return { live, bad: null };
+}
+
+/**
  * Why the runner must not start (#378 r1 M1), or null: a session it carries over (listed and not shown gone, or a start
  * still waiting) whose settings do not deny some other product of this config whole, a product added after it started.
  * groupGone(s) is the process-group port; a group it can't tell about counts as live.
@@ -293,15 +311,8 @@ export function carriedOverProblem(c, memory, { groupGone, readSettings = sessio
     if (files.length) return `it has no memory, but its settings folder holds ${files.length} earlier session${files.length === 1 ? '\'s' : 's\''} settings (${files.slice(0, 3).join(', ')}${files.length > 3 ? ', …' : ''}); a session started with one may still run. Once none does, remove them from ${c.settingsDir}`;
     return null;
   }
-  const live = [];
-  for (const s of Array.isArray(memory?.sessions) ? memory.sessions : []) {
-    // An entry that is not an object (null, "abc", 42) refuses the start (#528 r2 m3, I1): skipped, a damaged memory
-    // would read as "none live".
-    if (!s || typeof s !== 'object' || Array.isArray(s)) return `its memory lists a session that is not what the runner writes (${String(JSON.stringify(s)).slice(0, 40)}), so it is not known that none is live`;
-    if (!isLiveSession(s)) continue;   // the one live-session rule (owner-status.mjs, #528 r1 m4)
-    let gone = false; try { gone = groupGone(s) === true; } catch { gone = false; }
-    if (!gone) live.push({ id: s.id, product: s.product });
-  }
+  const { live, bad } = memoryLive(memory, groupGone);
+  if (bad) return bad;
   // Waiting rows are not counted here (#378 self-review M2): no group of theirs can be shown gone, and they are never
   // dropped, so the runner would stay down, serving no stop. Each start still checks them (worker-runner.mjs `live`).
   for (const q of Object.keys(c.products)) {
@@ -368,6 +379,8 @@ export function realRunnerPorts(c, over = {}, { stopped = () => false, log, prod
     // The session reader (L899) gives the attempt whose push took the card's bundle (L898).
     outboxDrained: drainedPort({ readFact: (fact) => readFactFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, fact }), readSession: (session) => readSessionFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, session }) }),
     size: sizePort(),
+    // #674 review m1: the older session output files, once their session is ended (pruneSessionOut).
+    pruneOutputs: (live) => pruneSessionOut(c.settingsDir, live),
     ...over,
   };
 }
@@ -468,6 +481,12 @@ export async function main(argv, { readConfig = (f) => readRunnerConfig(f, selfP
     let m = null; try { m = memory(c.memoryFile, { uid: process.getuid() }); } catch { m = null; }
     const why = m ? carriedOverProblem(c, m, { groupGone: P.groupGone }) : null;
     if (why) { log(`the worker runner did not start: ${why}`); return 1; }
+    // #674 review m1: on start, the older session output files of ended sessions go. With no memory read, none does
+    // (which sessions still run is not known).
+    if (m && typeof P.pruneOutputs === 'function') {
+      const ml = memoryLive(m, P.groupGone);
+      if (!ml.bad) { try { for (const x of P.pruneOutputs(keptOutputIds(ml.live, m.requests))?.problems ?? []) log(`worker runner: session output: ${x}`); } catch (e) { log(`worker runner: session output files were not pruned (${e?.message ?? e})`); } }
+    }
     let hooks = null;
     if (c.hookStateDir !== undefined) {
       try { hooks = hooksOf(c); } catch (e) { log(`the worker runner did not start: ${e?.message ?? e}`); return 1; }

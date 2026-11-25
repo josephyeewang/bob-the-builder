@@ -131,6 +131,13 @@ export function openRead(file) {
 
 // Running: its process group is known to be there, or nothing says it is gone or ended.
 export const live = (x) => x.alive === true || (x.alive !== false && x.ended !== true);
+/**
+ * The session ids whose output file the runner keeps whatever its age (#674 review m1): the live sessions (memoryLive)
+ * and every request not yet stopped (a start still on has made its file before its session is listed).
+ */
+export const keptOutputIds = (running, requests) => new Set([...running.map((s) => s.id),
+  ...Object.entries(requests && typeof requests === 'object' ? requests : {}).filter(([, r]) => r?.state !== 'stopped').map(([id]) => id)]);
+
 const bad = (x, why) => { throw new Error(`session ${x.id} in the worker runner's status ${why}`); };
 /** One listed session checked as the reader checks it, or a throw (the runner checks a start's answer with it before listing it). */
 export function checkSession(x, { uid, outboxRoot, realpath }) {
