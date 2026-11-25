@@ -825,6 +825,29 @@ test('Track A step 6: outboxSessions adds this product\'s Front Door tabs, by th
   assert.deepEqual(got[1], { sessionId: mine, role: 'front_door', outbox: join(fd, mine), uid: ws.c.hostLockUid, card: null, product: P });
 });
 
+test('L1370: outboxSessions adds this product\'s one-shot Leads, by their folder\'s name, as the owner\'s lead sessions', () => {
+  const ws = syncWorld();
+  const fd = join(ws.c.outboxRoot, 'front_door');
+  const ld = join(ws.c.outboxRoot, 'lead');
+  const tab = `fd-${P}-20261123120000`;
+  const mine = `ld-${P}-20261125090000`;
+  mkdirSync(join(fd, tab), { recursive: true });
+  for (const n of [mine, 'ld-other-app-20261125090000', `ld-${P}-x`, `fd-${P}-20261125090000`, 'L-1']) mkdirSync(join(ld, n), { recursive: true });
+  const got = ws.ports.outboxSessions();
+  assert.deepEqual(got.map((x) => x.sessionId), ['S-1', tab, mine], 'the runner\'s, the tabs, then the Leads; another product\'s and odd names left out');
+  assert.deepEqual(got[2], { sessionId: mine, role: 'lead', outbox: join(ld, mine), uid: ws.c.hostLockUid, card: null, product: P });
+});
+
+test('L1370: a Lead folder that can\'t be read loses only the Leads this pass, never the runner\'s or the Front Door\'s', () => {
+  const said = [];
+  const ws = syncWorld({ extraIo: { leadList: () => { throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }); }, log: (t) => said.push(t) } });
+  const tab = `fd-${P}-20261123120000`;
+  mkdirSync(join(ws.c.outboxRoot, 'front_door', tab), { recursive: true });
+  assert.deepEqual(ws.ports.outboxSessions().map((x) => x.sessionId), ['S-1', tab]);
+  assert.equal(said.length, 1);
+  assert.match(said[0], /one-shot Leads' folders could not be read this pass.*EACCES/);
+});
+
 test('#657 audit m2: a Front Door folder that can\'t be read loses only the Front Door\'s tabs this pass, never the runner\'s hand-ins', () => {
   const said = [];
   const ws = syncWorld({ extraIo: { frontDoorList: () => { throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }); }, log: (t) => said.push(t) } });

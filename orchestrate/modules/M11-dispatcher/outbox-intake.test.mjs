@@ -11,6 +11,7 @@ import { outbox } from './alerts.mjs';
 import { PRODUCT, must, setup as setupRecord, outboxFile, product, runnerLaunch, runnerEndedRecord, seed, HEAD, CLEAN_CHECKLIST } from '../M9-record/fixtures.test-helper.mjs';
 import { NEVER_RAN, runnerEnded } from '../M9-record/outbox.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
+import { readLaunchFile } from '../M3-lead/sessions.mjs';
 import { PRODUCT_OUTBOX_ROLES } from '../../shared/product-paths.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 
@@ -1781,4 +1782,124 @@ test('L1006: a script outbox with its own card\'s saved bundle gives no alert', 
   const o2 = await intakePass({ rec, sessions: [{ sessionId: 'S-4', role: 'script', product: 'p1', outbox: ob2, uid: UID, card: 'C-3' }], ...w.ports });
   assert.equal(o2.length, 1); assert.ok(o2[0].refused, JSON.stringify(o2));
   assert.equal(w.calls.alerts.length, 1, w.calls.alerts.join(' | '));
+});
+
+// Track A step 8 (L1370): a one-shot Lead's launch file. The start writes .launch.json in the Lead's outbox; the intake
+// records the launch only when the export check says the head is one the lead-main export gave.
+const ONE_SHOT = 'ld-orchestrate-test-20261125090000';
+function oneShotWorld() {
+  const E = setupRecord({ prefix: 'm11-intake-ld-' });
+  product(E);
+  const w = world();
+  const ob = mk(join(E.outRoot, 'lead', ONE_SHOT));
+  const owner = [];
+  const asked = [];
+  const sessions = [{ sessionId: ONE_SHOT, role: 'lead', outbox: ob, uid: UID, card: null, product: PRODUCT }];
+  const exported = (answer = { ok: true }) => (x) => { asked.push(x); return answer; };
+  const run = (over = {}) => withAlerts(E.record, E.clock.t, (t) => { owner.push(typeof t === 'string' ? t : t.text); return true; },
+    (alert) => intakePass({ rec: E.record, sessions, ...w.ports, alert, now: E.clock.t, replyToLead: async () => ({ ok: true }), ...over }));
+  const launchFile = (doc) => writeFileSync(join(ob, '.launch.json'), typeof doc === 'string' ? doc : JSON.stringify(doc));
+  const hand = (cards) => writeFileSync(join(ob, 'plan-a.json'), JSON.stringify({ cards }));
+  const launches = () => E.record.list('launch').filter((l) => l.doc.session_id === ONE_SHOT);
+  return { E, rec: E.record, ob, owner, asked, exported, run, launchFile, hand, launches };
+}
+
+test('L1370: a one-shot Lead\'s launch file is recorded when its head is an exported one, before its plan, so the plan is applied', async () => {
+  const p = oneShotWorld();
+  p.launchFile({ session: ONE_SHOT, product: PRODUCT, head: HEAD });
+  p.hand([planCard('C-1')]);
+  const out = await p.run({ exportedHead: p.exported() });
+  assert.deepEqual(p.asked, [{ head: HEAD, product: PRODUCT, session: ONE_SHOT }], 'the export check is asked about this head, once');
+  assert.deepEqual(out[0], { session: ONE_SHOT, launch: 'recorded', head: HEAD });
+  assert.equal(p.launches().length, 1);
+  assert.deepEqual([p.launches()[0].doc.role, p.launches()[0].doc.head, p.launches()[0].doc.product], ['lead', HEAD, PRODUCT]);
+  assert.equal(out[1].applied, true, JSON.stringify(out[1]));
+  assert.equal(p.rec.read('card', 'C-1').doc.main_commit, HEAD);
+  // Once recorded, the file is not read again.
+  let reads = 0;
+  p.E.clock.t += 60_000;
+  await p.run({ exportedHead: p.exported(), readLaunch: () => { reads += 1; return { ok: false, reason: 'x' }; } });
+  assert.equal(reads, 0);
+  assert.equal(p.asked.length, 1);
+  assert.equal(p.launches().length, 1);
+});
+
+test('L1370: until the export check is wired, a one-shot Lead\'s launch is not recorded, its plan waits, and the owner is told why', async () => {
+  const p = oneShotWorld();
+  p.launchFile({ session: ONE_SHOT, product: PRODUCT, head: HEAD });
+  p.hand([planCard('C-1')]);
+  const out = await p.run();
+  assert.equal(p.launches().length, 0);
+  assert.equal(out[0].launch, 'held');
+  assert.match(out[0].reason, /not wired/);
+  assert.match(out[1].waiting, /no launch record/);
+  assert.equal(p.rec.read('card', 'C-1'), null);
+  assert.ok(p.owner.some((t) => t.includes(`Lead ${ONE_SHOT} started on ${HEAD.slice(0, 12)}, which could not be shown to be a commit the lead-main export gave (not wired`)), p.owner.join('\n'));
+  // A check that says no, throws, hangs or answers a bare true is the same: nothing recorded.
+  for (const exportedHead of [() => ({ ok: false, reason: 'not an export' }), () => { throw new Error('git broke'); }, () => new Promise(() => {}), () => true]) {
+    const q = oneShotWorld();
+    q.launchFile({ session: ONE_SHOT, product: PRODUCT, head: HEAD });
+    const [r] = await q.run({ exportedHead, portMs: 20 });
+    assert.equal(r.launch, 'held', String(exportedHead));
+    assert.equal(q.launches().length, 0, String(exportedHead));
+  }
+});
+
+test('L1370: a launch file that is not this start\'s is never used, and the export check is not asked; no file is not told', async () => {
+  const bad = [
+    [{ session: 'ld-orchestrate-test-20261125090001', product: PRODUCT, head: HEAD }, /another session/],
+    [{ session: ONE_SHOT, product: 'other', head: HEAD }, /another product/],
+    [{ session: ONE_SHOT, product: PRODUCT, head: HEAD.slice(0, 12) }, /not a full commit sha/],
+    [{ session: ONE_SHOT, product: PRODUCT, head: HEAD, card: 'C-1' }, /session, product and head only/],
+    ['{"session":', /does not read as JSON/],
+    [`"${HEAD}"`, /not a JSON object/],
+    [`${JSON.stringify({ session: ONE_SHOT, product: PRODUCT, head: HEAD })}${' '.repeat(5000)}`, /too big/],
+  ];
+  for (const [doc, why] of bad) {
+    const p = oneShotWorld();
+    p.launchFile(doc);
+    const [r] = await p.run({ exportedHead: p.exported() });
+    assert.equal(r.launch, 'held', String(why));
+    assert.match(r.reason, why);
+    assert.deepEqual(p.asked, [], String(why));
+    assert.equal(p.launches().length, 0);
+    assert.ok(p.owner.some((t) => t.includes(`the Lead ${ONE_SHOT}'s launch file was not used`)), String(why));
+  }
+  // A reader that throws holds the launch too; the pass goes on.
+  const t = oneShotWorld();
+  const [thrown] = await t.run({ exportedHead: t.exported(), readLaunch: () => { throw Object.assign(new Error('io'), { code: 'EIO' }); } });
+  assert.deepEqual([thrown.launch, thrown.reason], ['held', 'the launch file could not be read (EIO)']);
+  assert.deepEqual(t.asked, []);
+  // A link to a good file is not followed.
+  const p = oneShotWorld();
+  const elsewhere = join(dirname(p.ob), 'real.json');
+  writeFileSync(elsewhere, JSON.stringify({ session: ONE_SHOT, product: PRODUCT, head: HEAD }));
+  symlinkSync(elsewhere, join(p.ob, '.launch.json'));
+  const [r] = await p.run({ exportedHead: p.exported() });
+  assert.match(r.reason, /without following a link/);
+  assert.equal(p.launches().length, 0);
+  // Another user's file is refused (the reader is given the session's uid).
+  const q = oneShotWorld();
+  q.launchFile({ session: ONE_SHOT, product: PRODUCT, head: HEAD });
+  assert.match(readLaunchFile({ sessionId: ONE_SHOT, outbox: q.ob, uid: UID + 1, product: PRODUCT }).reason, /not the owner's/);
+  // No file at all: nothing told, nothing asked (a Lead the runner started has none), and the plan waits as before.
+  const n = oneShotWorld();
+  n.hand([planCard('C-1')]);
+  const out = await n.run({ exportedHead: n.exported() });
+  assert.deepEqual(n.asked, []);
+  assert.equal(out.length, 1);
+  assert.match(out[0].waiting, /no launch record/);
+  assert.equal(n.owner.some((t) => /launch file/.test(t)), false);
+});
+
+test('L1370: a Lead that already has a launch record (one the runner started) never has a launch file read', async () => {
+  const p = oneShotWorld();
+  must(recordLeadLaunch({ rec: p.rec, now: p.E.clock.t, alert: fakeAlert(), sessionId: ONE_SHOT, head: HEAD, product: PRODUCT }));
+  p.launchFile({ session: ONE_SHOT, product: PRODUCT, head: 'b'.repeat(40) });
+  let reads = 0;
+  const out = await p.run({ exportedHead: p.exported(), readLaunch: () => { reads += 1; return { ok: true, head: 'b'.repeat(40) }; } });
+  assert.equal(reads, 0);
+  assert.deepEqual(p.asked, []);
+  assert.deepEqual(out, []);
+  assert.equal(p.launches().length, 1);
 });
