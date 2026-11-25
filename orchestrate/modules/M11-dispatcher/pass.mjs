@@ -104,16 +104,18 @@ export const UNKNOWN_FACT = 'unknown-usage-alert';
 export const RESET_FACT = 'reset-usage-alert';
 export const RULES_MISSING_FACT = 'rules-missing-alert';
 // L1365: a card whose session ended without finishing waits with this `what` (tick.mjs actOnDead writes it, as
-// `dead_session: <why>`), and the waits step starts it again while its re-runs in DEAD_RERUN_WINDOW_MS are under the
+// `dead_session: <why>`), and the waits step puts it back in the queue while its re-runs in DEAD_RERUN_WINDOW_MS are under the
 // product's claims.dead_reruns_per_day. The re-runs are counted on DEAD_RERUN_FACT(card): { times: [iso, ...] }, the
 // times of those within the window, written before the card moves (a move that then fails is over-counted, never under).
 export const DEAD_SESSION_WAIT = 'dead_session';
 export const isDeadSessionWait = (what) => typeof what === 'string' && what.startsWith(`${DEAD_SESSION_WAIT}:`);
 export const DEAD_RERUN_FACT = (card) => `dead-rerun-${card}`;
 export const DEAD_RERUN_WINDOW_MS = 24 * 60 * 60_000;
-export const deadRerunText = (card, n, cap) => `card ${card}: its session ended without finishing; started again (${n} of ${cap} in the last 24 hours)`;
+// L1367 item 2: the card is put back in the queue, not started: the start loop starts it, when the band and caps let it.
+export const deadRerunText = (card, n, cap) => `card ${card}: its session ended without finishing; put back in the queue (${n} of ${cap} in the last 24 hours)`;
 /** The tail of actOnDead's tell for a card at the cap (L1365 m4): it waits on Joe until the oldest re-run is 24 h old. */
-export const deadCapText = (n, oldest) => `; it was started again ${n} times in the last 24 hours, the most claims.dead_reruns_per_day allows, so it is not started again by itself ${oldest === null ? 'while its re-run times cannot be read' : `before ${new Date(oldest + DEAD_RERUN_WINDOW_MS).toISOString()}`}`;
+// `oldest` null: no kept time is a readable past one (deadReruns: one ahead of the clock or unreadable counts, undated).
+export const deadCapText = (n, oldest) => `; it was put back in the queue ${n} times in the last 24 hours, the most claims.dead_reruns_per_day allows, so it is not put back by itself ${oldest === null ? 'while its re-run times are in the future or cannot be read' : `before ${new Date(oldest + DEAD_RERUN_WINDOW_MS).toISOString()}`}`;
 /**
  * The re-runs that count against the cap (L1365 M1). It fails closed: a time that can't be read, or lies ahead of now
  * past the skew allowed (pastTime, I4: a clock stepped back), counts as inside the window and is kept, and a fact
@@ -749,12 +751,14 @@ export async function dispatcherPass({ rec, rules, now, clock = () => now, accou
       else askJoe(id, { what: 'limit_hit: the limit reset; Tier-1 work does not resume by itself', now, kind: 'limit_reset', alert,
         text: `card ${id}: the usage limit it waited on reset, but Tier-1 work does not resume by itself; it waits on you` });
     } else if (isDeadSessionWait(what)) {
-      // L1365: the bounded re-run. Every card not started again here (past the cap, no key, a count that can't be read
-      // or written) stays waiting on Joe; the missing key is told with the others, the rest by holdAlert, once a day.
+      // L1365: the bounded re-run. Every card not put back in the queue here (past the cap, no key, a count that can't be
+      // read or written, a move refused) stays waiting on Joe; the missing key is told with the others, the rest by
+      // tellDead (holdAlert), once a day. tellDead is the one teller of a refused move back to ready (L1367 item 3):
+      // resume_dead_session is not a refused-writes kind, so it is not told twice.
       // Open: L1365 — Joe has no command or answer to retry or cancel a card waiting on him; past the cap it waits.
       // Open: L1365 m3 — a wait whose return_to is not ready is left on Joe. The Record's release (writer.mjs) frees
-      // only a card still claimed, and claimed -> waiting is not a move the Record allows, so actOnDead's ask for a
-      // claimed card is itself refused and no such wait is made today.
+      // only a card still claimed, and actOnDead puts only a running card on Joe (L1367 item 1: a claimed card's dead
+      // session is the lapse's), so no such wait is made today.
       if (doc.wait?.return_to !== 'ready') continue;
       const tellDead = (line) => {
         failing(line);
@@ -767,10 +771,10 @@ export async function dispatcherPass({ rec, rules, now, clock = () => now, accou
         continue;
       }
       const used = deadReruns(rec, id, now);
-      if (used.corrupt) { tellDead(`card ${id}: its dead-session re-runs can't be read (${used.corrupt}), so it is not started again`); continue; }
+      if (used.corrupt) { tellDead(`card ${id}: its dead-session re-runs can't be read (${used.corrupt}), so it is not put back in the queue`); continue; }
       if (used.times.length >= cap) continue;
       const counted = putFact(rec, DEAD_RERUN_FACT(id), { ...(used.doc ?? {}), times: [...used.times, iso(now)] }, 'dead_rerun_count', used.doc);
-      if (!counted?.ok) { tellDead(`card ${id}: its dead-session re-run could not be counted (${counted?.reason ?? 'no answer'}), so it is not started again`); continue; }
+      if (!counted?.ok) { tellDead(`card ${id}: its dead-session re-run could not be counted (${counted?.reason ?? 'no answer'}), so it is not put back in the queue`); continue; }
       const back = move(rec, 'card', id, { state: 'ready' }, { kind: 'resume_dead_session' });
       if (back.ok) {
         out.resumed.push(id);
