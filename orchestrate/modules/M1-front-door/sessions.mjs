@@ -31,4 +31,4 @@ export const isFrontDoorSession = (name, product) => isOwnerSession(FRONT_DOOR_P
 export const frontDoorFolder = (outboxRoot) => join(outboxRoot, FRONT_DOOR_ROLE);
 
 /** This product's Front Door sessions (shared/owner-sessions.mjs ownerSessions, role front_door). */
-export const frontDoorSessions = (o) => ownerSessions({ ...o, role: FRONT_DOOR_ROLE, prefix: FRONT_DOOR_PREFIX });
+export const frontDoorSessions = (o) => ownerSessions({ ...o, role: FRONT_DOOR_ROLE, prefix: FRONT_DOOR_PREFIX, label: 'Front Door' });

@@ -880,10 +880,15 @@ test('L1370: the leadMain port runs only rev-parse and archive, only on a mirror
   const port = leadMainPorts({ config: { ...w.config, leadMainRoot: root }, selfUid: ME }, { run });
   await assert.rejects(port.exportMain(), /could not read main in the mirror \(stub\)/);
   assert.deepEqual(calls, [['rev-parse', w.mirror, 'lead-main-export']]);
-  // No leadMainRoot in the config (one written before the key): the step fails, told daily, and runs no git.
+  // No leadMainRoot in the config (one written before the key): not configured, so the tick skips the step quietly;
+  // the log's line is answered once per port (one port per start); exportMain still refuses, and runs no git.
   calls.length = 0;
+  assert.equal(port.configured, true);
   const { leadMainRoot: _, ...old } = { ...w.config };
-  await assert.rejects(leadMainPorts({ config: old, selfUid: ME }, { run }).exportMain(), (e) => e.message === NOT_CONFIGURED);
+  const unset = leadMainPorts({ config: old, selfUid: ME }, { run });
+  assert.equal(unset.configured, false);
+  assert.deepEqual([unset.skipNote(), unset.skipNote()], [`skipped: ${NOT_CONFIGURED}`, null]);
+  await assert.rejects(unset.exportMain(), (e) => e.message === NOT_CONFIGURED);
   // A root others can write is refused before any git.
   chmodSync(root, 0o777);
   await assert.rejects(port.exportMain(), /can be written by others/);

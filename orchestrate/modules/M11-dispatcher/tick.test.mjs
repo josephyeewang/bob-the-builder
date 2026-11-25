@@ -5,7 +5,9 @@ import { mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync, readdirSyn
 import { takePassLock } from './pass-lock.mjs';
 import { RESTART_FACT, HANDOFF_NAME } from './lead-restart.mjs';
 import { leadLaunchHead } from '../../shared/record.mjs';
-import { LEAD_MAIN_FACT } from './lead-main.mjs';
+import { LEAD_MAIN_FACT, NOT_CONFIGURED } from './lead-main.mjs';
+import { EXPORT_NOT_WIRED } from './outbox-intake.mjs';
+import { leadMainPorts } from '../../wiring/worker-ports.mjs';
 import { RULES_MISSING_FACT, STOP_FACT, PAUSE_FACT, UNDO_HELD_FACT, HOLD_FACT, HOST_COPY_FAIL } from './pass.mjs';
 import { factFamilyOf } from '../M9-record/permissions.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
@@ -72,7 +74,7 @@ function world(entries = [], { over = {}, rules = rulesWith({}, allow), outboxRo
     sendFrontDoor: async () => ({ outcome: 'sent' }), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
     frontDoorAlive: () => null, frontDoorHandoff: () => null,
     cleanup: { copiesRoot: empty, sealRoot: empty, mirrorFor: () => null },
-    leadMain: { product: 'p1', exportMain: async () => ({ head: 'c'.repeat(40), changed: false }) },
+    leadMain: { product: 'p1', configured: true, exportMain: async () => ({ head: 'c'.repeat(40), changed: false }) },
     // No products for Approvals in this world (the test world only: in production a missing port fails the step).
     approvals: () => [],
     ...over,
@@ -682,7 +684,7 @@ export async function wire() {
     launch: () => new Promise(() => {}), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
     sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
-    leadMain: { product: 'p1', exportMain: async () => ({ head: 'c'.repeat(40), changed: false }) }, cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null }, approvals: () => [] } };
+    leadMain: { product: 'p1', configured: true, exportMain: async () => ({ head: 'c'.repeat(40), changed: false }) }, cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null }, approvals: () => [] } };
 }
 `);
   const config = L.path('config.json');
@@ -716,7 +718,7 @@ export async function wire(config) {
     sessions: noop, probe: () => null, launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
     sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
-    leadMain: { product: 'p1', exportMain: async () => ({ head: 'c'.repeat(40), changed: false }) }, cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null }, approvals: () => [] } };
+    leadMain: { product: 'p1', configured: true, exportMain: async () => ({ head: 'c'.repeat(40), changed: false }) }, cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null }, approvals: () => [] } };
 }
 export { rec };
 `);
@@ -804,7 +806,7 @@ export async function wire() {
     sessions: noop, probe: () => null, launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
     sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
-    leadMain: { product: 'p1', exportMain: async () => ({ head: 'c'.repeat(40), changed: false }) }, cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null }, approvals: () => [] } };
+    leadMain: { product: 'p1', configured: true, exportMain: async () => ({ head: 'c'.repeat(40), changed: false }) }, cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null }, approvals: () => [] } };
 }
 `);
   const config = L.path('config.json');
@@ -1002,7 +1004,7 @@ export async function wire() {
     launch: () => new Promise(() => { setInterval(() => {}, 1000); }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
     sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
-    leadMain: { product: 'p1', exportMain: async () => ({ head: 'c'.repeat(40), changed: false }) }, cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null }, approvals: () => [] } };
+    leadMain: { product: 'p1', configured: true, exportMain: async () => ({ head: 'c'.repeat(40), changed: false }) }, cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null }, approvals: () => [] } };
 }
 `);
   const lockFile = join(dir, 'pass.lock');
@@ -1450,7 +1452,7 @@ export async function wire() {
     sessions: block, probe: () => null, launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
     sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
-    leadMain: { product: 'p1', exportMain: async () => ({ head: 'c'.repeat(40), changed: false }) }, cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null }, approvals: () => [] } };
+    leadMain: { product: 'p1', configured: true, exportMain: async () => ({ head: 'c'.repeat(40), changed: false }) }, cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null }, approvals: () => [] } };
 }
 `);
   const lockFile = join(dir, 'pass.lock');
@@ -1487,7 +1489,7 @@ export async function wire() {
     sessions: noop, probe: () => null, launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
     sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
-    leadMain: { product: 'p1', exportMain: async () => ({ head: 'c'.repeat(40), changed: false }) }, cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null }, approvals: () => [] } };
+    leadMain: { product: 'p1', configured: true, exportMain: async () => ({ head: 'c'.repeat(40), changed: false }) }, cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null }, approvals: () => [] } };
 }
 `);
   const config = L.path('config.json');
@@ -1534,7 +1536,7 @@ export async function wire() {
     sessions: block, probe: () => null, launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
     sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
-    leadMain: { product: 'p1', exportMain: async () => ({ head: 'c'.repeat(40), changed: false }) }, cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null }, approvals: () => [] } };
+    leadMain: { product: 'p1', configured: true, exportMain: async () => ({ head: 'c'.repeat(40), changed: false }) }, cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null }, approvals: () => [] } };
 }
 `);
   const config = L.path('config.json');
@@ -1797,7 +1799,7 @@ export async function wire() {
     sessions: noop, probe: () => null, launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
     sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
-    leadMain: { product: 'p1', exportMain: async () => ({ head: 'c'.repeat(40), changed: false }) }, cleanup: { copiesRoot: ${JSON.stringify(L.base)}, sealRoot: ${JSON.stringify(L.base)}, mirrorFor: () => null }, approvals: () => [] } };
+    leadMain: { product: 'p1', configured: true, exportMain: async () => ({ head: 'c'.repeat(40), changed: false }) }, cleanup: { copiesRoot: ${JSON.stringify(L.base)}, sealRoot: ${JSON.stringify(L.base)}, mirrorFor: () => null }, approvals: () => [] } };
 }
 `);
   const config = L.path('config.json');
@@ -2410,7 +2412,7 @@ test('L1370: the tick wires exportedHead to the heads the lead-main step noted; 
   mkdirSync(dir, { recursive: true });
   const sessions = [];
   let head = H1;
-  const w = world([account(), usage()], { over: { outboxSessions: () => [...sessions], leadMain: { product: 'p1', exportMain: async () => ({ head, changed: true }) } } });
+  const w = world([account(), usage()], { over: { outboxSessions: () => [...sessions], leadMain: { product: 'p1', configured: true, exportMain: async () => ({ head, changed: true }) } } });
   const first = await w.pass();
   assert.equal(first.steps['lead-main'].ok, true, first.steps['lead-main'].error);
   assert.deepEqual(w.rec.read('fact', LEAD_MAIN_FACT('p1')).doc.heads, [H1]);
@@ -2434,10 +2436,38 @@ test('L1370: the tick wires exportedHead to the heads the lead-main step noted; 
   assert.deepEqual(w.rec.read('fact', LEAD_MAIN_FACT('p1')).doc.heads, [H2, H1]);
 });
 
-test('L1370: a lead-main step that fails (no leadMainRoot in the config) is told, and the other steps run', async () => {
-  const w = world([account(), usage()], { over: { leadMain: { product: 'p1', exportMain: async () => { throw new Error('not configured: no leadMainRoot'); } } } });
+test('L1370: a lead-main step that fails (a configured root that is bad) is told, and the other steps run', async () => {
+  const w = world([account(), usage()], { over: { leadMain: { product: 'p1', configured: true, exportMain: async () => { throw new Error("the Lead's copy folder (leadMainRoot) /x can be written by others (mode 777)"); } } } });
   const r = await w.pass();
   assert.equal(r.steps['lead-main'].ok, false);
-  assert.ok(w.calls.alerts.some((a) => /lead-main step failed: not configured/.test(a)), w.calls.alerts.join(' | '));
+  assert.ok(w.calls.alerts.some((a) => /lead-main step failed: the Lead's copy folder \(leadMainRoot\) \/x can be written by others/.test(a)), w.calls.alerts.join(' | '));
   for (const s of STEPS.filter((x) => x !== 'lead-main')) assert.equal(r.steps[s].ok, true, s);
+});
+
+// L1370 (Lead, before #681's audit): a config written before leadMainRoot was a key (the live one, until setup's
+// dispatcher step runs again with Joe's admin password) must not fail a step or tell Joe daily.
+test('L1370: no leadMainRoot in the config: the step is skipped quietly, one log line per start, no alert, and exportedHead stays unwired', async () => {
+  let exported = 0;
+  // The real port, from a config with no leadMainRoot; its exportMain is watched, never to be called.
+  const real = leadMainPorts({ config: { product: 'p1', mirror: '/nonexistent-mirror' }, selfUid: process.getuid() });
+  assert.equal(real.configured, false);
+  const leadMain = { ...real, exportMain: async () => { exported += 1; return real.exportMain(); } };
+  const sid = 'ld-p1-20261029120000';
+  const dir = join(tempDir('m11-ld-'), 'lead', sid);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, '.launch.json'), JSON.stringify({ session: sid, product: 'p1', head: '1'.repeat(40) }));
+  const sessions = [{ sessionId: sid, role: 'lead', outbox: dir, uid: process.getuid(), product: 'p1' }];
+  const w = world([account(), usage()], { over: { outboxSessions: () => [...sessions], leadMain } });
+  const runs = [];
+  for (const min of [0, 1, 60 * 25]) runs.push(await w.pass(min));
+  for (const r of runs) assert.equal(r.steps['lead-main'].ok, true, r.steps['lead-main'].error);
+  assert.equal(exported, 0, 'nothing is exported');
+  assert.equal(w.rec.read('fact', STEP_ERROR_FACT('lead-main')), null, 'no step error is kept');
+  assert.equal(w.rec.read('fact', LEAD_MAIN_FACT('p1')), null, 'no head is noted');
+  assert.ok(!w.calls.alerts.some((a) => /lead-main step|leadMainRoot|not configured/.test(a)), w.calls.alerts.join(' | '));
+  // One line to the log for the start (the port is made once per start), none on later passes.
+  assert.deepEqual(runs.map((r) => r.reports.filter((l) => l.startsWith('lead-main:'))), [[`lead-main: skipped: ${NOT_CONFIGURED}`], [], []]);
+  // exportedHead is left to the intake's default: the Lead's launch is not recorded, and the hold says why.
+  assert.equal(leadLaunchHead(w.rec, sid), null);
+  assert.ok(w.calls.alerts.some((a) => a.includes(EXPORT_NOT_WIRED)), w.calls.alerts.join(' | '));
 });

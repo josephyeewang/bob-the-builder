@@ -114,7 +114,8 @@ export const OPTIONAL_CONFIG_KEYS = Object.freeze(['hostLockStamp']);
 // leadMainRoot: optional too (L1370), the Lead's read-only copy folder (setup layout.mjs leadMainPath), which setup
 // writes. A config written before it was a key still starts: the Dispatcher's code is updated from main on its own, its
 // config only when setup is run again, so a required key would stop the live Dispatcher. Without it the lead-main step
-// fails, told daily (worker-ports.mjs leadMainPorts), and no one-shot Lead's launch is recorded.
+// is skipped quietly (one log line per start, no alert; worker-ports.mjs leadMainPorts), and no one-shot Lead's launch
+// is recorded.
 export const CONFIG_KEYS = Object.freeze(['installRoot', 'wiring', 'lockFile', 'runDeadlineMs', 'product', 'recordRoot', 'ownerUid', 'productsFile', 'rulesStateDir', 'tokenFile', 'approvalsStateDir',
   'rulesSnapshotFile', 'leadMainRoot', ...REVIEW_CONFIG_KEYS, ...WORKER_CONFIG_KEYS]);
 const PATHS = Object.freeze(['recordRoot', 'productsFile', 'rulesStateDir', 'tokenFile', 'approvalsStateDir', ...[...REVIEW_CONFIG_KEYS, ...WORKER_CONFIG_KEYS].filter((k) => !UID_KEYS.includes(k))]);

@@ -36,11 +36,12 @@ export function isOwnerSession(prefix, name, product) {
 /**
  * This product's sessions of `role`, as intake's session list has them (wiring/owner-ports.mjs outboxSessions):
  * [{ sessionId, role, outbox, uid, card: null, product }]. Only plain folders count (a link is left out; the Record
- * refuses one anyway). No role folder yet (none was set up) is none; any other failure to list throws.
+ * refuses one anyway). No role folder yet (none was set up) is none; any other failure to list throws. `label` is the
+ * role as the owner reads it ("Front Door", "Lead"), for the errors.
  */
-export function ownerSessions({ role, prefix, outboxRoot, product, uid, list = (d) => readdirSync(d), lstat = (p) => lstatSync(p) }) {
-  if (typeof outboxRoot !== 'string' || !outboxRoot.startsWith('/')) throw new Error(`the ${role} sessions need the outbox root`);
-  if (!Number.isSafeInteger(uid) || uid < 0) throw new Error(`the ${role} sessions need the owner's Mac user id`);
+export function ownerSessions({ role, prefix, label = role, outboxRoot, product, uid, list = (d) => readdirSync(d), lstat = (p) => lstatSync(p) }) {
+  if (typeof outboxRoot !== 'string' || !outboxRoot.startsWith('/')) throw new Error(`the ${label} sessions need the outbox root`);
+  if (!Number.isSafeInteger(uid) || uid < 0) throw new Error(`the ${label} sessions need the owner's Mac user id`);
   const dir = join(outboxRoot, role);
   let names;
   try { names = list(dir); } catch (e) { if (e?.code === 'ENOENT') return []; throw e; }

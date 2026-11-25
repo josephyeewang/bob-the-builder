@@ -14,9 +14,9 @@
 //
 // STILL OWED: the start command that makes the folder and writes this file (step 8 PR 3), and the export check (PR 2).
 
-import { closeSync, constants as C, fstatSync, openSync, readSync } from 'node:fs';
 import { join } from 'node:path';
 import { ownerSessionId, isOwnerSession, ownerSessions } from '../../shared/owner-sessions.mjs';
+import { readOwnedFile } from '../M4-workshop/launcher/outbox.mjs';
 
 export const LEAD_ROLE = 'lead';
 export const LEAD_PREFIX = 'ld';
@@ -30,7 +30,7 @@ export const leadSessionId = (product, date = new Date()) => ownerSessionId(LEAD
 export const isLeadSession = (name, product) => isOwnerSession(LEAD_PREFIX, name, product);
 
 /** This product's one-shot Lead sessions (shared/owner-sessions.mjs ownerSessions, role lead). */
-export const leadSessions = (o) => ownerSessions({ ...o, role: LEAD_ROLE, prefix: LEAD_PREFIX });
+export const leadSessions = (o) => ownerSessions({ ...o, role: LEAD_ROLE, prefix: LEAD_PREFIX, label: 'Lead' });
 
 /** The launch file's text for a start: what the start command writes. */
 export function launchFileText({ session, product, head }) {
@@ -38,34 +38,27 @@ export function launchFileText({ session, product, head }) {
 }
 
 /**
- * The launch file of session `s` ({ sessionId, outbox, uid, product }): { ok: true, head } | { ok: false, none?, reason }.
- * `none` is "no file" (nothing to tell: a Lead the runner started has none). Opened without following a link; it must be
- * a plain file with one name, `s.uid`'s, small, and name this session and product with a full commit sha, nothing else.
+ * The launch file of session `s` ({ sessionId, outbox, uid, product }): { ok: true, head, mtimeMs } | { ok: false, none?,
+ * reason, mtimeMs? }. `none` is "no file" (nothing to tell: a Lead the runner started has none); `mtimeMs` is when the
+ * file was last written, once it was seen (intake stops looking at a start older than a day). Opened through M4's one
+ * safe open (readOwnedFile): not following a link, a plain file with one name, `s.uid`'s, small. It must name this
+ * session and product with a full commit sha, nothing else.
  */
-export function readLaunchFile(s, { open = openSync } = {}) {
-  let fd;
-  try { fd = open(join(s.outbox, LAUNCH_FILE), C.O_RDONLY | C.O_NOFOLLOW | (C.O_NONBLOCK ?? 0)); } catch (e) {
-    return e?.code === 'ENOENT' ? { ok: false, none: true, reason: 'no launch file' } : { ok: false, reason: `the launch file could not be opened without following a link (${e?.code ?? 'error'})` };
+export function readLaunchFile(s, { open } = {}) {
+  const f = readOwnedFile(join(s.outbox, LAUNCH_FILE), { uid: s.uid, label: 'the launch file', owner: 'the owner', maxBytes: LAUNCH_MAX_BYTES, ...(open ? { open } : {}) });
+  if (!f.ok) {
+    if (f.missing) return { ok: false, none: true, reason: 'no launch file' };
+    return { ok: false, reason: f.code ? `${f.reason} (${f.code})` : f.reason, ...(f.mtimeMs !== undefined ? { mtimeMs: f.mtimeMs } : {}) };
   }
-  let text;
-  try {
-    const st = fstatSync(fd);
-    if (!st.isFile()) return { ok: false, reason: 'the launch file is not a plain file' };
-    if (st.nlink !== 1) return { ok: false, reason: 'the launch file has more than one link' };
-    if (st.uid !== s.uid) return { ok: false, reason: 'the launch file is not the owner\'s' };
-    if (st.size > LAUNCH_MAX_BYTES) return { ok: false, reason: 'the launch file is too big' };
-    const buf = Buffer.alloc(LAUNCH_MAX_BYTES + 1);
-    const n = readSync(fd, buf, 0, buf.length, 0);
-    if (n > LAUNCH_MAX_BYTES) return { ok: false, reason: 'the launch file is too big' };
-    text = buf.subarray(0, n).toString('utf8');
-  } finally { closeSync(fd); }
+  const at = { mtimeMs: f.mtimeMs };
+  const no = (reason) => ({ ok: false, reason, ...at });
   let doc;
-  try { doc = JSON.parse(text); } catch { return { ok: false, reason: 'the launch file does not read as JSON' }; }
-  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return { ok: false, reason: 'the launch file is not a JSON object' };
+  try { doc = JSON.parse(f.text); } catch { return no('the launch file does not read as JSON'); }
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return no('the launch file is not a JSON object');
   const keys = Object.keys(doc).sort().join(',');
-  if (keys !== 'head,product,session') return { ok: false, reason: 'the launch file must hold session, product and head only' };
-  if (doc.session !== s.sessionId) return { ok: false, reason: 'the launch file names another session' };
-  if (doc.product !== s.product) return { ok: false, reason: 'the launch file names another product' };
-  if (typeof doc.head !== 'string' || !/^[0-9a-f]{40}$/.test(doc.head)) return { ok: false, reason: 'the launch file\'s head is not a full commit sha' };
-  return { ok: true, head: doc.head };
+  if (keys !== 'head,product,session') return no('the launch file must hold session, product and head only');
+  if (doc.session !== s.sessionId) return no('the launch file names another session');
+  if (doc.product !== s.product) return no('the launch file names another product');
+  if (typeof doc.head !== 'string' || !/^[0-9a-f]{40}$/.test(doc.head)) return no('the launch file\'s head is not a full commit sha');
+  return { ok: true, head: doc.head, ...at };
 }

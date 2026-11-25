@@ -4,7 +4,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
+import { linkSync, mkdirSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { SESSION_ID } from '../../shared/record-names.mjs';
@@ -47,8 +47,40 @@ test('the launch file the start writes is the one the intake reads, and only for
   mkdirSync(s.outbox);
   assert.deepEqual(readLaunchFile(s), { ok: false, none: true, reason: 'no launch file' });
   writeFileSync(join(s.outbox, LAUNCH_FILE), launchFileText({ session: s.sessionId, product: 'p', head: HEAD }));
-  assert.deepEqual(readLaunchFile(s), { ok: true, head: HEAD });
+  const read = readLaunchFile(s);
+  assert.deepEqual([read.ok, read.head], [true, HEAD]);
+  assert.equal(read.mtimeMs, statSync(join(s.outbox, LAUNCH_FILE)).mtimeMs, 'when the start wrote it, so intake can stop looking after a day');
   assert.equal(LAUNCH_FILE.startsWith('.'), true, 'a dot-name: never a hand-in, and the Lead\'s own tools may not write it');
   assert.match(readLaunchFile({ ...s, product: 'q' }).reason, /another product/);
   assert.match(readLaunchFile({ ...s, sessionId: 'ld-p-20261125090508' }).reason, /another session/);
+});
+
+// L1370 audit m3: the launch file goes through M4's one safe open (readOwnedFile), with its size cap and link count.
+test('the launch file is opened as an outbox file is: no link followed, one name, the owner\'s, small', () => {
+  const root = tempDir('m3-ld-safe-');
+  const s = { sessionId: 'ld-p-20261125090507', outbox: join(root, 'ld-p-20261125090507'), uid: process.getuid(), product: 'p' };
+  mkdirSync(s.outbox);
+  const text = launchFileText({ session: s.sessionId, product: 'p', head: HEAD });
+  writeFileSync(join(root, 'elsewhere.json'), text);
+  symlinkSync(join(root, 'elsewhere.json'), join(s.outbox, LAUNCH_FILE));
+  assert.match(readLaunchFile(s).reason, /^the launch file could not be opened without following a link \(\w+\)$/);
+  const t = { ...s, outbox: join(root, 't') };
+  mkdirSync(t.outbox);
+  linkSync(join(root, 'elsewhere.json'), join(t.outbox, LAUNCH_FILE));
+  assert.equal(readLaunchFile(t).reason, 'the launch file has more than one link');
+  const u = { ...s, outbox: join(root, 'u') };
+  mkdirSync(join(u.outbox, LAUNCH_FILE), { recursive: true });
+  assert.equal(readLaunchFile(u).reason, 'the launch file is not a plain file');
+  const v = { ...s, outbox: join(root, 'v') };
+  mkdirSync(v.outbox);
+  writeFileSync(join(v.outbox, LAUNCH_FILE), `${text}${' '.repeat(5000)}`);
+  assert.equal(readLaunchFile(v).reason, 'the launch file is too big');
+  writeFileSync(join(v.outbox, LAUNCH_FILE), text);
+  assert.equal(readLaunchFile({ ...v, uid: v.uid + 1 }).reason, 'the launch file is not owned by the owner');
+});
+
+// L1370 audit c2: the errors name the role as the owner reads it.
+test('the listing\'s errors say "Lead" and "Front Door", not the role keys', () => {
+  assert.throws(() => leadSessions({ outboxRoot: 'rel', product: 'p', uid: 1 }), /^Error: the Lead sessions need the outbox root$/);
+  assert.throws(() => frontDoorSessions({ outboxRoot: '/x', product: 'p', uid: -1 }), /^Error: the Front Door sessions need the owner's Mac user id$/);
 });

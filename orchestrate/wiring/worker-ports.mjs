@@ -41,7 +41,8 @@
 //   board()              → this product's worker sessions only, by the product the status names (L927); a dead one's
 //                          claim is read from this Record (recordHolds).
 //   outboxSessions()     → this product's open worker and script outboxes: another product's are its own Dispatcher's;
-//                          then this product's Front Door sessions (M1 sessions.mjs frontDoorSessions), the owner's files.
+//                          then this product's Front Door sessions (M1 sessions.mjs frontDoorSessions) and one-shot
+//                          Leads (M3 sessions.mjs leadSessions, L1370), the owner's files.
 //   probe(session)       → the worker runner's, for the kinds it starts (RUNNER_KINDS). Every other kind throws: the
 //                          review runner reports no size or activity, and no runner here starts the rest (L925 rule 2).
 //   stopSession(id)      → the worker runner's: true once the launch request is used up, else a stop request in its
@@ -179,7 +180,9 @@ export function untarInto(tar, dir, { bin = '/usr/bin/tar', timeoutMs = UNTAR_MS
  * The lead-main export's port (Track A step 8 G1, L1370; lead-main.mjs): `exportMain()` makes <leadMainRoot>/<product>
  * main's files from this product's mirror. Its git runs only rev-parse and archive, only on the mirror, each time after
  * the mirror's own check; the root is checked on each call too (a plain folder, this job's, others read but don't write).
- * A config with no leadMainRoot (one written before it was a key) makes the step fail with NOT_CONFIGURED, told daily.
+ * A config with no leadMainRoot (one written before it was a key) gives `configured: false`: the tick skips the step
+ * quietly and leaves exportedHead unwired, and `skipNote()` answers the log's one line the first time only (one port per
+ * start). `exportMain` itself still refuses with NOT_CONFIGURED.
  */
 export function leadMainPorts({ config: c, selfUid }, { run = safeGit, untar = untarInto } = {}) {
   const git = (args) => {
@@ -188,8 +191,11 @@ export function leadMainPorts({ config: c, selfUid }, { run = safeGit, untar = u
     if (bad) return Promise.resolve({ code: -1, stdout: Buffer.alloc(0), stderr: `lead-main git: refused: ${bad}` });
     return run(args, { gitDir: c.mirror, purpose: 'lead-main-export', timeoutMs: LEAD_MAIN_GIT_MS });
   };
+  let skipTold = false;
   return {
     product: c.product,
+    configured: c.leadMainRoot !== undefined,
+    skipNote: () => (skipTold ? null : ((skipTold = true), `skipped: ${NOT_CONFIGURED}`)),
     exportMain: async () => {
       if (c.leadMainRoot === undefined) throw new Error(NOT_CONFIGURED);
       const bad = leadMainRootProblem(c.leadMainRoot, selfUid);

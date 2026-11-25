@@ -67,7 +67,7 @@ function world({ pause = true, cards = ['C-1', 'C-2'], live = [{ id: 'S-1', prod
     filesOf: filesOfCommits,
     sendFrontDoor: async () => ({ outcome: 'sent' }), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
     frontDoorAlive: () => null, frontDoorHandoff: () => null,
-    leadMain: { product: 'p1', exportMain: async () => ({ head: 'c'.repeat(40), changed: false }) }, cleanup: { copiesRoot: empty, sealRoot: empty, mirrorFor: () => null },
+    leadMain: { product: 'p1', configured: true, exportMain: async () => ({ head: 'c'.repeat(40), changed: false }) }, cleanup: { copiesRoot: empty, sealRoot: empty, mirrorFor: () => null },
     approvals: () => [],
   });
   const card = (id) => E.record.read('card', id).doc;
@@ -266,7 +266,7 @@ export async function wire() {
     sessions: noop, probe: () => null, launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
     sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
-    leadMain: { product: 'p1', exportMain: async () => ({ head: 'c'.repeat(40), changed: false }) }, cleanup: { copiesRoot: ${JSON.stringify(L.base)}, sealRoot: ${JSON.stringify(L.base)}, mirrorFor: () => null }, approvals: () => [] } };
+    leadMain: { product: 'p1', configured: true, exportMain: async () => ({ head: 'c'.repeat(40), changed: false }) }, cleanup: { copiesRoot: ${JSON.stringify(L.base)}, sealRoot: ${JSON.stringify(L.base)}, mirrorFor: () => null }, approvals: () => [] } };
 }
 export { rec };
 `);

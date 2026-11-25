@@ -22,7 +22,7 @@ import { LAST_PASS_FACT, STEPS, STEP_ERROR_FACT, runTick } from '../modules/M11-
 import { wire, notWiredText, refusing, checkConfig, recordOutbox, CONFIG_KEYS, OPTIONAL_CONFIG_KEYS, PORT_GROUPS, TICK_PORTS } from './dispatcher-wiring.mjs';
 import { fakeAlert } from '../test/fake-alert.test-helper.mjs';
 import { CLEANUP_PORTS, NOT_WIRED_CLEANUP, NOT_WIRED_WORKER, cleanupProblem, workerPorts } from './worker-ports.mjs';
-// A config from before leadMainRoot was a key (as this test's) starts, and the lead-main step fails with this, told daily (L1370).
+// A config from before leadMainRoot was a key (as this test's) starts, and the lead-main step is skipped quietly, nothing told (L1370).
 import { NOT_CONFIGURED } from '../modules/M11-dispatcher/lead-main.mjs';
 import { NOT_WIRED_REVIEW, reviewPorts } from './review-ports.mjs';
 import { NOT_WIRED_PHONE, phonePorts } from './phone-ports.mjs';
@@ -69,7 +69,7 @@ const NOT_REVIEW_USERS = "no review was asked for: the review runner's folder is
 // status is never trusted, and every step that reads it fails with exactly that (L925: "not known", never a list).
 const NOT_THE_RUNNERS = "the worker runner's folder is not owned by the worker runner's user (workerUid)";
 const EXPECTED_STEPS = Object.freeze({
-  stops: NOT_THE_RUNNERS, undo: 'ok', 'undo-starts': NOT_THE_RUNNERS, outage: NOT_THE_RUNNERS, adopt: 'ok', lapse: 'ok', intake: NOT_THE_RUNNERS, 'lead-main': NOT_CONFIGURED, proposals: NW('proposals'), research: 'ok', leads: NW('leads'), approvals: 'ok', 'plan-go': 'ok',
+  stops: NOT_THE_RUNNERS, undo: 'ok', 'undo-starts': NOT_THE_RUNNERS, outage: NOT_THE_RUNNERS, adopt: 'ok', lapse: 'ok', intake: NOT_THE_RUNNERS, 'lead-main': 'ok', proposals: NW('proposals'), research: 'ok', leads: NW('leads'), approvals: 'ok', 'plan-go': 'ok',
   pass: NOT_THE_RUNNERS, limits: NOT_REVIEW_USERS, merges: 'ok', waits: 'ok', 'lost-cards': 'ok', 'stuck-cards': 'ok', phone: 'ok', cleanup: NW(`cleanup.${NOT_WIRED_CLEANUP[0]}`),
 });
 
@@ -132,6 +132,8 @@ test('R-0b-162 A: `node main.mjs <config>` with the real wiring runs one full pa
     assert.equal(rec.read('fact', STEP_ERROR_FACT(s))?.doc?.error, EXPECTED_STEPS[s], s);
     assert.ok(queued(rec).includes(`the Dispatcher's ${s} step failed: ${EXPECTED_STEPS[s]}; the other steps still ran`), `${s} told: ${queued(rec).join('\n')}`);
   }
+  // This config has no leadMainRoot (L1370): the lead-main step is skipped quietly, so nothing about it is queued.
+  assert.ok(!queued(rec).some((t) => t.includes(NOT_CONFIGURED) || t.includes('lead-main step')), queued(rec).join('\n'));
   // The Record was opened with the real rules: each write carries the approved version's revision (audit #127 m-2).
   const line = rec.diary({ since: 0 }).filter((l) => l.id === LAST_PASS_FACT).at(-1);
   assert.equal(line.rules_rev, `${P}=${COMMIT.slice(0, 7)}:${blobOf(FIRST).slice(0, 7)}`);

@@ -131,8 +131,19 @@ export function exportedHead(rec, { head, product } = {}) {
   return heads.includes(head) ? { ok: true } : { ok: false, reason: `not one of the last ${KEEP_HEADS} heads the lead-main export gave` };
 }
 
-/** The tick's step: the port exports main if it moved, then the head is noted (again, when an earlier note failed). */
-export async function leadMainStep({ rec, now, leadMain }) {
+/**
+ * The tick's step: the port exports main if it moved, then the head is noted (again, when an earlier note failed).
+ * A port with no leadMainRoot (`configured: false`: a config written before the key, until setup's dispatcher step runs
+ * again, which needs Joe's admin password) is skipped quietly: no alert, no failed step, and at most one line to the log
+ * per start (the port's `skipNote` answers it once; `note` is the tick's log). The tick then leaves exportedHead unwired,
+ * so no one-shot Lead's launch is recorded. A root that is configured but bad still fails the step, and is told.
+ */
+export async function leadMainStep({ rec, now, leadMain, note = () => {} }) {
+  if (leadMain?.configured === false) {
+    const line = leadMain.skipNote?.();
+    if (line) note(line);
+    return { skipped: true };
+  }
   const r = await leadMain.exportMain();
   noteExported(rec, { product: leadMain.product, head: r.head, now });
   return r;
