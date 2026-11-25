@@ -6,8 +6,8 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync,
 import { join } from 'node:path';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { recWith, T0 } from './fixtures.test-helper.mjs';
-import { HEAD_FILE, KEEP_HEADS, LEAD_MAIN_FACT, OLD, TEMP, copyHead, exportMain, exportedHead, leadMainStep, noteExported } from './lead-main.mjs';
-import { UNTAR_ARGS, leadMainRootProblem, untarInto } from '../../wiring/worker-ports.mjs';
+import { HEAD_FILE, KEEP_HEADS, LEAD_MAIN_FACT, LEAD_MAIN_MAX_BYTES, OLD, TEMP, TOO_BIG, copyHead, exportMain, exportedHead, leadMainStep, noteExported } from './lead-main.mjs';
+import { UNTAR_ARGS, leadMainRootProblem, untarArgs, untarInto } from '../../wiring/worker-ports.mjs';
 import { PRODUCT } from '../../shared/product-paths.mjs';
 import { git as safeGit } from '../M4-workshop/git/safe-git.mjs';
 
@@ -189,6 +189,36 @@ test('L1370 audit m2: a tar that runs past its budget is killed', async () => {
   assert.ok(Date.now() - t0 < 2_000);
 });
 
+test('L1370 audit #681 r2 m-a: an archive past the cap fails in lead-main\'s own words, cause first, and keeps the copy', async () => {
+  const w = world();
+  const kept = (await w.run()).head;
+  w.move();
+  // What safe-git answers when the cap stops git (the test below shows it does).
+  const big = async (args, o) => (args[0] === 'archive'
+    ? { code: -1, stdout: Buffer.alloc(0), stderr: `${'x'.repeat(300)}safe-git: git wrote more than ${o.maxOutBytes} bytes and was stopped`, tooBig: true }
+    : w.git(args));
+  await assert.rejects(w.run({ git: big }), (e) => {
+    assert.equal(TOO_BIG, "main is larger than the 256 MB limit for the Lead's copy");
+    assert.ok(e.message.slice(0, 200).startsWith(TOO_BIG), e.message);
+    return true;
+  });
+  assert.equal(copyHead(w.dest), kept);
+  assert.deepEqual(readdirSync(w.root), [P]);
+  assert.equal(LEAD_MAIN_MAX_BYTES, 256 * 1024 * 1024);
+});
+
+test('L1370 audit #681 r2 c-1: safe-git takes maxOutBytes null (or none) as no cap', async () => {
+  const base = tempDir('m11-lead-main-nocap-');
+  const bin = join(base, 'some-git.sh');
+  writeFileSync(bin, '#!/bin/sh\nexec /usr/bin/head -c 100000 /dev/zero\n'); chmodSync(bin, 0o755);
+  for (const maxOutBytes of [null, undefined]) {
+    const r = await safeGit(['--version'], { gitDir: '/dev/null', gitBin: bin, maxOutBytes, timeoutMs: 10_000 });
+    assert.equal(r.code, 0, `${maxOutBytes}: ${r.stderr}`);
+    assert.equal(r.stdout.length, 100_000, String(maxOutBytes));
+    assert.equal(r.tooBig, undefined);
+  }
+});
+
 test('L1370 audit m2: safe-git stops a git whose output passes maxOutBytes, and keeps none of it', async () => {
   const base = tempDir('m11-lead-main-big-');
   const bin = join(base, 'big-git.sh');
@@ -197,6 +227,7 @@ test('L1370 audit m2: safe-git stops a git whose output passes maxOutBytes, and 
   assert.equal(r.code, -1);
   assert.equal(r.stdout.length, 0);
   assert.match(r.stderr, /git wrote more than 65536 bytes and was stopped/);
+  assert.equal(r.tooBig, true, 'the answer says the cap stopped it');
 });
 
 test('L1370: main that can\'t be read, or an archive that fails, changes nothing and says why', async () => {
@@ -208,7 +239,11 @@ test('L1370: main that can\'t be read, or an archive that fails, changes nothing
   assert.deepEqual(readdirSync(w.root), []);
 });
 
-test('L1370 audit C1: tar refuses an entry with .. and one through a link the archive made; nothing lands outside', async () => {
+// bsdtar's own archive making (-s) and refusal wording: macOS only. GNU tar (Linux CI) makes and words them otherwise,
+// and the Dispatcher only ever runs on macOS (L1370 audit #681 r2).
+const NOT_MAC = process.platform !== 'darwin' && 'the hostile archives are made with bsdtar -s and matched on bsdtar\'s refusal text; the Dispatcher runs only on macOS';
+
+test('L1370 audit C1: tar refuses an entry with .. and one through a link the archive made; nothing lands outside', { skip: NOT_MAC }, async () => {
   const base = tempDir('m11-lead-main-evil-');
   const T = (...a) => { const r = spawnSync('/usr/bin/tar', a, { cwd: base }); if (r.status !== 0) throw new Error(String(r.stderr)); return r; };
   const outside = join(base, 'outside'); mkdirSync(outside);
@@ -225,9 +260,14 @@ test('L1370 audit C1: tar refuses an entry with .. and one through a link the ar
     assert.deepEqual(readdirSync(outside), [], `${name}: nothing outside`);
     assert.equal(existsSync(join(base, 'evil.txt')), false, `${name}: nothing beside the folder`);
   }
-  // The flags that keep extended attributes, access lists and file flags off the copy are passed; -P never is.
-  for (const f of ['--no-xattrs', '--no-acls', '--no-fflags']) assert.ok(UNTAR_ARGS.includes(f), f);
-  assert.equal(UNTAR_ARGS.includes('-P'), false);
+});
+
+test('L1370 audit C1, #681 r2: tar keeps extended attributes and access lists off on both tars, file flags on bsdtar, and never takes -P', () => {
+  for (const f of ['--no-xattrs', '--no-acls', '--no-fflags']) assert.ok(untarArgs('darwin').includes(f), f);
+  for (const f of ['--no-xattrs', '--no-acls']) assert.ok(untarArgs('linux').includes(f), f);
+  assert.equal(untarArgs('linux').includes('--no-fflags'), false, 'GNU tar refuses --no-fflags');
+  for (const pl of ['darwin', 'linux']) assert.equal(untarArgs(pl).includes('-P'), false, pl);
+  assert.deepEqual(UNTAR_ARGS, untarArgs(process.platform));
 });
 
 test('L1370: the system tar unpacks the archive; a broken archive is refused', async () => {
