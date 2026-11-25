@@ -60,7 +60,7 @@ function mac(entries, { alert = fakeAlert() } = {}) {
     filesOf: filesOfCommits,
     sendFrontDoor: async () => ({ outcome: 'sent' }), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
     frontDoorAlive: () => null, frontDoorHandoff: () => null,
-    cleanup: { copiesRoot: dir, sealRoot: dir, mirrorFor: () => null },
+    leadMain: { product: 'p1', configured: true, exportMain: async () => ({ head: 'c'.repeat(40), changed: false }) }, cleanup: { copiesRoot: dir, sealRoot: dir, mirrorFor: () => null },
   };
   const lockFile = join(dir, 'pass.lock');
   const at = async (min) => {

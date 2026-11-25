@@ -15,7 +15,8 @@ import { mirrorTree } from '../modules/M11-dispatcher/cleanup.mjs';
 import { ENDED_FOLDER } from '../modules/M9-record/outbox.mjs';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { MIRROR_CONFIG_TEMPLATE } from '../modules/M4-workshop/git/safe-git.mjs';
-import { CLEANUP_GIT, HOST_LOCK_MAX, HOST_LOCK_STAMP_MAX_MS, hostLockStampProblem, REVIEW_KIND_OF, REVIEW_STATE_CORRUPT, cleanupPorts, hostLockPort, mirrorProblem, recordHolds, requestsAclProblem, requestsFolderProblem, reviewEndedPort, reviewSessions, runnerAsyncPorts, runnerSyncPorts, workerPorts } from './worker-ports.mjs';
+import { CLEANUP_GIT, HOST_LOCK_MAX, HOST_LOCK_STAMP_MAX_MS, hostLockStampProblem, REVIEW_KIND_OF, REVIEW_STATE_CORRUPT, cleanupPorts, hostLockPort, mirrorProblem, recordHolds, requestsAclProblem, requestsFolderProblem, reviewEndedPort, reviewSessions, runnerAsyncPorts, runnerSyncPorts, workerPorts, leadMainPorts } from './worker-ports.mjs';
+import { HEAD_FILE, LEAD_MAIN_MAX_BYTES, NOT_CONFIGURED, copyHead } from '../modules/M11-dispatcher/lead-main.mjs';
 import { runnerTick } from './runner-loop.mjs';
 import { pauseLeadPort, saveWorkPort, startPort } from './runner-ports.mjs';
 import { NO_COPY_KINDS } from './owner-asks.mjs';
@@ -854,4 +855,68 @@ test('#657 audit m2: a Front Door folder that can\'t be read loses only the Fron
   assert.deepEqual(ws.ports.outboxSessions().map((x) => x.sessionId), ['S-1']);
   assert.equal(said.length, 1);
   assert.match(said[0], /Front Door's tabs could not be read this pass.*EACCES/);
+});
+
+// ---- leadMain (Track A step 8 G1, L1370) ----
+
+test('L1370: the leadMain port exports main from the product\'s mirror, through safe-git, into <leadMainRoot>/<product>', async () => {
+  const w = mirrorWorld();
+  const root = join(w.base, 'lead-main');
+  mkdirSync(root); chmodSync(root, 0o755);
+  const ports = workerPorts({ ...w.ctx, config: { ...w.config, leadMainRoot: root } });
+  assert.equal(ports.leadMain.product, P);
+  assert.deepEqual(await ports.leadMain.exportMain(), { head: w.empty, changed: true });
+  assert.equal(copyHead(join(root, P)), w.empty);
+  assert.equal(readFileSync(join(root, P, 'b', 'c.txt'), 'utf8'), 'c\n');
+  assert.equal(statSync(join(root, P, HEAD_FILE)).mode & 0o777, 0o644);
+});
+
+test('L1370: the leadMain port runs only rev-parse and archive, only on a mirror that passes its check, into a root that passes its own', async () => {
+  const w = mirrorWorld();
+  const root = join(w.base, 'lead-main');
+  mkdirSync(root); chmodSync(root, 0o755);
+  const calls = [];
+  const run = async (args, opts) => { calls.push([args[0], opts.gitDir, opts.purpose]); return { code: 1, stdout: Buffer.alloc(0), stderr: 'stub' }; };
+  const port = leadMainPorts({ config: { ...w.config, leadMainRoot: root }, selfUid: ME }, { run });
+  await assert.rejects(port.exportMain(), /could not read main in the mirror \(stub\)/);
+  assert.deepEqual(calls, [['rev-parse', w.mirror, 'lead-main-export']]);
+  // No leadMainRoot in the config (one written before the key): not configured, so the tick skips the step silently
+  // (no log line: L1370 audit C2, so the port has nothing to say); exportMain still refuses, and runs no git.
+  calls.length = 0;
+  assert.equal(port.configured, true);
+  const { leadMainRoot: _, ...old } = { ...w.config };
+  const unset = leadMainPorts({ config: old, selfUid: ME }, { run });
+  assert.equal(unset.configured, false);
+  assert.equal('skipNote' in unset, false);
+  await assert.rejects(unset.exportMain(), (e) => e.message === NOT_CONFIGURED);
+  // A root others can write is refused before any git.
+  chmodSync(root, 0o777);
+  await assert.rejects(port.exportMain(), /can be written by others/);
+  chmodSync(root, 0o755);
+  assert.deepEqual(calls, []);
+  // A mirror that fails its check is refused at the git call.
+  chmodSync(w.mirror, 0o777);
+  const real = leadMainPorts({ config: { ...w.config, leadMainRoot: root }, selfUid: ME });
+  await assert.rejects(real.exportMain(), /lead-main git: refused: .*can be written by others/);
+  chmodSync(w.mirror, 0o755);
+});
+
+test('L1370 audit m2: the leadMain port gives each git only what is left of the step\'s until, and the archive a size cap', async () => {
+  const w = mirrorWorld();
+  const root = join(w.base, 'lead-main');
+  mkdirSync(root); chmodSync(root, 0o755);
+  const seen = [];
+  const { git: safeGitFor } = await import('../modules/M4-workshop/git/safe-git.mjs');
+  const run = async (args, opts) => { seen.push({ cmd: args[0], timeoutMs: opts.timeoutMs, maxOutBytes: opts.maxOutBytes }); return safeGitFor(args, opts); };
+  const port = leadMainPorts({ config: { ...w.config, leadMainRoot: root }, selfUid: ME }, { run });
+  const until = Date.now() + 5_000;
+  assert.deepEqual(await port.exportMain({ until }), { head: w.empty, changed: true });
+  assert.deepEqual(seen.map((x) => x.cmd), ['rev-parse', 'archive']);
+  for (const x of seen) assert.ok(x.timeoutMs > 0 && x.timeoutMs <= 5_000, `${x.cmd} got ${x.timeoutMs} ms`);
+  assert.equal(seen[0].maxOutBytes, undefined);
+  assert.equal(seen[1].maxOutBytes, LEAD_MAIN_MAX_BYTES);
+  // An until already past runs no git at all.
+  seen.length = 0;
+  await assert.rejects(port.exportMain({ until: Date.now() - 1 }), /ran out of time before reading main/);
+  assert.deepEqual(seen, []);
 });

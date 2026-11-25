@@ -384,18 +384,28 @@ function oddFiles(dir, common, allowObjects) {
  * the whole group is killed and the call ends at once, even if a program that left the group keeps the output open
  * (lead's standing rule, 30 Oct 2026: no call may wait forever).
  */
-function runChild(bin, argv, { cwd, env, input = null, timeoutMs, limitMs = timeoutMs }) {
+function runChild(bin, argv, { cwd, env, input = null, timeoutMs, limitMs = timeoutMs, maxOutBytes }) {
+  // No cap unless a number is given: undefined and null both mean none (L1370 audit #681 r2 c-1).
+  const cap = typeof maxOutBytes === 'number' ? maxOutBytes : Infinity;
   return new Promise((resolve) => {
-    const out = []; let err = ''; let ended = false; let timer = null;
+    const out = []; let size = 0; let err = ''; let ended = false; let timer = null;
     const end = (r) => { if (ended) return; ended = true; clearTimeout(timer); resolve(r); };
     let child;
     try { child = spawn(bin, argv, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'], detached: true }); } catch (e) { end({ code: -1, stdout: Buffer.alloc(0), stderr: String(e.message) }); return; }
-    timer = setTimeout(() => {
+    const stop = (why, keep, more = {}) => {
       try { process.kill(-child.pid, 'SIGKILL'); } catch { /* the group has already ended */ }
       for (const s of [child.stdin, child.stdout, child.stderr]) s.destroy();
-      end({ code: -1, stdout: Buffer.concat(out), stderr: `${err}safe-git: git did not end within ${limitMs} ms and was stopped` });
-    }, timeoutMs);
-    child.stdout.on('data', (d) => out.push(d));
+      end({ code: -1, stdout: keep ? Buffer.concat(out) : Buffer.alloc(0), stderr: `${err}safe-git: ${why}`, ...more });
+    };
+    timer = setTimeout(() => stop(`git did not end within ${limitMs} ms and was stopped`, true), timeoutMs);
+    // `maxOutBytes` (lead-main's archive, L1370 audit m2): output past it is not held; git is stopped, nothing kept,
+    // and the answer says so (`tooBig: true`), so the caller can name the cause itself (#681 r2 m-a).
+    child.stdout.on('data', (d) => {
+      if (ended) return;
+      size += d.length;
+      if (size > cap) { out.length = 0; stop(`git wrote more than ${cap} bytes and was stopped`, false, { tooBig: true }); return; }
+      out.push(d);
+    });
     child.stderr.on('data', (d) => { err += d; });
     child.on('error', (e) => end({ code: -1, stdout: Buffer.alloc(0), stderr: String(e.message) }));
     child.on('close', (code, signal) => end({ code: code ?? (signal ? -1 : 0), stdout: Buffer.concat(out), stderr: err }));
@@ -524,9 +534,10 @@ export function withNoPrograms(args) {
  * the objects folders an alternates file may borrow from. A command that reaches another repository must name the
  * place: an absolute path, or `address` (one https address) (L51). Only `git init` runs where nothing is yet, and a
  * call with no command (`--version`) opens no repository, so it is not checked. `path` replaces the PATH git gets
- * (ROOT_PATH for git run as root).
+ * (ROOT_PATH for git run as root). `maxOutBytes` caps the output held: past it git is stopped (code -1, no output,
+ * `tooBig: true`); undefined or null is no cap.
  */
-export async function git(args, { gitDir, workTree, cwd, input, extraConfig, allowObjects, address, purpose = 'unnamed', timeoutMs = GIT_TIMEOUT_MS, gitBin = 'git', path } = {}) {
+export async function git(args, { gitDir, workTree, cwd, input, extraConfig, allowObjects, address, purpose = 'unnamed', timeoutMs = GIT_TIMEOUT_MS, maxOutBytes, gitBin = 'git', path } = {}) {
   if (!gitDir) return { code: -1, stdout: Buffer.alloc(0), stderr: 'safe-git: GIT_DIR is required' };
   // One limit for the whole call, the repository check's config reads and the git itself (#536 r2 Minor 3).
   const end = Date.now() + timeoutMs;
@@ -543,7 +554,7 @@ export async function git(args, { gitDir, workTree, cwd, input, extraConfig, all
   callLog.push({ purpose, gitDir, cwd: where, workTree: workTree ?? null, args: args.filter((a) => !/^http\..*extraheader/i.test(a)) });
   const rest = end - Date.now();
   if (rest <= 0) return { code: -1, stdout: Buffer.alloc(0), stderr: `safe-git: git did not end within ${timeoutMs} ms and was stopped` };
-  return runChild(gitBin, ['--no-pager', ...withNoPrograms(args)], { cwd: where, env, input, timeoutMs: rest, limitMs: timeoutMs });
+  return runChild(gitBin, ['--no-pager', ...withNoPrograms(args)], { cwd: where, env, input, timeoutMs: rest, limitMs: timeoutMs, maxOutBytes });
 }
 
 /** Like git() but resolves stdout as text and refuses (throws) on a non-zero exit. */
