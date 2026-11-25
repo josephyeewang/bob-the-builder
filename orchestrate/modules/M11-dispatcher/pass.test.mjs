@@ -7,7 +7,7 @@ import { tempDir } from '../../shared/test-tmp.mjs';
 import { launchInputProblem } from '../../wiring/owner-asks.mjs';
 import { STATES, FINAL_STATES } from '../../shared/record.mjs';
 import { STOP_QUIET_REASONS } from '../M4-workshop/launcher/review-runner.mjs';
-import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts as undoStarts0, stopProcessGroup, guarded, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, RESET_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RUN, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, LIMIT_H5_MS, resetEndsLimit, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0, UNKNOWN_FACT, REVIEW_STOP_FACT, REVIEW_STOP_RUNNER_REASON, REVIEW_STOP_AGAIN_MS, REVIEW_STOP_TELL_FACT, REVIEW_STOP_MAX_ASKS, HOST_COPY_FAIL, HOST_COPY_CAUSE, HOLD_FACT, adoptLate as adoptLate0, lapseStop, LAUNCH_DEADLINE_MS, PORT_DEADLINE_MS, DEAD_RERUN_FACT, DEAD_RERUN_MOVE_CAUSE, DEAD_SESSION_WAIT, deadRerunText, missingText } from './pass.mjs';
+import { LAUNCH_SKIP_FACT, LAUNCH_SKIP_CAUSE, LAUNCH_SKIP_TELL, dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts as undoStarts0, stopProcessGroup, guarded, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, RESET_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RUN, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, LIMIT_H5_MS, resetEndsLimit, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0, UNKNOWN_FACT, REVIEW_STOP_FACT, REVIEW_STOP_RUNNER_REASON, REVIEW_STOP_AGAIN_MS, REVIEW_STOP_TELL_FACT, REVIEW_STOP_MAX_ASKS, HOST_COPY_FAIL, HOST_COPY_CAUSE, HOLD_FACT, adoptLate as adoptLate0, lapseStop, LAUNCH_DEADLINE_MS, PORT_DEADLINE_MS, DEAD_RERUN_FACT, DEAD_RERUN_MOVE_CAUSE, DEAD_SESSION_WAIT, deadRerunText, missingText } from './pass.mjs';
 import { USAGE_FACT, BAND_FACT } from './usage.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { retellWaits, WAIT_TELL_FACT } from './joe-waits.mjs';
@@ -3022,6 +3022,112 @@ test('L1361 audit m4: after the first launch, a launch that could not finish ins
   assert.ok(!w.calls.alerts.some((a) => /C-2|C-3/.test(a)), 'noted, not told');
   const next = await w.pass(1);
   assert.deepEqual(next.started.sort(), ['C-2', 'C-3']);
+});
+
+test('L1368: a card the launch cap leaves on 3 passes in a row is told, once a day; the count clears when it starts', async () => {
+  const w = world(['C-1', 'C-2', 'C-3'].map((id) => card(id)));
+  const tight = () => ({ launchUntil: Date.now() + LAUNCH_DEADLINE_MS });
+  const skips = (id) => w.rec.read('fact', LAUNCH_SKIP_FACT(id))?.doc?.passes ?? 0;
+  const told = () => w.calls.alerts.filter((a) => /has not been started for/.test(a));
+  // Before each pass a new card older than C-2 and C-3 is made ready: it starts first and takes the step's time, so
+  // C-2 and C-3 are left (C-1 is the first pass's).
+  let k = 0;
+  const again = async (min) => { if (k) seed(w.rec, 'card', `A-${k}`, card(`A-${k}`, { changed_at: iso(T0 - 60 * MIN + k) })[2]); k += 1; w.sessions.length = 0; return w.pass(min, tight()); };
+  await again(0);
+  assert.equal(skips('C-2'), 1); assert.equal(skips('C-3'), 1);
+  assert.deepEqual(told(), [], 'one pass left behind: noted, not told');
+  await again(1);
+  assert.equal(skips('C-2'), 2); assert.deepEqual(told(), []);
+  // A second run at the same pass time (the undo-only run and the full pass of one tick) does not count twice.
+  await again(1);
+  assert.equal(skips('C-2'), 2, 'one pass time counts once');
+  await again(2);
+  assert.equal(skips('C-2'), LAUNCH_SKIP_TELL);
+  assert.deepEqual(told().sort(), [
+    'card C-2 has not been started for 3 passes because the starts before it used the step\'s time; it stays ready, nothing to do unless it keeps happening',
+    'card C-3 has not been started for 3 passes because the starts before it used the step\'s time; it stays ready, nothing to do unless it keeps happening',
+  ]);
+  // Once a day: the fourth pass the same day tells nothing more, though the count goes on.
+  await again(3);
+  assert.equal(skips('C-2'), 4); assert.equal(told().length, 2, 'not told again within the day');
+  // A pass with time to spare starts them: the count and the hold are cleared.
+  w.sessions.length = 0;
+  const r = await w.pass(4);
+  assert.deepEqual(r.started.sort(), ['C-2', 'C-3']);
+  for (const id of ['C-2', 'C-3']) {
+    assert.equal(skips(id), 0, `${id}'s count cleared on its start`);
+    assert.equal(w.rec.read('fact', HOLD_FACT(LAUNCH_SKIP_CAUSE(id)))?.doc?.told_at ?? null, null, `${id}'s hold cleared, so a return is told afresh`);
+  }
+});
+
+// #678 audit: three passes leave C-2 behind a newer older card each time (C-1, then A-1, A-2), as above.
+async function skippedThrice(rec = null) {
+  const w = world(['C-1', 'C-2'].map((id) => card(id)));
+  let k = 0;
+  const again = async (min, extra = {}) => { if (k) seed(w.rec, 'card', `A-${k}`, card(`A-${k}`, { changed_at: iso(T0 - 60 * MIN + k) })[2]); k += 1; w.sessions.length = 0; return w.pass(min, { launchUntil: Date.now() + LAUNCH_DEADLINE_MS, ...extra }); };
+  return { w, again, skips: () => w.rec.read('fact', LAUNCH_SKIP_FACT('C-2'))?.doc ?? null };
+}
+const skipWrite = (w, answer) => ({ ...w.rec, write: (a) => (a.entity === 'fact' && a.id === LAUNCH_SKIP_FACT('C-2') && /^launch_skip/.test(a.kind ?? '') ? answer(a) : w.rec.write(a)) });
+
+test('#678 m1: a count or clear that throws is reported; the loop goes on, and no card is left claimed but not launched', async () => {
+  const { w, again, skips } = await skippedThrice();
+  const throwing = skipWrite(w, () => { throw new Error('disk full'); });
+  const r = await again(0, { rec: throwing });
+  assert.deepEqual(r.started, ['C-1'], 'the pass ends normally');
+  assert.equal(w.rec.read('card', 'C-2').doc.state, 'ready');
+  assert.ok(r.notes.some((n) => n === 'card C-2: the launch-cap skip count could not be written (disk full)'), r.notes.join(' | '));
+  assert.equal(skips(), null);
+  // Now a count to clear, and a clear that throws: the card still starts and runs.
+  await again(1); await again(2);
+  assert.equal(skips().passes, 2);
+  w.sessions.length = 0;
+  const s = await w.pass(3, { rec: throwing });
+  assert.ok(s.started.includes('C-2'), JSON.stringify(s));
+  assert.equal(w.rec.read('card', 'C-2').doc.state, 'running');
+  assert.ok(s.notes.some((n) => n === 'card C-2: the launch-cap skip count could not be cleared (disk full)'), s.notes.join(' | '));
+});
+
+test('#678 m1: the count clears only once the card has started; a refused launch keeps it', async () => {
+  const { w, again, skips } = await skippedThrice();
+  await again(0); await again(1); await again(2);
+  assert.equal(skips().passes, 3);
+  w.refuseLaunch((x) => (x.card === 'C-2' ? { ok: false, reason: 'check 7: no' } : { ok: true }));
+  w.sessions.length = 0;
+  await w.pass(3);
+  assert.equal(w.rec.read('card', 'C-2').doc.state, 'ready', 'given back');
+  assert.equal(skips().passes, 3, 'not started: the count stays');
+  assert.ok(skips().told_at, 'and so does the told mark');
+  w.refuseLaunch(() => ({ ok: true }));
+  w.sessions.length = 0;
+  await w.pass(4);
+  assert.equal(skips().passes, 0); assert.equal(skips().told_at, null);
+});
+
+test('#678 m2: a refused count or clear write is reported (L449); a refused clear keeps the told mark too', async () => {
+  const { w, again, skips } = await skippedThrice();
+  const r = await again(0, { rec: skipWrite(w, () => ({ ok: false, reason: 'busy' })) });
+  assert.ok(r.notes.includes('card C-2: the launch-cap skip count could not be written (busy)'), r.notes.join(' | '));
+  assert.equal(skips(), null);
+  await again(1); await again(2); await again(3);
+  assert.equal(skips().passes, 3); assert.ok(skips().told_at);
+  w.sessions.length = 0;
+  const s = await w.pass(4, { rec: skipWrite(w, () => ({ ok: false, reason: 'busy' })) });
+  assert.ok(s.started.includes('C-2'));
+  assert.ok(s.notes.includes('card C-2: the launch-cap skip count could not be cleared (busy)'), s.notes.join(' | '));
+  assert.equal(skips().passes, 3, 'the count is as it was');
+  assert.ok(skips().told_at, 'the told mark is not cleared alone');
+});
+
+test('#678 m3: a count last added to over a day ago starts again at 1', async () => {
+  const { w, again, skips } = await skippedThrice();
+  await again(0); await again(1);
+  assert.equal(skips().passes, 2);
+  w.setUsage(GREEN, T0 + 24 * 60 * MIN);
+  await again(24 * 60 + 2);
+  assert.equal(skips().passes, 1, 'the old skips are not added to');
+  assert.equal(w.calls.alerts.filter((a) => /has not been started for/.test(a)).length, 0);
+  await again(24 * 60 + 3);
+  assert.equal(skips().passes, 2, 'a fresh run counts on');
 });
 
 test('L1361 audit m5: a wrong-outbox start stopped but not given back is given back later naming its outbox', async () => {

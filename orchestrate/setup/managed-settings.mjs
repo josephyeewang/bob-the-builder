@@ -31,7 +31,7 @@ import { readFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { installPaths } from './install.mjs';
 import { notPlainFile } from './mac.mjs';
-import { COPY_HOOKS, managedGuardDir, managedRulesPath } from './layout.mjs';
+import { COPY_HOOKS, MANAGED_GUARD, MANAGED_GUARD_FILES, managedGuardDir, managedRulesPath } from './layout.mjs';
 import { rulesProblems } from './review-config.mjs';
 import { CLAUDE_FILE, checkMachineWide, listDropIns, readPlist } from '../modules/M4-workshop/launcher/env-check.mjs';
 import { machineWideSettings, MACHINE_WIDE_FAILS_CLOSED } from '../modules/M4-workshop/launcher/render-settings.mjs';
@@ -39,9 +39,9 @@ import { makeSnapshot, readSnapshot } from '../modules/M4-workshop/hooks/snapsho
 
 /** The node every Mac user's session runs the guard with: nodejs.org's, root's, at its fixed place (setup's README). */
 export const NODE_BIN = '/usr/local/bin/node';
-export const GUARD = 'production-write-guard.mjs';
-/** The guard and the modules it imports (only node's own beyond these two): what its folder holds besides the copy. */
-export const GUARD_FILES = Object.freeze([GUARD, 'lib.mjs', 'snapshot.mjs']);
+export const GUARD = MANAGED_GUARD;
+/** The guard and the modules it imports (layout.mjs MANAGED_GUARD_FILES, the one list). */
+export const GUARD_FILES = MANAGED_GUARD_FILES;
 export const RULES_FILE = 'rules.json';
 const NEXT = '.next';
 /** The way out (L1031 guard c), said after every run and in the README. */

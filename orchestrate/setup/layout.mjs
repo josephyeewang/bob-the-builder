@@ -397,6 +397,10 @@ export const watchNotesPath = (cfg) => join(cfg.base, 'watch-notes');
 // each root's 0644: no one else can change them or rename them away. Written by managed-settings alone, never refreshed
 // (the hook reads the copy with no age limit).
 export const managedGuardDir = (cfg) => join(cfg.base, 'machine-wide-guard');
+/** The guard and the modules it imports (only node's own beyond these two): what its folder holds besides the copy. One
+ * list, for managed-settings (which places them) and check-install (which compares them with the installed ones, L1355). */
+export const MANAGED_GUARD = 'production-write-guard.mjs';
+export const MANAGED_GUARD_FILES = Object.freeze([MANAGED_GUARD, 'lib.mjs', 'snapshot.mjs']);
 export const managedRulesPath = (cfg) => join(managedGuardDir(cfg), 'rules.json');
 
 /** The secret scanner the push step runs (L1083): root's folder, made by `scanner` (scanner-setup.mjs), not by users-folders. */
