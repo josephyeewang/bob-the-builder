@@ -20,6 +20,7 @@ const UID = process.getuid();
 const answer = (extra = {}) => ({ v: 1, account: 'a', signed_in: true, observed_at: new Date(T0).toISOString(),
   usage: { h5: { used_pct: 40, resets_at: '2026-11-05T15:00:00.000Z' }, week: { used_pct: 60, resets_at: '2026-11-07T22:59:59.000Z' }, week_from: 'weekly_all' }, ...extra });
 const noAcl = () => null;
+const RW = (pct, r = '2026-11-07T22:59:59.000Z') => ({ used_pct: pct, resets_at: r });
 
 function place(doc = answer(), { raw } = {}) {
   const dir = tempDir('orch-sensors-ports-');
@@ -153,7 +154,22 @@ test('a shape this reader does not know is refused, and says what', () => {
     [{ doc: answer({ usage: { ...answer().usage, week_from: 'weekly_bogus' } }) }, /week_from is not a row/],
     [{ doc: answer({ usage: { ...answer().usage, week_from: 'weekly_scoped:has space' } }) }, /week_from is not a row/],
     [{ doc: answer({ usage: { ...answer().usage, week_from: null } }) }, /week has no week_from/],
+    // L1358 r2: week_rows, every weekly row, each a window, the week under its own row and none above it.
+    ...[[[], /week_rows is not an object/], [{}, /1 to 16 rows/],
+      [Object.fromEntries(Array.from({ length: 17 }, (_, i) => [`weekly_scoped:m${i}`, { used_pct: 1, resets_at: null }])), /1 to 16 rows/],
+      [{ weekly_all: RW(60), weekly_bogus: RW(1) }, /names a row this reader does not know/],
+      [{ weekly_all: RW(60), 'weekly_scoped:Y': { used_pct: 1, resets_at: null, token: 'x' } }, /weekly_scoped:Y row is not a window/],
+      [{ weekly_all: RW(60), 'weekly_scoped:Y': RW(101) }, /in week_rows, weekly_scoped:Y has a percent outside 0 to 100/],
+      [{ weekly_all: RW(60), 'weekly_scoped:Y': RW(1, 'soon') }, /in week_rows, weekly_scoped:Y has a reset time that can't be read/],
+      [{ weekly_all: RW(60), 'weekly_scoped:Y': RW(1, '2026-11-20T00:00:00.000Z') }, /further out than one weekly window/],
+      [{ weekly_all: RW(60), 'weekly_scoped:Y': RW(61) }, /weekly_scoped:Y row is higher than the week/],
+      [{ 'weekly_scoped:Y': RW(60) }, /does not hold the week under its own row/],
+      [{ weekly_all: RW(59) }, /does not hold the week under its own row/],
+    ].map(([rows, why]) => [{ doc: answer({ usage: { ...answer().usage, week_rows: rows } }) }, why]),
+    [{ doc: answer({ usage: { h5: answer().usage.h5, week: null, week_from: null, week_rows: { weekly_all: RW(60) } } }) }, /week_rows comes with no week/],
   ];
+  const good = place(answer({ usage: { ...answer().usage, week_rows: { weekly_all: RW(60), 'weekly_scoped:Y': RW(60, null) } } }));
+  try { assert.equal(readOwnerAnswer({ file: good.file, ownerUid: UID, now: () => new Date(T0), acl: noAcl }).ok, true, 'a scoped row with no reset time is a gap, read'); } finally { good.done(); }
   for (const [c, why] of cases) {
     const w = place(c.doc, { raw: c.raw });
     try {
@@ -281,7 +297,13 @@ test('L728 m1, L1358: within one window a lower percent on the same row is taken
     put(H(41), W(10), 'weekly_scoped:Y'); assert.equal(await p.readUsage('a'), null, 'a change of row does not start the week afresh');
     assert.match(p.lastReason(), /weekly_scoped:Y row went down within one window \(10% after 61%\)/);
     put(H(41), W(70), 'weekly_scoped:Y'); assert.equal((await p.readUsage('a'))?.week?.used_pct, 70, 'another row going up in the same week is fine');
-    put(H(41), W(65), 'weekly_scoped:Y'); assert.equal((await p.readUsage('a'))?.reset_note, 'usage for weekly_scoped:Y went from 70% to 65% this week; taken as a reset', 'and a drop on that same row after is a reset');
+    put(H(41), W(55), 'weekly_scoped:Y'); assert.equal((await p.readUsage('a'))?.reset_note, 'usage for weekly_scoped:Y went from 70% to 55% this week; taken as a reset', 'and a drop on that same row after is a reset');
+    // m2 (#671 audit r2): a dip under 10 points that stays above 5% is the latest figure, not a reset: no note.
+    put(H(41), W(46), 'weekly_scoped:Y'); u = await p.readUsage('a');
+    assert.deepEqual([u?.week?.used_pct, u?.reset_note, u?.reset_windows, p.lastReason()], [46, undefined, undefined, null], 'a 9-point dip is taken, not said');
+    put(H(41), W(4), 'weekly_scoped:Y'); u = await p.readUsage('a');
+    assert.deepEqual([u?.reset_note, u?.reset_windows], ['usage for weekly_scoped:Y went from 46% to 4% this week; taken as a reset', ['week']], 'to 5% or below is a reset');
+    put(H(41), W(1), 'weekly_scoped:Y'); assert.equal((await p.readUsage('a'))?.reset_note, 'usage for weekly_scoped:Y went from 4% to 1% this week; taken as a reset', 'a drop to 5% or below is a reset, however small');
     const fresh = ports(w.file);
     put(H(1), W(1)); assert.ok(await fresh.readUsage('a'), 'with no stored fact (stored gives null), a new process has only its own marks');
   } finally { w.done(); }

@@ -67,11 +67,11 @@ Facts the tick writes: `signed-in-account` is read (missing or stale: nothing st
 
 ## Facts this folder reads or writes (the contracts)
 
-For a fact M12 writes, the shape is the fields this folder reads, the same list as `READ_FACTS` in `read-facts.mjs` (read-facts.test.mjs keeps the two equal). The writer may store more; it must store these. In `usage-<account>`, `h5_none` is true when the plan's usage report listed no 5-hour row at all: the week alone then sets the band (L1331). False, or a fact written before it existed, leaves a missing 5-hour figure unknown.
+For a fact M12 writes, the shape is the fields this folder reads, the same list as `READ_FACTS` in `read-facts.mjs` (read-facts.test.mjs keeps the two equal). The writer may store more; it must store these. In `usage-<account>`, `h5_none` is true when the plan's usage report listed no 5-hour row at all: the week alone then sets the band (L1331). False, or a fact written before it existed, leaves a missing 5-hour figure unknown. `last_reset` is the latest usage drop the Sensors took as a reset (L1358): its plain-words note, its time, and which windows reset (`h5`, `week`); none is `{note: null, at: null, windows: []}`. This folder tells Joe once per `at` and ends a limit wait of the same window on it. The fact's `reset_note` (the same note, only on the write where the reset was seen, for the diary) and `week_rows` (every weekly row, for the Sensors' own next read) are stored but not read here.
 
 | Fact id | Written by | Shape |
 |---|---|---|
-| `usage-<account>` | M12 Sensors (lane 3), to the review's M5 contract | `{ account, observed_at, week: {used_pct, resets_at}, h5: {used_pct, resets_at}, h5_none, last_reset: {note, at} }` |
+| `usage-<account>` | M12 Sensors (lane 3), to the review's M5 contract | `{ account, observed_at, week: {used_pct, resets_at}, h5: {used_pct, resets_at}, h5_none, last_reset: {note, at, windows} }` |
 | `band-usage` | this folder | `{ band: green/amber/red/unknown, own_building, reason, account, decided_at, unknown_since }` |
 | `signed-in-account` | M12 | `{ account, signed_in, reason, observed_at }` |
 | `pr-<n>` | M12 | `{ state, merged, merge_commit_sha, head_sha, observed_at }` |

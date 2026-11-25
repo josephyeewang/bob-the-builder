@@ -1,14 +1,15 @@
 // Usage bands (R-0b-67; design v4 §5.4, rail A8, G3; review 0b-6 M1–M5, M8, M23, m14, m17; lead L13, L14).
 //
 // Reads the record fact `usage-<account>` that the Sensors (M12) write, through sensorsFact (only a reading Sensors
-// made counts). The fields read are READ_FACTS' (read-facts.mjs, L89):
+// made counts), and turns it into two separate values (M3): `band` (green | amber | red | unknown), which Joe's own
+// tabs read, and `own_building` (open | amber | full | unknown), which gates only the work the
+// Dispatcher itself starts. Writing red into `band` at the reserve line would stop Joe's tabs too.
+// The fields read here are these of READ_FACTS' (read-facts.mjs, L89; its `last_reset`, a drop taken as a reset, L1358,
+// is pass.mjs's, which tells Joe and ends a limit wait on it; a drop itself is just a lower figure here):
 //   { account, h5: { used_pct, resets_at }, week: { used_pct, resets_at }, observed_at, h5_none }
 // h5_none: true (L1331) means the plan's usage report listed no 5-hour row at all, which is no 5-hour limit, not an
 // unknown one: with no 5-hour figure, the 5-hour window is skipped and the week alone sets the band. A 5-hour figure that
 // is there (a stored window handed on) is still checked. Without the marker a missing 5-hour figure is unknown, as before.
-// and turns it into two separate values (M3): `band` (green | amber | red | unknown), which Joe's own
-// tabs read, and `own_building` (open | amber | full | unknown), which gates only the work the
-// Dispatcher itself starts. Writing red into `band` at the reserve line would stop Joe's tabs too.
 //
 // Unknown is never zero (A8): no fact, the wrong account, a reading older than stale_after_min by its
 // own `observed_at` (never the file's time), a window whose reset time has passed (m14), or any field

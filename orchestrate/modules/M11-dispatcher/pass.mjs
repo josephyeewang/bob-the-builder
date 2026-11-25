@@ -72,6 +72,23 @@ export const LIMIT_NO_RESET = 'limit_hit: the hit has no readable reset time';
  *  reset more than a week (and an hour's slack) after the hit is a misread, read as no reset time: the card waits on Joe
  *  and he is told, never held in silence until a date that will not come. */
 export const LIMIT_RESET_MAX_MS = 7 * 24 * 60 * 60 * 1000 + 60 * 60 * 1000;
+/** The furthest a 5-hour limit can reset after its hit: the window and an hour's slack (the worker's message gives the
+ *  reset time to the hour at best). A hit that resets further out is the week's (#671 audit r2 m3). */
+export const LIMIT_H5_MS = 6 * 60 * 60 * 1000;
+/**
+ * Whether usage the Sensors took as reset after a limit hit ends that hit's wait (L1358 m5), as the reset time passing
+ * would. Only a reset of the hit's own window does (#671 audit r2 m3): the usage fact's last_reset.windows says which
+ * windows reset ('h5', 'week'), and the hit's window is told by how far its reset time lies after it (LIMIT_H5_MS). A
+ * weekly hit within that time of the week's end reads as a 5-hour one, so a 5-hour reset could end its wait up to a few
+ * hours early: the card then hits the limit again and waits again (a retry; the plan's own limit still stops the work).
+ * A reset whose time can't be read or lies ahead is no reset (pastTime, I4); one from before the hit ends nothing.
+ */
+export function resetEndsLimit(lastReset, hit, seen, now) {
+  const at = pastTime(lastReset?.at, now);
+  if (at === null || !(at > seen)) return false;
+  const win = Date.parse(hit?.resets_at ?? '') - seen > LIMIT_H5_MS ? 'week' : 'h5';
+  return Array.isArray(lastReset?.windows) && lastReset.windows.includes(win);
+}
 
 // When a card began to wait: its wait's since, or `fallback` when that can't be read (L285), so a cap measured from
 // it still ends. The Record writer stamps since and keeps it on a re-check (M9 checkWait), so only a hand-edited
@@ -674,10 +691,8 @@ export async function dispatcherPass({ rec, rules, now, clock = () => now, accou
           text: `card ${id}: account ${acct} hit its usage limit but ${why}, so it can't resume by itself; it waits on you` });
         continue;
       }
-      // L1358 m5: usage the Sensors took as reset after the hit (the account's usage fact, last_reset.at) ends the wait as
-      // the reset time passing would. A reset time that can't be read or lies ahead is no reset (pastTime, I4).
-      const resetAt = pastTime(sensorsFact(rec, USAGE_FACT(acct))?.doc?.last_reset?.at, now);
-      if (now < resets && !(resetAt !== null && resetAt > seen)) {
+      // L1358 m5: usage the Sensors took as reset after the hit, in the hit's own window, ends the wait (resetEndsLimit).
+      if (now < resets && !resetEndsLimit(sensorsFact(rec, USAGE_FACT(acct))?.doc?.last_reset, lf, seen, now)) {
         if (now - waitedFrom(doc, runStarted, now) > LIMIT_RESET_MAX_MS) {
           askJoe(id, { what: LIMIT_NO_RESET, now, kind: 'limit_no_reset', alert,
             text: `card ${id}: it has waited on account ${acct}'s usage limit since ${iso(waitedFrom(doc, runStarted, now))}, longer than any real limit window, and the reset it gives (${lf.resets_at}) is still ahead, so it can't resume by itself; it waits on you` });

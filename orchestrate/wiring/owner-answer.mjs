@@ -5,13 +5,14 @@
 // through a folder: `<answer folder>/owner-answer.json`. `sensors-ports.mjs` reads it on the `orchestrate` side.
 //
 //   ownerAnswer({ home, authStatus?, usage?, inUse?, now? }) → the answer (below); never throws
-//   parseUsageReport(text) → { ok: true, h5, week, week_from, h5_none? } | { ok: false, reason }
+//   parseUsageReport(text) → { ok: true, h5, week, week_from, week_rows, h5_none? } | { ok: false, reason }
 //   writeAnswer({ to, answer, uid? }) → { ok: true } | { ok: false, reason }
 //   node owner-answer.mjs --to <file>     one round, run by the owner's job (placed by lane 4's setup); the home is the
 //                                         job's own, as it runs as the owner
 //
 // The answer: { v: 1, account: 'a'|'b'|null, signed_in: true|false|null, observed_at,
-//               usage: { h5: {used_pct, resets_at}|null, week: {used_pct, resets_at}|null, week_from, h5_none?: true } | null,
+//               usage: { h5: {used_pct, resets_at}|null, week: {used_pct, resets_at}|null, week_from,
+//                        week_rows?: { <row>: {used_pct, resets_at} }, h5_none?: true } | null,
 //               usage_reason? }
 // It never holds an email address, a token or Claude's raw output: only the named fields below.
 //
@@ -24,6 +25,11 @@
 // no `session` row at all, even in active use: the plan lists no 5-hour limit. So a report this reads cleanly, with a
 // weekly row and no `session` row, says so with `h5_none: true` (L1331), and M11 then judges the band by the week
 // alone. It is written only then: a `session` row that can't be read refuses the whole report, as before.
+// `week_rows` (L1358, #671 audit r2 MAT-1) is every weekly row by the same name, `week` among them. The top row can change
+// from one round to the next (a tie goes to `weekly_all`), so the Sensors judge a drop on the row they saw last, by that
+// row's own new figure, not on whichever row is top now. Two scoped rows whose names cut to the same letters keep the
+// higher figure (a drop is then seen only when both drop: the safe side). More than MAX_WEEK_ROWS weekly rows refuses
+// the report (the answer file is small).
 // A report this doesn't know is refused and says why, in `usage_reason`: a row kind other than the three known ones (a
 // renamed row is refused, never skipped; L728 m3), a percent outside 0 to 100, or percents that look like fractions
 // (every row at 1 or under while a row's severity is not `normal`; L728 m2).
@@ -41,6 +47,7 @@ import { accountInUse, accountEnv, accountDir, readAuthStatus, claudeAuthStatus,
 export const ANSWER_FILE = 'owner-answer.json';
 export const ANSWER_VERSION = 1;
 export const ROW_KINDS = Object.freeze(['session', 'weekly_all', 'weekly_scoped']);
+export const MAX_WEEK_ROWS = 16;
 const MAX_OUT = 1024 * 1024;
 const refuse = (reason) => ({ ok: false, reason });
 
@@ -104,12 +111,18 @@ export function parseUsageReport(text) {
   }
   const h5 = checked.find((c) => c.kind === 'session')?.w ?? null;
   let top = null;
+  const weekRows = {};
   for (const c of checked) {
     if (c.kind === 'session') continue;
     if (!top || c.w.used_pct > top.w.used_pct || (c.w.used_pct === top.w.used_pct && c.kind === 'weekly_all')) top = c;
+    const name = rowName(c.row);
+    if (!Object.hasOwn(weekRows, name) || c.w.used_pct > weekRows[name].used_pct) weekRows[name] = c.w;
   }
   if (!h5 && !top) return refuse('the /usage report has neither a session nor a weekly row');
-  const out = { ok: true, h5, week: top?.w ?? null, week_from: top ? rowName(top.row) : null };
+  if (Object.keys(weekRows).length > MAX_WEEK_ROWS) return refuse(`the /usage report has more than ${MAX_WEEK_ROWS} weekly rows`);
+  // The top row's own entry is the week itself, reset time included, so the two never disagree.
+  if (top) weekRows[rowName(top.row)] = top.w;
+  const out = { ok: true, h5, week: top?.w ?? null, week_from: top ? rowName(top.row) : null, week_rows: top ? weekRows : null };
   // L1331: no session row in a clean report with a weekly row = the plan lists no 5-hour limit (not a 0% one). Only when
   // the report and its rate_limits hold just the keys this reader knows: a 5-hour figure moved elsewhere must stay unknown.
   if (!h5 && top && Object.keys(rl).every((k) => RL_KEYS.includes(k)) && Object.keys(report).every((k) => REPORT_KEYS.includes(k))) out.h5_none = true;
@@ -140,7 +153,7 @@ export async function ownerAnswer({ home, authStatus = claudeAuthStatus(), usage
   if (answer.signed_in !== true) { answer.usage_reason = answer.signed_in === false ? 'not signed in' : 'who is signed in could not be read'; return answer; }
   let r;
   try { r = parseUsageReport(await usage(use.account, env)); } catch (e) { r = refuse(`the /usage read failed (${e?.message ?? e})`); }
-  if (r.ok) answer.usage = { h5: r.h5, week: r.week, week_from: r.week_from, ...(r.h5_none === true ? { h5_none: true } : {}) };
+  if (r.ok) answer.usage = { h5: r.h5, week: r.week, week_from: r.week_from, ...(r.week_rows ? { week_rows: r.week_rows } : {}), ...(r.h5_none === true ? { h5_none: true } : {}) };
   else answer.usage_reason = r.reason;
   return answer;
 }

@@ -107,19 +107,25 @@ export async function writeUsageFact(writer, readUsage, account, { now = () => n
   // carried to the next write. `last_reset` is carried on (from the stored fact) so M11 can tell Joe once, by its `at`,
   // whichever pass reads it, and can end a limit wait that the reset ended. A stored one that can't be read is dropped.
   // None is { note: null, at: null }, so every field M11 reads is always stored (READ_FACTS).
+  // `windows` says which windows reset ('h5', 'week'; #671 audit r2 m3), so M11 ends only a limit wait of the same window.
+  const windowsOf = (x) => (Array.isArray(x) ? [...new Set(x.filter((k) => k === 'h5' || k === 'week'))] : []);
   if (typeof r.reset_note === 'string' && r.reset_note) {
     doc.reset_note = r.reset_note.slice(0, 300);
-    doc.last_reset = { note: doc.reset_note, at: observed_at };
+    doc.last_reset = { note: doc.reset_note, at: observed_at, windows: windowsOf(r.reset_windows) };
   } else {
     const lr = stored?.last_reset;
-    doc.last_reset = lr && typeof lr.note === 'string' && lr.note && timeOrNull(lr.at) ? { note: lr.note.slice(0, 300), at: lr.at } : { note: null, at: null };
+    doc.last_reset = lr && typeof lr.note === 'string' && lr.note && timeOrNull(lr.at) ? { note: lr.note.slice(0, 300), at: lr.at, windows: windowsOf(lr.windows) } : { note: null, at: null, windows: [] };
   }
+  // L1358 r2 (MAT-1): every weekly row the reading had, by name, so the next read judges a drop on the row seen last. It
+  // goes with the week: a reading without it (an older answer) stores none, and a handed-on week keeps the stored rows.
+  const rowsOf = (x) => (x && typeof x === 'object' && !Array.isArray(x) ? Object.fromEntries(Object.entries(x).map(([n, w]) => [n, win(w)])) : null);
+  doc.week_rows = rowsOf(r.week_rows);
   for (const k of handedOn) doc[k] = win(stored[k]);
   if (handedOn.length) {
     doc.observed_at = relayed(observed_at, stored.observed_at);
     // The source names the row the stored week came from ("week from <row>"), which sensors-ports holds a drop to (L1358):
     // when the week is handed on, its source goes with it.
-    if (handedOn.includes('week')) doc.source = stored.source ?? null;
+    if (handedOn.includes('week')) { doc.source = stored.source ?? null; doc.week_rows = rowsOf(stored.week_rows); }
   }
   const w = writer.put(USAGE_FACT(account), doc);
   // Which windows were handed on, so the pass summary says "kept", never "known", for them (L771).

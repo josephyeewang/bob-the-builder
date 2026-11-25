@@ -17,14 +17,30 @@ const limits = (rows) => ({ session: {}, rate_limits: { limits: rows } });
 const T = '2026-11-07T22:59:59.734Z';
 test('parseUsageReport: the session row is the 5-hour window; the week is the highest weekly row, and says which', () => {
   const r = parseUsageReport(stream(limits([row('session', 12.5), row('weekly_all', 99), row('weekly_scoped', 2, { scope: { model: { display_name: 'X' } } })])));
-  assert.deepEqual(r, { ok: true, h5: { used_pct: 12.5, resets_at: T }, week: { used_pct: 99, resets_at: T }, week_from: 'weekly_all' });
+  assert.deepEqual(r, { ok: true, h5: { used_pct: 12.5, resets_at: T }, week: { used_pct: 99, resets_at: T }, week_from: 'weekly_all',
+    week_rows: { weekly_all: { used_pct: 99, resets_at: T }, 'weekly_scoped:X': { used_pct: 2, resets_at: T } } });
+});
+
+test('L1358 r2 (MAT-1): week_rows holds every weekly row by name, the week under its own; shared cut names keep the higher; too many rows refuse', () => {
+  // The live account's tie: both rows at the same figure and time; the week is weekly_all, and the scoped row is still there.
+  const tie = parseUsageReport(stream(limits([row('weekly_scoped', 0, { scope: { model: { display_name: 'Fable' } } }), row('weekly_all', 0)])));
+  assert.deepEqual([tie.week_from, tie.week_rows], ['weekly_all', { 'weekly_scoped:Fable': { used_pct: 0, resets_at: T }, weekly_all: { used_pct: 0, resets_at: T } }]);
+  const shared = parseUsageReport(stream(limits([row('weekly_all', 10), row('weekly_scoped', 30, { scope: { model: { display_name: 'A b' } } }),
+    row('weekly_scoped', 20, { scope: { model: { display_name: 'A/b' } } })])));
+  assert.deepEqual(shared.week_rows, { weekly_all: { used_pct: 10, resets_at: T }, 'weekly_scoped:A-b': { used_pct: 30, resets_at: T } });
+  assert.equal(shared.week_from, 'weekly_scoped:A-b');
+  const many = parseUsageReport(stream(limits([row('weekly_all', 1), ...Array.from({ length: 16 }, (_, i) => row('weekly_scoped', 1, { scope: { model: { display_name: `m${i}` } } }))])));
+  assert.match(many.reason, /more than 16 weekly rows/);
+  // No weekly row: no rows either.
+  assert.equal(parseUsageReport(stream(limits([row('session', 3)]))).week_rows, null);
 });
 
 test('L728 M2: a scoped weekly row higher than weekly_all is the week, named by its model; a tie goes to weekly_all', () => {
   const later = '2026-11-09T10:00:00Z';
   const r = parseUsageReport(stream(limits([row('session', 10), row('weekly_all', 50),
     row('weekly_scoped', 100, { scope: { model: { display_name: 'Big Model 4/x' } }, resets_at: later }), row('weekly_scoped', 70, { scope: { model: { display_name: 'Y' } } })])));
-  assert.deepEqual(r, { ok: true, h5: { used_pct: 10, resets_at: T }, week: { used_pct: 100, resets_at: '2026-11-09T10:00:00.000Z' }, week_from: 'weekly_scoped:Big-Model-4-x' });
+  assert.deepEqual(r, { ok: true, h5: { used_pct: 10, resets_at: T }, week: { used_pct: 100, resets_at: '2026-11-09T10:00:00.000Z' }, week_from: 'weekly_scoped:Big-Model-4-x',
+    week_rows: { weekly_all: { used_pct: 50, resets_at: T }, 'weekly_scoped:Big-Model-4-x': { used_pct: 100, resets_at: '2026-11-09T10:00:00.000Z' }, 'weekly_scoped:Y': { used_pct: 70, resets_at: T } } });
   const tie = parseUsageReport(stream(limits([row('weekly_scoped', 60, { scope: { model: { display_name: 'Y' } } }), row('weekly_all', 60)])));
   assert.equal(tie.week_from, 'weekly_all');
   const only = parseUsageReport(stream(limits([row('weekly_scoped', 3)])));
@@ -95,11 +111,13 @@ const fakes = ({ use = { account: 'a' }, auth = signedIn(), usage = stream(limit
 test('ownerAnswer: signed in → the account and both windows, with no email, token or raw output in it', async () => {
   const a = await ownerAnswer(fakes());
   assert.deepEqual(a, { v: 1, account: 'a', signed_in: true, observed_at: '2026-11-05T12:00:00.000Z',
-    usage: { h5: { used_pct: 40, resets_at: '2026-11-07T22:59:59.734Z' }, week: { used_pct: 60, resets_at: '2026-11-07T22:59:59.734Z' }, week_from: 'weekly_all' } });
+    usage: { h5: { used_pct: 40, resets_at: '2026-11-07T22:59:59.734Z' }, week: { used_pct: 60, resets_at: '2026-11-07T22:59:59.734Z' }, week_from: 'weekly_all',
+      week_rows: { weekly_all: { used_pct: 60, resets_at: '2026-11-07T22:59:59.734Z' } } } });
   assert.doesNotMatch(JSON.stringify(a), /example\.com|claude\.ai|max|Current week/);
   // L1331: the live report's shape on 20 Nov (weekly rows only) → no 5-hour window, said in so many words.
   const weekly = await ownerAnswer(fakes({ usage: stream(limits([row('weekly_all', 48), row('weekly_scoped', 25, { scope: { model: { display_name: 'M' } } })])) }));
-  assert.deepEqual(weekly.usage, { h5: null, week: { used_pct: 48, resets_at: '2026-11-07T22:59:59.734Z' }, week_from: 'weekly_all', h5_none: true });
+  assert.deepEqual(weekly.usage, { h5: null, week: { used_pct: 48, resets_at: '2026-11-07T22:59:59.734Z' }, week_from: 'weekly_all',
+    week_rows: { weekly_all: { used_pct: 48, resets_at: '2026-11-07T22:59:59.734Z' }, 'weekly_scoped:M': { used_pct: 25, resets_at: '2026-11-07T22:59:59.734Z' } }, h5_none: true });
   // Audit m1: rate_limits with a key this reader doesn't know may hold a moved 5-hour figure, so no marker (unknown).
   const moved = await ownerAnswer(fakes({ usage: stream({ session: {}, rate_limits: { limits: [row('weekly_all', 48)], five_hour: { utilization: 99 } } }) }));
   assert.equal(moved.usage.h5_none, undefined);
