@@ -276,7 +276,7 @@ export function sessionSettings(c, { role, sessionId, copy, node }, { owner = 0,
   const changed = onlySpotsChanged(t.template, settings, v.values);
   if (changed) return refuse(`the filled settings differ from the template beyond its placeholders: ${changed}`);
   if (LOOKALIKE.test(JSON.stringify(settings))) return refuse('the filled settings still hold a placeholder');
-  const ck = checkSettings(settings, { profile: DESIGN_PROFILES[role] });
+  const ck = checkSettings(settings, { profile: DESIGN_PROFILES[role], role });
   if (!ck.ok) return refuse(`the filled settings were refused: ${ck.reason}`);
 
   // The runner's own folders (0700): the settings files, and the session's compaction-notes folder (L101).

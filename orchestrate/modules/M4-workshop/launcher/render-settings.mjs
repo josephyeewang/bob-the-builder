@@ -591,11 +591,11 @@ function sandboxKeysProblem(obj, machineWide, phase = null) {
  * it writes: a sibling's outbox, one of the same product included, then can't be written, renamed or deleted (shown
  * on claude 2.1.322 with worker settings: touch, mv and rm in a sibling's outbox all refused; checked: claude-code
  * 2.1.322, open until 2027-01-20 (R-0b-176), which runs worker settings on the pin). The only other added
- * folders may be the Bob folder and the one-shot Lead's code folder (L1370), each read-only to the tools and walled
- * from the shell. The outbox is the one every
+ * folders may be the Bob folder and, for `role` lead only, the one-shot Lead's code folder (L1370, #682 r1 m6), each
+ * read-only to the tools and walled from the shell. The outbox is the one every
  * hook is told (--outbox). → the reason, or null.
  */
-function ownFoldersProblem(obj) {
+function ownFoldersProblem(obj, role) {
   const p = obj[S.permissions] ?? {};
   if (!Object.hasOwn(p, S.additionalDirectories)) return null;
   const dirs = p[S.additionalDirectories];
@@ -616,9 +616,10 @@ function ownFoldersProblem(obj) {
   if (outboxes.size !== 1) return `${beyond} (its hooks name ${outboxes.size ? 'more than one outbox' : 'no outbox'})`;
   const [outbox] = outboxes;
   if (wallPath(outbox) !== outbox) return `${beyond} (the outbox is not a plain absolute path)`;
-  if (dirs[0] !== outbox || dirs.length > 3) return beyond;
-  // Past the outbox: the Bob folder, and the one-shot Lead's read-only code folder (L1370), each read-only to the tools
-  // and the shell, apart from the outbox and from each other.
+  // Past the outbox: the Bob folder, and for the Lead alone its read-only code folder (L1370; #682 r1 m6: a role the
+  // check is not told is the Lead gets the Bob folder only), each read-only to the tools and the shell, apart from the
+  // outbox and from each other.
+  if (dirs[0] !== outbox || dirs.length > (role === 'lead' ? 3 : 2)) return beyond;
   const deny = p[S.deny] ?? [];
   const shellWrite = obj[S.sandbox]?.[S.filesystem]?.[S.denyWrite] ?? [];
   const extra = dirs.slice(1);
@@ -635,7 +636,7 @@ function ownFoldersProblem(obj) {
  * excludedCommands entry or an unsandboxed escape refuses every role. `phase` ('session', 'install' or 'save'), when
  * the caller knows it: the builder proxy's port must be that phase's (proxyPortsProblem).
  */
-export function checkSettings(obj, { machineWide = false, profile = null, phase = null } = {}) {
+export function checkSettings(obj, { machineWide = false, profile = null, phase = null, role = null } = {}) {
   const sb = obj?.[S.sandbox];
   const p = obj?.[S.permissions];
   if (sb && Object.hasOwn(sb, S.excludedCommands)) return refuse(`${machineWide ? 'machine-wide' : 'role'} settings hold excludedCommands`);
@@ -659,7 +660,7 @@ export function checkSettings(obj, { machineWide = false, profile = null, phase 
   if (!p || p[S.ask]?.length) return refuse('role settings hold ask rules');
   if ((p[S.allow] ?? []).some((r) => !/^Bash\(.+\)$/.test(r) || BAD_COMMAND.test(r.slice(5, -1)))) return refuse('an allow rule is not one exact command');
   if (profile && p[S.defaultMode] !== profile.mode) return refuse('permission mode differs from the profile');
-  const folders = ownFoldersProblem(obj);
+  const folders = ownFoldersProblem(obj, role);
   if (folders) return refuse(folders);
   for (const list of Object.values(obj[S.hooks] ?? {})) {
     for (const m of Array.isArray(list) ? list : []) for (const h of m?.[H.hooks] ?? []) {
@@ -708,13 +709,13 @@ export function machineWideSettings({ node, hooksDir, snapshot }) {
 }
 
 /** Writes the role file (atomically), reads it back from disk and checks it, with the phase when given (its proxy port). */
-export function writeRoleSettings(file, settings, { profile, phase = null } = {}) {
+export function writeRoleSettings(file, settings, { profile, phase = null, role = null } = {}) {
   const text = `${JSON.stringify(settings, null, 2)}\n`;
   const tmp = join(dirname(file), `.${basename(file)}.tmp`);
   writeFileSync(tmp, text, { mode: 0o644 });
   renameSync(tmp, file);
   let back; try { back = JSON.parse(readFileSync(file, 'utf8')); } catch { return refuse('role settings did not read back'); }
   if (JSON.stringify(back) !== JSON.stringify(settings)) return refuse('role settings read back differently');
-  const c = checkSettings(back, { profile, phase });
+  const c = checkSettings(back, { profile, phase, role });
   return c.ok ? { ok: true, file, settings: back } : c;
 }

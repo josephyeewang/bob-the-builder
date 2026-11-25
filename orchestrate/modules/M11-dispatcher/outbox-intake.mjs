@@ -284,7 +284,8 @@ export async function launchFromFile({ rec, now, alert, s, readLaunch = readLaun
   const spanned = firstExport !== null && lastExport !== null && lastExport - firstExport >= LEAD_LAUNCH_SPAN_MS;
   if (first !== null && now - first > LEAD_LAUNCH_LOOK_MS && (!f?.ok || spanned)) {
     holdAlert({ rec, cause: cause.stale, now, alert, text: `the Lead ${s.sessionId} was first checked more than a day ago and its launch was never recorded, so its plans will not be taken; it is no longer looked at. Start a new Lead for the idea` });
-    // Cleared once told, so never again: a tell that did not land leaves the record, and the next pass tells again.
+    // Cleared here only when the tell has already landed (told_at, written once the queued alert is sent); otherwise the
+    // record stays, and the first pass after the tell lands takes the 'ignored' path above and clears it then (#682 r1 c1).
     if (staleTold()) clearLook(rec, s.sessionId, look, checked, report);
     return { session: s.sessionId, launch: 'stale' };
   }

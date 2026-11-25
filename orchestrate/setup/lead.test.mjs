@@ -8,7 +8,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { fakeAlert } from '../test/fake-alert.test-helper.mjs';
@@ -23,7 +23,7 @@ import { withAlerts } from '../modules/M11-dispatcher/fixtures.test-helper.mjs';
 import { leadSessions, readLaunchFile } from '../modules/M3-lead/sessions.mjs';
 import { LEAD_ONE_SHOT, LEAD_WORDING, ONE_SHOT_UNUSED, checkPlan } from '../modules/M3-lead/lead-wording.mjs';
 import { OWNER_WAIT_WHO } from '../shared/record.mjs';
-import { LEAD_EFFORT, LEAD_MODEL, PROMPT_NAME, RUN_LOG, USAGE, earlierPlans, ideaIdOf, main, notesFolder, planLead, realIo } from './lead.mjs';
+import { LEAD_EFFORT, LEAD_MODEL, PROMPT_NAME, RUN_ENDED, RUN_LOG, RUN_OVER_MS, USAGE, earlierPlans, heldBy, ideaIdOf, main, notesFolder, planLead, realIo, sessionStart } from './lead.mjs';
 import { SETTINGS_NAME } from './role-start.mjs';
 
 const P = PRODUCT;
@@ -38,13 +38,15 @@ const PLAN = { cards: [card('C-1'), card('C-2', { brief: { goal: 'Ask the owner:
   wait: { who: OWNER_WAIT_WHO, what: 'an answer to the question in the goal', since: '2026-11-25T09:05:07Z', next_check: '2026-11-26T09:05:07Z' } } })] };
 
 // The fake claude: records its words and folder, then writes the plan where the prompt says, under the name it gives.
-function fakeClaude(dir, { plan = PLAN, write = true } = {}) {
+// `moveHead`: it also moves the lead-main copy's .head to this commit, as a swap by the Dispatcher mid-run would.
+function fakeClaude(dir, { plan = PLAN, write = true, moveHead = null } = {}) {
   const bin = join(dir, 'claude');
   writeFileSync(bin, `#!${process.execPath}
 const fs = require('node:fs'); const path = require('node:path');
 const args = process.argv.slice(2);
 fs.writeFileSync(${JSON.stringify(join(dir, 'claude-ran.json'))}, JSON.stringify({ args, cwd: process.cwd(), env: Object.keys(process.env) }));
-const m = /Your outbox folder is (\\S+): write (plan-\\S+\\.json) there/.exec(args.at(-1));
+const m = /Your outbox folder is (\\S+): write (plan-\\S+\\.json) there, then stop\\. The code folder is (\\S+)\\./.exec(args.at(-1));
+if (m && ${JSON.stringify(moveHead)}) fs.writeFileSync(path.join(m[3], '.head'), ${JSON.stringify(`${moveHead}\n`)});
 if (m && ${write}) fs.writeFileSync(path.join(m[1], m[2]), ${JSON.stringify(JSON.stringify(plan))});
 console.log(JSON.stringify({ type: 'result', subtype: 'success' }));
 `);
@@ -52,7 +54,7 @@ console.log(JSON.stringify({ type: 'result', subtype: 'success' }));
   return { bin, ran: () => JSON.parse(readFileSync(join(dir, 'claude-ran.json'), 'utf8')) };
 }
 
-function world({ check = { ok: true, version: '2.1.316' }, plan, write, head = HEAD, workerRunner = true } = {}) {
+function world({ check = { ok: true, version: '2.1.316' }, plan, write, moveHead, head = HEAD, workerRunner = true } = {}) {
   const base = realpathSync(tempDir('m3-lead-start-'));
   const home = join(base, 'home-joe'); mkdirSync(home);
   for (const d of ['outboxes/front_door', 'outboxes/lead', 'install/orchestrate/hooks', 'owner-taps', 'worker-rules', 'keys', 'private', 'bob', 'launches', 'fake']) mkdirSync(join(base, d), { recursive: true });
@@ -60,7 +62,7 @@ function world({ check = { ok: true, version: '2.1.316' }, plan, write, head = H
   const setupFile = join(base, 'setup.json');
   writeFileSync(setupFile, JSON.stringify({ base, owner: OWNER, products: ['insiderintent', P], dispatcher: { product: P }, ...(workerRunner ? { workerRunner: { product: P } } : {}) }));
   const installRoot = join(base, 'install', 'orchestrate');
-  const claude = fakeClaude(join(base, 'fake'), { plan, write });
+  const claude = fakeClaude(join(base, 'fake'), { plan, write, moveHead });
   const recordRoot = join(base, 'products', P, 'store');
   const review = { claudeBin: claude.bin, hooksDir: join(installRoot, 'hooks'), pin: '2.1.316', bobFolder: join(base, 'bob'),
     recordRoot, recordUid: UID, rules: { secrets: { paths: [join(base, 'secret-one')] }, production: { env_files: [], hosts: [], programs: [] } } };
@@ -99,7 +101,8 @@ function world({ check = { ok: true, version: '2.1.316' }, plan, write, head = H
     rm: real.rm, list: (d) => readdirSync(d),
     uid: 501, user: OWNER, home, env: { PATH: '/usr/bin:/bin', HOME: home, ANTHROPIC_API_KEY: 'never-passed', GH_TOKEN: 'never-passed' },
     now: () => now, progress: (s) => calls.said.push(s),
-    check: async (x) => { calls.check.push(x); return check; },
+    // Check 6 runs before claude: no launch file may be there yet (#682 r1 m5).
+    check: async (x) => { calls.check.push({ ...x, launchThen: existsSync(join(x.cwd, '.launch.json')) }); return check; },
     runHeadless: real.runHeadless,
     // Each wait for the outcome is one Dispatcher pass.
     sleep: async (ms) => { calls.sleeps += 1; now += ms; clock.t += ms; await intake(); },
@@ -125,7 +128,10 @@ test('G4 end to end: idea in the Record → the one-shot Lead → plan-<idea id>
   assert.deepEqual(w.exported, [{ head: HEAD, product: P, session: SID }]);
   assert.equal(w.record.list('launch').filter((l) => l.doc.session_id === SID && l.doc.role === 'lead' && l.doc.head === HEAD).length, 1);
   // The launch file is the start's, in M3's one shape.
-  assert.deepEqual(readLaunchFile({ sessionId: SID, outbox: w.outbox, uid: UID, product: P }).head, HEAD);
+  assert.deepEqual(readLaunchFile({ sessionId: SID, outbox: w.outbox, uid: UID, product: P }), { ok: true, head: HEAD, idea: w.idea.id });
+  assert.equal(w.calls.check[0].launchThen, false, 'no launch file before claude started (#682 r1 m5)');
+  assert.equal(r.headAfter, HEAD);
+  assert.doesNotMatch(r.text, /moved/);
   // The fake claude ran headless in its outbox (never inside the lead-main copy, which a swap may delete under it), on the
   // Lead's walls, with effort high and no model (main).
   const ran = w.claude.ran();
@@ -166,7 +172,112 @@ test('G4 end to end: idea in the Record → the one-shot Lead → plan-<idea id>
   const hooks = JSON.stringify(s.hooks);
   assert.ok(hooks.includes(`--outbox ${w.outbox}`) && hooks.includes('--kinds') && !hooks.includes('--copy'), 'its tools write its outbox only');
   assert.ok(hooks.includes(`--notes ${notesFolder(w.outboxRoot, SID)}`) && existsSync(notesFolder(w.outboxRoot, SID)));
-  assert.deepEqual(readdirSync(w.outbox).sort(), ['.launch.json', PROMPT_NAME, RUN_LOG, SETTINGS_NAME, name].sort());
+  assert.deepEqual(readdirSync(w.outbox).sort(), ['.launch.json', PROMPT_NAME, RUN_ENDED, RUN_LOG, SETTINGS_NAME, name].sort());
+});
+
+test('L1370 audit (#682 r1 M1): a plan handed in but not yet taken holds its idea, so a second Lead an hour later is refused', async () => {
+  // The audit's repro: the Dispatcher is down (no intake while the start waits), so run 1 ends "not taken".
+  const w = world();
+  w.io.sleep = async (ms) => { w.calls.sleeps += 1; w.clock.t += ms; };
+  const ticking = (from) => { let t = from; return () => (t += 60_000); };
+  const r1 = await planLead({ product: P, idea: w.idea.id, setupFile: w.setupFile }, { ...w.io, now: ticking(T) });
+  assert.equal(r1.ok, true, r1.reason);
+  assert.equal(r1.state, 'not taken');
+  const before = readdirSync(join(w.outboxRoot, 'lead')).sort();
+  const r2 = await planLead({ product: P, idea: w.idea.id, setupFile: w.setupFile }, { ...w.io, now: ticking(T + 3600e3) });
+  assert.equal(r2.ok, false, 'a second Lead for the same idea');
+  assert.match(r2.reason, new RegExp(`is held by the Lead ${r1.sessionId}: it handed in plan-${w.idea.id}\\.json, which the Dispatcher has not taken yet`));
+  assert.deepEqual(readdirSync(join(w.outboxRoot, 'lead')).sort(), before, 'no second folder');
+  assert.equal(w.calls.check.length, 1, 'claude started once');
+  // The Dispatcher comes back: one plan, applied once.
+  await w.intake();
+  assert.deepEqual(cards(w), [['C-1', 'draft', HEAD], ['C-2', 'draft', HEAD]]);
+  assert.deepEqual(w.record.list('fact').map((f) => f.id).filter((x) => x.includes('plan-')), [`intake-applied-${r1.sessionId}-plan-${w.idea.id}.json`]);
+});
+
+test('L1370 audit (#682 r1 M1): a Lead still planning holds its idea by its launch file; one that ended with no plan, or whose plan was refused, does not', () => {
+  const ideaId = 'idea-fd-x-1';
+  const leadRoot = '/o/lead';
+  const now = new Date(2026, 10, 25, 10, 0, 0).getTime();
+  const sid = (min) => { const d = new Date(now - min * 60_000); const two = (n) => String(n).padStart(2, '0'); return `ld-${P}-${d.getFullYear()}${two(d.getMonth() + 1)}${two(d.getDate())}${two(d.getHours())}${two(d.getMinutes())}00`; };
+  assert.equal(sessionStart(sid(10)), now - 10 * 60_000);
+  const plan = `plan-${ideaId}.json`;
+  const launch = (idea) => JSON.stringify({ session: 's', product: P, head: HEAD, idea });
+  const held = (folders, facts = {}) => heldBy({ leadRoot, product: P, ideaId, fact: (id) => (facts[id] ? { ok: true, doc: facts[id] } : { ok: false }) }, {
+    now: () => now,
+    list: (d) => { if (d === leadRoot) return Object.keys(folders); const f = folders[d.slice(leadRoot.length + 1)]; if (!f) throw Object.assign(new Error('no'), { code: 'EACCES' }); return Object.keys(f); },
+    readText: (f) => { const [s, n] = f.slice(leadRoot.length + 1).split('/'); return folders[s][n]; },
+  });
+  const fid = (s) => `intake-applied-${s}-${plan}`;
+  // In flight: its launch file names the idea, no plan yet, no end.
+  assert.deepEqual(held({ [sid(10)]: { '.launch.json': launch(ideaId) } }), { sessionId: sid(10), why: 'it is still planning it' });
+  // Ended with no plan: by its end marker, or by its age past the run's limit with no marker (its start was cut off).
+  assert.equal(held({ [sid(10)]: { '.launch.json': launch(ideaId), [RUN_ENDED]: 'x' } }), null);
+  assert.equal(held({ [sid(RUN_OVER_MS / 60_000 + 1)]: { '.launch.json': launch(ideaId) } }), null);
+  // Another idea, another product's Lead, notes folders: not this idea's.
+  assert.equal(held({ [sid(10)]: { '.launch.json': launch('idea-fd-x-2') }, [`ld-other-${sid(10).slice(-14)}`]: { '.launch.json': launch(ideaId) }, [`.notes-${sid(5)}`]: {} }), null);
+  // A plan handed in holds it, ended or not, unless refused; interrupted and starting hold it too.
+  const ended = { [plan]: '{}', [RUN_ENDED]: 'x' };
+  assert.match(held({ [sid(50)]: ended }).why, /which the Dispatcher has not taken yet/);
+  for (const state of ['interrupted', 'starting', 'waiting', 'applying', 'applied']) assert.equal(held({ [sid(50)]: ended }, { [fid(sid(50))]: { state } })?.sessionId, sid(50), state);
+  assert.equal(held({ [sid(50)]: ended }, { [fid(sid(50))]: { state: 'refused' } }), null);
+  // A folder that can't be read can't be shown not to hold it.
+  assert.match(held({ [sid(10)]: null }).why, /can't be read/);
+});
+
+test('L1370 audit (#682 r1 M1): an interrupted or starting plan stands in the way as an applied one does', async () => {
+  for (const state of ['interrupted', 'starting']) {
+    const w = world();
+    const other = `ld-${P}-20261124090000`;
+    const id = `intake-applied-${other}-plan-${w.idea.id}.json`;
+    const put = w.record.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: 0, doc: { session: other, name: `plan-${w.idea.id}.json`, sha256: 'a'.repeat(64), state, at: '2026-11-24T09:00:00Z' } });
+    assert.equal(put.ok, true, put.reason);
+    const r = await planLead({ product: P, idea: w.idea.id, setupFile: w.setupFile }, w.io);
+    assert.equal(r.ok, false, state);
+    assert.match(r.reason, new RegExp(`already has a plan: plan-${w.idea.id}\\.json from the Lead ${other}`), state);
+    assert.deepEqual(readdirSync(join(w.outboxRoot, 'lead')), [], state);
+  }
+});
+
+test('L1370 audit (#682 r1 m3): a lead-main copy that is a link, or not a folder, is refused before anything is made', async () => {
+  for (const make of [(w) => { rmSync(w.code, { recursive: true }); mkdirSync(`${w.code}-real`); writeFileSync(join(`${w.code}-real`, '.head'), `${HEAD}\n`); symlinkSync(`${w.code}-real`, w.code); },
+    (w) => { rmSync(w.code, { recursive: true }); writeFileSync(w.code, 'x'); }]) {
+    const w = world();
+    make(w);
+    const r = await planLead({ product: P, idea: w.idea.id, setupFile: w.setupFile }, { ...w.io, lstat: undefined });
+    assert.equal(r.ok, false);
+    assert.match(r.reason, /is (a link|not a folder), so it is not the copy the Dispatcher made/);
+    assert.deepEqual(readdirSync(join(w.outboxRoot, 'lead')), []);
+    assert.equal(existsSync(join(w.base, 'fake', 'claude-ran.json')), false);
+  }
+});
+
+test('L1370 audit (#682 r1 m4): the Lead may not read the other products\' lead-main copies, the other Leads\' folders or the worker and review copies', async () => {
+  const w = world();
+  const others = [join(w.base, 'lead-main', 'insiderintent'), join(w.outboxRoot, 'lead', `ld-${P}-20261124090000`), join(w.outboxRoot, 'lead', '.notes-ld-insiderintent-20261124090000')];
+  for (const d of others) mkdirSync(d, { recursive: true });
+  const r = await planLead({ product: P, idea: w.idea.id, setupFile: w.setupFile }, w.io);
+  assert.equal(r.ok, true, r.reason);
+  const deny = JSON.parse(readFileSync(join(w.outbox, SETTINGS_NAME), 'utf8')).permissions.deny;
+  for (const d of [...others, join(w.base, 'worker-copies'), join(w.base, 'review-copies')]) assert.ok(deny.includes(`Read(/${d}/**)`), d);
+  for (const own of [w.code, w.outbox, notesFolder(w.outboxRoot, SID)]) assert.equal(deny.includes(`Read(/${own}/**)`), false, own);
+});
+
+test('L1370 audit (#682 r1 m5): a claude that never starts leaves no launch file; a copy moved mid-run is said, the launch keeps the start\'s head', async () => {
+  const w = world();
+  writeFileSync(join(w.installRoot, RUNNER_CONFIG), JSON.stringify({ ...w.review, claudeBin: join(w.base, 'fake', 'no-such-claude') }));
+  const r = await planLead({ product: P, idea: w.idea.id, setupFile: w.setupFile }, w.io);
+  assert.equal(r.ok, false);
+  assert.match(r.reason, new RegExp(`the Lead ${SID} did not start \\(claude ended with 127\\); nothing was handed in`));
+  assert.equal(existsSync(join(w.outbox, '.launch.json')), false);
+  assert.ok(existsSync(join(w.outbox, RUN_ENDED)), 'it ended: it holds no idea');
+  const MOVED = 'b'.repeat(40);
+  const m = world({ moveHead: MOVED });
+  const rm = await planLead({ product: P, idea: m.idea.id, setupFile: m.setupFile }, m.io);
+  assert.equal(rm.ok, true, rm.reason);
+  assert.deepEqual([rm.head, rm.headAfter], [HEAD, MOVED]);
+  assert.match(rm.text, new RegExp(`Note: the Lead's copy of main moved from ${HEAD.slice(0, 12)} to ${MOVED.slice(0, 12)} while it ran`));
+  assert.equal(readLaunchFile({ sessionId: SID, outbox: m.outbox, uid: UID, product: P }).head, HEAD);
 });
 
 test('G4: an idea already planned is refused before anything is made; a refused plan may be planned again', async () => {

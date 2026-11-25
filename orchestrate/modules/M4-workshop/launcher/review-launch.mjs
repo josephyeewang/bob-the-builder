@@ -145,7 +145,7 @@ export function reviewChecks(x) {
       let obj; try { obj = JSON.parse(back); } catch { return refuse('the settings file read back is not JSON'); }
       // The very bytes sessionSettings wrote (L83 minor 2), not only the same settings once parsed.
       if (back !== templateText(x.settings.settings) || !isDeepStrictEqual(obj, x.settings.settings)) return refuse('the settings file read back differs from what was written');
-      return checkSettings(obj, { profile: x.profile });
+      return checkSettings(obj, { profile: x.profile, role: x.role });
     },
     6: async () => readBack({ claudeBin: x.claudeBin, args: roleArgs({ profile: x.profile, settingsFile: x.settings.file }), env: x.env, cwd: x.copy,
       role: x.role, profile: x.profile, pin: x.pin, spawnFn: x.spawn, timeoutMs: probeMs }),

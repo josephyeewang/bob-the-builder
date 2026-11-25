@@ -63,7 +63,7 @@ export async function launch({ role, profile, checks, start, names, ctx = {}, ow
   if (!flags.includes(F.strictMcpConfig) || !flags.includes(F.mcpConfig)) return { ok: false, failedAt: 0, reason: `${NCR.noToolLock}: the start's flags lack ${F.strictMcpConfig} ${F.mcpConfig}`, log };
   // The object handed in must itself be a locked-down role file, so an empty or partial one cannot pass
   // check 0 (audit R-0b-44 round 2 MIN-1, round 3 MIN-4).
-  const locked = checkSettings(names.settings, { profile });
+  const locked = checkSettings(names.settings, { profile, role });
   if (!locked.ok) return { ok: false, failedAt: 0, reason: `${NCR.notLocked} is not locked down: ${locked.reason}`, log };
   for (const c of CHECKS) {
     if (!c.applies(role, profile)) { log.push({ n: c.n, skipped: true }); continue; }

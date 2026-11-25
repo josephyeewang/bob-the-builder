@@ -14,7 +14,7 @@
 // The caller then starts claude itself: the Front Door interactive in the tab, the Lead headless.
 
 import { join } from 'node:path';
-import { renderRoleSettings } from '../modules/M4-workshop/launcher/render-settings.mjs';
+import { checkSettings, renderRoleSettings } from '../modules/M4-workshop/launcher/render-settings.mjs';
 import { roleArgs } from '../modules/M4-workshop/launcher/readback.mjs';
 import { FLAGS as F, noToolServerArgs, sourcesArgs } from '../modules/M4-workshop/launcher/settings-names.mjs';
 import { NODE, RUNNER_CONFIG } from '../modules/M4-workshop/launcher/install-check.mjs';
@@ -112,6 +112,9 @@ export async function prepareStart({ role, who, profile, model, effort, places: 
   const no = (reason) => ({ ok: false, reason });
   const r = renderRoleSettings({ role, profile, paths: { ...P.paths, ...paths, outbox, ...(notes ? { notes } : {}) }, productionFiles: P.productionFiles, proposalOutboxes: P.proposalOutboxes });
   if (!r.ok) return no(`${who}'s settings can't be made (${r.reason})`);
+  // The written-settings check every role file meets, told the role (#682 r1 m6: only the Lead may add a code folder).
+  const ck = checkSettings(r.settings, { profile, role });
+  if (!ck.ok) return no(`${who}'s settings were refused (${ck.reason})`);
   try { io.mkdir(outbox, 0o750); } catch (e) { return no(`the outbox ${outbox} can't be made (${e?.code ?? e?.message}); is ${who} folder set up (users-folders)?`); }
   const made = [outbox];
   const undo = (reason) => { for (const d of made) { try { io.rm(d); } catch { /* left; it holds nothing filed */ } } return no(reason); };
