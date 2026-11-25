@@ -997,8 +997,9 @@ function countLaunchSkip({ rec, id, now, alert, report }) {
   try {
     const was = factDoc(rec, LAUNCH_SKIP_FACT(id))?.doc;
     const base = typeof was === 'object' && was !== null ? was : undefined;
-    const last = typeof base?.at === 'string' ? Date.parse(base.at) : NaN;
-    const fresh = Number.isFinite(last) && now - last < HOLD_REPEAT_MS;
+    // An `at` that can't be read or lies ahead counts as old (pastTime, I4): the count starts again.
+    const last = pastTime(base?.at, now);
+    const fresh = last !== null && now - last < HOLD_REPEAT_MS;
     const prior = fresh && Number.isInteger(base.passes) && base.passes > 0 ? base.passes : 0;
     const passes = base?.at === iso(now) ? Math.max(prior, 1) : prior + 1;
     if (passes !== base?.passes || base?.at !== iso(now)) {
