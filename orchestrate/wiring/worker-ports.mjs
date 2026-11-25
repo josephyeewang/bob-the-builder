@@ -163,7 +163,11 @@ export function leadMainRootProblem(root, uid, { lstat = lstatSync } = {}) {
 
 export const UNTAR_MS = 120_000;
 // What the archive may not carry onto the copy: extended attributes, access lists, file flags (L1370 audit C1).
-export const UNTAR_ARGS = Object.freeze(['-x', '-o', '--no-xattrs', '--no-acls', '--no-fflags', '-f', '-', '-C']);
+// `--no-fflags` is bsdtar's only; GNU tar (Linux, where CI runs) refuses it, and takes the other two (L1370 audit
+// #681 r2). Keyed on the platform, not on asking `tar --version`: no extra process, nothing cached, and macOS's
+// /usr/bin/tar is always bsdtar, which is the only tar the Dispatcher runs with.
+export const untarArgs = (platform = process.platform) => Object.freeze(['-x', '-o', '--no-xattrs', '--no-acls', ...(platform === 'darwin' ? ['--no-fflags'] : []), '-f', '-', '-C']);
+export const UNTAR_ARGS = untarArgs();
 /**
  * Unpacks a tar archive into `dir` with the system tar, not as the archive's owner or modes (-o), and with no extended
  * attributes, access lists or file flags; lead-main's `untar`. Killed at `timeoutMs` (lead-main passes what is left of
@@ -197,7 +201,7 @@ export function leadMainPorts({ config: c, selfUid }, { run = safeGit, untar = u
     if (!LEAD_MAIN_GIT.includes(args?.[0])) return Promise.resolve({ code: -1, stdout: Buffer.alloc(0), stderr: `lead-main git: refused: only ${LEAD_MAIN_GIT.join(' and ')} run on the mirror` });
     const bad = mirrorProblem(c.mirror, selfUid);
     if (bad) return Promise.resolve({ code: -1, stdout: Buffer.alloc(0), stderr: `lead-main git: refused: ${bad}` });
-    return run(args, { gitDir: c.mirror, purpose: 'lead-main-export', timeoutMs, ...(maxOutBytes !== undefined ? { maxOutBytes } : {}) });
+    return run(args, { gitDir: c.mirror, purpose: 'lead-main-export', timeoutMs, maxOutBytes });
   };
   return {
     product: c.product,

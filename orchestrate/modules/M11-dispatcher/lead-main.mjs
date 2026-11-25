@@ -42,6 +42,7 @@ export const LEAD_MAIN_GIT = Object.freeze(['rev-parse', 'archive']);
 export const LEAD_MAIN_MS = 120_000;
 // The most archive bytes held in memory: a main bigger than this is refused, told by the step's error.
 export const LEAD_MAIN_MAX_BYTES = 256 * 1024 * 1024;
+export const TOO_BIG = `main is larger than the ${LEAD_MAIN_MAX_BYTES / (1024 * 1024)} MB limit for the Lead's copy`;
 export const NOT_CONFIGURED = 'not configured: the Dispatcher\'s config names no leadMainRoot (rerun setup\'s dispatcher step to write it)';
 
 // `.` ends the product: no product name has one, so one product's prefix is never another's (L1370 audit m1).
@@ -101,6 +102,8 @@ export async function exportMain({ root, product, git, untar, now = Date.now, un
   const dest = join(root, product);
   if (copyHead(dest) === head) return { head, changed: false };
   const a = await git(['archive', '--format=tar', head], { timeoutMs: left('the archive'), maxOutBytes: LEAD_MAIN_MAX_BYTES });
+  // The cause first, in lead-main's own words, so no cut of the step's error can drop it (L1370 audit #681 r2 m-a).
+  if (a?.tooBig === true) throw new Error(`${TOO_BIG} (git archive of ${head.slice(0, 12)} was stopped)`);
   if (a?.code !== 0) throw new Error(`git archive of ${head.slice(0, 12)} failed (${String(a?.stderr ?? '').trim().slice(0, 200)})`);
   const tmp = mkdtempSync(join(root, TEMP(product)));
   try {
