@@ -28,11 +28,13 @@ never assume an assistant-specific home path. See DEPENDENCIES.md for tools and 
 | **Image comps** | Art direction, homepage/hero, moodboards, brand feel, logo *exploration* | The optional **design-mockups** module (theme→variation, refs-by-number), or a user-approved image tool; if unavailable, use supplied images or continue in HTML and state the omitted generation |
 | **SVG logo board** | Converging a mark once direction is known | One HTML file: each concept is a parameterized inline-SVG function, rendered across context tiles (light/dark, sizes, in-context lockups). The winner ships as ONE canonical component — hard-coded colors, **no font dependency** (a type-set mark breaks in favicon/OG/email; draw the glyphs as geometry), exported to favicon/OG from the same SVG. **Full procedure + scripts: `logo-kit/LOGO-LANE.md`** — brief → 8–12 one-line concepts → build 3 in SVG black-first → audit + render-and-look loop → concept sheet, then STOP for a pick → kit (favicon/app-icon/web-icon set, mono/reversed variants) |
 | **Scroll story** | Marketing pages ONLY (homepage, launch page, a personal site) where the visitor's scroll tells the story — feeling curve, page grammar, scroll devices, one signature move, scroll QA | The optional **scroll-craft** plugin, run AFTER the lock, with project-specific integration guidance in `references/scroll-story-lane.md` |
+| **Motion mockups** | Directions where movement is the design — cinematic scroll journeys, camera zooms, ambient motion, a guided tour through results — on marketing pages OR product surfaces, BEFORE a lock | Numbered standalone `.html` entries driven by a per-entry shot list, recorded as scroll-through clips on desktop + phone + reduced motion; libraries load from a CDN so the production stack stays undecided. Procedure: `references/motion-mockup-lane.md` |
 
 Rule of thumb: image lane to FIND a direction cheaply; HTML lane the moment the surface is a
 real product UI (image comps can't be transferred exactly — HTML mockups ARE the spec).
 Scroll-story lane only for a marketing page, only after its lock exists — it originates design
-and must never redefine tokens. Agent/chat surfaces: walk `references/agent-ui-primitives.md`
+and must never redefine tokens. To compare moving directions before any lock, or for a
+product surface, use the motion-mockup lane instead. Agent/chat surfaces: walk `references/agent-ui-primitives.md`
 before mocking so every state (thinking, streaming, awaiting approval, failed) is on the board.
 
 The HTML lane also supports dataviz concept labs (several visualizations of one analytical idea)
@@ -116,6 +118,7 @@ counterfeit spec that mis-briefs every future session).
 - `templates/playground-controls.html` — the live-parameter bar (paste into a mockup copy)
 - `templates/LOCKED-DESIGN.template.md` — the lock doc
 - `templates/fidelity-protocol.md` — the transfer discipline + CI gate snippet + checklist
+- `references/motion-mockup-lane.md` — lane 5: moving, scroll-driven mockups before a lock; shot lists, tiers, recording, checks
 - `references/scroll-story-lane.md` — lane 4: when to use scroll-craft, how it sequences with
   the lock, optional asset/motion integrations (design-mockups when available, hero preference optional)
 - `references/inspo-round-zero.md` — Round 0: real reference sites from Inspo (default for every
