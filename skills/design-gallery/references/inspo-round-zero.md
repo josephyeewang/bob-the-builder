@@ -7,6 +7,10 @@ and the approved data route; installation does not establish a connection. Show 
 mockups that start from the liked sites' actual type and spacing — not from a style name written
 in words.
 
+**Input.** The page's art-direction brief (`../templates/art-direction-brief.md`) is required
+before Round 0: its audience sentence and references steer the searches, and its banned list
+filters the results. No brief yet: write it with the user first.
+
 **Why.** "Reference-class anchoring decides the cluster" (design-mockups heuristic #1), and
 "Translate, Don't Paraphrase" (Engineering Principle 6): a real site is a source to port proportions
 from; a prose style can lose those details. Before Inspo, Round 1 could only use references the user

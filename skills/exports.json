@@ -61,8 +61,14 @@
         "templates/fidelity-protocol.md",
         "templates/gallery-index.html",
         "templates/playground-controls.html",
+        "references/motion-mockup-lane.md",
+        "references/screenshot-gate.md",
+        "scripts/gate-capture.mjs",
+        "templates/art-direction-brief.md",
         "logo-kit/tests/smoke_test.py",
-        "logo-kit/tests/test_export_titles.py"
+        "logo-kit/tests/test_export_titles.py",
+        "tests/gate-fixture.html",
+        "tests/gate_capture.test.mjs"
       ],
       "optionalModules": [
         "design-mockups"

@@ -34,6 +34,8 @@
 - **Radius:** exact px per element class (e.g. "panels 3px, tags/pills 2px — NOT 8-10px, NOT rounded-full").
 - **Base register:** body font-size / line-height from the mock.
 - Shadows, borders, chart stroke widths/fills/legends — literal values or "see mock lines N-M".
+- **Motion (moving pages):** per shot — duration, easing, scroll distance, the reduced-motion
+  replacement — plus the recorded reference clip's path. These are values, like the palette.
 
 ## Pinned decisions & deliberate exceptions (do NOT re-litigate)
 <!-- List each intentional deviation and its approval source. Do not reopen a settled decision

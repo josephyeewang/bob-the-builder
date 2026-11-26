@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gate fixture</title>
+<style>
+  :root { --ink: #1a1a1a; --ground: #f4f1ea; --accent: #2f5d50; }
+  body { margin: 0; font-family: serif; color: var(--ink); background: var(--ground); }
+  section { min-height: 100vh; padding: 10vh 8vw; box-sizing: border-box; }
+  h1 { font-size: clamp(40px, 8vw, 96px); margin: 0 0 24px; }
+  h2 { font-size: clamp(28px, 4vw, 48px); margin: 0 0 16px; color: var(--accent); }
+  p { max-width: 38em; font-size: 18px; line-height: 1.5; }
+  @media (prefers-reduced-motion: no-preference) { h1 { animation: rise 400ms ease-out both; } }
+  @keyframes rise { from { opacity: 0; transform: translateY(12px); } }
+</style>
+</head>
+<body>
+  <section class="stop"><h1>A fictional studio page</h1><p>Test content for the screenshot gate. No real product.</p></section>
+  <section class="stop"><h2>Second scene</h2><p>Each section is one screen tall, so each is one scroll stop.</p></section>
+  <section class="stop"><h2>Third scene</h2><p>The reduced-motion capture shows the same words without the entrance.</p></section>
+</body>
+</html>

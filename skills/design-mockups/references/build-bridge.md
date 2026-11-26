@@ -24,7 +24,9 @@ Before building, capture the locked direction as a machine-readable `DESIGN.md`:
 - **Skip image-to-code converters.** Feed the winning comp + `LOCKED-DESIGN.md` straight to the coding agent: *"clean React/Tailwind, flexbox not absolute, reuse my components, responsive."* The agent reads the repo and reuses real conventions. Inspect any converter output for responsiveness and maintainable layout.
 - **Export the winning comp's 4K backdrop as an actual asset** — the art survives as a file instead of being approximated in CSS.
 - v0 for fast clean components; Relume to kill the blank page (sitemap→wireframe scaffold).
-- Copy-paste component libraries: Aceternity, Magic UI, React Bits, shadcn/ui, 21st.dev.
+- Copy-paste component libraries: Aceternity, Magic UI, React Bits, shadcn/ui, 21st.dev. Their
+  popular animated effects are now a recognisable look of their own: use them for behaviour (how a
+  menu opens, focus handling), never as the page's visible signature.
 
 ## 4. Honest limits
 - Image comps show layout, palette, texture and concept, not implemented interaction or motion.

@@ -1,6 +1,6 @@
 ---
 name: design-gallery
-description: "The design-gallery machinery: explore a product's look-and-feel as a rated gallery of mockups, converge through rounds to a LOCKED design, then transfer it into the real product EXACTLY (no re-creation-from-description drift). Four lanes: HTML mockups for product UI/dashboards where exactness must survive the transfer to code; AI-image comps (via the design-mockups skill) for art direction, heroes, moodboards, brand; code-drawn SVG concept boards for logos/marks; a landing-page scroll-story lane (via the scroll-craft plugin) for marketing pages where scroll is the storytelling device. Includes the agent/chat-surface primitives checklist. Use when the user wants to explore visual directions for a dashboard/app/website, run a design gallery, audition palettes/parameters live, lock a design, or push a locked design through to the real product. Bob Step 5.5."
+description: "The design-gallery machinery: explore a product's look-and-feel as a rated gallery of mockups, converge through rounds to a LOCKED design, then transfer it into the real product EXACTLY (no re-creation-from-description drift). Five lanes: HTML mockups for product UI/dashboards where exactness must survive the transfer to code; AI-image comps (via the design-mockups skill) for art direction, heroes, moodboards, brand; code-drawn SVG concept boards for logos/marks; a landing-page scroll-story lane (via the scroll-craft plugin) for marketing pages where scroll is the storytelling device; motion mockups, written as code, where movement is the design. Includes the agent/chat-surface primitives checklist. Use when the user wants to explore visual directions for a dashboard/app/website, run a design gallery, audition palettes/parameters live, lock a design, or push a locked design through to the real product. Bob Step 5.5."
 user-invocable: true
 ---
 
@@ -28,11 +28,13 @@ never assume an assistant-specific home path. See DEPENDENCIES.md for tools and 
 | **Image comps** | Art direction, homepage/hero, moodboards, brand feel, logo *exploration* | The optional **design-mockups** module (theme→variation, refs-by-number), or a user-approved image tool; if unavailable, use supplied images or continue in HTML and state the omitted generation |
 | **SVG logo board** | Converging a mark once direction is known | One HTML file: each concept is a parameterized inline-SVG function, rendered across context tiles (light/dark, sizes, in-context lockups). The winner ships as ONE canonical component — hard-coded colors, **no font dependency** (a type-set mark breaks in favicon/OG/email; draw the glyphs as geometry), exported to favicon/OG from the same SVG. **Full procedure + scripts: `logo-kit/LOGO-LANE.md`** — brief → 8–12 one-line concepts → build 3 in SVG black-first → audit + render-and-look loop → concept sheet, then STOP for a pick → kit (favicon/app-icon/web-icon set, mono/reversed variants) |
 | **Scroll story** | Marketing pages ONLY (homepage, launch page, a personal site) where the visitor's scroll tells the story — feeling curve, page grammar, scroll devices, one signature move, scroll QA | The optional **scroll-craft** plugin, run AFTER the lock, with project-specific integration guidance in `references/scroll-story-lane.md` |
+| **Motion mockups** | Directions where movement is the design — cinematic scroll journeys, camera zooms, ambient motion, a guided tour through results — on marketing pages OR product surfaces, BEFORE a lock | Numbered standalone `.html` entries driven by a per-entry shot list, motion written as code by default (generated footage only where a shot needs photographic material), each entry naming its reference and engine, recorded as scroll-through clips on desktop + phone + reduced motion; libraries load from a CDN so the production stack stays undecided. Procedure: `references/motion-mockup-lane.md` |
 
 Rule of thumb: image lane to FIND a direction cheaply; HTML lane the moment the surface is a
 real product UI (image comps can't be transferred exactly — HTML mockups ARE the spec).
 Scroll-story lane only for a marketing page, only after its lock exists — it originates design
-and must never redefine tokens. Agent/chat surfaces: walk `references/agent-ui-primitives.md`
+and must never redefine tokens. To compare moving directions before any lock, or for a
+product surface, use the motion-mockup lane instead. Agent/chat surfaces: walk `references/agent-ui-primitives.md`
 before mocking so every state (thinking, streaming, awaiting approval, failed) is on the board.
 
 The HTML lane also supports dataviz concept labs (several visualizations of one analytical idea)
@@ -43,6 +45,13 @@ Run the gallery before building production UI so the user can choose a direction
 implementation depends on it. In Bob this is Step 5.5; the same ordering works independently.
 
 ## The HTML-lane funnel (adapt round sizes to the brief and budget)
+**First, the brief (required input to Round 0).** Write one art-direction brief per page or
+surface with the user from `templates/art-direction-brief.md`: audience, rated references with
+take / don't take, banned patterns, one signature idea, motion path and budgets, and whether the
+page shares the product's visual language. **Rule order:** the lock > the page brief > any taste
+skill or style catalogue (those are inputs to the brief, not rivals). Every candidate in any lane
+passes the screenshot gate (`references/screenshot-gate.md`) before it goes on the board.
+
 0. **Round 0 — real reference sites (DEFAULT, don't ask).** For any website/marketing page
    (and, smaller, for dashboards), pull ~10 real shipped sites that fit the brief from **Inspo**
    (`inspo` MCP server — search, never `recommend`; trust its fonts/sizes/spacing, never its
@@ -54,6 +63,11 @@ implementation depends on it. In Bob this is Step 5.5; the same ordering works i
    in a distinct style. Self-contained files: inline CSS, Google-Fonts links, `:root` custom
    properties for every color (this is what makes the playground and the transfer possible).
    Include the user's own past favorites, named references, and the Round 0 LIKEs as styles.
+1b. **Type-specimen micro-round (early — lock the face before remixing).** The page's real
+   headlines and a body paragraph set in 8–10 candidate faces, side by side (the step 5 feature-lab
+   pattern). Free sources first (open-licence libraries, foundries' free commercial-use faces);
+   a paid face only when the user picks one that is only sold. Read each finalist's licence text
+   for web use and self-hosting before shipping, and record it in the lock.
 2. **Rating pass.** Build the board from `templates/gallery-index.html` (edit only its CONFIG
    block): live iframe thumbnails, LIKE/MEH/NO + a note per design, localStorage persistence,
    and a "Copy my feedback" export the user pastes back. Feedback is BY NUMBER — that precision
@@ -103,6 +117,9 @@ counterfeit spec that mis-briefs every future session).
   from the selected mock. A range or an unresolved font choice is not a finished lock.
 - **Offer comparisons at the right scale.** Render ambiguous choices as a small inline gallery
   and let the user select or combine them before another production change.
+- **Component libraries are a look now.** Popular animated component libraries' signature
+  effects are themselves recognisable as generated pages. Use them for behaviour (menus, focus,
+  dialogs), never for the page's visible signature.
 - **Codify rejections as standing project rules.** Keep the user's approved constraints in the
   project's lock so later iterations do not silently reopen settled decisions.
 - **Logos: generate wide in the image lane, converge in code.** The SVG board renders every
@@ -116,6 +133,10 @@ counterfeit spec that mis-briefs every future session).
 - `templates/playground-controls.html` — the live-parameter bar (paste into a mockup copy)
 - `templates/LOCKED-DESIGN.template.md` — the lock doc
 - `templates/fidelity-protocol.md` — the transfer discipline + CI gate snippet + checklist
+- `templates/art-direction-brief.md` — the one-page brief every gallery starts from (required before Round 0)
+- `references/screenshot-gate.md` — the pass/fail gate on screenshots for the HTML, motion and scroll-story lanes;
+  `scripts/gate-capture.mjs` captures it with Playwright (self-test: `tests/gate_capture.test.mjs`)
+- `references/motion-mockup-lane.md` — lane 5: moving, scroll-driven mockups before a lock; shot lists, motion vocabulary, tiers, the optional image-sequence recipe, recording
 - `references/scroll-story-lane.md` — lane 4: when to use scroll-craft, how it sequences with
   the lock, optional asset/motion integrations (design-mockups when available, hero preference optional)
 - `references/inspo-round-zero.md` — Round 0: real reference sites from Inspo (default for every

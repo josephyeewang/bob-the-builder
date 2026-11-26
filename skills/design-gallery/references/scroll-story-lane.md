@@ -34,7 +34,8 @@ this module does not bundle its implementation or assume it is connected.
    craft's brief (Step 0, question 6 "aesthetic family" + assets): hand it the locked tokens and
    fonts. It plans the curve, grammar, devices, and signature move *inside* that look.
 3. **Its QA pass runs before the transfer diff.** Dead-scroll / contrast / phone composition
-   findings get fixed in the page, then the normal fidelity-protocol adversarial diff runs.
+   findings get fixed in the page; then the screenshot gate (`screenshot-gate.md`, which takes the
+   plugin's QA as one input), then the normal fidelity-protocol adversarial diff.
 
 ## Project choices for the optional integration
 
