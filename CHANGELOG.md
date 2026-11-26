@@ -6,6 +6,12 @@ Until 2026-10-29 the history sat in four places that disagreed (the core's foote
 
 ## 1. v2.28 onward (v2.28 – v2.40 moved from the footer of `build-protocol-core.md`)
 
+v2.78 — 2026-11-26 — Design gallery: a brief first, a gate before showing, motion as code
+
+- A fifth design-gallery lane, motion mockups: moving, scroll-driven directions reviewed before a lock, each with a shot list naming its reference and engine. Motion is written as code by default; a scroll-scrubbed image sequence is an optional path for shots that need photographic material. A motion vocabulary lists each move with when it fits and its performance and reduced-motion note.
+- A one-page art-direction brief is required before Round 0: audience, rated references with take / don't take (one from outside websites), banned generic patterns plus the project's own, one signature idea with the "could it sit on any other site?" test, motion path, budgets, and whether a marketing page shares the product's visual language (default yes). Rule order: lock > page brief > taste skills. A type-specimen micro-round picks the face early; licences are read before shipping.
+- A screenshot pass/fail gate for the HTML, motion and scroll-story lanes (four widths, every scroll stop, reduced motion, drawn fonts, throttled phone paint and weight, a blind "which template made this?" test, 3 strikes then change approach), with a Playwright capture script whose self-test runs in CI. The fidelity protocol and lock template carry motion values and a shot-by-shot clip comparison. Popular animated component libraries are for behaviour, not the visible signature.
+
 v2.77 — 2026-11-13 — Grade, fix, guard and cover the same way every time (D-040)
 
 - Rule 30(j): a Material finding states four lines (trigger, path, outcome, reach) or goes back to the auditor; what is Minor is listed. Rule 30(a): a product that acts on its own tiers its code by the harm it can reach.

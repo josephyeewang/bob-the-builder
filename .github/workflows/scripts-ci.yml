@@ -145,6 +145,8 @@ jobs:
           node node_modules/playwright/cli.js install --with-deps chromium
       - name: End to end on the test product (fixtures/quality-app)
         run: node scripts/quality-tools-e2e.mjs --tools "$RUNNER_TEMP/quality-tools"
+      - name: The design skill's screenshot-gate capture passes its fixture and fails its planted faults
+        run: GATE_TOOLS="$RUNNER_TEMP/quality-tools" node --test skills/design-gallery/tests/gate_capture.test.mjs
 
   bob-init-smoke:
     name: bob-init smoke test

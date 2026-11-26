@@ -28,6 +28,9 @@ and its imports; a completed component library alone does not establish a comple
 - Use the production build for final review. Isolate its build/output directory from any dev server,
   and stop only a server process owned by this task. Verify the screenshot targets the intended build.
 - Run both checks: matching style values does not establish correct data or actual rendered behavior.
+- Motion is part of the lock: durations, easings and scroll distances per shot are compared as
+  values, and the built page is recorded and compared with the mockup's recorded clip shot by shot,
+  on desktop and phone (and with reduced motion on).
 
 ### 5. Gate it in CI, and retire rival design descriptions
 Adapt this illustrative token gate to the actual surface paths, lock and deliberate exceptions;
@@ -70,6 +73,7 @@ changing an intentional deviation.
 - [ ] Keep sample content out of production defaults; trace every displayed figure to real data.
 - [ ] Preserve the reskin contract and approved exceptions.
 - [ ] Verify all intended pages consume the tokens/components.
-- [ ] Complete value-level and rendered production-build comparisons, including computed fonts.
+- [ ] Complete value-level and rendered production-build comparisons, including computed fonts
+      and, for moving pages, motion values and a shot-by-shot clip comparison.
 - [ ] Check the token gate and update obsolete design descriptions.
 - [ ] Keep gallery/experiment files separate, revertible and appropriately private.

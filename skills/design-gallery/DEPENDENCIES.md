@@ -22,6 +22,13 @@ availability before promising raster output; preserve SVG output if no renderer 
 From logo-kit/ run python3 tests/test_export_titles.py and python3 tests/smoke_test.py after
 script changes. Structural checks do not replace rendering and visual inspection.
 
+## Screenshot gate
+
+scripts/gate-capture.mjs needs Node 20+ and Playwright with Chromium; it installs nothing. Pass
+--tools DIR (DIR/node_modules holds playwright) or run it from a folder that has it. Without it,
+follow references/screenshot-gate.md by hand and state which measured steps were skipped. Its
+self-test (tests/gate_capture.test.mjs) skips the browser cases unless GATE_TOOLS names that folder.
+
 ## Optional integrations
 
 - Design Mockups: separate image generation/gallery module. Use supplied images or HTML if absent.
